@@ -1,0 +1,194 @@
+name: Report Generation
+
+on:
+  workflow_call:
+    inputs:
+      has_vulnerabilities:
+        required: true
+        type: boolean
+        description: 'Whether vulnerabilities were found and PoCs generated'
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: outputs/
+          
+      - name: Generate Security Report with Claude
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mode: agent
+          model: claude-3-5-sonnet-20241022
+          max_thinking_tokens: 15000
+          prompt: |
+            Execute the security analysis prompt located at prompts/whitehat/04_REPORT.md
+            
+            Aggregate all analysis results from:
+            - outputs/spec-output/WHITEHAT_01_SPEC.json
+            - outputs/audit-map-output/WHITEHAT_02_AUDITMAP.json
+            - outputs/reviewed-vulnerabilities/reviewed_vulnerabilities.json (if exists)
+            - outputs/poc-*/ (all PoC results if any)
+            
+            Generate a comprehensive security report that includes:
+            1. Executive Summary
+            2. Scope and Methodology
+            3. Findings Summary (categorized by severity)
+            4. Detailed Vulnerability Analysis (if any found)
+            5. Risk Assessment
+            6. Recommendations
+            7. Technical Appendix
+            
+            Save outputs to:
+            - outputs/WHITEHAT_04_REPORT.json (structured data)
+            - outputs/WHITEHAT_04_REPORT.md (human-readable markdown)
+            
+            The report should be:
+            - Professional and suitable for bug bounty submission
+            - Clear about severity and impact
+            - Include reproduction steps for all findings
+            - Provide actionable recommendations
+      
+      - name: Create report summary
+        id: summary
+        run: |
+          # Extract key metrics from the report
+          if [ -f "outputs/WHITEHAT_04_REPORT.json" ]; then
+            TOTAL=$(jq -r '.summary.total_vulnerabilities // 0' outputs/WHITEHAT_04_REPORT.json)
+            CRITICAL=$(jq -r '.summary.critical_count // 0' outputs/WHITEHAT_04_REPORT.json)
+            HIGH=$(jq -r '.summary.high_count // 0' outputs/WHITEHAT_04_REPORT.json)
+            MEDIUM=$(jq -r '.summary.medium_count // 0' outputs/WHITEHAT_04_REPORT.json)
+            LOW=$(jq -r '.summary.low_count // 0' outputs/WHITEHAT_04_REPORT.json)
+            
+            echo "total=$TOTAL" >> $GITHUB_OUTPUT
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+            echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+            echo "low=$LOW" >> $GITHUB_OUTPUT
+          else
+            echo "No vulnerabilities found in security analysis"
+            echo "total=0" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Upload final report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            outputs/WHITEHAT_04_REPORT.json
+            outputs/WHITEHAT_04_REPORT.md
+          retention-days: 30
+          
+      - name: Send Discord notification
+        if: ${{ secrets.DISCORD_WEBHOOK }}
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          # Prepare Discord embed
+          REPO_NAME="${{ github.repository }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          # Color based on severity
+          if [ "${{ steps.summary.outputs.critical }}" -gt 0 ]; then
+            COLOR="15158332"  # Red
+          elif [ "${{ steps.summary.outputs.high }}" -gt 0 ]; then
+            COLOR="15105570"  # Orange
+          elif [ "${{ steps.summary.outputs.medium }}" -gt 0 ]; then
+            COLOR="15844367"  # Yellow
+          else
+            COLOR="3066993"   # Green
+          fi
+          
+          # Send notification
+          curl -X POST $DISCORD_WEBHOOK \
+            -H "Content-Type: application/json" \
+            -d @- << EOF
+          {
+            "embeds": [{
+              "title": "Security Analysis Complete",
+              "description": "Automated security analysis for PR #${PR_NUMBER}",
+              "color": $COLOR,
+              "fields": [
+                {
+                  "name": "Repository",
+                  "value": "$REPO_NAME",
+                  "inline": true
+                },
+                {
+                  "name": "Total Vulnerabilities",
+                  "value": "${{ steps.summary.outputs.total }}",
+                  "inline": true
+                },
+                {
+                  "name": "Severity Breakdown",
+                  "value": "Critical: ${{ steps.summary.outputs.critical }}\nHigh: ${{ steps.summary.outputs.high }}\nMedium: ${{ steps.summary.outputs.medium }}\nLow: ${{ steps.summary.outputs.low }}",
+                  "inline": false
+                }
+              ],
+              "footer": {
+                "text": "Security Agent"
+              },
+              "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)",
+              "url": "$PR_URL",
+              "author": {
+                "name": "View Full Report",
+                "url": "$RUN_URL"
+              }
+            }]
+          }
+          EOF
+          
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = 'outputs/WHITEHAT_04_REPORT.md';
+            
+            let comment = '## 🔒 Security Analysis Report\n\n';
+            
+            if (fs.existsSync(summaryPath)) {
+              // Read the first part of the markdown report
+              const report = fs.readFileSync(summaryPath, 'utf8');
+              const lines = report.split('\n');
+              
+              // Extract executive summary section
+              let inSummary = false;
+              let summaryContent = [];
+              
+              for (const line of lines) {
+                if (line.includes('Executive Summary')) {
+                  inSummary = true;
+                  continue;
+                }
+                if (inSummary && line.startsWith('#')) {
+                  break;
+                }
+                if (inSummary) {
+                  summaryContent.push(line);
+                }
+              }
+              
+              comment += summaryContent.join('\n').trim() || 'No vulnerabilities detected.';
+            } else {
+              comment += 'No vulnerabilities detected in this pull request.';
+            }
+            
+            comment += '\n\n[View Full Report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})';
+            
+            // Post comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: comment
+            });
