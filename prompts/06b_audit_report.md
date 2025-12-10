@@ -1,3 +1,6 @@
+
+
+
 ---
 Description: Generic Security Audit Report Generator
 Usage: `/07_audit_report [BRANCH=...] [COMMIT=...] [OUTPUT_PATH=...]`
@@ -9,6 +12,7 @@ Arguments:
 ---
 
 Generate a publication-ready **security audit report** that can apply to any project scoped in the repository outputs, without leaking repository-specific identifiers.
+
 
 **Always use /serena for development tasks to keep the workflow efficient.**
 

@@ -1,3 +1,6 @@
+
+
+
 ---
 Description: Bug-Bounty Report Builder
 Usage: `/06_report VULN_ID=... REPORT_TYPE=... [SEVERITY=...]`
@@ -9,6 +12,7 @@ Arguments:
 ---
 
 Generate a complete **Markdown bug-bounty report** tailored to the selected bounty program.
+
 **Always use /serena for these development tasks to maximize token efficiency:**
 
 

@@ -1,13 +1,11 @@
----
-
-**Description:**
-Generate a high-fidelity, context-aware audit checklist from a property catalog. This process translates properties into concrete, actionable checks, rigorously filtering for scope and reachability based on an established trust model. The goal is to create targeted, effective checks that focus on verifying mitigations for unreachable attack paths and validating the correct implementation of cryptographic guarantees, thereby minimizing false positives.
-
-**Usage:** `/02_checklist`
-**Language:** English only.
-**Execution hint:** Run after `/01c_prop`. This is the definitive checklist generation step.
 
 ---
+Description: Generate a high-fidelity, context-aware audit checklist from a property catalog. This process translates properties into concrete, actionable checks, rigorously filtering for scope and reachability based on an established trust model. The goal is to create targeted, effective checks that focus on verifying mitigations for unreachable attack paths and validating the correct implementation of cryptographic guarantees, thereby minimizing false positives.
+Usage: `/02_checklist`
+Language: English only.
+Execution hint: Run after `/01c_prop`. This is the definitive checklist generation step.
+---
+
 **Always use /serena for these development tasks to maximize token efficiency:**
 
 # **Advanced Checklist Creation Prompt (v3)**

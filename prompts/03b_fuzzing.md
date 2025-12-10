@@ -1,3 +1,6 @@
+
+
+
 ---
 Description: Fuzzing Test Generator & Self-Verifying Checklist Validator
 Usage: `/03b_fuzzing CHECKLIST_ID=... [OUTPUT_PATH=...]`
@@ -9,6 +12,7 @@ Arguments:
 ---
 
 Create & validate a comprehensive fuzzing test that verifies **$CHECKLIST_ID** through property-based testing and invariant checking.
+
 **Always use /serena for these development tasks to maximize token efficiency.**
 **Never assume the implementation language; detect and reuse the project's existing language, test harness, fixtures, and mocks.**
 

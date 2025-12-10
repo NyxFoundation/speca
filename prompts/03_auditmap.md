@@ -1,18 +1,15 @@
+
+
+
+---
+Description: Deploy a **property-first, pro-hacker audit** across every file under `$PATH`, using `security-agent/outputs/02_CHECKLIST.json` as the authoritative operations manual. Treat each checklist line as a security objective expressed via properties, anti-properties, attack playbooks, and observability probes. Annotate code inline and append only new findings to `security-agent/outputs/03_AUDITMAP.json`; never mutate prior records.
+Usage: `/03_auditmap PATH=...`
+Example: `/03_auditmap PATH="./src"`
+Language: English only (instructions, annotations, summaries).
 ---
 
-**Description**
-Deploy a **property-first, pro-hacker audit** across every file under `$PATH`, using `security-agent/outputs/02_CHECKLIST.json` as the authoritative operations manual. Treat each checklist line as a security objective expressed via properties, anti-properties, attack playbooks, and observability probes. Annotate code inline and append only new findings to `security-agent/outputs/03_AUDITMAP.json`; never mutate prior records.
-
-**Usage**
-`/03_auditmap PATH=...`
-
-**Example**
-`/03_auditmap PATH="./src"`
-
-**Language**
-English only (instructions, annotations, summaries).
-
 **Mission Mindset**
+
 - Start from **spec properties**: translate every normative behavior in `01_SPEC.json` into a safety property and its dual anti-property before scanning code.
 - Think in **attack chains**: model Nomad, Wormhole, Harmony, and Hyperlane style incident playbooks; expect multi-step exploit composition, not isolated bugs.
 - Demand **observability proof**: every control must emit or reference evidence (events, metrics, logs) proving it fired.

@@ -1,14 +1,11 @@
----
-
-**Description:** Generate a comprehensive, citation-rich natural-language specification for a target project by crawling local artefacts and designated references, optionally augmented with vetted web research, and limit coverage strictly to the domain(s) explicitly provided via `CATEGORY`. Always finish by writing a syntactically valid JSON document to `security-agent/outputs/01_SPEC.json`, overwriting any prior file, and populate the `trusted_entity`, `user_flows`, and `algorithms` sections under each approved domain.
-
-**Usage:** `/01_spec TARGET_DIRECTORY=... CATEGORY=... PROJECT_NAME=... [REFERENCE_URLS=...]`
-
-**Example:** `/01_spec TARGET_DIRECTORY="/docs" CATEGORY="ethereum-el" PROJECT_NAME="Atlas L2" REFERENCE_URLS="https://example.com/spec,https://example.com/audit"`
-
-**Language:** English only.
 
 ---
+Description: Generate a comprehensive, citation-rich natural-language specification for a target project by crawling local artefacts and designated references, optionally augmented with vetted web research, and limit coverage strictly to the domain(s) explicitly provided via `CATEGORY`. Always finish by writing a syntactically valid JSON document to `security-agent/outputs/01_SPEC.json`, overwriting any prior file, and populate the `trusted_entity`, `user_flows`, and `algorithms` sections under each approved domain.
+Usage: `/01_spec TARGET_DIRECTORY=... CATEGORY=... PROJECT_NAME=... [REFERENCE_URLS=...]`
+Example: `/01_spec TARGET_DIRECTORY="/docs" CATEGORY="ethereum-el" PROJECT_NAME="Atlas L2" REFERENCE_URLS="https://example.com/spec,https://example.com/audit"`
+Language: English only.
+---
+
 **Always use /serena for these development tasks to maximize token efficiency:**
 
 **Goal**

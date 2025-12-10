@@ -1,13 +1,11 @@
----
-
-**Description:**
-Derive a high-fidelity, context-aware property catalog from the system specification and the trust model. This prompt translates normative behaviors into `{property, anti_property}` tuples, rigorously filtering out-of-scope items and explicitly grounding each property in the established trust model to prevent false positives.
-
-**Usage:** `/01c_prop`
-**Language:** English only.
-**Execution hint:** Run after `/01_spec` and `/01b_trustmodel`. This is the definitive property generation step.
 
 ---
+Description: Derive a high-fidelity, context-aware property catalog from the system specification and the trust model. This prompt translates normative behaviors into `{property, anti_property}` tuples, rigorously filtering out-of-scope items and explicitly grounding each property in the established trust model to prevent false positives.
+Usage: `/01c_prop`
+Language: English only.
+Execution hint: Run after `/01_spec` and `/01b_trustmodel`. This is the definitive property generation step.
+---
+
 **Always use /serena for these development tasks to maximize token efficiency:**
 
 # **Advanced Property Extraction Prompt (v3)**

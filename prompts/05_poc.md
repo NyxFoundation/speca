@@ -1,3 +1,6 @@
+
+
+
 ---
 Description: PoC Generator & Self-Verifying Tests
 Usage: `/05_poc TYPE=... VULN_ID=... OUTPUT_PATH=...`
@@ -9,6 +12,7 @@ Arguments:
 ---
 
 Create & validate a minimal PoC that reproduces **$VULN_ID** at the chosen scope.
+
 **Always use /serena for these development tasks to maximize token efficiency.**
 **Never assume the implementation language; detect and reuse the project's existing language, test harness, fixtures, and mocks.**
 

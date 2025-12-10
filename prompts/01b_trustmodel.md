@@ -1,14 +1,16 @@
----
 
-**Description:**
+
+---
+Description:
 Construct a detailed, operation-centric Trust Model by analyzing system architecture, specifications, and potential operational configurations. This model will identify all actors, components, and their trust boundaries, serving as the foundational security context for all subsequent audit phases.
 
-**Usage:** `/01b_trustmodel`
-**Language:** English only.
-**Execution hint:** Run after `/01_spec` but before `/01c_prop`. This ensures the trust model is established before properties are extracted, preventing the propagation of incorrect trust assumptions.
-
+Usage: `/01b_trustmodel`
+Language: English only.
+Execution hint: Run after `/01_spec` but before `/01c_prop`. This ensures the trust model is established before properties are extracted, preventing the propagation of incorrect trust assumptions.
 ---
+
 **Always use /serena for these development tasks to maximize token efficiency:**
+
 
 # **Trust Model Construction Prompt**
 
