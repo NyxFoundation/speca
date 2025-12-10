@@ -13,23 +13,23 @@ Execution hint: Run after `/01_spec` and `/01b_trustmodel`. This is the definiti
 **Goal**
 Translate every normative behavior from the specification into actionable, trust-model-aware property tuples. This process involves a rigorous 6-step validation to ensure every property is in-scope, contextually relevant, and directly traceable to the system's architecture and trust boundaries.
 
-**Output (required file):** `security-agent/outputs/01c_PROP.json`
+**Output (required file):** `outputs/01c_PROP.json`
 **Determinism:** Sort all top-level arrays deterministically by `id`.
 
 ---
 
 ## 1) Inputs & Authority
 
-1.  **Trust Model (Authoritative):** `security-agent/outputs/01b_TRUSTMODEL.json`
+1.  **Trust Model (Authoritative):** `outputs/01b_TRUSTMODEL.json`
     *   **This is your primary source of truth for trust assumptions.**
     *   If missing, halt and report an error.
     *   Inherit `actors`, `components`, `trust_level`, `capabilities_if_malicious`, and `mitigations`.
 
-2.  **Specification (Supporting):** `security-agent/outputs/01_SPEC.json`
+2.  **Specification (Supporting):** `outputs/01_SPEC.json`
     *   Use `user_flows` and `algorithms` to understand intended behavior.
     *   If the spec contradicts the trust model, **the trust model takes precedence.**
 
-3.  **Bounty/Audit Scope (Filter):** `security-agent/outputs/01_BOUNTY_GUIDELINE.md` (if it exists)
+3.  **Bounty/Audit Scope (Filter):** `outputs/01_BOUNTY_GUIDELINE.md` (if it exists)
     *   Use the `Out of Scope` section to filter out irrelevant properties early.
 
 ---
@@ -96,7 +96,7 @@ After a potential property survives the gauntlet, create a full property tuple w
 
 ## 4) Output Format (JSON)
 
-**File:** `security-agent/outputs/01c_PROP.json`
+**File:** `outputs/01c_PROP.json`
 
 Generate a valid JSON object. Ensure every property has passed through the 6-step validation gauntlet and is explicitly linked to the trust model.
 
@@ -108,15 +108,15 @@ Generate a valid JSON object. Ensure every property has passed through the 6-ste
     "sources": [
       {
         "title": "Trust Model",
-        "path": "security-agent/outputs/01b_TRUSTMODEL.json"
+        "path": "outputs/01b_TRUSTMODEL.json"
       },
       {
         "title": "Project Specification",
-        "path": "security-agent/outputs/01_SPEC.json"
+        "path": "outputs/01_SPEC.json"
       },
       {
         "title": "Bounty Guidelines",
-        "path": "security-agent/outputs/01_BOUNTY_GUIDELINE.md"
+        "path": "outputs/01_BOUNTY_GUIDELINE.md"
       }
     ]
   },
@@ -166,7 +166,7 @@ Generate a valid JSON object. Ensure every property has passed through the 6-ste
 
 After generating all properties, create a `coverage` object in the output JSON. This object will track which parts of the specification have been covered.
 
-*   **Input:** `security-agent/outputs/01_SPEC.json` (for `domains`, `user_flows`, `algorithms`)
+*   **Input:** `outputs/01_SPEC.json` (for `domains`, `user_flows`, `algorithms`)
 *   **Logic:**
     1.  Create a master list of all normative items from the spec (e.g., `FLOW-001`, `ALGO-COMMIT-VERIFY`).
     2.  For each generated property, check its `spec_refs` field.
