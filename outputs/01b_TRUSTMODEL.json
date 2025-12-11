@@ -1,0 +1,1054 @@
+{
+  "metadata": {
+    "generated_at": "2025-12-11T02:52:00Z",
+    "project_name": "Geth (go-ethereum)",
+    "version": "go-ethereum v1.14+",
+    "source_directory": ".",
+    "spec_reference": "outputs/01_SPEC.json",
+    "analysis_scope": "Ethereum Execution Layer (Geth) - analyzing all actors, components, and trust boundaries in operational scenarios"
+  },
+  "actors": [
+    {
+      "id": "ACTOR-001",
+      "name": "Consensus Client (CL)",
+      "type": "off_chain_software",
+      "description": "Paired beacon chain client (e.g., Prysm, Lighthouse, Teku, Nimbus) that communicates with Geth via authenticated Engine API to coordinate block production and fork choice",
+      "operational_scenarios": [
+        {
+          "scenario": "centralized_protocol_team",
+          "description": "Protocol team or single validator operator runs both Geth and paired CL on same infrastructure",
+          "trust_implications": [
+            "Assumed honest operation of both EL and CL by same operator",
+            "Local authenticated connection reduces MITM risk",
+            "Single point of failure: compromise of infrastructure affects both layers"
+          ],
+          "deployment_pattern": "Common for solo validators and protocol testing"
+        },
+        {
+          "scenario": "permissioned_known_operators",
+          "description": "Institutional staking provider runs Geth paired with CL operated by known partner (e.g., white-label staking services)",
+          "trust_implications": [
+            "Trust that CL operator provides honest fork choice updates",
+            "Network authentication (JWT) critical to prevent unauthorized Engine API access",
+            "Split responsibility: EL operator trusts CL for liveness, not for safety (EL validates all payloads)"
+          ],
+          "deployment_pattern": "Used by institutional staking providers with separate teams"
+        },
+        {
+          "scenario": "user_misconfiguration",
+          "description": "User accidentally connects Geth to wrong network's CL or malicious CL instance",
+          "trust_implications": [
+            "Malicious CL can DoS Geth with invalid payloads, triggering repeated validation failures",
+            "Malicious CL can withhold block proposals, preventing validator from earning rewards",
+            "EL CANNOT be forced to accept invalid state (all payloads validated against consensus rules)",
+            "Worst case: liveness failure, NOT safety failure"
+          ],
+          "deployment_pattern": "Edge case: user error or social engineering attack"
+        }
+      ],
+      "trust_level": "conditionally_trusted",
+      "trust_level_rationale": "Trusted for LIVENESS (providing payloads, fork choice updates) but NOT for SAFETY. Geth validates all received payloads and will reject invalid blocks even from paired CL.",
+      "capabilities_if_honest": [
+        "Provides canonical fork choice view (headBlockHash, safeBlockHash, finalizedBlockHash)",
+        "Requests block building with valid payload attributes (timestamp, feeRecipient, withdrawals, beaconRoot)",
+        "Submits network-received blocks for validation via engine_newPayload",
+        "Triggers chain reorganizations via engine_forkchoiceUpdated"
+      ],
+      "capabilities_if_malicious": [
+        "DoS Geth by sending invalid payloads repeatedly (triggers validation overhead)",
+        "Request building blocks with invalid attributes (rejected by Geth)",
+        "Withhold fork choice updates causing Geth to fall behind canonical chain",
+        "Request reorgs to non-existent or invalid blocks (Geth enters SYNCING state)",
+        "CANNOT force Geth to accept invalid state root, transactions, or consensus rule violations"
+      ],
+      "mitigations": [
+        "All Engine API methods authenticated via JWT (--authrpc.jwtsecret)",
+        "Engine API exposed only on localhost by default (--authrpc.addr)",
+        "Geth fully validates all received payloads against consensus rules",
+        "Invalid blocks tracked ephemerally with hit-count eviction (never persisted)",
+        "Geth monitors CL liveness and warns if no updates received for 2 minutes"
+      ],
+      "source_of_truth": [
+        "./eth/catalyst/api.go:48-58 (Engine API registration)",
+        "./eth/catalyst/api.go:60-125 (invalid block tracking)",
+        "./eth/catalyst/api.go:900-1250 (engine_newPayload validation)",
+        "outputs/01_SPEC.json:EL-TRUST-001"
+      ]
+    },
+    {
+      "id": "ACTOR-002",
+      "name": "Node Operator",
+      "type": "human",
+      "description": "Individual or organization running Geth node with control over configuration, keystore, RPC exposure, and system resources",
+      "operational_scenarios": [
+        {
+          "scenario": "solo_home_validator",
+          "description": "Individual runs Geth on home hardware with local keystore for validator signing",
+          "trust_implications": [
+            "Full control over private keys, configuration, and RPC exposure",
+            "Responsible for securing keystore passphrase and file permissions",
+            "Vulnerable to local system compromise (malware, physical access)",
+            "Must correctly configure fork activation parameters (--override.osaka, etc.)"
+          ],
+          "deployment_pattern": "Common in decentralized validator set"
+        },
+        {
+          "scenario": "institutional_operator",
+          "description": "Staking service or exchange runs Geth fleet with centralized key management",
+          "trust_implications": [
+            "Uses external signer (Clef) or HSM for key isolation",
+            "RPC endpoints may be exposed to internal services (monitoring, trading bots)",
+            "Configuration drift risk across fleet",
+            "Insider threat: operators have god-mode access to signing keys"
+          ],
+          "deployment_pattern": "Used by Coinbase, Kraken, Lido node operators"
+        },
+        {
+          "scenario": "malicious_or_incompetent",
+          "description": "Operator exposes dangerous RPC endpoints publicly or uses weak keystore passwords",
+          "trust_implications": [
+            "Exposed --http.api=admin,debug allows remote code execution (debug_setHead, admin_startRPC)",
+            "Exposed personal namespace (deprecated) allows account unlocking",
+            "Weak keystore password enables key theft via brute force",
+            "Incorrect fork configuration causes chain split from network"
+          ],
+          "deployment_pattern": "Security anti-pattern, unfortunately common (bots scan for open RPC)"
+        }
+      ],
+      "trust_level": "trusted",
+      "trust_level_rationale": "Node operator has ultimate control over Geth instance and is inherently trusted. Compromise of operator = compromise of node.",
+      "capabilities_if_honest": [
+        "Configure fork activation parameters to match network consensus",
+        "Manage private keys securely in keystore with strong passphrases",
+        "Expose RPC endpoints only to trusted local/internal services",
+        "Monitor node health and respond to liveness issues",
+        "Upgrade Geth to patch vulnerabilities"
+      ],
+      "capabilities_if_malicious": [
+        "Expose dangerous RPC namespaces (admin, debug, personal) to internet",
+        "Use weak keystore passwords enabling brute force attacks",
+        "Configure incorrect fork activation blocks causing consensus split",
+        "Extract private keys from keystore for theft or unauthorized signing",
+        "Manipulate local state database (though this causes peer rejection)",
+        "Deploy backdoored Geth binary with embedded key exfiltration"
+      ],
+      "mitigations": [
+        "Geth defaults to safe RPC configuration: only eth, net, web3 namespaces on HTTP",
+        "Admin/debug namespaces require explicit --http.api flag (warning issued)",
+        "Account unlocking forbidden over HTTP/WebSocket by default",
+        "Keystore files encrypted with scrypt KDF (configurable work factor)",
+        "Documentation warns about RPC exposure risks",
+        "Clef (external signer) isolates key management from node operation"
+      ],
+      "source_of_truth": [
+        "./accounts/keystore/keystore.go:50-100 (keystore management)",
+        "./accounts/keystore/passphrase.go:40-90 (key encryption)",
+        "README.md:196-200 (security warnings)",
+        "outputs/01_SPEC.json:EL-TRUST-010 (private keys)",
+        "outputs/01_SPEC.json:EL-TRUST-012 (RPC access control)"
+      ]
+    },
+    {
+      "id": "ACTOR-003",
+      "name": "P2P Network Peers",
+      "type": "distributed_network",
+      "description": "Ethereum execution layer peer-to-peer network participants exchanging blocks, transactions, and protocol messages via ETH/68 and ETH/69 protocols",
+      "operational_scenarios": [
+        {
+          "scenario": "honest_majority_network",
+          "description": "Majority of peers run honest Geth/Besu/Nethermind implementations following consensus rules",
+          "trust_implications": [
+            "Geth can sync chain state from any honest peer",
+            "Transaction propagation ensures mempool diversity",
+            "Block propagation enables timely fork choice awareness",
+            "Peer diversity reduces censorship risk"
+          ],
+          "deployment_pattern": "Normal operation on Ethereum mainnet"
+        },
+        {
+          "scenario": "eclipse_attack",
+          "description": "Attacker controls all peer connections to victim Geth node, isolating it from honest network",
+          "trust_implications": [
+            "Victim receives only attacker's blocks and transactions",
+            "Attacker can censor specific transactions from victim's view",
+            "Attacker can delay block propagation to cause sync lag",
+            "Victim consensus client will detect finality mismatch if eclipse lasts >2 epochs"
+          ],
+          "deployment_pattern": "Advanced network attack requiring IP-level manipulation"
+        },
+        {
+          "scenario": "sybil_dos_attack",
+          "description": "Attacker spawns many malicious peers to flood victim with invalid blocks/txs",
+          "trust_implications": [
+            "Geth spends CPU validating invalid messages before rejection",
+            "Bandwidth exhaustion if attacker sends max-size messages (10MB)",
+            "Peer reputation system eventually blacklists malicious peers",
+            "Node remains safe (invalid messages rejected) but liveness impacted"
+          ],
+          "deployment_pattern": "DoS attack vector, mitigated by peer scoring"
+        }
+      ],
+      "trust_level": "untrusted",
+      "trust_level_rationale": "P2P peers assumed adversarial. Geth validates ALL received data before state incorporation. Peers can impact liveness (DoS) but not safety.",
+      "capabilities_if_honest": [
+        "Propagate valid blocks to peers via NewBlockMsg",
+        "Propagate valid transactions via TransactionsMsg or NewPooledTransactionHashesMsg",
+        "Respond to GetBlockHeaders, GetBlockBodies, GetReceipts requests",
+        "Respond to GetPooledTransactions for announced transaction hashes",
+        "Provide recent chain state for snap sync"
+      ],
+      "capabilities_if_malicious": [
+        "Send invalid blocks causing validation overhead (rejected after ValidateBody/ValidateState)",
+        "Send oversized messages up to 10MB protocol limit to waste bandwidth",
+        "Withhold announced transactions (tx hash advertised but GetPooledTransactions fails)",
+        "Send equivocating messages (different blocks to different peers)",
+        "Exhaust peer connection slots via Sybil attack",
+        "CANNOT force acceptance of invalid state, transactions, or consensus violations"
+      ],
+      "mitigations": [
+        "All received blocks validated via BlockValidator.ValidateBody and ValidateState",
+        "All received transactions validated via TxPool validation (signature, nonce, balance, gas)",
+        "Message size limit enforced (10MB max per ETH protocol)",
+        "Peer reputation tracking: misbehaving peers blacklisted",
+        "Fork ID validation prevents cross-network pollution",
+        "MaxPeers limit (default 50) prevents connection exhaustion",
+        "Inbound connection throttling (30s per source IP)"
+      ],
+      "source_of_truth": [
+        "./eth/protocols/eth/protocol.go:30-60 (ETH protocol definition)",
+        "./eth/handler.go:100-250 (peer management)",
+        "./core/block_validator.go:50-140 (block validation)",
+        "./core/txpool/validation.go:61-154 (transaction validation)",
+        "./p2p/server.go:45-61 (connection throttling)",
+        "outputs/01_SPEC.json:EL-TRUST-003"
+      ]
+    },
+    {
+      "id": "ACTOR-004",
+      "name": "Transaction Submitter (User/Wallet/DApp)",
+      "type": "external_client",
+      "description": "External entity submitting signed transactions to Geth mempool via eth_sendRawTransaction RPC or P2P propagation",
+      "operational_scenarios": [
+        {
+          "scenario": "wallet_user",
+          "description": "End user submits transaction via MetaMask/Rabby/hardware wallet to public/private RPC endpoint",
+          "trust_implications": [
+            "User's wallet signs transaction locally (Geth never sees private key)",
+            "RPC provider (if third-party) can censor transaction by not relaying it",
+            "Malicious RPC can return fake transaction hash without broadcasting",
+            "Transaction validation ensures user cannot submit invalid tx (insufficient balance, bad nonce, etc.)"
+          ],
+          "deployment_pattern": "Standard user interaction with Ethereum"
+        },
+        {
+          "scenario": "mev_searcher",
+          "description": "MEV bot submits bundle to Flashbots/private mempool or direct to validator",
+          "trust_implications": [
+            "Searcher may use private RPC to avoid front-running by public mempool",
+            "Validator operator (running Geth) sees transaction before inclusion",
+            "No additional trust: transaction still validated via standard rules",
+            "Censorship possible if validator colludes with specific searchers"
+          ],
+          "deployment_pattern": "MEV supply chain, ~90% of Ethereum blocks"
+        },
+        {
+          "scenario": "malicious_spammer",
+          "description": "Attacker submits flood of transactions to DoS mempool or waste block space",
+          "trust_implications": [
+            "Each transaction must pay gas, limiting economic viability of spam",
+            "TxPool has size limits (default 4096 pending, 1024 queued per account)",
+            "Low gas price transactions evicted when pool full",
+            "Block builders prioritize by effective priority fee, naturally filtering spam"
+          ],
+          "deployment_pattern": "DoS attempt, economically deterred by gas fees"
+        }
+      ],
+      "trust_level": "untrusted",
+      "trust_level_rationale": "Transaction submitters assumed adversarial. Geth validates signature, nonce, balance, gas before mempool admission. Invalid transactions rejected.",
+      "capabilities_if_honest": [
+        "Submit valid signed transaction with correct nonce, sufficient balance, adequate gas",
+        "Pay appropriate gas fees for desired inclusion speed",
+        "Use EIP-1559 dynamic fees (type 0x02) for fee market efficiency",
+        "Submit blob transactions (type 0x03) for L2 data availability"
+      ],
+      "capabilities_if_malicious": [
+        "Submit transaction with invalid signature (rejected: signature verification fails)",
+        "Submit transaction with insufficient balance (rejected: balance check fails)",
+        "Submit transaction with replay attack signature (rejected: chainID mismatch or nonce duplicate)",
+        "Spam mempool with low-fee transactions (evicted by fee market)",
+        "Submit blob transaction with invalid KZG commitment (rejected: proof verification fails)",
+        "CANNOT bypass validation: all transactions must pass ValidateTransaction checks"
+      ],
+      "mitigations": [
+        "Signature verification via ECDSA secp256k1 recovers sender address",
+        "EIP-155 replay protection via chainID in signature",
+        "Nonce check prevents duplicate transaction inclusion",
+        "Balance check ensures sender can pay gas + value",
+        "Gas limit check prevents under-gassed transactions",
+        "Blob transaction KZG proof verification ensures data availability",
+        "TxPool size limits prevent memory exhaustion",
+        "Fee market naturally filters spam via economic cost"
+      ],
+      "source_of_truth": [
+        "./core/txpool/validation.go:61-154 (stateless validation)",
+        "./core/txpool/legacypool/legacypool.go:700-800 (stateful validation)",
+        "./core/types/transaction_signing.go:40-80 (signature verification)",
+        "./internal/ethapi/api.go:1800-1850 (eth_sendRawTransaction)",
+        "outputs/01_SPEC.json:EL-FLOW-001"
+      ]
+    },
+    {
+      "id": "ACTOR-005",
+      "name": "RPC Client (DApp Backend/Indexer/User)",
+      "type": "external_client",
+      "description": "External service or user querying Geth state via JSON-RPC (eth_call, eth_getBalance, eth_getLogs, etc.) over HTTP/WebSocket/IPC",
+      "operational_scenarios": [
+        {
+          "scenario": "read_only_public_node",
+          "description": "Infura/Alchemy/Ankr provides public RPC endpoint with rate limits and read-only access",
+          "trust_implications": [
+            "Clients trust RPC provider to return accurate state data",
+            "Malicious RPC can return fake balances, logs, call results",
+            "Clients should verify critical data via multiple providers or light client",
+            "RPC provider cannot modify chain state (read-only access)"
+          ],
+          "deployment_pattern": "Standard DApp backend relying on third-party RPC"
+        },
+        {
+          "scenario": "private_authenticated_rpc",
+          "description": "Organization runs private Geth with authenticated RPC for internal services (trading, monitoring)",
+          "trust_implications": [
+            "Internal services trust RPC provider (same organization)",
+            "Authentication prevents unauthorized access but not malicious insider",
+            "If admin/debug namespaces enabled, RPC client has god-mode access",
+            "Critical: never expose admin/debug to untrusted clients"
+          ],
+          "deployment_pattern": "Enterprise staking infrastructure"
+        },
+        {
+          "scenario": "malicious_rpc_client",
+          "description": "Attacker with RPC access attempts to exploit node via crafted requests",
+          "trust_implications": [
+            "Read-only namespaces (eth, net, web3) cannot modify state",
+            "Admin namespace (if exposed) allows arbitrary peer manipulation, RPC config changes",
+            "Debug namespace allows trace replay with arbitrary gas limits (potential DoS)",
+            "Personal namespace (deprecated) allowed account unlocking over network"
+          ],
+          "deployment_pattern": "Attack vector if dangerous namespaces exposed"
+        }
+      ],
+      "trust_level": "untrusted",
+      "trust_level_rationale": "RPC clients assumed adversarial. Default configuration exposes only read-only namespaces. Admin/debug require explicit operator configuration.",
+      "capabilities_if_honest": [
+        "Query chain state: balances, storage, code, logs, receipts",
+        "Simulate transactions via eth_call (no state change)",
+        "Subscribe to new block headers, logs, pending transactions (WebSocket)",
+        "Retrieve historical data within configured retention period"
+      ],
+      "capabilities_if_malicious": [
+        "DoS via expensive queries (eth_getLogs with wide block range) - mitigated by RPCGlobalLogQueryLimit",
+        "DoS via eth_call with excessive gas - mitigated by RPCGlobalGasCapFlag",
+        "If admin exposed: manipulate peer connections (admin_addPeer, admin_removePeer)",
+        "If debug exposed: trigger expensive trace operations (debug_traceBlock)",
+        "If personal exposed (deprecated): attempt account unlocking",
+        "CANNOT modify chain state via read-only namespaces"
+      ],
+      "mitigations": [
+        "Default HTTP API whitelist: only eth, net, web3 (safe read-only namespaces)",
+        "Admin/debug require explicit --http.api flag with documentation warnings",
+        "Personal namespace deprecated and removed",
+        "RPCGlobalGasCapFlag limits eth_call gas (default 50M gas)",
+        "RPCGlobalLogQueryLimit caps eth_getLogs results (default 10000 logs)",
+        "RPCGlobalEVMTimeoutFlag limits execution time (default 5s)",
+        "Batch request limits prevent amplification attacks"
+      ],
+      "source_of_truth": [
+        "README.md:176-200 (RPC security warnings)",
+        "./node/node.go:118-120 (API registration)",
+        "./internal/ethapi/api.go:180+ (RPC API implementation)",
+        "outputs/01_SPEC.json:EL-TRUST-012"
+      ]
+    },
+    {
+      "id": "ACTOR-006",
+      "name": "Clef (External Signer)",
+      "type": "off_chain_software",
+      "description": "Standalone transaction signing daemon that manages keystores and provides signing services to Geth or other clients, isolating key material from node operation",
+      "operational_scenarios": [
+        {
+          "scenario": "local_usb_signer",
+          "description": "Clef runs on USB Armory or dedicated hardware, signs transactions via IPC for paired Geth",
+          "trust_implications": [
+            "Key material isolated from internet-connected Geth node",
+            "Requires physical access to USB device for signing approval",
+            "Compromised Geth cannot extract keys (stored in Clef, not Geth)",
+            "User must manually approve each transaction via Clef UI"
+          ],
+          "deployment_pattern": "High-security validator setup, similar to hardware wallet"
+        },
+        {
+          "scenario": "remote_signer_with_rules",
+          "description": "Clef runs with automated rule engine for MEV bot or trading system",
+          "trust_implications": [
+            "Rules allow automatic signing without manual approval (convenience vs security tradeoff)",
+            "Compromised Geth could trick Clef into signing malicious transactions if rules too permissive",
+            "Rate limiting in rules mitigates theft but doesn't prevent it entirely",
+            "Audit log tracks all signing requests for forensics"
+          ],
+          "deployment_pattern": "Institutional staking with automated operations"
+        },
+        {
+          "scenario": "compromised_clef",
+          "description": "Attacker gains access to Clef binary or its encrypted master seed",
+          "trust_implications": [
+            "Master seed encrypted with user passphrase (scrypt KDF)",
+            "Weak passphrase enables key extraction",
+            "Clef audit log may reveal attacker activity",
+            "Equivalent to compromising Geth keystore if Clef accessible"
+          ],
+          "deployment_pattern": "Security failure scenario"
+        }
+      ],
+      "trust_level": "semi_trusted",
+      "trust_level_rationale": "Clef trusted for key custody and signing decisions. Compromise of Clef = compromise of keys. Used to REDUCE attack surface by isolating keys from Geth.",
+      "capabilities_if_honest": [
+        "Store and manage encrypted keystores with scrypt KDF",
+        "Sign transactions after user approval or rule-based authorization",
+        "Provide UI for transaction review (shows decoded call data, warnings)",
+        "Maintain audit log of all signing requests and approvals",
+        "Support hardware wallets (Ledger, Trezor) as signing backends"
+      ],
+      "capabilities_if_malicious": [
+        "Sign arbitrary transactions without user knowledge (if rules misconfigured)",
+        "Exfiltrate private keys to attacker (if Clef binary backdoored)",
+        "Approve phishing transactions if user tricked by malicious DApp",
+        "Rate limit bypass if rules not properly restrictive"
+      ],
+      "mitigations": [
+        "Clef External API (untrusted): does not accept credentials or assume authority",
+        "User approval required for each transaction unless explicit rules configured",
+        "Keystore encrypted with scrypt (configurable work factor)",
+        "Audit log tracks all signing activity",
+        "4byte database identifies known method selectors for user review",
+        "Warning issued for suspicious transactions (invalid checksum, unusual data)"
+      ],
+      "source_of_truth": [
+        "./cmd/clef/README.md:60-69 (security model)",
+        "./accounts/external/backend.go (Clef integration)",
+        "./accounts/keystore/keystore.go:50-100 (keystore management)",
+        "outputs/01_SPEC.json:EL-TRUST-010"
+      ]
+    },
+    {
+      "id": "ACTOR-007",
+      "name": "Block Builder / MEV Relay",
+      "type": "off_chain_service",
+      "description": "OPTIONAL external service that constructs blocks for validators via MEV-Boost, optimizing transaction ordering for maximal extractable value",
+      "operational_scenarios": [
+        {
+          "scenario": "mev_boost_relay",
+          "description": "Validator operator connects Geth to Flashbots/BloXroute relay for outsourced block building",
+          "trust_implications": [
+            "Relay builds block with private order flow, validator blindly signs header",
+            "Validator trusts relay to include valid transactions and pay promised fee",
+            "Relay CANNOT include invalid transactions (validator's Geth validates payload post-signing)",
+            "Censorship risk: relay may exclude certain transactions (e.g., Tornado Cash)",
+            "Liveness dependency: if relay offline, validator cannot propose"
+          ],
+          "deployment_pattern": "~90% of Ethereum validators use MEV-Boost as of 2024"
+        },
+        {
+          "scenario": "local_block_building",
+          "description": "Validator builds blocks locally using Geth's built-in miner (no external relay)",
+          "trust_implications": [
+            "Full control over transaction selection and ordering",
+            "No censorship risk from external party",
+            "Lower MEV revenue (no access to private order flow)",
+            "Simpler security model: no external dependency"
+          ],
+          "deployment_pattern": "Solo validators prioritizing censorship resistance"
+        },
+        {
+          "scenario": "malicious_relay",
+          "description": "Relay builds invalid block or withholds block after validator signs header",
+          "trust_implications": [
+            "If block invalid: validator's Geth rejects payload via engine_newPayload, attestation missed",
+            "If block withheld: network doesn't receive block, slot missed, validator penalized",
+            "Relay CANNOT steal validator keys or force signing of invalid state root",
+            "Worst case: liveness failure (missed attestations), not slashing"
+          ],
+          "deployment_pattern": "Attack vector or relay infrastructure failure"
+        }
+      ],
+      "trust_level": "semi_trusted",
+      "trust_level_rationale": "Trusted for LIVENESS and MEV REVENUE, not for SAFETY. Geth validates all received payloads. Relay can cause missed slots but cannot force acceptance of invalid state.",
+      "capabilities_if_honest": [
+        "Build blocks with optimized transaction ordering for maximal MEV revenue",
+        "Include private order flow from searchers not visible in public mempool",
+        "Provide block to validator before proposal deadline",
+        "Pay validator promised block value in coinbase or separate payment"
+      ],
+      "capabilities_if_malicious": [
+        "Withhold block after validator signs header (causes missed slot)",
+        "Build block with excluded transactions (censorship)",
+        "Pay less than promised block value (theft, but detectable)",
+        "Include invalid transactions (rejected by validator's Geth during engine_newPayload)",
+        "CANNOT force validator to accept invalid state root or consensus violations"
+      ],
+      "mitigations": [
+        "Validator's Geth validates all received payloads via engine_newPayload",
+        "Block validation occurs AFTER header signed but BEFORE attestation",
+        "Relay reputation system: validators switch to honest relays if misbehavior detected",
+        "Min-bid configuration allows validator to reject low-value blocks",
+        "Local fallback: validator can build block locally if relay fails"
+      ],
+      "source_of_truth": [
+        "outputs/01_SPEC.json:EL-FLOW-002 (block building)",
+        "outputs/01_SPEC.json:EL-FLOW-003 (payload validation)",
+        "./miner/worker.go:1000-1200 (local block building)",
+        "https://github.com/flashbots/mev-boost (external dependency, not in Geth codebase)"
+      ],
+      "note": "MEV-Boost is NOT part of Geth codebase. It's an external middleware that sits between CL and Geth. Included in trust model because it's operationally critical for >90% of validators."
+    },
+    {
+      "id": "ACTOR-008",
+      "name": "Node Deployer / DevOps",
+      "type": "human",
+      "description": "Individual or team responsible for deploying Geth binary, configuring startup flags, and managing infrastructure (distinct from ongoing node operator)",
+      "operational_scenarios": [
+        {
+          "scenario": "trusted_deployment",
+          "description": "DevOps downloads Geth from official GitHub releases, verifies GPG signature, deploys to production",
+          "trust_implications": [
+            "Trust that ethereum/go-ethereum repository not compromised",
+            "Trust that GPG signing key not stolen",
+            "Trust that build reproducibility matches published checksums",
+            "Correct initial configuration critical (fork params, bootnodes, JWT secret)"
+          ],
+          "deployment_pattern": "Best practice deployment"
+        },
+        {
+          "scenario": "supply_chain_attack",
+          "description": "Attacker compromises GitHub release, build pipeline, or distribution channel to inject backdoored Geth binary",
+          "trust_implications": [
+            "Backdoored binary could exfiltrate keys, manipulate RPC responses, or cause consensus failures",
+            "GPG signature verification only helps if signing key not compromised",
+            "Reproducible builds allow independent verification but rarely performed",
+            "Docker image from Docker Hub could be malicious (not signed)"
+          ],
+          "deployment_pattern": "Advanced persistent threat (APT) scenario"
+        },
+        {
+          "scenario": "misconfigured_deployment",
+          "description": "DevOps uses wrong network config, exposes dangerous RPC namespaces, or disables critical features",
+          "trust_implications": [
+            "Wrong --networkid or --bootnodes connects to wrong chain (testnet vs mainnet)",
+            "Exposed --http.api=admin,debug,personal allows remote exploitation",
+            "Missing --authrpc.jwtsecret allows unauthorized Engine API access",
+            "Disabled --snapshot or wrong --syncmode causes slow sync or excessive disk usage"
+          ],
+          "deployment_pattern": "Configuration error, unfortunately common"
+        }
+      ],
+      "trust_level": "trusted",
+      "trust_level_rationale": "Deployer has root-level control over Geth binary and configuration. Compromise at deployment = compromise of node from inception.",
+      "capabilities_if_honest": [
+        "Download Geth from official sources and verify GPG signatures",
+        "Configure fork activation parameters correctly (--override.osaka, etc.)",
+        "Generate secure JWT secret for Engine API authentication",
+        "Set safe RPC API exposure (default or --http.api=eth,net,web3)",
+        "Deploy on hardened infrastructure with proper firewall rules"
+      ],
+      "capabilities_if_malicious": [
+        "Deploy backdoored Geth binary with embedded key exfiltration",
+        "Configure incorrect fork parameters causing chain split",
+        "Expose dangerous RPC namespaces to internet",
+        "Use predictable JWT secret allowing MITM on Engine API",
+        "Disable critical security features (e.g., --insecure flag if exists)",
+        "Exfiltrate validator keys during initial setup"
+      ],
+      "mitigations": [
+        "Official Geth releases GPG signed by Ethereum Foundation",
+        "Checksums published on geth.ethereum.org for verification",
+        "Reproducible builds documented (though rarely independently verified)",
+        "Docker images published to ghcr.io/ethereum/client-go (GitHub container registry)",
+        "Configuration validation warnings in Geth startup logs",
+        "IaC (Terraform/Ansible) reduces configuration drift"
+      ],
+      "source_of_truth": [
+        "README.md:13-31 (building and downloading)",
+        ".github/workflows/ (CI/CD build process)",
+        "https://geth.ethereum.org/downloads (official release distribution)"
+      ]
+    },
+    {
+      "id": "ACTOR-009",
+      "name": "Ethereum Foundation / Core Developers",
+      "type": "governance",
+      "description": "Core protocol developers who maintain Geth codebase, define consensus rules via EIPs, and release new versions",
+      "operational_scenarios": [
+        {
+          "scenario": "honest_development",
+          "description": "Core devs implement EIPs per community consensus, maintain backward compatibility, and fix security bugs",
+          "trust_implications": [
+            "Node operators trust that Geth implements Ethereum protocol correctly",
+            "Trust that security patches address real vulnerabilities without introducing backdoors",
+            "Trust that fork activation logic (e.g., Dencun at timestamp 1710338135) matches network consensus",
+            "Open source code auditable by community"
+          ],
+          "deployment_pattern": "Normal protocol evolution"
+        },
+        {
+          "scenario": "compromised_maintainer",
+          "description": "Attacker compromises core dev GitHub account or GPG key to merge malicious code",
+          "trust_implications": [
+            "Malicious code in release could steal keys, manipulate consensus, or create backdoor",
+            "Multi-party code review process should catch obvious attacks",
+            "Subtle bugs could be introduced that appear benign",
+            "GPG key compromise allows signing of malicious binaries"
+          ],
+          "deployment_pattern": "Supply chain attack at protocol level"
+        },
+        {
+          "scenario": "controversial_fork",
+          "description": "Community disagrees on EIP (e.g., ProgPoW), Geth implements one side causing potential chain split",
+          "trust_implications": [
+            "Node operators must choose which fork to follow",
+            "If contentious, could lead to replay attacks or network partition",
+            "Historical precedent: Ethereum/Ethereum Classic split after DAO fork",
+            "Geth's decision effectively determines 'canonical' chain due to market dominance"
+          ],
+          "deployment_pattern": "Governance crisis scenario (rare)"
+        }
+      ],
+      "trust_level": "trusted",
+      "trust_level_rationale": "Node operators MUST trust that Geth codebase correctly implements Ethereum consensus rules. Open source allows verification but few operators audit code.",
+      "capabilities_if_honest": [
+        "Implement EIPs as agreed by community via EIP process",
+        "Fix security vulnerabilities and issue timely patches",
+        "Maintain backward compatibility across upgrades",
+        "Provide migration paths for breaking changes (e.g., PoW to PoS)",
+        "Document configuration options and security best practices"
+      ],
+      "capabilities_if_malicious": [
+        "Introduce consensus bugs causing network splits",
+        "Embed backdoors in codebase (requires bypassing PR review)",
+        "Manipulate fork activation logic to favor specific actors",
+        "Sign compromised release binaries with stolen GPG key",
+        "Withhold security patches to exploit vulnerabilities",
+        "CANNOT force node operators to upgrade (operators control deployment)"
+      ],
+      "mitigations": [
+        "Open source code on GitHub (ethereum/go-ethereum) allows public audit",
+        "Multi-party PR review process requires approval from multiple maintainers",
+        "GPG signing of releases by known Ethereum Foundation keys",
+        "Community consensus required for contentious EIPs (rough consensus in ACD calls)",
+        "Alternative implementations (Besu, Nethermind, Erigon) provide diversity",
+        "Node operators free to fork codebase or delay upgrades if suspicious"
+      ],
+      "source_of_truth": [
+        "https://github.com/ethereum/go-ethereum (primary repository)",
+        "https://eips.ethereum.org (EIP specification process)",
+        ".github/CONTRIBUTING.md (contribution guidelines)"
+      ]
+    }
+  ],
+  "components": [
+    {
+      "id": "COMPONENT-001",
+      "name": "Engine API (eth/catalyst)",
+      "type": "rpc_interface",
+      "description": "Authenticated JSON-RPC interface for consensus layer to execution layer communication, implementing engine_newPayload, engine_forkchoiceUpdated, and engine_getPayload methods",
+      "trust_boundary": "Trusted boundary - requires JWT authentication to prevent unauthorized payload submission or fork choice manipulation",
+      "trust_implications": [
+        "AUTHENTICATED by JWT secret shared between Geth and CL at startup",
+        "Exposed only on localhost by default (--authrpc.addr=localhost:8551)",
+        "Compromise of JWT secret allows attacker to impersonate CL and inject invalid payloads",
+        "Invalid payloads rejected after validation but cause DoS overhead"
+      ],
+      "validated_inputs": [
+        "JWT token in Authorization header (HS256 signature)",
+        "Payload version matches fork (V1=Paris, V2=Shanghai, V3=Cancun, V4=Prague)",
+        "Block hash matches recomputed hash of header fields",
+        "Blob versioned hashes match transaction blob commitments",
+        "All standard block validation (state root, receipts root, gas used, etc.)"
+      ],
+      "threat_model": "TRUSTED interface assumed honest if authenticated. Malicious CL can DoS Geth but cannot force invalid state acceptance.",
+      "source_of_truth": [
+        "./eth/catalyst/api.go:48-58",
+        "./beacon/engine/types.go (Engine API types)",
+        "outputs/01_SPEC.json:EL-TRUST-001"
+      ]
+    },
+    {
+      "id": "COMPONENT-002",
+      "name": "JSON-RPC Server (node/rpc)",
+      "type": "rpc_interface",
+      "description": "Public/private RPC endpoint exposing Ethereum APIs (eth, net, web3, admin, debug, personal) over HTTP, WebSocket, and IPC transports",
+      "trust_boundary": "Untrusted boundary for HTTP/WS - assumes adversarial clients. Trusted for IPC (local only).",
+      "trust_implications": [
+        "HTTP/WebSocket: UNTRUSTED, must validate all inputs and enforce rate limits",
+        "IPC: TRUSTED (local socket, restricted file permissions)",
+        "Namespace-based access control: admin/debug/personal require explicit configuration",
+        "Default whitelist: only eth, net, web3 on HTTP to minimize attack surface"
+      ],
+      "validated_inputs": [
+        "JSON-RPC 2.0 message format validation",
+        "Batch request limits (--rpc.batch.limit, --rpc.batch.responsemaxsize)",
+        "Gas cap on eth_call to prevent DoS (--rpc.gascap, default 50M)",
+        "Query limits on eth_getLogs to prevent memory exhaustion (--rpc.logquerylimit, default 10000)",
+        "Execution timeout on expensive operations (--rpc.evmtimeout, default 5s)"
+      ],
+      "threat_model": "UNTRUSTED clients assumed malicious. Read-only namespaces safe. Admin/debug namespaces enable node compromise if exposed to attackers.",
+      "source_of_truth": [
+        "./node/node.go:62-67 (RPC server initialization)",
+        "./internal/ethapi/api.go (API implementations)",
+        "outputs/01_SPEC.json:EL-TRUST-012"
+      ]
+    },
+    {
+      "id": "COMPONENT-003",
+      "name": "P2P Network Layer (p2p, eth/protocols/eth)",
+      "type": "network_protocol",
+      "description": "Peer-to-peer networking stack implementing devp2p RLPx protocol and ETH/68-69 subprotocol for block and transaction propagation",
+      "trust_boundary": "Untrusted boundary - all P2P peers assumed adversarial",
+      "trust_implications": [
+        "ALL received data validated before processing (blocks, transactions, headers)",
+        "Peer reputation tracking identifies and blacklists misbehaving peers",
+        "Connection limits prevent Sybil attacks exhausting resources",
+        "Fork ID prevents pollution from wrong network (mainnet vs testnet)"
+      ],
+      "validated_inputs": [
+        "RLPx protocol handshake with ECDH key exchange",
+        "Fork ID validation (Genesis hash + fork blocks/timestamps)",
+        "Message size limits (10MB max per ETH protocol)",
+        "Block validation via BlockValidator before chain incorporation",
+        "Transaction validation via TxPool before mempool admission"
+      ],
+      "threat_model": "UNTRUSTED network assumed hostile. Byzantine peers can cause DoS via resource exhaustion but cannot compromise safety (invalid data rejected).",
+      "source_of_truth": [
+        "./p2p/server.go:73-100 (P2P server)",
+        "./eth/protocols/eth/protocol.go:30-60 (ETH protocol)",
+        "./eth/handler.go:100-250 (peer management)",
+        "outputs/01_SPEC.json:EL-TRUST-003"
+      ]
+    },
+    {
+      "id": "COMPONENT-004",
+      "name": "Transaction Pool (core/txpool)",
+      "type": "mempool",
+      "description": "In-memory pool of pending and queued transactions awaiting block inclusion, with separate subpools for legacy (LegacyPool) and blob (BlobPool) transactions",
+      "trust_boundary": "Untrusted boundary - assumes malicious transaction submissions",
+      "trust_implications": [
+        "Stateless validation: signature, type, size, intrinsic gas, blob commitments",
+        "Stateful validation: nonce, balance, gas price vs base fee, blob base fee",
+        "Pool size limits prevent memory exhaustion (4096 pending, 1024 queued per account)",
+        "Eviction policy: lowest fee transactions dropped when pool full"
+      ],
+      "validated_inputs": [
+        "ECDSA signature verification (secp256k1) with address recovery",
+        "EIP-155 replay protection via chainID in signature",
+        "Nonce continuity (pending = next nonce, queued = future nonce)",
+        "Balance check: sender has value + gasLimit * gasFeeCap",
+        "Blob KZG commitment verification via point evaluation precompile (0x0a)",
+        "Transaction size under limit (128KB legacy, 256KB blob pool)"
+      ],
+      "threat_model": "UNTRUSTED submitters. All transactions validated before admission. Economic incentives (gas fees) deter spam. Invalid transactions rejected immediately.",
+      "source_of_truth": [
+        "./core/txpool/txpool.go:200-250 (pool routing)",
+        "./core/txpool/validation.go:61-188 (validation logic)",
+        "./core/txpool/legacypool/legacypool.go:600-800 (legacy pool)",
+        "./core/txpool/blobpool/blobpool.go (blob pool)",
+        "outputs/01_SPEC.json:EL-FLOW-001"
+      ]
+    },
+    {
+      "id": "COMPONENT-005",
+      "name": "Block Validator (core/block_validator)",
+      "type": "consensus_enforcement",
+      "description": "Validates received blocks against consensus rules via ValidateBody (structural) and ValidateState (execution) checks before chain incorporation",
+      "trust_boundary": "Trust enforcement - prevents invalid blocks from entering canonical chain",
+      "trust_implications": [
+        "CRITICAL SAFETY COMPONENT: last line of defense against invalid state",
+        "Validates ALL blocks regardless of source (P2P, Engine API, local mining)",
+        "Consensus bug in validator = network-wide vulnerability",
+        "Performance critical: must validate blocks within 12-second slot time"
+      ],
+      "validated_inputs": [
+        "Block structure: transaction count, uncle count, withdrawals (post-Shanghai)",
+        "Merkle roots: transaction root, uncle root, withdrawals root, receipts root",
+        "Gas accounting: gas used, gas limit, base fee calculation (EIP-1559)",
+        "Blob accounting: blob gas used, excess blob gas (EIP-4844)",
+        "State root: matches after executing all transactions",
+        "Execution requests root: deposits, withdrawals, consolidations (Prague+)"
+      ],
+      "threat_model": "Defends against BYZANTINE BLOCKS from any source. Must be deterministic and bug-free to prevent consensus splits.",
+      "source_of_truth": [
+        "./core/block_validator.go:50-196 (validation logic)",
+        "./core/state_processor.go:80-650 (block execution)",
+        "outputs/01_SPEC.json:algorithms[5] (Block Validation pseudocode)",
+        "outputs/01_SPEC.json:EL-FLOW-003"
+      ]
+    },
+    {
+      "id": "COMPONENT-006",
+      "name": "EVM (core/vm)",
+      "type": "execution_engine",
+      "description": "Ethereum Virtual Machine implementing all opcodes, precompiled contracts, and gas metering for transaction execution",
+      "trust_boundary": "Trust enforcement - executes untrusted bytecode in sandboxed environment",
+      "trust_implications": [
+        "CRITICAL SAFETY COMPONENT: must enforce gas limits to prevent infinite loops",
+        "Executes untrusted bytecode from contracts and EOAs",
+        "Gas metering prevents DoS via expensive operations",
+        "Precompiled contracts implement cryptography deterministically (ECRECOVER, SHA256, KZG, BLS)"
+      ],
+      "validated_inputs": [
+        "Gas limit enforced per opcode (out of gas = revert)",
+        "Stack depth limit (1024) prevents unbounded recursion",
+        "Memory expansion cost quadratic to prevent DoS",
+        "Access lists (EIP-2929) reduce storage access cost after first touch",
+        "Precompiled contract input validation (e.g., BLS point validity)"
+      ],
+      "threat_model": "Executes UNTRUSTED CODE in sandboxed environment. Gas metering ensures termination. Must be deterministic to prevent consensus splits.",
+      "source_of_truth": [
+        "./core/vm/evm.go:200-450 (EVM execution)",
+        "./core/vm/interpreter.go:120-200 (opcode loop)",
+        "./core/vm/gas_table.go:50-180 (gas costs)",
+        "./core/vm/contracts.go:80-150 (precompiles)",
+        "outputs/01_SPEC.json:algorithms[4] (Gas Metering pseudocode)",
+        "outputs/01_SPEC.json:EL-TRUST-008"
+      ]
+    },
+    {
+      "id": "COMPONENT-007",
+      "name": "State Database (core/state, triedb)",
+      "type": "storage",
+      "description": "Merkle Patricia Trie database storing world state (accounts, storage, code) with cryptographic commitment via state root",
+      "trust_boundary": "Trusted persistence - assumes disk integrity, but validates all state transitions",
+      "trust_implications": [
+        "State root binds all account balances, nonces, storage, code hashes",
+        "Corrupted disk data detected by state root mismatch during block validation",
+        "Pruning retains last 128 blocks in memory (TriesInMemory) for reorg support",
+        "PBSS (Path-Based State Scheme) enables efficient state access vs legacy hash-based scheme"
+      ],
+      "validated_inputs": [
+        "All state transitions via EVM execution validated by block validator",
+        "State root recomputed after every block and checked against header",
+        "Trie nodes authenticated by Merkle proofs",
+        "Snapshot layer provides fast state access with fallback to trie"
+      ],
+      "threat_model": "Trusted storage layer but defended by cryptographic commitments. Disk corruption or tampering detected by state root mismatch.",
+      "source_of_truth": [
+        "./core/state/statedb.go:650-700 (state root computation)",
+        "./triedb/database.go:100-250 (trie database)",
+        "./triedb/pathdb/database.go:50-100 (PBSS)",
+        "outputs/01_SPEC.json:algorithms[6] (State Root pseudocode)",
+        "outputs/01_SPEC.json:EL-TRUST-007"
+      ]
+    },
+    {
+      "id": "COMPONENT-008",
+      "name": "Keystore (accounts/keystore)",
+      "type": "key_management",
+      "description": "Encrypted storage for private keys using Web3 Secret Storage Definition (scrypt KDF), managed locally by Geth or externally by Clef",
+      "trust_boundary": "Trusted key material - compromise of keystore or passphrase = theft of funds",
+      "trust_implications": [
+        "CRITICAL SECURITY COMPONENT: stores private keys for validator signing",
+        "Passphrase-based encryption via scrypt KDF with configurable work factor",
+        "Weak passphrase vulnerable to brute force (scrypt slows but doesn't prevent)",
+        "File permissions critical: keystore files should be 0600 (owner read/write only)",
+        "Clef alternative isolates keys from Geth process"
+      ],
+      "validated_inputs": [
+        "Passphrase provided by operator at unlock time",
+        "Scrypt work factor validation (N, r, p parameters)",
+        "Private key validity (secp256k1 curve point)",
+        "Address derivation matches key (keccak256(pubkey)[12:])"
+      ],
+      "threat_model": "TRUSTED by operator but HIGH-VALUE TARGET for attackers. Compromise = complete key theft. Encrypted at rest but plaintext in memory when unlocked.",
+      "source_of_truth": [
+        "./accounts/keystore/keystore.go:50-100 (keystore management)",
+        "./accounts/keystore/passphrase.go:40-90 (encryption/decryption)",
+        "./accounts/keystore/key.go (key structure)",
+        "outputs/01_SPEC.json:EL-TRUST-010"
+      ]
+    },
+    {
+      "id": "COMPONENT-009",
+      "name": "Miner/Builder (miner/worker)",
+      "type": "block_production",
+      "description": "Block construction engine that selects transactions from pool, executes them, and assembles payload for consensus layer proposal",
+      "trust_boundary": "Trusted block production - operator controls which transactions included (censorship risk)",
+      "trust_implications": [
+        "Transaction selection controlled by operator: can censor or prioritize specific transactions",
+        "MEV extraction: operator can reorder transactions for profit (front-running, sandwiching)",
+        "Payload must pass validation by own node before submission to CL",
+        "External builder (MEV-Boost) outsources this function to third party"
+      ],
+      "validated_inputs": [
+        "Payload attributes from CL (timestamp, feeRecipient, withdrawals, beaconRoot)",
+        "Transactions from pool sorted by effective priority fee",
+        "System calls executed before transactions (beacon root, parent hash, withdrawals)",
+        "Block size limit enforced (EIP-7934: 8MB max minus 1MB buffer)",
+        "Blob limit enforced (Cancun: 6 blobs, configurable in later forks)"
+      ],
+      "threat_model": "TRUSTED by operator for liveness and MEV revenue. Operator can censor but all produced blocks validated locally before submission.",
+      "source_of_truth": [
+        "./miner/worker.go:1000-1250 (block building)",
+        "./miner/ordering.go:40-90 (transaction ordering)",
+        "./miner/payload_building.go:80-120 (payload construction)",
+        "outputs/01_SPEC.json:EL-FLOW-002"
+      ]
+    },
+    {
+      "id": "COMPONENT-010",
+      "name": "Downloader / Sync (eth/downloader)",
+      "type": "synchronization",
+      "description": "Fetches historical blocks and state from P2P peers to catch up with canonical chain head, supporting snap sync (state), full sync (all blocks), and archive mode",
+      "trust_boundary": "Untrusted P2P data - validates all received data before incorporation",
+      "trust_implications": [
+        "Snap sync downloads state snapshot from peers (faster but trusts state root)",
+        "Full sync validates every block from genesis (slow but fully trustless)",
+        "Archive mode retains all historical state (high disk usage)",
+        "Checkpoint sync trusts finalized checkpoint to skip initial sync"
+      ],
+      "validated_inputs": [
+        "All received blocks validated via BlockValidator",
+        "State snapshot authenticated via state root in finalized checkpoint",
+        "Peer-provided data cross-checked against multiple peers",
+        "Bad blocks tracked ephemerally to avoid re-processing"
+      ],
+      "threat_model": "UNTRUSTED P2P network. Snap sync trades trust for speed (trusts finalized state root). Full sync fully trustless. Eclipse attack can feed wrong chain.",
+      "source_of_truth": [
+        "./eth/downloader/downloader.go (sync orchestration)",
+        "./eth/downloader/queue.go (block queue)",
+        "./eth/sync.go (sync modes)",
+        "outputs/01_SPEC.json:EL-TRUST-003"
+      ]
+    },
+    {
+      "id": "COMPONENT-011",
+      "name": "ChainConfig (params/config.go)",
+      "type": "consensus_parameters",
+      "description": "Hardcoded and operator-configured fork activation parameters (block numbers and timestamps) defining when consensus rule changes activate",
+      "trust_boundary": "TRUSTED configuration - incorrect values cause chain split from network",
+      "trust_implications": [
+        "CRITICAL CONFIGURATION: wrong fork activation = consensus split",
+        "Mainnet values hardcoded in params/config.go (London: 12965000, Paris: TTD 58750e18, etc.)",
+        "Override flags (--override.osaka, --override.verkle) allow testing on custom networks",
+        "Node operator trusts that Geth's default config matches community consensus"
+      ],
+      "validated_inputs": [
+        "Fork timestamps must be monotonically increasing",
+        "Genesis config loaded from file or defaults",
+        "Override flags validated for sane values",
+        "Fork detector warns if chain config doesn't match connected peers"
+      ],
+      "threat_model": "TRUSTED by operator but CRITICAL for consensus. Misconfiguration or malicious override causes network split. Geth defaults assumed correct for mainnet.",
+      "source_of_truth": [
+        "./params/config.go:40-76 (mainnet config)",
+        "./params/config.go:369-418 (blob config by fork)",
+        "./core/genesis.go (genesis loading)",
+        "outputs/01_SPEC.json:EL-TRUST-002"
+      ]
+    },
+    {
+      "id": "COMPONENT-012",
+      "name": "Precompiled Contracts (core/vm/contracts.go)",
+      "type": "cryptographic_primitives",
+      "description": "Native implementations of cryptographic operations at addresses 0x01-0x11 (ECRECOVER, SHA256, BLAKE2F, KZG, BLS12-381) with fixed gas costs",
+      "trust_boundary": "Trust enforcement - must be deterministic and bug-free for consensus",
+      "trust_implications": [
+        "CRITICAL CONSENSUS COMPONENT: bugs cause network splits",
+        "Cryptographic implementations must match spec exactly (bit-for-bit)",
+        "Gas costs must be deterministic and sufficient to prevent DoS",
+        "KZG and BLS12-381 rely on trusted setup ceremony parameters"
+      ],
+      "validated_inputs": [
+        "Input length validation per precompile spec",
+        "Point validity checks for BLS12-381 curve operations",
+        "KZG commitment/proof format validation",
+        "Gas cost calculation before execution (insufficient gas = failure)"
+      ],
+      "threat_model": "TRUSTED implementations assumed correct. Bugs in precompiles (especially KZG, BLS) could break L2 data availability or future Verkle proofs.",
+      "source_of_truth": [
+        "./core/vm/contracts.go:80-150 (precompile definitions)",
+        "./crypto/kzg4844/kzg4844.go:50-170 (KZG implementation)",
+        "./crypto/bls12381/ (BLS12-381 implementation)",
+        "outputs/01_SPEC.json:EL-TRUST-006"
+      ]
+    }
+  ],
+  "trust_boundaries": [
+    {
+      "boundary": "Engine API (Geth <-> Consensus Client)",
+      "enforced_by": "JWT authentication (HS256 signature), localhost-only binding by default",
+      "threat": "Unauthenticated attacker impersonating CL to inject malicious payloads",
+      "mitigation": "JWT secret shared securely, payload validation rejects invalid blocks"
+    },
+    {
+      "boundary": "Public RPC (Geth <-> External Clients)",
+      "enforced_by": "Namespace whitelisting (eth/net/web3 only by default), rate limits, gas caps",
+      "threat": "Malicious client exploiting admin/debug APIs or DoS via expensive queries",
+      "mitigation": "Admin/debug require explicit --http.api, query limits enforced"
+    },
+    {
+      "boundary": "P2P Network (Geth <-> Peers)",
+      "enforced_by": "Full validation of all received data (blocks, transactions), peer reputation",
+      "threat": "Byzantine peers sending invalid blocks/txs to corrupt state or DoS node",
+      "mitigation": "BlockValidator and TxPool validation reject invalid data, peer blacklisting"
+    },
+    {
+      "boundary": "Keystore Access (Geth <-> Filesystem)",
+      "enforced_by": "Passphrase-based encryption (scrypt KDF), file permissions (0600)",
+      "threat": "Attacker stealing keystore files and brute-forcing passphrase",
+      "mitigation": "Strong passphrase required, scrypt slows brute force, Clef isolates keys"
+    },
+    {
+      "boundary": "User Input (TxPool <-> Transaction Submitters)",
+      "enforced_by": "Signature verification, nonce/balance checks, gas validation, KZG proofs",
+      "threat": "Malicious user submitting invalid or replay transactions",
+      "mitigation": "Comprehensive validation before mempool admission, EIP-155 replay protection"
+    }
+  ],
+  "summary": {
+    "total_actors": 9,
+    "total_components": 12,
+    "key_trust_assumptions": [
+      "Consensus Client trusted for liveness (providing fork choice), not safety (Geth validates all payloads)",
+      "Node Operator and Deployer fully trusted - have root access to keys and configuration",
+      "P2P Network and RPC Clients assumed adversarial - all inputs validated",
+      "Core Developers trusted to implement protocol correctly - open source allows audit",
+      "Cryptographic primitives (ECDSA, KZG, BLS, keccak256) assumed secure",
+      "Precompiled contracts deterministic and correct - bugs cause consensus splits",
+      "State Database integrity protected by state root - disk corruption detectable"
+    ],
+    "critical_security_boundaries": [
+      "Engine API: JWT authentication prevents unauthorized CL impersonation",
+      "Block Validator: Last line of defense against invalid state, must be bug-free",
+      "TxPool Validator: Prevents invalid transactions from entering mempool",
+      "EVM Gas Metering: Ensures execution termination, prevents DoS",
+      "Keystore Encryption: Protects private keys with passphrase, weak passphrase = key theft"
+    ],
+    "operational_trade_offs": [
+      "MEV-Boost: Outsources block building for higher revenue but adds liveness dependency and censorship risk",
+      "Snap Sync: Faster sync but trusts finalized state root (vs full sync from genesis)",
+      "Clef: Isolates keys from Geth but adds complexity and potential misconfiguration",
+      "Public RPC: Provides service to users but exposes attack surface (mitigated by namespace whitelisting)",
+      "P2P: Decentralized but vulnerable to eclipse attacks if attacker controls routing"
+    ],
+    "unclear_areas": [
+      "UNCLEAR: Operational model for MEV relays (centralized Flashbots vs permissionless relay network) - not specified in Geth codebase, external dependency",
+      "UNCLEAR: How node operators verify Geth binary integrity in practice - GPG signature verification documented but adoption rate unknown",
+      "UNCLEAR: Incident response process if consensus bug discovered - no formal protocol in codebase, relies on social coordination",
+      "UNCLEAR: Long-term incentive alignment for core developers - funded by Ethereum Foundation but no explicit governance over codebase direction"
+    ],
+    "notes": [
+      "Geth is the dominant Ethereum execution client (~80% market share as of 2024), making it a critical single point of failure for network",
+      "Post-Merge architecture splits trust: Consensus Layer (Prysm/Lighthouse) handles fork choice, Execution Layer (Geth) validates all payloads",
+      "MEV supply chain adds external actors (builders, relays) not in Geth codebase but operationally critical for >90% of validators",
+      "Trust model heavily relies on cryptographic assumptions: ECDSA for transaction signatures, KZG for blob commitments, BLS for consensus (via CL)",
+      "Operational security depends on node operator competence: weak RPC config or keystore passphrase undermines protocol-level security"
+    ]
+  }
+}
