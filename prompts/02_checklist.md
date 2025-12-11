@@ -27,10 +27,9 @@ Translate every **in-scope** property from the property catalog (`01c_PROP.json`
 2.  **Trust Model (Required Context):** `outputs/01b_TRUSTMODEL.json`
     *   Use this to understand the context behind `trust_scope` and why certain actors are considered trusted or untrusted.
 
-3.  **Specification (Supporting):** `outputs/01_SPEC.json`
-    *   Use for high-level understanding of flows and algorithms.
 
-4.  **Historical Signals (Optional):** `outputs/01_SIMILAR_ISSUES.json`, `outputs/01_PAST_REPORTS/*`
+
+3.  **Historical Signals (Optional):** `outputs/01_SIMILAR_ISSUES.json`, `outputs/01_PAST_REPORTS/*`
     *   Use for attack patterns and heuristics **only if the property is reachable**.
 
 ---
