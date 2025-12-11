@@ -1,7 +1,8 @@
 
 
+
 ---
-Description: Review and validate existing @audit annotations listed in security-agent/outputs/03_AUDITMAP.json.
+Description: Review and validate existing @audit annotations listed in outputs/03_AUDITMAP.json.
 Usage: `/04_review`
 Example: `/04_review`
 ---
@@ -11,15 +12,15 @@ Example: `/04_review`
 
 
 # 🎯 Goal
-For every entry recorded in `security-agent/outputs/03_AUDITMAP.json`, decide with rigorous reasoning whether the referenced `@audit` remains a real, exploitable issue. When disproved, transform the source comment into `@audit-ok` with a brief rationale and remove the corresponding entry from `03_AUDITMAP.json`. When confirmed (or partially confirmed), keep `@audit`, expand insight, and categorise the exact risk while updating the map item.
+For every entry recorded in `outputs/03_AUDITMAP.json`, decide with rigorous reasoning whether the referenced `@audit` remains a real, exploitable issue. When disproved, transform the source comment into `@audit-ok` with a brief rationale and remove the corresponding entry from `03_AUDITMAP.json`. When confirmed (or partially confirmed), keep `@audit`, expand insight, and categorise the exact risk while updating the map item.
 
-Finally, synchronise results back into `security-agent/outputs/03_AUDITMAP.json`.
+Finally, synchronise results back into `outputs/03_AUDITMAP.json`.
 
 # 📥 Input
-1. Audit map:         `security-agent/outputs/03_AUDITMAP.json`
-2. Checklist context: `security-agent/outputs/02_CHECKLIST.json` (`ok_if` guidance)
+1. Audit map:         `outputs/03_AUDITMAP.json`
+2. Checklist context: `outputs/02_CHECKLIST.json` (`ok_if` guidance)
 3. Source code (rec.): referenced by each audit entry
-4. Project spec:      `security-agent/outputs/01_SPEC.json`
+4. Project spec:      `outputs/01_SPEC.json`
 5. External context:  Use web search to locate related PRs or documentation and weigh them alongside `01_SPEC.json` when interpreting intent.
 
 # 📤 Output
@@ -65,14 +66,14 @@ Finally, synchronise results back into `security-agent/outputs/03_AUDITMAP.json`
 2. **Permissionless Reachability** — prove lack of owner / role guard
 3. **Guard Bypass & State Reachability** — enumerate *all* checks, find gaps
 4. **Non-self Attack** — impact > attacker alone
-5. **Bug Bounty Scope** — verify in-scope via `security-agent/outputs/01_BOUNTY_GUIDELINE.md` (if exists)
+5. **Bug Bounty Scope** — verify in-scope via `outputs/01_BOUNTY_GUIDELINE.md` (if exists)
 
 While assessing "ok" cases, consult the applicable `ok_if` rationale in `02_CHECKLIST.json` and ensure the justification aligns with its acceptance conditions.
 
 # 🔍 Review Procedure
 
 ```
-LOAD audit_items FROM security-agent/outputs/03_AUDITMAP.json ORDERED BY file→line:
+LOAD audit_items FROM outputs/03_AUDITMAP.json ORDERED BY file→line:
     ENSURE the command was invoked with no arguments; rely exclusively on the audit map entry.
     1. Re-open the source location (file and line) and confirm the @audit context.
     2. Derive execution path (AST and callgraph) and record a line-number trace in proof_trace.
@@ -82,7 +83,7 @@ LOAD audit_items FROM security-agent/outputs/03_AUDITMAP.json ORDERED BY file→
     6. Decide:
         a) Exploitable ⇒ keep @audit, enrich description, set status="Vuln" (or "Needs-Review"), retain entry in 03_AUDITMAP.json.
         b) Non-exploitable ⇒ transform comment to @audit-ok, set status="ok", remove the audit item from 03_AUDITMAP.json.
-    7. Update security-agent/outputs/02_ORDER.json.review_rounds++
+    7. Update outputs/02_ORDER.json.review_rounds++
 REPEAT until no unchecked audit_items remain.
 ```
 

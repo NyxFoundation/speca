@@ -7,36 +7,28 @@ permissions:
 on:
   workflow_dispatch:
   # schedule:
-  #   - cron: '0 0 * * *' # Daily check (Uncomment in target branch)
+  #   - cron: '0 0 * * *'
   # push:
   #   branches: 
-  #     - 'audit/*' # Trigger when config is updated in these branches (Uncomment in target branch)
+  #     - 'audit/*'
 
 jobs:
   audit_gitops:
     runs-on: ubuntu-latest
     env:
       # --- CONFIGURATION (Override these in your branch) ---
-      TARGET_REPO: "NyxFoundation/security-agent" # Default (to be overridden)
-      TARGET_REF: "main"                          # Default (HEAD of default branch)
-      TARGET_DIRECTORIES: '["."]'
+      TARGET_REPO: "ethereum/go-ethereum" # Default (to be overridden)
+      TARGET_REF: "master"                          # Default (HEAD of default branch)
       # -----------------------------------------------------
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Built-in token is sufficient for self-repo PRs
-      CLAUDE_CODE_PERMISSIONS: "bypassPermissions" # Allow file writes without prompts in CI
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CLAUDE_CODE_PERMISSIONS: "bypassPermissions"
 
     steps:
       - name: Checkout Security Agent (Self)
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Needed for branch creation
-
-      - name: Setup Configuration (Env Override)
-        # This step allows setting env vars dynamically if needed, 
-        # or we just rely on the hardcoded `env` block above which users edit.
-        run: |
-          echo "Target Repo: $TARGET_REPO"
-          echo "Current Branch: $GITHUB_REF_NAME"
+          fetch-depth: 0
 
       - name: Checkout Target Repository
         uses: actions/checkout@v3
@@ -60,38 +52,49 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Prepare Inputs
+        working-directory: ./target_workspace
+        run: |
+          # Copy outputs from previous phase (in repo root ./outputs) to ./target_workspace/outputs
+          # This allows the agent running in target_workspace to find "outputs/02_CHECKLIST.json" locally.
+          mkdir -p outputs
+          cp -r ../outputs/* outputs/ 2>/dev/null || echo "No inputs found in root outputs/"
+          ls -F outputs/
+
       - name: Run 03_auditmap
         working-directory: ./target_workspace
-        # We process directories based on JSON input.
-        # Since we can't easily use matrix strategy with dynamic env vars in GitOps mode without complex setup,
-        # we will iterate within the script or assume single root for now.
-        # For simplicity in this template, we audit "." (root).
         run: |
-          # If TARGET_DIRECTORIES is a JSON string, we might need parsing. 
-          # For now, let's just pass "." as the PATH if it's simple.
-          claude -p "$(cat ../prompts/03_auditmap.md) PATH=."
+          # Run audit scan on "." (target_workspace root)
+          # Uses relative path to prompts (../prompts/...)
+          claude --dangerously-skip-permissions --agent serena -p "$(cat ../prompts/03_auditmap.md) PATH=."
+          test -f outputs/03_AUDITMAP.json || exit 1
+
+      - name: Run 04_review
+        working-directory: ./target_workspace
+        run: |
+          # Review the findings and update the audit map in-place
+          claude --dangerously-skip-permissions --agent serena -p "$(cat ../prompts/04_review.md)"
+          
+          # Verify integrity (optional check, prompt ensures in-place update)
+          test -f outputs/03_AUDITMAP.json || exit 1
 
       - name: Prepare Snapshot Branch
         id: snapshot
         run: |
-          # Define branch names
           BASE_BRANCH="${GITHUB_REF_NAME}"
-          TARGET_NAME=$(echo "$TARGET_REPO" | cut -d'/' -f2) # e.g. go-ethereum
+          TARGET_NAME=$(echo "$TARGET_REPO" | cut -d'/' -f2)
           RUN_ID="${{ steps.target_info.outputs.date }}_${{ steps.target_info.outputs.short_sha }}"
-          SNAPSHOT_BRANCH="runs/${TARGET_NAME}/${RUN_ID}"
+          SNAPSHOT_BRANCH="audit-runs/${TARGET_NAME}/${RUN_ID}"
           
           echo "base_branch=${BASE_BRANCH}" >> $GITHUB_OUTPUT
           echo "snapshot_branch=${SNAPSHOT_BRANCH}" >> $GITHUB_OUTPUT
           
-          # Configure Git
           git config --global user.name "Security Agent Bot"
           git config --global user.email "bot@nyxfoundation.org"
 
-          # checkout new branch from current base
           git checkout -b "$SNAPSHOT_BRANCH"
 
-          # Copy outputs from target_workspace to local outputs/
-          # First, clean existing outputs to ensure we capture deletions/changes
+          # Copy outputs back from target_workspace to local outputs/ for commit
           rm -rf outputs/
           mkdir -p outputs/
           cp -r target_workspace/outputs/* outputs/ 2>/dev/null || echo "No outputs found to copy"
@@ -101,6 +104,9 @@ jobs:
           git add outputs/
           if ! git diff --staged --quiet; then
             git commit -m "audit: snapshot for $TARGET_REPO @ ${{ steps.target_info.outputs.short_sha }}"
+            
+            # Use HTTPS with GITHUB_TOKEN
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push origin "${{ steps.snapshot.outputs.snapshot_branch }}"
           else
             echo "No changes found. Skipping PR."
@@ -116,13 +122,3 @@ jobs:
             --title "Audit Report: $TARGET_REPO (${{ steps.target_info.outputs.short_sha }})" \
             --body "Automated audit report for $TARGET_REPO commit ${{ steps.target_info.outputs.short_sha }}." \
             || echo "PR may already exist."
-
-  review:
-    needs: audit_gitops
-    # Review job could be similar, or integrated into the main job. 
-    # For GitOps, running sequentially in one job is easier to manage context.
-    # Let's skip separate review job for this template to keep it simple, 
-    # or the user can add it back if they want the 04_review step.
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Review step placeholder"

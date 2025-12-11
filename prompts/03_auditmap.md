@@ -2,7 +2,7 @@
 
 
 ---
-Description: Deploy a **property-first, pro-hacker audit** across every file under `$PATH`, using `security-agent/outputs/02_CHECKLIST.json` as the authoritative operations manual. Treat each checklist line as a security objective expressed via properties, anti-properties, attack playbooks, and observability probes. Annotate code inline and append only new findings to `security-agent/outputs/03_AUDITMAP.json`; never mutate prior records.
+Description: Deploy a **property-first, pro-hacker audit** across every file under `$PATH`, using `outputs/02_CHECKLIST.json` as the authoritative operations manual. Treat each checklist line as a security objective expressed via properties, anti-properties, attack playbooks, and observability probes. Annotate code inline and append only new findings to `outputs/03_AUDITMAP.json`; never mutate prior records.
 Usage: `/03_auditmap PATH=...`
 Example: `/03_auditmap PATH="./src"`
 Language: English only (instructions, annotations, summaries).
@@ -22,11 +22,11 @@ Language: English only (instructions, annotations, summaries).
 
 ## Inputs
 
-1. **Checklist (required):** `security-agent/outputs/02_CHECKLIST.json` — source of properties, anti-properties, static rules, fuzz hooks, observability probes, combinators.
-2. **Spec (context-only):** `security-agent/outputs/01_SPEC.json` — authoritative on architecture, trust assumptions, governance. Never contradict declared `trust_entities`.
-3. **Property inventory (derived):** `security-agent/outputs/01_PROP.json` — For every spec behavior, record the property/anti-property pair with location, state predicate, falsification method, and evidence target.
+1. **Checklist (required):** `outputs/02_CHECKLIST.json` — source of properties, anti-properties, static rules, fuzz hooks, observability probes, combinators.
+2. **Spec (context-only):** `outputs/01_SPEC.json` — authoritative on architecture, trust assumptions, governance. Never contradict declared `trust_entities`.
+3. **Property inventory (derived):** `outputs/01_PROP.json` — For every spec behavior, record the property/anti-property pair with location, state predicate, falsification method, and evidence target.
 4. **Audit target (required):** `$PATH` — audit every file recursively; zero default exclusions.
-5. **Existing Audit Map (optional):** `security-agent/outputs/03_AUDITMAP.json` — append-only sink; prior entries are immutable.
+5. **Existing Audit Map (optional):** `outputs/03_AUDITMAP.json` — append-only sink; prior entries are immutable.
 
 ---
 
@@ -117,7 +117,7 @@ Attach `attack_chain_score` (0–10) to each JSON entry to reflect composition r
 
 ---
 
-## Output: `security-agent/outputs/03_AUDITMAP.json`
+## Output: `outputs/03_AUDITMAP.json`
 
 Statuses remain restricted to `vuln` or `needs-investigation`.
 
@@ -179,11 +179,11 @@ When the file already exists, append only new non-duplicate entries. Update summ
 ## Procedure (Step-by-step)
 
 1. **Preflight**
-   - Load `02_CHECKLIST.json`; extract properties, anti-properties, static detectors, fuzz harnesses, observability probes, combinators.
-   - Read `01_SPEC.json` for architecture, trust entities, governance constraints.
+   - Load `outputs/02_CHECKLIST.json`; extract properties, anti-properties, static detectors, fuzz harnesses, observability probes, combinators.
+   - Read `outputs/01_SPEC.json` for architecture, trust entities, governance constraints.
    - Reconcile existing property inventory with checklist to ensure every behavior has a mapped property pair.
    - Recursively index files under `$PATH`; parse existing `@audit`/`@audit-ok` annotations to avoid duplicate tagging.
-   - Load `03_AUDITMAP.json` if present to collect existing composite keys and tags.
+   - Load `outputs/03_AUDITMAP.json` if present to collect existing composite keys and tags.
 
 2. **Execute the Ten-Pass Property Audit Loop**
    - During each pass, attach annotations, run static detectors, execute fuzz/property tests, parity vectors, and document observability.
