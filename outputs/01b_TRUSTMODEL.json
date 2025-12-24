@@ -1,0 +1,217 @@
+{
+  "metadata": {
+    "title": "Go-Ethereum (Geth) Execution Client Trust Model",
+    "version": "1.0.0",
+    "generated": "2025-12-22",
+    "description": "Formal trust model derived from Program Graph specification, identifying actors' trust levels and trust boundary crossings on edges",
+    "source_specification": "outputs/01_SPEC.json"
+  },
+  "actors": [
+    {
+      "id": "ACTOR-CL-CONSENSUS-CLIENT",
+      "name": "Consensus Layer Client (CL)",
+      "trust_level": "TRUSTED",
+      "rationale": "The Consensus Layer Client (Prysm, Lighthouse, Teku, etc.) is trusted to follow the Ethereum proof-of-stake protocol correctly. Communication is authenticated via JWT and occurs over a secured local channel (Engine API on port 8551). The CL drives block production and finalization."
+    },
+    {
+      "id": "ACTOR-EL-EXECUTION-CLIENT",
+      "name": "Execution Layer Client (EL) - Geth",
+      "trust_level": "TRUSTED",
+      "rationale": "The system under audit. Geth is the trusted execution environment that must correctly process transactions, execute the EVM, and maintain state integrity. All security guarantees depend on its correct implementation."
+    },
+    {
+      "id": "ACTOR-EXTERNAL-USER",
+      "name": "External User / DApp",
+      "trust_level": "UNTRUSTED",
+      "rationale": "External entities submitting transactions or querying state via the public JSON-RPC API (port 8545/8546). Input from external users is completely untrusted and may be malicious, malformed, or designed to exploit vulnerabilities. All data must be validated."
+    },
+    {
+      "id": "ACTOR-P2P-PEER",
+      "name": "P2P Network Peer",
+      "trust_level": "SEMI_TRUSTED",
+      "rationale": "Other Ethereum nodes in the devp2p network. Peers are semi-trusted because they follow the protocol to some degree (otherwise they would be disconnected), but may be malicious, compromised, or simply buggy. Data from peers (blocks, transactions) must be fully validated before acceptance."
+    },
+    {
+      "id": "ACTOR-MINER-BUILDER",
+      "name": "Block Builder / Miner",
+      "trust_level": "TRUSTED",
+      "rationale": "Internal component of Geth responsible for assembling transactions into blocks when requested by the consensus layer. As an internal component, it operates within the trusted boundary of the execution client."
+    },
+    {
+      "id": "ACTOR-EVM-INTERPRETER",
+      "name": "EVM Interpreter",
+      "trust_level": "TRUSTED",
+      "rationale": "Core internal component executing smart contract bytecode. The EVM interpreter is trusted to correctly implement the Ethereum Virtual Machine specification, but must handle potentially malicious contract bytecode safely through gas limits and execution constraints."
+    },
+    {
+      "id": "ACTOR-STATE-DB",
+      "name": "State Database",
+      "trust_level": "TRUSTED",
+      "rationale": "Internal persistent storage layer managing account state, contract code, and storage via Merkle Patricia Trie. As an internal component (LevelDB/Pebble), it is trusted to maintain data integrity."
+    },
+    {
+      "id": "ACTOR-TX-POOL",
+      "name": "Transaction Pool",
+      "trust_level": "TRUSTED",
+      "rationale": "Internal component managing pending transactions awaiting block inclusion. Trusted to correctly validate, prioritize, and store transactions, but processes input from untrusted external users."
+    }
+  ],
+  "boundary_edges": [
+    {
+      "edge_id": "EDGE-USER-SUBMIT-TX",
+      "description": "External user submits a transaction to the Transaction Pool via eth_sendRawTransaction JSON-RPC call. This is the primary trust boundary between the untrusted external world and the trusted execution environment.",
+      "source_id": "ACTOR-EXTERNAL-USER",
+      "source_trust_level": "UNTRUSTED",
+      "target_id": "ACTOR-TX-POOL",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-TRANSACTION"],
+      "security_assumption": "The Transaction Pool (ACTION-EL-VALIDATE-TX) MUST NOT trust any aspect of DATA-TRANSACTION until it has been fully validated. Validation includes: signature verification (secp256k1), nonce correctness, sufficient balance for gas and value, gas limit bounds, transaction format conformance, and EIP-specific constraints (access lists, blob commitments, etc.). Malformed or malicious transactions must be rejected without affecting system state."
+    },
+    {
+      "edge_id": "EDGE-TX-INCLUDED",
+      "description": "A pending transaction from the Transaction Pool is selected for inclusion in a block being built. Data flows from the pool (which received it from an untrusted source) to the block builder.",
+      "source_id": "ACTOR-TX-POOL",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-MINER-BUILDER",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-TRANSACTION"],
+      "security_assumption": "Although both components are trusted, the transaction data originally came from an untrusted source. The block builder assumes the Transaction Pool has performed initial validation, but the state transition function will re-validate critical properties during execution. This is defense-in-depth."
+    },
+    {
+      "edge_id": "IMPLICIT-P2P-TX-RECEIVE",
+      "description": "Transactions received from P2P network peers for inclusion in the local transaction pool. While not explicitly modeled as a single edge in the main graph, this represents a critical trust boundary.",
+      "source_id": "ACTOR-P2P-PEER",
+      "source_trust_level": "SEMI_TRUSTED",
+      "target_id": "ACTOR-TX-POOL",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-TRANSACTION"],
+      "security_assumption": "Transactions received from P2P peers are treated with similar caution to those from external users. Full validation is required. The semi-trusted status of peers means they might forward invalid transactions (intentionally or due to bugs). DoS protections (rate limiting, fee requirements) help mitigate abuse."
+    },
+    {
+      "edge_id": "IMPLICIT-P2P-BLOCK-RECEIVE",
+      "description": "Blocks received from P2P network peers during synchronization. These blocks must be fully validated before being incorporated into the local chain.",
+      "source_id": "ACTOR-P2P-PEER",
+      "source_trust_level": "SEMI_TRUSTED",
+      "target_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-BLOCK", "DATA-TRANSACTION"],
+      "security_assumption": "Blocks from peers are UNTRUSTED until fully validated. Validation includes: header validation (difficulty/timestamp/gas), transaction root verification, execution of all transactions, and state root verification. Invalid blocks must be rejected and peers may be penalized. This is a critical attack surface for consensus-breaking attacks."
+    },
+    {
+      "edge_id": "EDGE-CL-SENDS-FORKCHOICE",
+      "description": "The Consensus Layer client sends a ForkchoiceUpdated request to the Execution Layer. Although CL is trusted, this crosses process boundaries and requires authentication.",
+      "source_id": "ACTOR-CL-CONSENSUS-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-FORKCHOICE-STATE", "DATA-PAYLOAD-ATTRIBUTES", "DATA-JWT-TOKEN"],
+      "security_assumption": "Although both CL and EL are trusted, the communication occurs over a network socket (Engine API). JWT authentication (DATA-JWT-TOKEN) MUST be validated to ensure requests actually originate from the authorized CL and not from an attacker who gained network access. The JWT provides integrity and authenticity guarantees."
+    },
+    {
+      "edge_id": "EDGE-CL-SENDS-NEWPAYLOAD",
+      "description": "The Consensus Layer sends a new execution payload (block) to the Execution Layer for validation via engine_newPayload.",
+      "source_id": "ACTOR-CL-CONSENSUS-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-EXECUTION-PAYLOAD", "DATA-JWT-TOKEN"],
+      "security_assumption": "The payload originates from the CL which received it from the beacon chain network. Even though the CL is trusted, the execution payload itself may have been proposed by a potentially malicious validator. The EL MUST fully validate the payload (structural validation, transaction execution, state root verification) regardless of its trusted origin."
+    },
+    {
+      "edge_id": "EDGE-CL-REQUESTS-PAYLOAD",
+      "description": "The Consensus Layer requests a previously built payload from the Execution Layer via engine_getPayload.",
+      "source_id": "ACTOR-MINER-BUILDER",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": [],
+      "security_assumption": "Request is authenticated via JWT. The payload ID must be valid and correspond to a payload build initiated by a previous authenticated forkchoiceUpdated call."
+    },
+    {
+      "edge_id": "EDGE-PAYLOAD-RETRIEVED",
+      "description": "The built execution payload is returned to the Consensus Layer for proposal on the beacon chain.",
+      "source_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-CL-CONSENSUS-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-EXECUTION-PAYLOAD", "DATA-BLOB-SIDECAR"],
+      "security_assumption": "The EL has built a valid payload according to the provided attributes. The CL trusts the EL to produce a correctly-formed payload. If the payload is invalid, it will be rejected by the network during attestation."
+    },
+    {
+      "edge_id": "EDGE-ST-CREATE",
+      "description": "Contract creation transaction is sent to the EVM Interpreter for initcode execution. The transaction data originates from an untrusted external source.",
+      "source_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EVM-INTERPRETER",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-MESSAGE"],
+      "security_assumption": "The EVM Interpreter MUST safely execute arbitrary contract initcode without compromising the system. Gas limits, call depth limits, and EIP-3860 initcode size limits bound resource consumption. The initcode is UNTRUSTED data that has been wrapped in a validated message structure."
+    },
+    {
+      "edge_id": "EDGE-ST-CALL",
+      "description": "Contract call transaction is sent to the EVM Interpreter for bytecode execution. The call data originates from an untrusted external source.",
+      "source_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EVM-INTERPRETER",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-MESSAGE"],
+      "security_assumption": "The EVM Interpreter MUST safely execute arbitrary contract bytecode with arbitrary input data without compromising the system. The calldata (DATA-MESSAGE.Data) is UNTRUSTED and contracts may attempt to exploit reentrancy, integer overflows, or other vulnerabilities. The EVM provides sandboxing through gas metering, stack/memory limits, and state isolation."
+    },
+    {
+      "edge_id": "EDGE-VALID-COMMIT",
+      "description": "Validated block state changes are committed to the State Database. This represents the transition from in-memory state to persistent storage.",
+      "source_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-STATE-DB",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-STATE-OBJECT"],
+      "security_assumption": "State changes have been validated through transaction execution. The State Database trusts the state processor to provide consistent, valid state updates. The Merkle Patricia Trie structure provides cryptographic integrity guarantees for the committed state."
+    },
+    {
+      "edge_id": "EDGE-BP-APPLY",
+      "description": "Transaction message is sent to EVM for execution during block processing. The message contains data that ultimately originated from untrusted sources.",
+      "source_id": "ACTOR-STATE-DB",
+      "source_trust_level": "TRUSTED",
+      "target_id": "ACTOR-EL-EXECUTION-CLIENT",
+      "target_trust_level": "TRUSTED",
+      "data_flows_across": ["DATA-MESSAGE", "DATA-EVM-CONTEXT"],
+      "security_assumption": "The transaction context has been set up with proper isolation. The EVM context provides the execution environment. Even though both actors are trusted, the DATA-MESSAGE contains untrusted user input in its Data field."
+    }
+  ],
+  "trust_boundary_summary": {
+    "critical_boundaries": [
+      {
+        "boundary": "External User -> Transaction Pool",
+        "edge_id": "EDGE-USER-SUBMIT-TX",
+        "risk_level": "CRITICAL",
+        "description": "Primary attack surface. All user input enters through this boundary via JSON-RPC. Comprehensive validation is mandatory."
+      },
+      {
+        "boundary": "P2P Peer -> Execution Client (Block Reception)",
+        "edge_id": "IMPLICIT-P2P-BLOCK-RECEIVE",
+        "risk_level": "CRITICAL",
+        "description": "Blocks from network must be fully validated. Consensus attacks, invalid state roots, and malformed transactions are possible."
+      },
+      {
+        "boundary": "P2P Peer -> Transaction Pool",
+        "edge_id": "IMPLICIT-P2P-TX-RECEIVE",
+        "risk_level": "HIGH",
+        "description": "Transactions from peers may be malicious or invalid. DoS through tx flooding is a concern."
+      },
+      {
+        "boundary": "Consensus Layer <-> Execution Layer",
+        "edge_id": "EDGE-CL-SENDS-NEWPAYLOAD",
+        "risk_level": "MEDIUM",
+        "description": "Although CL is trusted, payloads originate from the network. JWT authentication protects the channel but payload content must still be validated."
+      }
+    ],
+    "internal_data_flow_concerns": [
+      {
+        "boundary": "State Transition -> EVM Interpreter",
+        "edge_ids": ["EDGE-ST-CREATE", "EDGE-ST-CALL"],
+        "risk_level": "MEDIUM",
+        "description": "Untrusted user data (calldata, initcode) flows into the EVM. The EVM sandbox must contain all potential exploits."
+      }
+    ]
+  }
+}

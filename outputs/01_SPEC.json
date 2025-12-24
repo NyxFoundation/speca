@@ -1,0 +1,3558 @@
+{
+  "metadata": {
+    "title": "Go-Ethereum (Geth) Execution Client Formal Specification",
+    "version": "1.0.0",
+    "generated": "2025-12-22",
+    "description": "Program Graph representation of the Geth Ethereum execution client for formal analysis and verification",
+    "source_repository": "github.com/ethereum/go-ethereum",
+    "keywords": ["geth", "ethereum client", "execution specs", "EIP"],
+    "specification_sources": [
+      "https://ethereum.github.io/execution-specs/src/",
+      "https://geth.ethereum.org/docs",
+      "https://eips.ethereum.org/",
+      "https://github.com/ethereum/execution-apis"
+    ],
+    "forks_covered": [
+      "Frontier", "Homestead", "DAO Fork", "Tangerine Whistle", "Spurious Dragon",
+      "Byzantium", "Constantinople", "Istanbul", "Berlin", "London", "Paris",
+      "Shanghai", "Cancun", "Prague", "Osaka"
+    ]
+  },
+  "trusted_entities": [
+    {
+      "id": "ACTOR-CL-CONSENSUS-CLIENT",
+      "entity": "Consensus Layer Client (CL)",
+      "description": "Manages proof-of-stake consensus, block proposals, and attestations. Drives the execution layer via Engine API. Examples: Prysm, Lighthouse, Teku, Lodestar, Nimbus.",
+      "trust_level": "trusted",
+      "interface": "Engine API (JSON-RPC on port 8551)"
+    },
+    {
+      "id": "ACTOR-EL-EXECUTION-CLIENT",
+      "entity": "Execution Layer Client (EL) - Geth",
+      "description": "The system under audit. Handles transaction processing, EVM execution, state management, and block validation. Implements the Ethereum execution layer specification.",
+      "trust_level": "system",
+      "interface": "Engine API, JSON-RPC API, P2P network"
+    },
+    {
+      "id": "ACTOR-EXTERNAL-USER",
+      "entity": "External User / DApp",
+      "description": "External entity submitting transactions or querying state via JSON-RPC. Untrusted input source.",
+      "trust_level": "untrusted",
+      "interface": "JSON-RPC API (port 8545/8546)"
+    },
+    {
+      "id": "ACTOR-P2P-PEER",
+      "entity": "P2P Network Peer",
+      "description": "Other Ethereum nodes in the devp2p network. Source of transactions, blocks, and state data for synchronization.",
+      "trust_level": "semi-trusted",
+      "interface": "devp2p protocol (port 30303)"
+    },
+    {
+      "id": "ACTOR-MINER-BUILDER",
+      "entity": "Block Builder / Miner",
+      "description": "Internal component responsible for assembling transactions into blocks when requested by consensus layer.",
+      "trust_level": "internal",
+      "interface": "Internal Go API"
+    },
+    {
+      "id": "ACTOR-EVM-INTERPRETER",
+      "entity": "EVM Interpreter",
+      "description": "Core component executing smart contract bytecode. Processes opcodes, manages stack/memory, and modifies state.",
+      "trust_level": "internal",
+      "interface": "Internal Go API"
+    },
+    {
+      "id": "ACTOR-STATE-DB",
+      "entity": "State Database",
+      "description": "Persistent storage layer managing account state, contract code, and storage via Merkle Patricia Trie.",
+      "trust_level": "internal",
+      "interface": "Internal Go API (LevelDB/Pebble)"
+    },
+    {
+      "id": "ACTOR-TX-POOL",
+      "entity": "Transaction Pool",
+      "description": "Manages pending transactions awaiting inclusion in blocks. Validates and prioritizes transactions.",
+      "trust_level": "internal",
+      "interface": "Internal Go API"
+    }
+  ],
+  "data_structures": [
+    {
+      "id": "DATA-EXECUTION-PAYLOAD",
+      "name": "ExecutionPayload",
+      "description": "Block data sent from CL to EL via Engine API. Contains parent hash, fee recipient, state root, receipts root, logs bloom, prev randao, block number, gas limit, gas used, timestamp, extra data, base fee, block hash, transactions, withdrawals (Shanghai+), blob gas used and excess blob gas (Cancun+), and execution requests (Prague+).",
+      "source_file": "beacon/engine/types.go"
+    },
+    {
+      "id": "DATA-FORKCHOICE-STATE",
+      "name": "ForkchoiceStateV1",
+      "description": "Fork choice information from CL specifying head block hash, safe block hash, and finalized block hash.",
+      "source_file": "beacon/engine/types.go"
+    },
+    {
+      "id": "DATA-PAYLOAD-ATTRIBUTES",
+      "name": "PayloadAttributes",
+      "description": "Attributes for block building including timestamp, prev randao, suggested fee recipient, withdrawals (V2+), and parent beacon block root (V3+).",
+      "source_file": "beacon/engine/types.go"
+    },
+    {
+      "id": "DATA-PAYLOAD-STATUS",
+      "name": "PayloadStatusV1",
+      "description": "Response from EL indicating payload validity. Status can be VALID, INVALID, SYNCING, ACCEPTED, or INVALID_BLOCK_HASH. Includes latestValidHash and optional validationError.",
+      "source_file": "beacon/engine/types.go"
+    },
+    {
+      "id": "DATA-TRANSACTION",
+      "name": "Transaction",
+      "description": "Ethereum transaction containing nonce, gas price/fee caps, gas limit, recipient, value, data, access list, and signature. Types include Legacy (0x00), EIP-2930 (0x01), EIP-1559 (0x02), EIP-4844 Blob (0x03), and EIP-7702 SetCode (0x04).",
+      "source_file": "core/types/transaction.go"
+    },
+    {
+      "id": "DATA-MESSAGE",
+      "name": "Message",
+      "description": "Transaction decoded for EVM execution. Contains From, To, Nonce, Value, GasLimit, GasPrice, GasFeeCap, GasTipCap, Data, AccessList, BlobHashes, BlobGasFeeCap, and SetCodeAuthorizations.",
+      "source_file": "core/state_transition.go"
+    },
+    {
+      "id": "DATA-BLOCK",
+      "name": "Block",
+      "description": "Complete Ethereum block containing header, transactions, uncles (legacy), and withdrawals. Header includes parent hash, uncle hash, coinbase, state root, tx root, receipt root, bloom, difficulty, number, gas limit, gas used, time, extra, mix digest, nonce, base fee, withdrawals hash, blob gas used, excess blob gas, parent beacon root, and requests hash.",
+      "source_file": "core/types/block.go"
+    },
+    {
+      "id": "DATA-RECEIPT",
+      "name": "Receipt",
+      "description": "Transaction execution result containing type, post state or status, cumulative gas used, bloom filter, logs, tx hash, contract address, gas used, effective gas price, blob gas used, and blob gas price.",
+      "source_file": "core/types/receipt.go"
+    },
+    {
+      "id": "DATA-STATE-OBJECT",
+      "name": "stateObject",
+      "description": "In-memory representation of an Ethereum account including address, nonce, balance, code hash, code, storage trie root, and dirty storage slots.",
+      "source_file": "core/state/state_object.go"
+    },
+    {
+      "id": "DATA-EVM-CONTEXT",
+      "name": "BlockContext + TxContext",
+      "description": "EVM execution context. BlockContext includes CanTransfer, Transfer, GetHash, Coinbase, GasLimit, BlockNumber, Time, Difficulty, BaseFee, BlobBaseFee, Random. TxContext includes Origin, GasPrice, BlobHashes, BlobFeeCap, AccessEvents.",
+      "source_file": "core/vm/evm.go"
+    },
+    {
+      "id": "DATA-SCOPE-CONTEXT",
+      "name": "ScopeContext",
+      "description": "Per-call execution context containing Memory, Stack, and Contract reference for the current execution frame.",
+      "source_file": "core/vm/interpreter.go"
+    },
+    {
+      "id": "DATA-EXECUTION-RESULT",
+      "name": "ExecutionResult",
+      "description": "Result of EVM message execution including UsedGas, MaxUsedGas, Err (if any), and ReturnData.",
+      "source_file": "core/state_transition.go"
+    },
+    {
+      "id": "DATA-PROCESS-RESULT",
+      "name": "ProcessResult",
+      "description": "Result of processing an entire block including Receipts array, Requests (EIP-6110/7002/7251), Logs, and total GasUsed.",
+      "source_file": "core/state_processor.go"
+    },
+    {
+      "id": "DATA-JWT-TOKEN",
+      "name": "JWT Authentication Token",
+      "description": "JSON Web Token used to authenticate Engine API requests between CL and EL. Required for all Engine API calls.",
+      "source_file": "node/jwt_auth.go"
+    },
+    {
+      "id": "DATA-WITHDRAWAL",
+      "name": "Withdrawal",
+      "description": "Beacon chain withdrawal operation (EIP-4895) containing index, validator index, address, and amount in Gwei.",
+      "source_file": "core/types/withdrawal.go"
+    },
+    {
+      "id": "DATA-BLOB-SIDECAR",
+      "name": "BlobTxSidecar",
+      "description": "Blob data for EIP-4844 transactions containing blobs, commitments, and proofs. Stored separately from transaction.",
+      "source_file": "core/types/tx_blob.go"
+    }
+  ],
+  "program_graph": {
+    "id": "GRAPH-GETH-MAIN",
+    "title": "Geth Execution Client Main Program Graph",
+    "description": "Top-level program graph modeling the complete execution flow from Engine API request through state commitment",
+    "nodes": [
+      {
+        "id": "STATE-EL-IDLE",
+        "label": "EL Idle - Awaiting Engine API Request",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Execution layer is ready and waiting for requests from consensus layer"
+      },
+      {
+        "id": "STATE-CL-PREPARING-FORKCHOICE",
+        "label": "CL Preparing ForkchoiceUpdated",
+        "actor_id": "ACTOR-CL-CONSENSUS-CLIENT",
+        "type": "State",
+        "description": "Consensus layer preparing to send fork choice update to execution layer"
+      },
+      {
+        "id": "STATE-CL-PREPARING-NEWPAYLOAD",
+        "label": "CL Preparing NewPayload",
+        "actor_id": "ACTOR-CL-CONSENSUS-CLIENT",
+        "type": "State",
+        "description": "Consensus layer preparing to send new payload (block) to execution layer"
+      },
+      {
+        "id": "ACTION-EL-VALIDATE-JWT",
+        "label": "EL Validates JWT Token",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Execution layer validates JWT authentication token from Engine API request"
+      },
+      {
+        "id": "STATE-EL-JWT-REJECTED",
+        "label": "EL Request Rejected - Invalid JWT",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Engine API request rejected due to invalid or missing JWT authentication"
+      },
+      {
+        "id": "ACTION-EL-PROCESS-FORKCHOICE",
+        "label": "EL Processes ForkchoiceUpdated",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Execution layer processes fork choice update - sets head, finalized, safe blocks",
+        "source_file": "eth/catalyst/api.go:162-183"
+      },
+      {
+        "id": "ACTION-EL-CHECK-BLOCK-EXISTS",
+        "label": "EL Checks if Block Exists",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Check if the specified head block hash exists in local chain database"
+      },
+      {
+        "id": "STATE-EL-SYNCING",
+        "label": "EL Syncing - Block Not Found",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Block not found locally, execution layer indicates SYNCING status"
+      },
+      {
+        "id": "ACTION-EL-SET-CANONICAL-HEAD",
+        "label": "EL Sets Canonical Head",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Execution layer updates canonical chain head to specified block"
+      },
+      {
+        "id": "ACTION-EL-UPDATE-FINALIZED-SAFE",
+        "label": "EL Updates Finalized/Safe Blocks",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Execution layer updates finalized and safe block pointers"
+      },
+      {
+        "id": "ACTION-EL-START-PAYLOAD-BUILD",
+        "label": "EL Starts Payload Build",
+        "actor_id": "ACTOR-MINER-BUILDER",
+        "type": "Action",
+        "description": "If payload attributes provided, start building new block with transactions from pool"
+      },
+      {
+        "id": "STATE-EL-PAYLOAD-BUILDING",
+        "label": "EL Building Payload",
+        "actor_id": "ACTOR-MINER-BUILDER",
+        "type": "State",
+        "description": "Block builder is actively assembling transactions into a new block"
+      },
+      {
+        "id": "STATE-EL-FORKCHOICE-RESPONSE-READY",
+        "label": "EL ForkchoiceUpdated Response Ready",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "ForkchoiceUpdated response prepared with payload status and optional payload ID"
+      },
+      {
+        "id": "ACTION-EL-PROCESS-NEWPAYLOAD",
+        "label": "EL Processes NewPayload",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Execution layer receives and processes new execution payload from consensus layer",
+        "source_file": "eth/catalyst/api.go"
+      },
+      {
+        "id": "ACTION-EL-VALIDATE-PAYLOAD-STRUCTURE",
+        "label": "EL Validates Payload Structure",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Validate payload structure: parent exists, timestamp ordering, block hash matches"
+      },
+      {
+        "id": "STATE-EL-PAYLOAD-INVALID-STRUCTURE",
+        "label": "EL Payload Invalid - Structure Error",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Payload rejected due to structural validation failure"
+      },
+      {
+        "id": "ACTION-EL-CONVERT-PAYLOAD-TO-BLOCK",
+        "label": "EL Converts Payload to Block",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Convert ExecutableData to internal Block representation"
+      },
+      {
+        "id": "ACTION-EL-INSERT-BLOCK-WITHOUT-HEAD",
+        "label": "EL Inserts Block (Without Setting Head)",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Insert block into chain database without updating canonical head",
+        "source_file": "core/blockchain.go"
+      },
+      {
+        "id": "ACTION-EL-PROCESS-BLOCK",
+        "label": "EL Processes Block Transactions",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Process all transactions in block through state processor",
+        "source_file": "core/state_processor.go:60-139",
+        "sub_graph_id": "GRAPH-BLOCK-PROCESSING"
+      },
+      {
+        "id": "STATE-EL-BLOCK-VALID",
+        "label": "EL Block Valid",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Block validated successfully, state root matches expected"
+      },
+      {
+        "id": "STATE-EL-BLOCK-INVALID",
+        "label": "EL Block Invalid",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Block validation failed - transaction error, state mismatch, or gas issue"
+      },
+      {
+        "id": "ACTION-EL-COMMIT-STATE",
+        "label": "EL Commits State to Trie",
+        "actor_id": "ACTOR-STATE-DB",
+        "type": "Action",
+        "description": "Commit state changes to Merkle Patricia Trie and database"
+      },
+      {
+        "id": "STATE-EL-NEWPAYLOAD-RESPONSE-READY",
+        "label": "EL NewPayload Response Ready",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "NewPayload response prepared with validity status and latest valid hash"
+      },
+      {
+        "id": "ACTION-EL-GET-PAYLOAD",
+        "label": "EL Retrieves Built Payload",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "Action",
+        "description": "Consensus layer requests previously built payload via GetPayload"
+      },
+      {
+        "id": "STATE-EL-PAYLOAD-RETURNED",
+        "label": "EL Payload Returned to CL",
+        "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+        "type": "State",
+        "description": "Built execution payload returned to consensus layer for signing/proposal"
+      },
+      {
+        "id": "STATE-USER-SUBMITTING-TX",
+        "label": "User Submitting Transaction",
+        "actor_id": "ACTOR-EXTERNAL-USER",
+        "type": "State",
+        "description": "External user submitting transaction via JSON-RPC"
+      },
+      {
+        "id": "ACTION-EL-VALIDATE-TX",
+        "label": "EL Validates Transaction",
+        "actor_id": "ACTOR-TX-POOL",
+        "type": "Action",
+        "description": "Transaction pool validates signature, nonce, balance, gas, and format"
+      },
+      {
+        "id": "STATE-TX-REJECTED",
+        "label": "Transaction Rejected",
+        "actor_id": "ACTOR-TX-POOL",
+        "type": "State",
+        "description": "Transaction rejected due to validation failure"
+      },
+      {
+        "id": "STATE-TX-PENDING",
+        "label": "Transaction Pending in Pool",
+        "actor_id": "ACTOR-TX-POOL",
+        "type": "State",
+        "description": "Valid transaction added to pending pool awaiting block inclusion"
+      }
+    ],
+    "edges": [
+      {
+        "id": "EDGE-CL-SENDS-FORKCHOICE",
+        "source": "STATE-CL-PREPARING-FORKCHOICE",
+        "target": "ACTION-EL-VALIDATE-JWT",
+        "label": "CL sends engine_forkchoiceUpdated request",
+        "data_involved": ["DATA-FORKCHOICE-STATE", "DATA-PAYLOAD-ATTRIBUTES", "DATA-JWT-TOKEN"]
+      },
+      {
+        "id": "EDGE-CL-SENDS-NEWPAYLOAD",
+        "source": "STATE-CL-PREPARING-NEWPAYLOAD",
+        "target": "ACTION-EL-VALIDATE-JWT",
+        "label": "CL sends engine_newPayload request",
+        "data_involved": ["DATA-EXECUTION-PAYLOAD", "DATA-JWT-TOKEN"]
+      },
+      {
+        "id": "EDGE-JWT-VALID-FORKCHOICE",
+        "source": "ACTION-EL-VALIDATE-JWT",
+        "target": "ACTION-EL-PROCESS-FORKCHOICE",
+        "label": "JWT valid, request is forkchoiceUpdated",
+        "data_involved": ["DATA-FORKCHOICE-STATE", "DATA-PAYLOAD-ATTRIBUTES"]
+      },
+      {
+        "id": "EDGE-JWT-VALID-NEWPAYLOAD",
+        "source": "ACTION-EL-VALIDATE-JWT",
+        "target": "ACTION-EL-PROCESS-NEWPAYLOAD",
+        "label": "JWT valid, request is newPayload",
+        "data_involved": ["DATA-EXECUTION-PAYLOAD"]
+      },
+      {
+        "id": "EDGE-JWT-INVALID",
+        "source": "ACTION-EL-VALIDATE-JWT",
+        "target": "STATE-EL-JWT-REJECTED",
+        "label": "JWT validation fails",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-FORKCHOICE-CHECK-BLOCK",
+        "source": "ACTION-EL-PROCESS-FORKCHOICE",
+        "target": "ACTION-EL-CHECK-BLOCK-EXISTS",
+        "label": "Check if head block exists locally",
+        "data_involved": ["DATA-FORKCHOICE-STATE"]
+      },
+      {
+        "id": "EDGE-BLOCK-NOT-FOUND",
+        "source": "ACTION-EL-CHECK-BLOCK-EXISTS",
+        "target": "STATE-EL-SYNCING",
+        "label": "Head block not found in local chain",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-BLOCK-FOUND-SET-HEAD",
+        "source": "ACTION-EL-CHECK-BLOCK-EXISTS",
+        "target": "ACTION-EL-SET-CANONICAL-HEAD",
+        "label": "Head block exists, proceed to set canonical",
+        "data_involved": ["DATA-BLOCK"]
+      },
+      {
+        "id": "EDGE-HEAD-SET-UPDATE-FINALIZED",
+        "source": "ACTION-EL-SET-CANONICAL-HEAD",
+        "target": "ACTION-EL-UPDATE-FINALIZED-SAFE",
+        "label": "Head set, update finalized/safe pointers",
+        "data_involved": ["DATA-FORKCHOICE-STATE"]
+      },
+      {
+        "id": "EDGE-CHECK-PAYLOAD-ATTRS",
+        "source": "ACTION-EL-UPDATE-FINALIZED-SAFE",
+        "target": "ACTION-EL-START-PAYLOAD-BUILD",
+        "label": "Payload attributes provided, start block building",
+        "data_involved": ["DATA-PAYLOAD-ATTRIBUTES"]
+      },
+      {
+        "id": "EDGE-NO-PAYLOAD-ATTRS",
+        "source": "ACTION-EL-UPDATE-FINALIZED-SAFE",
+        "target": "STATE-EL-FORKCHOICE-RESPONSE-READY",
+        "label": "No payload attributes, respond immediately",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-PAYLOAD-BUILD-STARTED",
+        "source": "ACTION-EL-START-PAYLOAD-BUILD",
+        "target": "STATE-EL-PAYLOAD-BUILDING",
+        "label": "Block builder started, worker assembling transactions",
+        "data_involved": ["DATA-TRANSACTION"]
+      },
+      {
+        "id": "EDGE-PAYLOAD-BUILD-RESPONSE",
+        "source": "ACTION-EL-START-PAYLOAD-BUILD",
+        "target": "STATE-EL-FORKCHOICE-RESPONSE-READY",
+        "label": "Return PayloadID to CL",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-FORKCHOICE-COMPLETE",
+        "source": "STATE-EL-FORKCHOICE-RESPONSE-READY",
+        "target": "STATE-EL-IDLE",
+        "label": "ForkchoiceUpdated response sent",
+        "data_involved": ["DATA-PAYLOAD-STATUS"]
+      },
+      {
+        "id": "EDGE-NEWPAYLOAD-VALIDATE-STRUCTURE",
+        "source": "ACTION-EL-PROCESS-NEWPAYLOAD",
+        "target": "ACTION-EL-VALIDATE-PAYLOAD-STRUCTURE",
+        "label": "Begin structural validation of payload",
+        "data_involved": ["DATA-EXECUTION-PAYLOAD"]
+      },
+      {
+        "id": "EDGE-STRUCTURE-INVALID",
+        "source": "ACTION-EL-VALIDATE-PAYLOAD-STRUCTURE",
+        "target": "STATE-EL-PAYLOAD-INVALID-STRUCTURE",
+        "label": "Payload structure invalid (parent missing, timestamp issue, etc.)",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-STRUCTURE-VALID",
+        "source": "ACTION-EL-VALIDATE-PAYLOAD-STRUCTURE",
+        "target": "ACTION-EL-CONVERT-PAYLOAD-TO-BLOCK",
+        "label": "Payload structure valid",
+        "data_involved": ["DATA-EXECUTION-PAYLOAD"]
+      },
+      {
+        "id": "EDGE-CONVERT-INSERT",
+        "source": "ACTION-EL-CONVERT-PAYLOAD-TO-BLOCK",
+        "target": "ACTION-EL-INSERT-BLOCK-WITHOUT-HEAD",
+        "label": "Block converted, insert into chain",
+        "data_involved": ["DATA-BLOCK"]
+      },
+      {
+        "id": "EDGE-INSERT-PROCESS",
+        "source": "ACTION-EL-INSERT-BLOCK-WITHOUT-HEAD",
+        "target": "ACTION-EL-PROCESS-BLOCK",
+        "label": "Block inserted, process transactions",
+        "data_involved": ["DATA-BLOCK"]
+      },
+      {
+        "id": "EDGE-BLOCK-VALID",
+        "source": "ACTION-EL-PROCESS-BLOCK",
+        "target": "STATE-EL-BLOCK-VALID",
+        "label": "All transactions executed, state root matches",
+        "data_involved": ["DATA-PROCESS-RESULT"]
+      },
+      {
+        "id": "EDGE-BLOCK-INVALID-EXEC",
+        "source": "ACTION-EL-PROCESS-BLOCK",
+        "target": "STATE-EL-BLOCK-INVALID",
+        "label": "Transaction failed or state mismatch",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-VALID-COMMIT",
+        "source": "STATE-EL-BLOCK-VALID",
+        "target": "ACTION-EL-COMMIT-STATE",
+        "label": "Block valid, commit state changes",
+        "data_involved": ["DATA-STATE-OBJECT"]
+      },
+      {
+        "id": "EDGE-COMMIT-RESPOND",
+        "source": "ACTION-EL-COMMIT-STATE",
+        "target": "STATE-EL-NEWPAYLOAD-RESPONSE-READY",
+        "label": "State committed, prepare VALID response",
+        "data_involved": ["DATA-PAYLOAD-STATUS"]
+      },
+      {
+        "id": "EDGE-INVALID-RESPOND",
+        "source": "STATE-EL-BLOCK-INVALID",
+        "target": "STATE-EL-NEWPAYLOAD-RESPONSE-READY",
+        "label": "Block invalid, prepare INVALID response with latestValidHash",
+        "data_involved": ["DATA-PAYLOAD-STATUS"]
+      },
+      {
+        "id": "EDGE-NEWPAYLOAD-COMPLETE",
+        "source": "STATE-EL-NEWPAYLOAD-RESPONSE-READY",
+        "target": "STATE-EL-IDLE",
+        "label": "NewPayload response sent to CL",
+        "data_involved": ["DATA-PAYLOAD-STATUS"]
+      },
+      {
+        "id": "EDGE-CL-REQUESTS-PAYLOAD",
+        "source": "STATE-EL-PAYLOAD-BUILDING",
+        "target": "ACTION-EL-GET-PAYLOAD",
+        "label": "CL sends engine_getPayload request",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-PAYLOAD-RETRIEVED",
+        "source": "ACTION-EL-GET-PAYLOAD",
+        "target": "STATE-EL-PAYLOAD-RETURNED",
+        "label": "Built payload returned to CL",
+        "data_involved": ["DATA-EXECUTION-PAYLOAD", "DATA-BLOB-SIDECAR"]
+      },
+      {
+        "id": "EDGE-PAYLOAD-RETURNED-IDLE",
+        "source": "STATE-EL-PAYLOAD-RETURNED",
+        "target": "STATE-EL-IDLE",
+        "label": "Payload delivery complete",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-SUBMIT-TX",
+        "source": "STATE-USER-SUBMITTING-TX",
+        "target": "ACTION-EL-VALIDATE-TX",
+        "label": "User submits tx via eth_sendRawTransaction",
+        "data_involved": ["DATA-TRANSACTION"]
+      },
+      {
+        "id": "EDGE-TX-VALID",
+        "source": "ACTION-EL-VALIDATE-TX",
+        "target": "STATE-TX-PENDING",
+        "label": "Transaction validation passes",
+        "data_involved": ["DATA-TRANSACTION"]
+      },
+      {
+        "id": "EDGE-TX-INVALID",
+        "source": "ACTION-EL-VALIDATE-TX",
+        "target": "STATE-TX-REJECTED",
+        "label": "Transaction validation fails",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-TX-INCLUDED",
+        "source": "STATE-TX-PENDING",
+        "target": "STATE-EL-PAYLOAD-BUILDING",
+        "label": "Transaction selected for block inclusion",
+        "data_involved": ["DATA-TRANSACTION"]
+      }
+    ]
+  },
+  "sub_graphs": [
+    {
+      "id": "GRAPH-BLOCK-PROCESSING",
+      "title": "Block Processing Sub-Graph",
+      "description": "Detailed state transitions for processing a block through StateProcessor.Process()",
+      "source_file": "core/state_processor.go",
+      "nodes": [
+        {
+          "id": "STATE-BLOCK-RECEIVED",
+          "label": "Block Received for Processing",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-INIT-PROCESSING",
+          "label": "Initialize Block Processing",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Initialize receipts, gas pool, EVM context"
+        },
+        {
+          "id": "ACTION-APPLY-HARD-FORKS",
+          "label": "Apply Hard Fork Mutations",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Apply fork-specific state changes (e.g., DAO fork)"
+        },
+        {
+          "id": "ACTION-PROCESS-BEACON-ROOT",
+          "label": "Process Beacon Block Root (EIP-4788)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Store beacon block root in state (Cancun+)"
+        },
+        {
+          "id": "ACTION-PROCESS-PARENT-HASH",
+          "label": "Process Parent Block Hash (EIP-2935)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Store parent block hash in state (Prague+)"
+        },
+        {
+          "id": "STATE-ITERATING-TXS",
+          "label": "Iterating Block Transactions",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-TX-TO-MESSAGE",
+          "label": "Convert Transaction to Message",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "TransactionToMessage() - decode tx, compute effective gas price"
+        },
+        {
+          "id": "ACTION-SET-TX-CONTEXT",
+          "label": "Set Transaction Context",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "statedb.SetTxContext() - set tx hash and index"
+        },
+        {
+          "id": "ACTION-APPLY-TX-WITH-EVM",
+          "label": "Apply Transaction with EVM",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "ApplyTransactionWithEVM() - execute transaction",
+          "sub_graph_id": "GRAPH-STATE-TRANSITION"
+        },
+        {
+          "id": "STATE-TX-EXECUTED",
+          "label": "Transaction Executed",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-COLLECT-RECEIPT",
+          "label": "Collect Receipt and Logs",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Append receipt to list, collect logs"
+        },
+        {
+          "id": "STATE-ALL-TXS-PROCESSED",
+          "label": "All Transactions Processed",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-PROCESS-REQUESTS-PRAGUE",
+          "label": "Process Prague System Calls",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "EIP-6110 deposits, EIP-7002 withdrawals, EIP-7251 consolidations"
+        },
+        {
+          "id": "ACTION-FINALIZE-BLOCK",
+          "label": "Finalize Block",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Consensus engine finalization (block rewards, etc.)"
+        },
+        {
+          "id": "STATE-PROCESS-COMPLETE",
+          "label": "Block Processing Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-BP-INIT",
+          "source": "STATE-BLOCK-RECEIVED",
+          "target": "ACTION-INIT-PROCESSING",
+          "label": "Begin processing",
+          "data_involved": ["DATA-BLOCK"]
+        },
+        {
+          "id": "EDGE-BP-FORKS",
+          "source": "ACTION-INIT-PROCESSING",
+          "target": "ACTION-APPLY-HARD-FORKS",
+          "label": "Apply fork mutations if applicable",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-BEACON",
+          "source": "ACTION-APPLY-HARD-FORKS",
+          "target": "ACTION-PROCESS-BEACON-ROOT",
+          "label": "Process beacon root (Cancun+)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-PARENT",
+          "source": "ACTION-PROCESS-BEACON-ROOT",
+          "target": "ACTION-PROCESS-PARENT-HASH",
+          "label": "Process parent hash (Prague+)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-ITERATE",
+          "source": "ACTION-PROCESS-PARENT-HASH",
+          "target": "STATE-ITERATING-TXS",
+          "label": "Begin transaction iteration",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-CONVERT",
+          "source": "STATE-ITERATING-TXS",
+          "target": "ACTION-TX-TO-MESSAGE",
+          "label": "Convert next transaction",
+          "data_involved": ["DATA-TRANSACTION"]
+        },
+        {
+          "id": "EDGE-BP-CONTEXT",
+          "source": "ACTION-TX-TO-MESSAGE",
+          "target": "ACTION-SET-TX-CONTEXT",
+          "label": "Set context for transaction",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-BP-APPLY",
+          "source": "ACTION-SET-TX-CONTEXT",
+          "target": "ACTION-APPLY-TX-WITH-EVM",
+          "label": "Execute transaction",
+          "data_involved": ["DATA-MESSAGE", "DATA-EVM-CONTEXT"]
+        },
+        {
+          "id": "EDGE-BP-EXECUTED",
+          "source": "ACTION-APPLY-TX-WITH-EVM",
+          "target": "STATE-TX-EXECUTED",
+          "label": "Transaction execution complete",
+          "data_involved": ["DATA-EXECUTION-RESULT"]
+        },
+        {
+          "id": "EDGE-BP-RECEIPT",
+          "source": "STATE-TX-EXECUTED",
+          "target": "ACTION-COLLECT-RECEIPT",
+          "label": "Collect results",
+          "data_involved": ["DATA-RECEIPT"]
+        },
+        {
+          "id": "EDGE-BP-NEXT-TX",
+          "source": "ACTION-COLLECT-RECEIPT",
+          "target": "STATE-ITERATING-TXS",
+          "label": "More transactions to process",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-ALL-DONE",
+          "source": "ACTION-COLLECT-RECEIPT",
+          "target": "STATE-ALL-TXS-PROCESSED",
+          "label": "No more transactions",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-REQUESTS",
+          "source": "STATE-ALL-TXS-PROCESSED",
+          "target": "ACTION-PROCESS-REQUESTS-PRAGUE",
+          "label": "Process system requests (Prague+)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-FINALIZE",
+          "source": "ACTION-PROCESS-REQUESTS-PRAGUE",
+          "target": "ACTION-FINALIZE-BLOCK",
+          "label": "Finalize block",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BP-COMPLETE",
+          "source": "ACTION-FINALIZE-BLOCK",
+          "target": "STATE-PROCESS-COMPLETE",
+          "label": "Return ProcessResult",
+          "data_involved": ["DATA-PROCESS-RESULT"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-STATE-TRANSITION",
+      "title": "State Transition Function Sub-Graph",
+      "description": "Detailed state transitions for individual transaction execution",
+      "source_file": "core/state_transition.go",
+      "nodes": [
+        {
+          "id": "STATE-ST-START",
+          "label": "State Transition Start",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-ST-VERIFY-SIGNATURE",
+          "label": "Verify Transaction Signature",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "secp256k1 signature verification"
+        },
+        {
+          "id": "ACTION-ST-CHECK-NONCE",
+          "label": "Check Sender Nonce",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify nonce matches sender account nonce"
+        },
+        {
+          "id": "ACTION-ST-COMPUTE-INTRINSIC-GAS",
+          "label": "Compute Intrinsic Gas",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "IntrinsicGas() - base tx cost + data cost + access list"
+        },
+        {
+          "id": "ACTION-ST-CHECK-GAS-LIMIT",
+          "label": "Check Gas Limit",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify tx gas limit >= intrinsic gas"
+        },
+        {
+          "id": "ACTION-ST-CHECK-BALANCE",
+          "label": "Check Sender Balance",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify balance >= gas * gasPrice + value + blobGas"
+        },
+        {
+          "id": "ACTION-ST-DEDUCT-GAS",
+          "label": "Deduct Gas from Sender",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "sender.balance -= gas * effectiveGasPrice"
+        },
+        {
+          "id": "ACTION-ST-INCREMENT-NONCE",
+          "label": "Increment Sender Nonce",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "sender.nonce++"
+        },
+        {
+          "id": "ACTION-ST-PROCESS-ACCESS-LIST",
+          "label": "Process Access List (EIP-2930)",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Warm up specified addresses and storage slots"
+        },
+        {
+          "id": "ACTION-ST-PROCESS-SETCODE-AUTHS",
+          "label": "Process SetCode Authorizations (EIP-7702)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Apply code delegation authorizations (Prague+)"
+        },
+        {
+          "id": "STATE-ST-PRE-EXECUTION",
+          "label": "Pre-Execution Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-ST-EXECUTE-CREATE",
+          "label": "Execute Contract Creation",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "evm.Create() - deploy new contract",
+          "sub_graph_id": "GRAPH-EVM-EXECUTION"
+        },
+        {
+          "id": "ACTION-ST-EXECUTE-CALL",
+          "label": "Execute Contract Call",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "evm.Call() - call existing contract",
+          "sub_graph_id": "GRAPH-EVM-EXECUTION"
+        },
+        {
+          "id": "STATE-ST-EXECUTION-COMPLETE",
+          "label": "EVM Execution Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-ST-CALCULATE-REFUND",
+          "label": "Calculate Gas Refund",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "SSTORE refunds capped at 20% (EIP-3529)"
+        },
+        {
+          "id": "ACTION-ST-REFUND-SENDER",
+          "label": "Refund Remaining Gas to Sender",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "sender.balance += (gasLimit - gasUsed + refund) * effectiveGasPrice"
+        },
+        {
+          "id": "ACTION-ST-PAY-COINBASE",
+          "label": "Pay Gas Fees to Coinbase",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "coinbase.balance += gasUsed * priorityFee (base fee burned)"
+        },
+        {
+          "id": "ACTION-ST-CREATE-RECEIPT",
+          "label": "Create Transaction Receipt",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "MakeReceipt() - create receipt with status and logs"
+        },
+        {
+          "id": "STATE-ST-COMPLETE",
+          "label": "State Transition Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-ST-FAILED",
+          "label": "State Transition Failed",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Transaction failed validation or execution"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-ST-SIG",
+          "source": "STATE-ST-START",
+          "target": "ACTION-ST-VERIFY-SIGNATURE",
+          "label": "Verify signature",
+          "data_involved": ["DATA-TRANSACTION"]
+        },
+        {
+          "id": "EDGE-ST-NONCE",
+          "source": "ACTION-ST-VERIFY-SIGNATURE",
+          "target": "ACTION-ST-CHECK-NONCE",
+          "label": "Signature valid",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-ST-INTRINSIC",
+          "source": "ACTION-ST-CHECK-NONCE",
+          "target": "ACTION-ST-COMPUTE-INTRINSIC-GAS",
+          "label": "Nonce matches",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-GAS-CHECK",
+          "source": "ACTION-ST-COMPUTE-INTRINSIC-GAS",
+          "target": "ACTION-ST-CHECK-GAS-LIMIT",
+          "label": "Intrinsic gas computed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-BALANCE",
+          "source": "ACTION-ST-CHECK-GAS-LIMIT",
+          "target": "ACTION-ST-CHECK-BALANCE",
+          "label": "Gas limit sufficient",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-DEDUCT",
+          "source": "ACTION-ST-CHECK-BALANCE",
+          "target": "ACTION-ST-DEDUCT-GAS",
+          "label": "Balance sufficient",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-NONCE-INC",
+          "source": "ACTION-ST-DEDUCT-GAS",
+          "target": "ACTION-ST-INCREMENT-NONCE",
+          "label": "Gas deducted",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-ACCESS-LIST",
+          "source": "ACTION-ST-INCREMENT-NONCE",
+          "target": "ACTION-ST-PROCESS-ACCESS-LIST",
+          "label": "Process access list",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-SETCODE",
+          "source": "ACTION-ST-PROCESS-ACCESS-LIST",
+          "target": "ACTION-ST-PROCESS-SETCODE-AUTHS",
+          "label": "Process EIP-7702 authorizations",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-PRE-EXEC",
+          "source": "ACTION-ST-PROCESS-SETCODE-AUTHS",
+          "target": "STATE-ST-PRE-EXECUTION",
+          "label": "Pre-execution setup complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-CREATE",
+          "source": "STATE-ST-PRE-EXECUTION",
+          "target": "ACTION-ST-EXECUTE-CREATE",
+          "label": "To == nil (contract creation)",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-ST-CALL",
+          "source": "STATE-ST-PRE-EXECUTION",
+          "target": "ACTION-ST-EXECUTE-CALL",
+          "label": "To != nil (contract call)",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-ST-CREATE-DONE",
+          "source": "ACTION-ST-EXECUTE-CREATE",
+          "target": "STATE-ST-EXECUTION-COMPLETE",
+          "label": "Creation complete",
+          "data_involved": ["DATA-EXECUTION-RESULT"]
+        },
+        {
+          "id": "EDGE-ST-CALL-DONE",
+          "source": "ACTION-ST-EXECUTE-CALL",
+          "target": "STATE-ST-EXECUTION-COMPLETE",
+          "label": "Call complete",
+          "data_involved": ["DATA-EXECUTION-RESULT"]
+        },
+        {
+          "id": "EDGE-ST-REFUND-CALC",
+          "source": "STATE-ST-EXECUTION-COMPLETE",
+          "target": "ACTION-ST-CALCULATE-REFUND",
+          "label": "Calculate refunds",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-REFUND",
+          "source": "ACTION-ST-CALCULATE-REFUND",
+          "target": "ACTION-ST-REFUND-SENDER",
+          "label": "Apply refund",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-COINBASE",
+          "source": "ACTION-ST-REFUND-SENDER",
+          "target": "ACTION-ST-PAY-COINBASE",
+          "label": "Pay coinbase",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-RECEIPT",
+          "source": "ACTION-ST-PAY-COINBASE",
+          "target": "ACTION-ST-CREATE-RECEIPT",
+          "label": "Create receipt",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-DONE",
+          "source": "ACTION-ST-CREATE-RECEIPT",
+          "target": "STATE-ST-COMPLETE",
+          "label": "State transition complete",
+          "data_involved": ["DATA-RECEIPT"]
+        },
+        {
+          "id": "EDGE-ST-FAIL-NONCE",
+          "source": "ACTION-ST-CHECK-NONCE",
+          "target": "STATE-ST-FAILED",
+          "label": "Nonce mismatch",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-FAIL-GAS",
+          "source": "ACTION-ST-CHECK-GAS-LIMIT",
+          "target": "STATE-ST-FAILED",
+          "label": "Insufficient gas limit",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-ST-FAIL-BALANCE",
+          "source": "ACTION-ST-CHECK-BALANCE",
+          "target": "STATE-ST-FAILED",
+          "label": "Insufficient balance",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EVM-EXECUTION",
+      "title": "EVM Execution Sub-Graph",
+      "description": "Core EVM interpreter execution loop with opcode processing",
+      "source_file": "core/vm/interpreter.go",
+      "nodes": [
+        {
+          "id": "STATE-EVM-START",
+          "label": "EVM Execution Start",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-EVM-CHECK-DEPTH",
+          "label": "Check Call Depth",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify call depth <= 1024"
+        },
+        {
+          "id": "ACTION-EVM-CREATE-CONTRACT",
+          "label": "Create Contract Context",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "NewContract() - initialize contract with caller, value, gas"
+        },
+        {
+          "id": "STATE-EVM-INTERPRETER-LOOP",
+          "label": "Interpreter Main Loop",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-EVM-FETCH-OPCODE",
+          "label": "Fetch Next Opcode",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Read opcode at program counter from bytecode"
+        },
+        {
+          "id": "ACTION-EVM-LOOKUP-OPERATION",
+          "label": "Lookup Operation in JumpTable",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Get operation handler from fork-specific jump table"
+        },
+        {
+          "id": "ACTION-EVM-CHECK-STACK",
+          "label": "Check Stack Requirements",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify minStack <= stack.len <= maxStack"
+        },
+        {
+          "id": "ACTION-EVM-CALCULATE-GAS",
+          "label": "Calculate Gas Cost",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "constantGas + dynamicGas()"
+        },
+        {
+          "id": "ACTION-EVM-DEDUCT-GAS",
+          "label": "Deduct Gas",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "contract.UseGas() - deduct from remaining gas"
+        },
+        {
+          "id": "ACTION-EVM-EXPAND-MEMORY",
+          "label": "Expand Memory if Needed",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "memorySize() - expand and charge for memory growth"
+        },
+        {
+          "id": "ACTION-EVM-EXECUTE-OPCODE",
+          "label": "Execute Opcode Handler",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "operation.execute(pc, evm, scope)"
+        },
+        {
+          "id": "ACTION-EVM-INCREMENT-PC",
+          "label": "Increment Program Counter",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "pc++ (or set by JUMP/JUMPI)"
+        },
+        {
+          "id": "STATE-EVM-EXECUTION-SUCCESS",
+          "label": "EVM Execution Success",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "STOP, RETURN, or end of code reached"
+        },
+        {
+          "id": "STATE-EVM-EXECUTION-REVERT",
+          "label": "EVM Execution Reverted",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "REVERT opcode executed, state changes rolled back"
+        },
+        {
+          "id": "STATE-EVM-EXECUTION-ERROR",
+          "label": "EVM Execution Error",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "Out of gas, stack error, invalid opcode, etc."
+        },
+        {
+          "id": "STATE-EVM-OUT-OF-GAS",
+          "label": "Out of Gas",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "STATE-EVM-STACK-OVERFLOW",
+          "label": "Stack Overflow/Underflow",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "STATE-EVM-INVALID-OPCODE",
+          "label": "Invalid Opcode",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-EVM-DEPTH",
+          "source": "STATE-EVM-START",
+          "target": "ACTION-EVM-CHECK-DEPTH",
+          "label": "Check depth limit",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-CONTRACT",
+          "source": "ACTION-EVM-CHECK-DEPTH",
+          "target": "ACTION-EVM-CREATE-CONTRACT",
+          "label": "Depth OK",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-LOOP-START",
+          "source": "ACTION-EVM-CREATE-CONTRACT",
+          "target": "STATE-EVM-INTERPRETER-LOOP",
+          "label": "Enter interpreter loop",
+          "data_involved": ["DATA-SCOPE-CONTEXT"]
+        },
+        {
+          "id": "EDGE-EVM-FETCH",
+          "source": "STATE-EVM-INTERPRETER-LOOP",
+          "target": "ACTION-EVM-FETCH-OPCODE",
+          "label": "Fetch opcode",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-LOOKUP",
+          "source": "ACTION-EVM-FETCH-OPCODE",
+          "target": "ACTION-EVM-LOOKUP-OPERATION",
+          "label": "Lookup in jump table",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-STACK-CHECK",
+          "source": "ACTION-EVM-LOOKUP-OPERATION",
+          "target": "ACTION-EVM-CHECK-STACK",
+          "label": "Check stack requirements",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-GAS-CALC",
+          "source": "ACTION-EVM-CHECK-STACK",
+          "target": "ACTION-EVM-CALCULATE-GAS",
+          "label": "Stack OK, calculate gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-GAS-DEDUCT",
+          "source": "ACTION-EVM-CALCULATE-GAS",
+          "target": "ACTION-EVM-DEDUCT-GAS",
+          "label": "Deduct gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-MEMORY",
+          "source": "ACTION-EVM-DEDUCT-GAS",
+          "target": "ACTION-EVM-EXPAND-MEMORY",
+          "label": "Expand memory if needed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-EXEC",
+          "source": "ACTION-EVM-EXPAND-MEMORY",
+          "target": "ACTION-EVM-EXECUTE-OPCODE",
+          "label": "Execute opcode",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-PC",
+          "source": "ACTION-EVM-EXECUTE-OPCODE",
+          "target": "ACTION-EVM-INCREMENT-PC",
+          "label": "Increment PC",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-CONTINUE",
+          "source": "ACTION-EVM-INCREMENT-PC",
+          "target": "STATE-EVM-INTERPRETER-LOOP",
+          "label": "Continue loop",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-STOP",
+          "source": "ACTION-EVM-EXECUTE-OPCODE",
+          "target": "STATE-EVM-EXECUTION-SUCCESS",
+          "label": "STOP/RETURN executed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-REVERT",
+          "source": "ACTION-EVM-EXECUTE-OPCODE",
+          "target": "STATE-EVM-EXECUTION-REVERT",
+          "label": "REVERT executed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-OOG",
+          "source": "ACTION-EVM-DEDUCT-GAS",
+          "target": "STATE-EVM-OUT-OF-GAS",
+          "label": "Insufficient gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-STACK-ERR",
+          "source": "ACTION-EVM-CHECK-STACK",
+          "target": "STATE-EVM-STACK-OVERFLOW",
+          "label": "Stack violation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-INVALID-OP",
+          "source": "ACTION-EVM-LOOKUP-OPERATION",
+          "target": "STATE-EVM-INVALID-OPCODE",
+          "label": "Undefined opcode",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-OOG-ERR",
+          "source": "STATE-EVM-OUT-OF-GAS",
+          "target": "STATE-EVM-EXECUTION-ERROR",
+          "label": "Error: out of gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-STACK-ERR2",
+          "source": "STATE-EVM-STACK-OVERFLOW",
+          "target": "STATE-EVM-EXECUTION-ERROR",
+          "label": "Error: stack",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-EVM-INVALID-ERR",
+          "source": "STATE-EVM-INVALID-OPCODE",
+          "target": "STATE-EVM-EXECUTION-ERROR",
+          "label": "Error: invalid opcode",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-3855-PUSH0",
+      "title": "EIP-3855: PUSH0 Instruction",
+      "description": "PUSH0 opcode pushes zero onto the stack (Shanghai+)",
+      "eip": "EIP-3855",
+      "source_file": "core/vm/eips.go:229-244",
+      "activation_fork": "Shanghai",
+      "nodes": [
+        {
+          "id": "STATE-PUSH0-START",
+          "label": "PUSH0 Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-PUSH0-CHARGE-GAS",
+          "label": "Charge Gas (2 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "GasQuickStep = 2"
+        },
+        {
+          "id": "ACTION-PUSH0-PUSH-ZERO",
+          "label": "Push Zero to Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "scope.Stack.push(new(uint256.Int))"
+        },
+        {
+          "id": "STATE-PUSH0-COMPLETE",
+          "label": "PUSH0 Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-PUSH0-GAS",
+          "source": "STATE-PUSH0-START",
+          "target": "ACTION-PUSH0-CHARGE-GAS",
+          "label": "Charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-PUSH0-EXEC",
+          "source": "ACTION-PUSH0-CHARGE-GAS",
+          "target": "ACTION-PUSH0-PUSH-ZERO",
+          "label": "Execute",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-PUSH0-DONE",
+          "source": "ACTION-PUSH0-PUSH-ZERO",
+          "target": "STATE-PUSH0-COMPLETE",
+          "label": "Complete",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-6780-SELFDESTRUCT",
+      "title": "EIP-6780: Deactivate SELFDESTRUCT",
+      "description": "SELFDESTRUCT only destroys contract if called in same transaction as creation (Cancun+)",
+      "eip": "EIP-6780",
+      "source_file": "core/vm/instructions.go:903-930",
+      "activation_fork": "Cancun",
+      "nodes": [
+        {
+          "id": "STATE-SD6780-START",
+          "label": "SELFDESTRUCT Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-SD6780-POP-BENEFICIARY",
+          "label": "Pop Beneficiary from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "beneficiary := scope.Stack.pop()"
+        },
+        {
+          "id": "ACTION-SD6780-TRANSFER-BALANCE",
+          "label": "Transfer Balance to Beneficiary",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Always transfer balance, even if contract not destroyed"
+        },
+        {
+          "id": "ACTION-SD6780-CHECK-CREATED-SAME-TX",
+          "label": "Check if Created in Same Transaction",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "evm.StateDB.Created(scope.Contract.Address())"
+        },
+        {
+          "id": "ACTION-SD6780-DESTROY-CONTRACT",
+          "label": "Destroy Contract (Mark as Selfdestructed)",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "evm.StateDB.Destruct(scope.Contract.Address())"
+        },
+        {
+          "id": "STATE-SD6780-NO-DESTROY",
+          "label": "Contract NOT Destroyed (EIP-6780)",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "State",
+          "description": "Contract persists, only balance transferred"
+        },
+        {
+          "id": "STATE-SD6780-COMPLETE",
+          "label": "SELFDESTRUCT Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-SD6780-POP",
+          "source": "STATE-SD6780-START",
+          "target": "ACTION-SD6780-POP-BENEFICIARY",
+          "label": "Get beneficiary",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-TRANSFER",
+          "source": "ACTION-SD6780-POP-BENEFICIARY",
+          "target": "ACTION-SD6780-TRANSFER-BALANCE",
+          "label": "Transfer balance",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-CHECK",
+          "source": "ACTION-SD6780-TRANSFER-BALANCE",
+          "target": "ACTION-SD6780-CHECK-CREATED-SAME-TX",
+          "label": "Check creation flag",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-SAME-TX",
+          "source": "ACTION-SD6780-CHECK-CREATED-SAME-TX",
+          "target": "ACTION-SD6780-DESTROY-CONTRACT",
+          "label": "Created in same tx - destroy",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-DIFF-TX",
+          "source": "ACTION-SD6780-CHECK-CREATED-SAME-TX",
+          "target": "STATE-SD6780-NO-DESTROY",
+          "label": "Created in different tx - no destroy",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-DESTROY-DONE",
+          "source": "ACTION-SD6780-DESTROY-CONTRACT",
+          "target": "STATE-SD6780-COMPLETE",
+          "label": "Destruction complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SD6780-NO-DESTROY-DONE",
+          "source": "STATE-SD6780-NO-DESTROY",
+          "target": "STATE-SD6780-COMPLETE",
+          "label": "Complete without destruction",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-4844-BLOBHASH",
+      "title": "EIP-4844: BLOBHASH Opcode",
+      "description": "BLOBHASH opcode returns versioned hash of blob at given index (Cancun+)",
+      "eip": "EIP-4844",
+      "source_file": "core/vm/eips.go:279-289",
+      "activation_fork": "Cancun",
+      "nodes": [
+        {
+          "id": "STATE-BLOBHASH-START",
+          "label": "BLOBHASH Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-BLOBHASH-CHARGE-GAS",
+          "label": "Charge Gas (3 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "GasFastestStep = 3"
+        },
+        {
+          "id": "ACTION-BLOBHASH-PEEK-INDEX",
+          "label": "Peek Index from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "index := scope.Stack.peek()"
+        },
+        {
+          "id": "ACTION-BLOBHASH-CHECK-BOUNDS",
+          "label": "Check Index Bounds",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Compare index with len(evm.TxContext.BlobHashes)"
+        },
+        {
+          "id": "ACTION-BLOBHASH-GET-HASH",
+          "label": "Get Blob Hash",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "blobHash := evm.TxContext.BlobHashes[index.Uint64()]"
+        },
+        {
+          "id": "ACTION-BLOBHASH-RETURN-ZERO",
+          "label": "Return Zero (Out of Bounds)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "index.Clear()"
+        },
+        {
+          "id": "STATE-BLOBHASH-COMPLETE",
+          "label": "BLOBHASH Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-BLOBHASH-GAS",
+          "source": "STATE-BLOBHASH-START",
+          "target": "ACTION-BLOBHASH-CHARGE-GAS",
+          "label": "Charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-INDEX",
+          "source": "ACTION-BLOBHASH-CHARGE-GAS",
+          "target": "ACTION-BLOBHASH-PEEK-INDEX",
+          "label": "Get index",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-BOUNDS",
+          "source": "ACTION-BLOBHASH-PEEK-INDEX",
+          "target": "ACTION-BLOBHASH-CHECK-BOUNDS",
+          "label": "Check bounds",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-VALID",
+          "source": "ACTION-BLOBHASH-CHECK-BOUNDS",
+          "target": "ACTION-BLOBHASH-GET-HASH",
+          "label": "Index valid",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-OOB",
+          "source": "ACTION-BLOBHASH-CHECK-BOUNDS",
+          "target": "ACTION-BLOBHASH-RETURN-ZERO",
+          "label": "Index out of bounds",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-DONE1",
+          "source": "ACTION-BLOBHASH-GET-HASH",
+          "target": "STATE-BLOBHASH-COMPLETE",
+          "label": "Return hash",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BLOBHASH-DONE2",
+          "source": "ACTION-BLOBHASH-RETURN-ZERO",
+          "target": "STATE-BLOBHASH-COMPLETE",
+          "label": "Return zero",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-1153-TRANSIENT-STORAGE",
+      "title": "EIP-1153: Transient Storage",
+      "description": "TLOAD and TSTORE opcodes for transaction-scoped storage (Cancun+)",
+      "eip": "EIP-1153",
+      "source_file": "core/vm/eips.go:183-220",
+      "activation_fork": "Cancun",
+      "nodes": [
+        {
+          "id": "STATE-TLOAD-START",
+          "label": "TLOAD Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-TLOAD-CHARGE-GAS",
+          "label": "Charge Gas (100 gas - warm read)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "WarmStorageReadCostEIP2929 = 100"
+        },
+        {
+          "id": "ACTION-TLOAD-PEEK-KEY",
+          "label": "Peek Key from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "loc := scope.Stack.peek()"
+        },
+        {
+          "id": "ACTION-TLOAD-GET-VALUE",
+          "label": "Get Transient Storage Value",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "val := evm.StateDB.GetTransientState(addr, hash)"
+        },
+        {
+          "id": "STATE-TLOAD-COMPLETE",
+          "label": "TLOAD Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "STATE-TSTORE-START",
+          "label": "TSTORE Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-TSTORE-CHECK-READONLY",
+          "label": "Check Read-Only Mode",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Reject if in static call context"
+        },
+        {
+          "id": "ACTION-TSTORE-CHARGE-GAS",
+          "label": "Charge Gas (100 gas - warm write)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "WarmStorageReadCostEIP2929 = 100"
+        },
+        {
+          "id": "ACTION-TSTORE-POP-KEY-VALUE",
+          "label": "Pop Key and Value from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "loc, val := scope.Stack.pop(), scope.Stack.pop()"
+        },
+        {
+          "id": "ACTION-TSTORE-SET-VALUE",
+          "label": "Set Transient Storage Value",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "evm.StateDB.SetTransientState(addr, key, value)"
+        },
+        {
+          "id": "STATE-TSTORE-COMPLETE",
+          "label": "TSTORE Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "STATE-TSTORE-WRITE-PROTECTED",
+          "label": "TSTORE Rejected - Write Protected",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "ErrWriteProtection in static context"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-TLOAD-GAS",
+          "source": "STATE-TLOAD-START",
+          "target": "ACTION-TLOAD-CHARGE-GAS",
+          "label": "Charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TLOAD-KEY",
+          "source": "ACTION-TLOAD-CHARGE-GAS",
+          "target": "ACTION-TLOAD-PEEK-KEY",
+          "label": "Get key",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TLOAD-GET",
+          "source": "ACTION-TLOAD-PEEK-KEY",
+          "target": "ACTION-TLOAD-GET-VALUE",
+          "label": "Read transient storage",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TLOAD-DONE",
+          "source": "ACTION-TLOAD-GET-VALUE",
+          "target": "STATE-TLOAD-COMPLETE",
+          "label": "Value returned",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-RO-CHECK",
+          "source": "STATE-TSTORE-START",
+          "target": "ACTION-TSTORE-CHECK-READONLY",
+          "label": "Check context",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-RO-FAIL",
+          "source": "ACTION-TSTORE-CHECK-READONLY",
+          "target": "STATE-TSTORE-WRITE-PROTECTED",
+          "label": "Static call - reject",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-GAS",
+          "source": "ACTION-TSTORE-CHECK-READONLY",
+          "target": "ACTION-TSTORE-CHARGE-GAS",
+          "label": "Not static - charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-POP",
+          "source": "ACTION-TSTORE-CHARGE-GAS",
+          "target": "ACTION-TSTORE-POP-KEY-VALUE",
+          "label": "Get key and value",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-SET",
+          "source": "ACTION-TSTORE-POP-KEY-VALUE",
+          "target": "ACTION-TSTORE-SET-VALUE",
+          "label": "Write transient storage",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-TSTORE-DONE",
+          "source": "ACTION-TSTORE-SET-VALUE",
+          "target": "STATE-TSTORE-COMPLETE",
+          "label": "Write complete",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-5656-MCOPY",
+      "title": "EIP-5656: MCOPY Opcode",
+      "description": "Memory copy opcode for efficient memory-to-memory copying (Cancun+)",
+      "eip": "EIP-5656",
+      "source_file": "core/vm/eips.go:253-277",
+      "activation_fork": "Cancun",
+      "nodes": [
+        {
+          "id": "STATE-MCOPY-START",
+          "label": "MCOPY Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-MCOPY-POP-ARGS",
+          "label": "Pop dst, src, length from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "dst, src, length := Stack.pop() x 3"
+        },
+        {
+          "id": "ACTION-MCOPY-CALC-GAS",
+          "label": "Calculate Dynamic Gas",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "3 + 3 * ceil(length/32) + memory expansion"
+        },
+        {
+          "id": "ACTION-MCOPY-EXPAND-MEMORY",
+          "label": "Expand Memory if Needed",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Ensure memory covers max(dst, src) + length"
+        },
+        {
+          "id": "ACTION-MCOPY-COPY",
+          "label": "Copy Memory",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "scope.Memory.Copy(dst, src, length) - handles overlapping"
+        },
+        {
+          "id": "STATE-MCOPY-COMPLETE",
+          "label": "MCOPY Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-MCOPY-POP",
+          "source": "STATE-MCOPY-START",
+          "target": "ACTION-MCOPY-POP-ARGS",
+          "label": "Pop arguments",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-MCOPY-GAS",
+          "source": "ACTION-MCOPY-POP-ARGS",
+          "target": "ACTION-MCOPY-CALC-GAS",
+          "label": "Calculate gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-MCOPY-MEM",
+          "source": "ACTION-MCOPY-CALC-GAS",
+          "target": "ACTION-MCOPY-EXPAND-MEMORY",
+          "label": "Expand memory",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-MCOPY-EXEC",
+          "source": "ACTION-MCOPY-EXPAND-MEMORY",
+          "target": "ACTION-MCOPY-COPY",
+          "label": "Execute copy",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-MCOPY-DONE",
+          "source": "ACTION-MCOPY-COPY",
+          "target": "STATE-MCOPY-COMPLETE",
+          "label": "Copy complete",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-1559-FEE-MARKET",
+      "title": "EIP-1559: Fee Market Change",
+      "description": "Base fee calculation and transaction fee handling (London+)",
+      "eip": "EIP-1559",
+      "source_file": "consensus/misc/eip1559/eip1559.go",
+      "activation_fork": "London",
+      "nodes": [
+        {
+          "id": "STATE-1559-CALC-START",
+          "label": "Base Fee Calculation Start",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-1559-GET-PARENT",
+          "label": "Get Parent Block Data",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Get parent gas used, gas limit, base fee"
+        },
+        {
+          "id": "ACTION-1559-CALC-TARGET",
+          "label": "Calculate Gas Target",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "target = parent.GasLimit / 2"
+        },
+        {
+          "id": "ACTION-1559-COMPARE-USAGE",
+          "label": "Compare Gas Usage to Target",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-1559-INCREASE-FEE",
+          "label": "Increase Base Fee",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "baseFee += (parentBaseFee * gasUsedDelta) / (target * 8)"
+        },
+        {
+          "id": "ACTION-1559-DECREASE-FEE",
+          "label": "Decrease Base Fee",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "baseFee -= (parentBaseFee * gasDeficit) / (target * 8)"
+        },
+        {
+          "id": "STATE-1559-FEE-UNCHANGED",
+          "label": "Base Fee Unchanged",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Gas usage == target"
+        },
+        {
+          "id": "STATE-1559-CALC-COMPLETE",
+          "label": "Base Fee Calculated",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-1559-BURN-BASE-FEE",
+          "label": "Burn Base Fee",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Base fee is burned (not paid to coinbase)"
+        },
+        {
+          "id": "ACTION-1559-PAY-PRIORITY-FEE",
+          "label": "Pay Priority Fee to Coinbase",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "coinbase receives only priority fee"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-1559-PARENT",
+          "source": "STATE-1559-CALC-START",
+          "target": "ACTION-1559-GET-PARENT",
+          "label": "Get parent data",
+          "data_involved": ["DATA-BLOCK"]
+        },
+        {
+          "id": "EDGE-1559-TARGET",
+          "source": "ACTION-1559-GET-PARENT",
+          "target": "ACTION-1559-CALC-TARGET",
+          "label": "Calculate target",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-COMPARE",
+          "source": "ACTION-1559-CALC-TARGET",
+          "target": "ACTION-1559-COMPARE-USAGE",
+          "label": "Compare usage",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-ABOVE",
+          "source": "ACTION-1559-COMPARE-USAGE",
+          "target": "ACTION-1559-INCREASE-FEE",
+          "label": "Usage > target",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-BELOW",
+          "source": "ACTION-1559-COMPARE-USAGE",
+          "target": "ACTION-1559-DECREASE-FEE",
+          "label": "Usage < target",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-EQUAL",
+          "source": "ACTION-1559-COMPARE-USAGE",
+          "target": "STATE-1559-FEE-UNCHANGED",
+          "label": "Usage == target",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-INC-DONE",
+          "source": "ACTION-1559-INCREASE-FEE",
+          "target": "STATE-1559-CALC-COMPLETE",
+          "label": "Fee increased",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-DEC-DONE",
+          "source": "ACTION-1559-DECREASE-FEE",
+          "target": "STATE-1559-CALC-COMPLETE",
+          "label": "Fee decreased",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-UNCHANGED-DONE",
+          "source": "STATE-1559-FEE-UNCHANGED",
+          "target": "STATE-1559-CALC-COMPLETE",
+          "label": "Fee unchanged",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-BURN",
+          "source": "STATE-1559-CALC-COMPLETE",
+          "target": "ACTION-1559-BURN-BASE-FEE",
+          "label": "Burn base fee portion",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-1559-PAY",
+          "source": "ACTION-1559-BURN-BASE-FEE",
+          "target": "ACTION-1559-PAY-PRIORITY-FEE",
+          "label": "Pay priority fee",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-7702-SETCODE",
+      "title": "EIP-7702: Set EOA Account Code",
+      "description": "Allow EOAs to set code via authorization lists (Prague+)",
+      "eip": "EIP-7702",
+      "source_file": "core/vm/eips.go",
+      "activation_fork": "Prague",
+      "nodes": [
+        {
+          "id": "STATE-7702-START",
+          "label": "EIP-7702 Processing Start",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-7702-ITERATE-AUTHS",
+          "label": "Iterate Authorization List",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Process each SetCodeAuthorization"
+        },
+        {
+          "id": "ACTION-7702-VERIFY-SIGNATURE",
+          "label": "Verify Authorization Signature",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Recover signer from authorization signature"
+        },
+        {
+          "id": "ACTION-7702-CHECK-CHAIN-ID",
+          "label": "Check Chain ID",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify chain ID matches or is zero (wildcard)"
+        },
+        {
+          "id": "ACTION-7702-CHECK-NONCE",
+          "label": "Check Authorization Nonce",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify nonce matches signer account nonce"
+        },
+        {
+          "id": "ACTION-7702-SET-DELEGATION",
+          "label": "Set Code Delegation",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Set EOA code to delegation designator pointing to target"
+        },
+        {
+          "id": "STATE-7702-COMPLETE",
+          "label": "EIP-7702 Processing Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-7702-ITER",
+          "source": "STATE-7702-START",
+          "target": "ACTION-7702-ITERATE-AUTHS",
+          "label": "Start iteration",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-7702-VERIFY",
+          "source": "ACTION-7702-ITERATE-AUTHS",
+          "target": "ACTION-7702-VERIFY-SIGNATURE",
+          "label": "Verify signature",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7702-CHAIN",
+          "source": "ACTION-7702-VERIFY-SIGNATURE",
+          "target": "ACTION-7702-CHECK-CHAIN-ID",
+          "label": "Check chain ID",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7702-NONCE",
+          "source": "ACTION-7702-CHECK-CHAIN-ID",
+          "target": "ACTION-7702-CHECK-NONCE",
+          "label": "Check nonce",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7702-SET",
+          "source": "ACTION-7702-CHECK-NONCE",
+          "target": "ACTION-7702-SET-DELEGATION",
+          "label": "Set delegation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7702-NEXT",
+          "source": "ACTION-7702-SET-DELEGATION",
+          "target": "ACTION-7702-ITERATE-AUTHS",
+          "label": "Next authorization",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7702-DONE",
+          "source": "ACTION-7702-ITERATE-AUTHS",
+          "target": "STATE-7702-COMPLETE",
+          "label": "All authorizations processed",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-3860-INITCODE",
+      "title": "EIP-3860: Limit and Meter Initcode",
+      "description": "Initcode size limits and gas metering for CREATE/CREATE2 operations (Shanghai+)",
+      "eip": "EIP-3860",
+      "source": "https://eips.ethereum.org/EIPS/eip-3860",
+      "activation_fork": "Shanghai",
+      "constants": {
+        "MAX_INITCODE_SIZE": 49152,
+        "INITCODE_WORD_COST": 2,
+        "MAX_CODE_SIZE": 24576
+      },
+      "nodes": [
+        {
+          "id": "STATE-3860-CONTRACT-CREATION-START",
+          "label": "Contract Creation Initiated",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "CREATE/CREATE2 opcode or creation transaction received"
+        },
+        {
+          "id": "ACTION-3860-CHECK-INITCODE-SIZE",
+          "label": "Check Initcode Size Against Limit",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify len(initcode) <= MAX_INITCODE_SIZE (49152 bytes)"
+        },
+        {
+          "id": "STATE-3860-INITCODE-EXCEEDS-LIMIT",
+          "label": "Initcode Exceeds Limit - Abort",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Initcode > 49152 bytes: transaction invalid or execution aborts (out of gas)"
+        },
+        {
+          "id": "ACTION-3860-COMPUTE-INITCODE-COST",
+          "label": "Compute Initcode Gas Cost",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "cost = INITCODE_WORD_COST * ceil(len(initcode) / 32) = 2 * ceil(len/32)"
+        },
+        {
+          "id": "ACTION-3860-CHARGE-INITCODE-GAS",
+          "label": "Charge Initcode Gas",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Deduct initcode cost before address calculation and execution"
+        },
+        {
+          "id": "STATE-3860-INITCODE-GAS-INSUFFICIENT",
+          "label": "Insufficient Gas for Initcode",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Out of gas when charging initcode cost"
+        },
+        {
+          "id": "STATE-3860-INITCODE-VALID",
+          "label": "Initcode Valid - Proceed to Execution",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Size check passed, gas charged, proceed with contract creation"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-3860-BEGIN-CHECK",
+          "source": "STATE-3860-CONTRACT-CREATION-START",
+          "target": "ACTION-3860-CHECK-INITCODE-SIZE",
+          "label": "Begin initcode size validation",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-3860-SIZE-EXCEEDED",
+          "source": "ACTION-3860-CHECK-INITCODE-SIZE",
+          "target": "STATE-3860-INITCODE-EXCEEDS-LIMIT",
+          "label": "len(initcode) > MAX_INITCODE_SIZE (49152)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-3860-SIZE-OK",
+          "source": "ACTION-3860-CHECK-INITCODE-SIZE",
+          "target": "ACTION-3860-COMPUTE-INITCODE-COST",
+          "label": "len(initcode) <= MAX_INITCODE_SIZE",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-3860-CHARGE-GAS",
+          "source": "ACTION-3860-COMPUTE-INITCODE-COST",
+          "target": "ACTION-3860-CHARGE-INITCODE-GAS",
+          "label": "Apply gas cost (2 gas per 32-byte word)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-3860-GAS-INSUFFICIENT",
+          "source": "ACTION-3860-CHARGE-INITCODE-GAS",
+          "target": "STATE-3860-INITCODE-GAS-INSUFFICIENT",
+          "label": "Insufficient gas for initcode cost",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-3860-GAS-CHARGED",
+          "source": "ACTION-3860-CHARGE-INITCODE-GAS",
+          "target": "STATE-3860-INITCODE-VALID",
+          "label": "Gas charged successfully",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-4895-WITHDRAWALS",
+      "title": "EIP-4895: Beacon Chain Withdrawals",
+      "description": "Push-based withdrawal processing from consensus layer (Shanghai+)",
+      "eip": "EIP-4895",
+      "source": "https://eips.ethereum.org/EIPS/eip-4895",
+      "activation_fork": "Shanghai",
+      "nodes": [
+        {
+          "id": "STATE-4895-BLOCK-RECEIVED",
+          "label": "Block with Withdrawals Received",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Block contains withdrawals array from consensus layer"
+        },
+        {
+          "id": "ACTION-4895-VALIDATE-WITHDRAWALS-ROOT",
+          "label": "Validate Withdrawals Root",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify header.withdrawals_root == compute_trie_root(withdrawals)"
+        },
+        {
+          "id": "STATE-4895-WITHDRAWALS-ROOT-INVALID",
+          "label": "Withdrawals Root Mismatch",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Block invalid - withdrawals root does not match"
+        },
+        {
+          "id": "STATE-4895-ITERATING-WITHDRAWALS",
+          "label": "Iterating Withdrawals",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-4895-PARSE-WITHDRAWAL",
+          "label": "Parse Withdrawal Data",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Extract [index, validator_index, address, amount] from withdrawal"
+        },
+        {
+          "id": "ACTION-4895-CREDIT-BALANCE",
+          "label": "Credit Withdrawal Amount to Address",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "address.balance += amount * 1e9 (Gwei to Wei) - MUST NOT fail"
+        },
+        {
+          "id": "STATE-4895-ALL-WITHDRAWALS-PROCESSED",
+          "label": "All Withdrawals Processed",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "All withdrawal balance credits applied - no gas consumed"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-4895-VALIDATE-ROOT",
+          "source": "STATE-4895-BLOCK-RECEIVED",
+          "target": "ACTION-4895-VALIDATE-WITHDRAWALS-ROOT",
+          "label": "Validate withdrawals commitment",
+          "data_involved": ["DATA-BLOCK", "DATA-WITHDRAWAL"]
+        },
+        {
+          "id": "EDGE-4895-ROOT-INVALID",
+          "source": "ACTION-4895-VALIDATE-WITHDRAWALS-ROOT",
+          "target": "STATE-4895-WITHDRAWALS-ROOT-INVALID",
+          "label": "Root mismatch - block invalid",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4895-ROOT-VALID",
+          "source": "ACTION-4895-VALIDATE-WITHDRAWALS-ROOT",
+          "target": "STATE-4895-ITERATING-WITHDRAWALS",
+          "label": "Root valid - begin processing",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4895-PARSE",
+          "source": "STATE-4895-ITERATING-WITHDRAWALS",
+          "target": "ACTION-4895-PARSE-WITHDRAWAL",
+          "label": "Parse next withdrawal",
+          "data_involved": ["DATA-WITHDRAWAL"]
+        },
+        {
+          "id": "EDGE-4895-CREDIT",
+          "source": "ACTION-4895-PARSE-WITHDRAWAL",
+          "target": "ACTION-4895-CREDIT-BALANCE",
+          "label": "Credit balance unconditionally",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4895-NEXT",
+          "source": "ACTION-4895-CREDIT-BALANCE",
+          "target": "STATE-4895-ITERATING-WITHDRAWALS",
+          "label": "More withdrawals to process",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4895-DONE",
+          "source": "ACTION-4895-CREDIT-BALANCE",
+          "target": "STATE-4895-ALL-WITHDRAWALS-PROCESSED",
+          "label": "No more withdrawals",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-7516-BLOBBASEFEE",
+      "title": "EIP-7516: BLOBBASEFEE Opcode",
+      "description": "Opcode returning current blob base fee (Cancun+)",
+      "eip": "EIP-7516",
+      "source": "https://eips.ethereum.org/EIPS/eip-7516",
+      "source_file": "core/vm/eips.go:325-333",
+      "activation_fork": "Cancun",
+      "opcode": "0x4a",
+      "gas_cost": 2,
+      "nodes": [
+        {
+          "id": "STATE-7516-OPCODE-START",
+          "label": "BLOBBASEFEE Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-7516-CHARGE-GAS",
+          "label": "Charge Gas (2 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "GasQuickStep = 2"
+        },
+        {
+          "id": "ACTION-7516-GET-BLOB-BASEFEE",
+          "label": "Get Blob Base Fee from Context",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "blobBaseFee := evm.Context.BlobBaseFee"
+        },
+        {
+          "id": "ACTION-7516-PUSH-VALUE",
+          "label": "Push Blob Base Fee to Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "scope.Stack.push(uint256.FromBig(blobBaseFee))"
+        },
+        {
+          "id": "STATE-7516-COMPLETE",
+          "label": "BLOBBASEFEE Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-7516-GAS",
+          "source": "STATE-7516-OPCODE-START",
+          "target": "ACTION-7516-CHARGE-GAS",
+          "label": "Charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7516-GET",
+          "source": "ACTION-7516-CHARGE-GAS",
+          "target": "ACTION-7516-GET-BLOB-BASEFEE",
+          "label": "Read blob base fee",
+          "data_involved": ["DATA-EVM-CONTEXT"]
+        },
+        {
+          "id": "EDGE-7516-PUSH",
+          "source": "ACTION-7516-GET-BLOB-BASEFEE",
+          "target": "ACTION-7516-PUSH-VALUE",
+          "label": "Push to stack",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7516-DONE",
+          "source": "ACTION-7516-PUSH-VALUE",
+          "target": "STATE-7516-COMPLETE",
+          "label": "Complete",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-4788-BEACON-ROOT",
+      "title": "EIP-4788: Beacon Block Root in EVM",
+      "description": "System contract storing beacon block roots for cross-layer verification (Cancun+)",
+      "eip": "EIP-4788",
+      "source": "https://eips.ethereum.org/EIPS/eip-4788",
+      "activation_fork": "Cancun",
+      "constants": {
+        "BEACON_ROOTS_ADDRESS": "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02",
+        "SYSTEM_ADDRESS": "0xfffffffffffffffffffffffffffffffffffffffe",
+        "HISTORY_BUFFER_LENGTH": 8191
+      },
+      "nodes": [
+        {
+          "id": "STATE-4788-BLOCK-START",
+          "label": "Block Processing Start (Cancun+)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Block has parent_beacon_block_root in header"
+        },
+        {
+          "id": "ACTION-4788-SYSTEM-CALL",
+          "label": "System Call to Beacon Roots Contract",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Call BEACON_ROOTS_ADDRESS as SYSTEM_ADDRESS with parent beacon root"
+        },
+        {
+          "id": "ACTION-4788-COMPUTE-SLOT-INDEX",
+          "label": "Compute Ring Buffer Index",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "slot = header.timestamp % HISTORY_BUFFER_LENGTH (8191)"
+        },
+        {
+          "id": "ACTION-4788-STORE-TIMESTAMP",
+          "label": "Store Timestamp at Index",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "storage[slot] = header.timestamp"
+        },
+        {
+          "id": "ACTION-4788-STORE-ROOT",
+          "label": "Store Beacon Root at Index + Buffer Length",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "storage[slot + HISTORY_BUFFER_LENGTH] = parent_beacon_block_root"
+        },
+        {
+          "id": "STATE-4788-STORAGE-COMPLETE",
+          "label": "Beacon Root Stored",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Beacon root stored in ring buffer, execution continues"
+        },
+        {
+          "id": "STATE-4788-QUERY-START",
+          "label": "External Query for Beacon Root",
+          "actor_id": "ACTOR-EXTERNAL-USER",
+          "type": "State",
+          "description": "User/contract calls BEACON_ROOTS_ADDRESS with timestamp"
+        },
+        {
+          "id": "ACTION-4788-LOOKUP-TIMESTAMP",
+          "label": "Lookup Stored Timestamp",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "stored_timestamp = storage[input_timestamp % HISTORY_BUFFER_LENGTH]"
+        },
+        {
+          "id": "ACTION-4788-VERIFY-TIMESTAMP",
+          "label": "Verify Timestamp Match",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Check stored_timestamp == input_timestamp"
+        },
+        {
+          "id": "STATE-4788-TIMESTAMP-MISMATCH",
+          "label": "Timestamp Mismatch - Revert",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "Requested timestamp not in ring buffer"
+        },
+        {
+          "id": "ACTION-4788-RETURN-ROOT",
+          "label": "Return Beacon Root",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Return storage[slot + HISTORY_BUFFER_LENGTH]"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-4788-SYSTEM-CALL",
+          "source": "STATE-4788-BLOCK-START",
+          "target": "ACTION-4788-SYSTEM-CALL",
+          "label": "Execute system call at block start",
+          "data_involved": ["DATA-BLOCK"]
+        },
+        {
+          "id": "EDGE-4788-COMPUTE-SLOT",
+          "source": "ACTION-4788-SYSTEM-CALL",
+          "target": "ACTION-4788-COMPUTE-SLOT-INDEX",
+          "label": "Compute storage slot",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-STORE-TS",
+          "source": "ACTION-4788-COMPUTE-SLOT-INDEX",
+          "target": "ACTION-4788-STORE-TIMESTAMP",
+          "label": "Store timestamp",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-STORE-ROOT",
+          "source": "ACTION-4788-STORE-TIMESTAMP",
+          "target": "ACTION-4788-STORE-ROOT",
+          "label": "Store beacon root",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-COMPLETE",
+          "source": "ACTION-4788-STORE-ROOT",
+          "target": "STATE-4788-STORAGE-COMPLETE",
+          "label": "Storage complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-QUERY-LOOKUP",
+          "source": "STATE-4788-QUERY-START",
+          "target": "ACTION-4788-LOOKUP-TIMESTAMP",
+          "label": "Lookup timestamp in ring buffer",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-VERIFY",
+          "source": "ACTION-4788-LOOKUP-TIMESTAMP",
+          "target": "ACTION-4788-VERIFY-TIMESTAMP",
+          "label": "Verify timestamp match",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-MISMATCH",
+          "source": "ACTION-4788-VERIFY-TIMESTAMP",
+          "target": "STATE-4788-TIMESTAMP-MISMATCH",
+          "label": "Timestamps do not match",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-4788-RETURN",
+          "source": "ACTION-4788-VERIFY-TIMESTAMP",
+          "target": "ACTION-4788-RETURN-ROOT",
+          "label": "Timestamps match - return root",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-6110-DEPOSITS",
+      "title": "EIP-6110: Supply Validator Deposits on Chain",
+      "description": "Deposit log parsing for validator deposits (Prague+)",
+      "eip": "EIP-6110",
+      "source": "https://eips.ethereum.org/EIPS/eip-6110",
+      "activation_fork": "Prague",
+      "constants": {
+        "DEPOSIT_CONTRACT_ADDRESS": "0x00000000219ab540356cbb839cbe05303d7705fa",
+        "DEPOSIT_EVENT_SIGNATURE_HASH": "0x649bbc62d0e31342afea4e5cd82d4049e7e1ee912fc0889aa790803be39038c5",
+        "DEPOSIT_REQUEST_TYPE": "0x00"
+      },
+      "nodes": [
+        {
+          "id": "STATE-6110-TX-EXECUTED",
+          "label": "Transaction Executed with Logs",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Transaction produced logs that may contain deposits"
+        },
+        {
+          "id": "ACTION-6110-FILTER-LOGS",
+          "label": "Filter Logs for Deposit Events",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Find logs where address == DEPOSIT_CONTRACT_ADDRESS and topic[0] == DEPOSIT_EVENT_SIGNATURE_HASH"
+        },
+        {
+          "id": "ACTION-6110-VALIDATE-LOG-FORMAT",
+          "label": "Validate Log Data Format",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Verify proper field offsets and data sizes (192 bytes total)"
+        },
+        {
+          "id": "STATE-6110-LOG-INVALID",
+          "label": "Invalid Deposit Log Format",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Log data layout invalid - reject"
+        },
+        {
+          "id": "ACTION-6110-PARSE-DEPOSIT",
+          "label": "Parse Deposit Request Data",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Extract pubkey (48), withdrawal_credentials (32), amount (8), signature (96), index (8)"
+        },
+        {
+          "id": "ACTION-6110-ADD-TO-REQUESTS",
+          "label": "Add Deposit to Block Requests",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Append deposit as EIP-7685 request with type 0x00"
+        },
+        {
+          "id": "STATE-6110-ALL-DEPOSITS-COLLECTED",
+          "label": "All Deposits Collected",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "All deposit events parsed and added to requests list in order"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-6110-FILTER",
+          "source": "STATE-6110-TX-EXECUTED",
+          "target": "ACTION-6110-FILTER-LOGS",
+          "label": "Filter transaction logs",
+          "data_involved": ["DATA-RECEIPT"]
+        },
+        {
+          "id": "EDGE-6110-VALIDATE",
+          "source": "ACTION-6110-FILTER-LOGS",
+          "target": "ACTION-6110-VALIDATE-LOG-FORMAT",
+          "label": "Validate each matching log",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-6110-INVALID",
+          "source": "ACTION-6110-VALIDATE-LOG-FORMAT",
+          "target": "STATE-6110-LOG-INVALID",
+          "label": "Invalid log format",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-6110-PARSE",
+          "source": "ACTION-6110-VALIDATE-LOG-FORMAT",
+          "target": "ACTION-6110-PARSE-DEPOSIT",
+          "label": "Format valid - parse deposit",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-6110-ADD",
+          "source": "ACTION-6110-PARSE-DEPOSIT",
+          "target": "ACTION-6110-ADD-TO-REQUESTS",
+          "label": "Add to requests list",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-6110-NEXT",
+          "source": "ACTION-6110-ADD-TO-REQUESTS",
+          "target": "ACTION-6110-FILTER-LOGS",
+          "label": "Process next log",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-6110-DONE",
+          "source": "ACTION-6110-ADD-TO-REQUESTS",
+          "target": "STATE-6110-ALL-DEPOSITS-COLLECTED",
+          "label": "No more deposit logs",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-7002-WITHDRAWALS",
+      "title": "EIP-7002: Execution Layer Triggerable Exits",
+      "description": "Withdrawal request queue processing via system contract (Prague+)",
+      "eip": "EIP-7002",
+      "source": "https://eips.ethereum.org/EIPS/eip-7002",
+      "activation_fork": "Prague",
+      "constants": {
+        "WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS": "0x00000961Ef480Eb55e80D19ad83579A64c007002",
+        "SYSTEM_ADDRESS": "0xfffffffffffffffffffffffffffffffffffffffe",
+        "MAX_WITHDRAWAL_REQUESTS_PER_BLOCK": 16,
+        "SYSTEM_CALL_GAS_LIMIT": 30000000,
+        "MIN_WITHDRAWAL_REQUEST_FEE": 1
+      },
+      "nodes": [
+        {
+          "id": "STATE-7002-USER-REQUEST",
+          "label": "User Submits Withdrawal Request",
+          "actor_id": "ACTOR-EXTERNAL-USER",
+          "type": "State",
+          "description": "Validator calls withdrawal request contract with pubkey (48) + amount (8)"
+        },
+        {
+          "id": "ACTION-7002-VALIDATE-INPUT",
+          "label": "Validate Request Input",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify input is exactly 56 bytes (pubkey + amount)"
+        },
+        {
+          "id": "ACTION-7002-CHECK-FEE",
+          "label": "Check Withdrawal Request Fee",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify msg.value >= current fee (exponential pricing)"
+        },
+        {
+          "id": "STATE-7002-FEE-INSUFFICIENT",
+          "label": "Insufficient Fee - Revert",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-7002-ENQUEUE-REQUEST",
+          "label": "Enqueue Withdrawal Request",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Add request to queue storage (source, pubkey, amount)"
+        },
+        {
+          "id": "STATE-7002-REQUEST-QUEUED",
+          "label": "Withdrawal Request Queued",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-7002-BLOCK-END",
+          "label": "Block Processing End (Prague+)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "After all transactions, process system calls"
+        },
+        {
+          "id": "ACTION-7002-SYSTEM-CALL",
+          "label": "System Call to Withdrawal Contract",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Call contract as SYSTEM_ADDRESS with 30M gas"
+        },
+        {
+          "id": "ACTION-7002-DEQUEUE-REQUESTS",
+          "label": "Dequeue Pending Requests",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Dequeue up to MAX_WITHDRAWAL_REQUESTS_PER_BLOCK (16) requests"
+        },
+        {
+          "id": "ACTION-7002-UPDATE-EXCESS",
+          "label": "Update Excess Tracking",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Update excess counter for dynamic fee calculation"
+        },
+        {
+          "id": "ACTION-7002-ADD-TO-REQUESTS",
+          "label": "Add Requests to Block",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Add dequeued requests to EIP-7685 requests list"
+        },
+        {
+          "id": "STATE-7002-SYSTEM-CALL-COMPLETE",
+          "label": "System Call Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Requests dequeued and added to block"
+        },
+        {
+          "id": "STATE-7002-SYSTEM-CALL-FAILED",
+          "label": "System Call Failed - Block Invalid",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "System call failure invalidates entire block"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-7002-VALIDATE",
+          "source": "STATE-7002-USER-REQUEST",
+          "target": "ACTION-7002-VALIDATE-INPUT",
+          "label": "Validate input format",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-CHECK-FEE",
+          "source": "ACTION-7002-VALIDATE-INPUT",
+          "target": "ACTION-7002-CHECK-FEE",
+          "label": "Check fee payment",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-FEE-FAIL",
+          "source": "ACTION-7002-CHECK-FEE",
+          "target": "STATE-7002-FEE-INSUFFICIENT",
+          "label": "Fee too low",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-ENQUEUE",
+          "source": "ACTION-7002-CHECK-FEE",
+          "target": "ACTION-7002-ENQUEUE-REQUEST",
+          "label": "Fee sufficient - enqueue",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-QUEUED",
+          "source": "ACTION-7002-ENQUEUE-REQUEST",
+          "target": "STATE-7002-REQUEST-QUEUED",
+          "label": "Request added to queue",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-BLOCK-END-CALL",
+          "source": "STATE-7002-BLOCK-END",
+          "target": "ACTION-7002-SYSTEM-CALL",
+          "label": "Execute system call",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-DEQUEUE",
+          "source": "ACTION-7002-SYSTEM-CALL",
+          "target": "ACTION-7002-DEQUEUE-REQUESTS",
+          "label": "Dequeue requests",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-UPDATE",
+          "source": "ACTION-7002-DEQUEUE-REQUESTS",
+          "target": "ACTION-7002-UPDATE-EXCESS",
+          "label": "Update fee parameters",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-ADD",
+          "source": "ACTION-7002-UPDATE-EXCESS",
+          "target": "ACTION-7002-ADD-TO-REQUESTS",
+          "label": "Add to block requests",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-COMPLETE",
+          "source": "ACTION-7002-ADD-TO-REQUESTS",
+          "target": "STATE-7002-SYSTEM-CALL-COMPLETE",
+          "label": "System call success",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7002-FAIL",
+          "source": "ACTION-7002-SYSTEM-CALL",
+          "target": "STATE-7002-SYSTEM-CALL-FAILED",
+          "label": "System call failed",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-7251-CONSOLIDATIONS",
+      "title": "EIP-7251: Increase MAX_EFFECTIVE_BALANCE (Consolidations)",
+      "description": "Consolidation request queue processing via system contract (Prague+)",
+      "eip": "EIP-7251",
+      "source": "https://eips.ethereum.org/EIPS/eip-7251",
+      "activation_fork": "Prague",
+      "constants": {
+        "CONSOLIDATION_REQUEST_PREDEPLOY_ADDRESS": "0x0000BBdDc7CE488642fb579F8B00f3a590007251",
+        "SYSTEM_ADDRESS": "0xfffffffffffffffffffffffffffffffffffffffe",
+        "MAX_CONSOLIDATION_REQUESTS_PER_BLOCK": 2,
+        "SYSTEM_CALL_GAS_LIMIT": 30000000,
+        "MIN_CONSOLIDATION_REQUEST_FEE": 1
+      },
+      "nodes": [
+        {
+          "id": "STATE-7251-USER-REQUEST",
+          "label": "User Submits Consolidation Request",
+          "actor_id": "ACTOR-EXTERNAL-USER",
+          "type": "State",
+          "description": "Validator calls consolidation contract with source_pubkey (48) + target_pubkey (48)"
+        },
+        {
+          "id": "ACTION-7251-VALIDATE-INPUT",
+          "label": "Validate Request Input",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify input is exactly 96 bytes (source + target pubkeys)"
+        },
+        {
+          "id": "ACTION-7251-CHECK-FEE",
+          "label": "Check Consolidation Request Fee",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Verify msg.value >= current fee (exponential pricing)"
+        },
+        {
+          "id": "STATE-7251-FEE-INSUFFICIENT",
+          "label": "Insufficient Fee - Revert",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-7251-ENQUEUE-REQUEST",
+          "label": "Enqueue Consolidation Request",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Add request to queue storage (source_addr, source_pubkey, target_pubkey)"
+        },
+        {
+          "id": "STATE-7251-REQUEST-QUEUED",
+          "label": "Consolidation Request Queued",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-7251-BLOCK-END",
+          "label": "Block Processing End (Prague+)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "After all transactions, process system calls"
+        },
+        {
+          "id": "ACTION-7251-SYSTEM-CALL",
+          "label": "System Call to Consolidation Contract",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Call contract as SYSTEM_ADDRESS with 30M gas"
+        },
+        {
+          "id": "ACTION-7251-DEQUEUE-REQUESTS",
+          "label": "Dequeue Pending Requests",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Dequeue up to MAX_CONSOLIDATION_REQUESTS_PER_BLOCK (2) requests"
+        },
+        {
+          "id": "ACTION-7251-UPDATE-EXCESS",
+          "label": "Update Excess Tracking",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Update excess counter for dynamic fee calculation"
+        },
+        {
+          "id": "ACTION-7251-ADD-TO-REQUESTS",
+          "label": "Add Requests to Block",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Add dequeued requests to EIP-7685 requests list"
+        },
+        {
+          "id": "STATE-7251-SYSTEM-CALL-COMPLETE",
+          "label": "System Call Complete",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Requests dequeued and added to block"
+        },
+        {
+          "id": "STATE-7251-SYSTEM-CALL-FAILED",
+          "label": "System Call Failed - Block Invalid",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "System call failure invalidates entire block"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-7251-VALIDATE",
+          "source": "STATE-7251-USER-REQUEST",
+          "target": "ACTION-7251-VALIDATE-INPUT",
+          "label": "Validate input format",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-CHECK-FEE",
+          "source": "ACTION-7251-VALIDATE-INPUT",
+          "target": "ACTION-7251-CHECK-FEE",
+          "label": "Check fee payment",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-FEE-FAIL",
+          "source": "ACTION-7251-CHECK-FEE",
+          "target": "STATE-7251-FEE-INSUFFICIENT",
+          "label": "Fee too low",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-ENQUEUE",
+          "source": "ACTION-7251-CHECK-FEE",
+          "target": "ACTION-7251-ENQUEUE-REQUEST",
+          "label": "Fee sufficient - enqueue",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-QUEUED",
+          "source": "ACTION-7251-ENQUEUE-REQUEST",
+          "target": "STATE-7251-REQUEST-QUEUED",
+          "label": "Request added to queue",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-BLOCK-END-CALL",
+          "source": "STATE-7251-BLOCK-END",
+          "target": "ACTION-7251-SYSTEM-CALL",
+          "label": "Execute system call",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-DEQUEUE",
+          "source": "ACTION-7251-SYSTEM-CALL",
+          "target": "ACTION-7251-DEQUEUE-REQUESTS",
+          "label": "Dequeue requests",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-UPDATE",
+          "source": "ACTION-7251-DEQUEUE-REQUESTS",
+          "target": "ACTION-7251-UPDATE-EXCESS",
+          "label": "Update fee parameters",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-ADD",
+          "source": "ACTION-7251-UPDATE-EXCESS",
+          "target": "ACTION-7251-ADD-TO-REQUESTS",
+          "label": "Add to block requests",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-COMPLETE",
+          "source": "ACTION-7251-ADD-TO-REQUESTS",
+          "target": "STATE-7251-SYSTEM-CALL-COMPLETE",
+          "label": "System call success",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7251-FAIL",
+          "source": "ACTION-7251-SYSTEM-CALL",
+          "target": "STATE-7251-SYSTEM-CALL-FAILED",
+          "label": "System call failed",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-2935-BLOCKHASH-STATE",
+      "title": "EIP-2935: Save Historical Block Hashes in State",
+      "description": "Parent block hash storage in system contract (Prague+)",
+      "eip": "EIP-2935",
+      "source": "https://eips.ethereum.org/EIPS/eip-2935",
+      "activation_fork": "Prague",
+      "constants": {
+        "HISTORY_STORAGE_ADDRESS": "0x0000F90827F1C53a10cb7A02335B175320002935",
+        "SYSTEM_ADDRESS": "0xfffffffffffffffffffffffffffffffffffffffe",
+        "HISTORY_SERVE_WINDOW": 8191,
+        "SYSTEM_CALL_GAS_LIMIT": 30000000
+      },
+      "nodes": [
+        {
+          "id": "STATE-2935-BLOCK-START",
+          "label": "Block Processing Start (Prague+)",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Block processing begins, before transactions"
+        },
+        {
+          "id": "ACTION-2935-SYSTEM-CALL",
+          "label": "System Call to History Contract",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "Action",
+          "description": "Call HISTORY_STORAGE_ADDRESS as SYSTEM_ADDRESS with parent hash"
+        },
+        {
+          "id": "ACTION-2935-COMPUTE-SLOT",
+          "label": "Compute Ring Buffer Slot",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "slot = (block.number - 1) % HISTORY_SERVE_WINDOW (8191)"
+        },
+        {
+          "id": "ACTION-2935-STORE-HASH",
+          "label": "Store Parent Block Hash",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "storage[slot] = parent_block_hash"
+        },
+        {
+          "id": "STATE-2935-STORAGE-COMPLETE",
+          "label": "Block Hash Stored",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Parent hash stored, continue with transaction processing"
+        },
+        {
+          "id": "STATE-2935-QUERY-START",
+          "label": "External Query for Block Hash",
+          "actor_id": "ACTOR-EXTERNAL-USER",
+          "type": "State",
+          "description": "User/contract calls HISTORY_STORAGE_ADDRESS with block number"
+        },
+        {
+          "id": "ACTION-2935-LOOKUP-HASH",
+          "label": "Lookup Block Hash from Ring Buffer",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Return storage[block_number % HISTORY_SERVE_WINDOW]"
+        },
+        {
+          "id": "STATE-2935-HASH-RETURNED",
+          "label": "Block Hash Returned",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "Historical block hash returned from ring buffer"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-2935-SYSTEM-CALL",
+          "source": "STATE-2935-BLOCK-START",
+          "target": "ACTION-2935-SYSTEM-CALL",
+          "label": "Execute pre-transaction system call",
+          "data_involved": ["DATA-BLOCK"]
+        },
+        {
+          "id": "EDGE-2935-COMPUTE",
+          "source": "ACTION-2935-SYSTEM-CALL",
+          "target": "ACTION-2935-COMPUTE-SLOT",
+          "label": "Compute storage slot",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2935-STORE",
+          "source": "ACTION-2935-COMPUTE-SLOT",
+          "target": "ACTION-2935-STORE-HASH",
+          "label": "Store parent hash",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2935-COMPLETE",
+          "source": "ACTION-2935-STORE-HASH",
+          "target": "STATE-2935-STORAGE-COMPLETE",
+          "label": "Storage complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2935-QUERY",
+          "source": "STATE-2935-QUERY-START",
+          "target": "ACTION-2935-LOOKUP-HASH",
+          "label": "Query block hash",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2935-RETURN",
+          "source": "ACTION-2935-LOOKUP-HASH",
+          "target": "STATE-2935-HASH-RETURNED",
+          "label": "Return hash from ring buffer",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-7939-CLZ",
+      "title": "EIP-7939: CLZ Opcode",
+      "description": "Count Leading Zeros opcode (Osaka+)",
+      "eip": "EIP-7939",
+      "source_file": "core/vm/eips.go:298-323",
+      "activation_fork": "Osaka",
+      "opcode": "CLZ",
+      "gas_cost": 5,
+      "nodes": [
+        {
+          "id": "STATE-7939-OPCODE-START",
+          "label": "CLZ Opcode Encountered",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-7939-CHARGE-GAS",
+          "label": "Charge Gas (5 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "GasFastStep = 5"
+        },
+        {
+          "id": "ACTION-7939-PEEK-VALUE",
+          "label": "Peek Value from Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "x := scope.Stack.peek()"
+        },
+        {
+          "id": "ACTION-7939-COMPUTE-CLZ",
+          "label": "Compute Count Leading Zeros",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "result = 256 - x.BitLen() (number of leading zero bits in 256-bit value)"
+        },
+        {
+          "id": "ACTION-7939-SET-RESULT",
+          "label": "Set Result on Stack",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "x.SetUint64(result) - overwrites stack top in place"
+        },
+        {
+          "id": "STATE-7939-COMPLETE",
+          "label": "CLZ Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-7939-GAS",
+          "source": "STATE-7939-OPCODE-START",
+          "target": "ACTION-7939-CHARGE-GAS",
+          "label": "Charge gas",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7939-PEEK",
+          "source": "ACTION-7939-CHARGE-GAS",
+          "target": "ACTION-7939-PEEK-VALUE",
+          "label": "Get stack value",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7939-COMPUTE",
+          "source": "ACTION-7939-PEEK-VALUE",
+          "target": "ACTION-7939-COMPUTE-CLZ",
+          "label": "Compute leading zeros",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7939-SET",
+          "source": "ACTION-7939-COMPUTE-CLZ",
+          "target": "ACTION-7939-SET-RESULT",
+          "label": "Set result",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-7939-DONE",
+          "source": "ACTION-7939-SET-RESULT",
+          "target": "STATE-7939-COMPLETE",
+          "label": "Complete",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-EIP-2929-GAS-ACCESS",
+      "title": "EIP-2929: Gas Cost Increases for State Access",
+      "description": "Cold/warm access patterns and gas repricing (Berlin+)",
+      "eip": "EIP-2929",
+      "source": "https://eips.ethereum.org/EIPS/eip-2929",
+      "activation_fork": "Berlin",
+      "constants": {
+        "COLD_SLOAD_COST": 2100,
+        "COLD_ACCOUNT_ACCESS_COST": 2600,
+        "WARM_STORAGE_READ_COST": 100
+      },
+      "nodes": [
+        {
+          "id": "STATE-2929-TX-START",
+          "label": "Transaction Execution Start",
+          "actor_id": "ACTOR-EL-EXECUTION-CLIENT",
+          "type": "State",
+          "description": "Initialize accessed_addresses with {sender, recipient, precompiles}"
+        },
+        {
+          "id": "ACTION-2929-INIT-ACCESS-LISTS",
+          "label": "Initialize Access Lists",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Create accessed_addresses and accessed_storage_keys sets"
+        },
+        {
+          "id": "ACTION-2929-PROCESS-TX-ACCESS-LIST",
+          "label": "Process Transaction Access List (EIP-2930)",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Add addresses and storage keys from tx.accessList to warm sets"
+        },
+        {
+          "id": "STATE-2929-ACCESS-CHECK",
+          "label": "State Access Operation",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "SLOAD, CALL, BALANCE, EXTCODE*, SELFDESTRUCT"
+        },
+        {
+          "id": "ACTION-2929-CHECK-ADDRESS-COLD",
+          "label": "Check if Address is Cold",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Check if address in accessed_addresses set"
+        },
+        {
+          "id": "ACTION-2929-CHARGE-COLD-ACCOUNT",
+          "label": "Charge Cold Account Access (2600 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "First access to address costs 2600 gas"
+        },
+        {
+          "id": "ACTION-2929-CHARGE-WARM-ACCOUNT",
+          "label": "Charge Warm Account Access (100 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Subsequent access to same address costs 100 gas"
+        },
+        {
+          "id": "ACTION-2929-ADD-ADDRESS-WARM",
+          "label": "Add Address to Warm Set",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "accessed_addresses.add(address)"
+        },
+        {
+          "id": "STATE-2929-SLOAD-CHECK",
+          "label": "SLOAD Operation",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "Storage read operation"
+        },
+        {
+          "id": "ACTION-2929-CHECK-SLOT-COLD",
+          "label": "Check if Storage Slot is Cold",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "Check if (address, key) in accessed_storage_keys"
+        },
+        {
+          "id": "ACTION-2929-CHARGE-COLD-SLOAD",
+          "label": "Charge Cold SLOAD (2100 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "First access to storage slot costs 2100 gas"
+        },
+        {
+          "id": "ACTION-2929-CHARGE-WARM-SLOAD",
+          "label": "Charge Warm SLOAD (100 gas)",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "Action",
+          "description": "Subsequent access to same slot costs 100 gas"
+        },
+        {
+          "id": "ACTION-2929-ADD-SLOT-WARM",
+          "label": "Add Storage Slot to Warm Set",
+          "actor_id": "ACTOR-STATE-DB",
+          "type": "Action",
+          "description": "accessed_storage_keys.add((address, key))"
+        },
+        {
+          "id": "STATE-2929-ACCESS-COMPLETE",
+          "label": "Access Complete",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "Gas charged, continue execution"
+        },
+        {
+          "id": "STATE-2929-SCOPE-REVERT",
+          "label": "Scope Reverted",
+          "actor_id": "ACTOR-EVM-INTERPRETER",
+          "type": "State",
+          "description": "On revert, access sets revert to pre-scope state"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-2929-INIT",
+          "source": "STATE-2929-TX-START",
+          "target": "ACTION-2929-INIT-ACCESS-LISTS",
+          "label": "Initialize warm sets",
+          "data_involved": ["DATA-MESSAGE"]
+        },
+        {
+          "id": "EDGE-2929-ACCESS-LIST",
+          "source": "ACTION-2929-INIT-ACCESS-LISTS",
+          "target": "ACTION-2929-PROCESS-TX-ACCESS-LIST",
+          "label": "Process EIP-2930 access list",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-ACCOUNT-CHECK",
+          "source": "STATE-2929-ACCESS-CHECK",
+          "target": "ACTION-2929-CHECK-ADDRESS-COLD",
+          "label": "Check address access",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-COLD-ACCOUNT",
+          "source": "ACTION-2929-CHECK-ADDRESS-COLD",
+          "target": "ACTION-2929-CHARGE-COLD-ACCOUNT",
+          "label": "Address is cold",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-WARM-ACCOUNT",
+          "source": "ACTION-2929-CHECK-ADDRESS-COLD",
+          "target": "ACTION-2929-CHARGE-WARM-ACCOUNT",
+          "label": "Address is warm",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-ADD-ADDRESS",
+          "source": "ACTION-2929-CHARGE-COLD-ACCOUNT",
+          "target": "ACTION-2929-ADD-ADDRESS-WARM",
+          "label": "Mark address warm",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-SLOAD-CHECK",
+          "source": "STATE-2929-SLOAD-CHECK",
+          "target": "ACTION-2929-CHECK-SLOT-COLD",
+          "label": "Check storage slot",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-COLD-SLOAD",
+          "source": "ACTION-2929-CHECK-SLOT-COLD",
+          "target": "ACTION-2929-CHARGE-COLD-SLOAD",
+          "label": "Slot is cold",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-WARM-SLOAD",
+          "source": "ACTION-2929-CHECK-SLOT-COLD",
+          "target": "ACTION-2929-CHARGE-WARM-SLOAD",
+          "label": "Slot is warm",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-ADD-SLOT",
+          "source": "ACTION-2929-CHARGE-COLD-SLOAD",
+          "target": "ACTION-2929-ADD-SLOT-WARM",
+          "label": "Mark slot warm",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-COLD-COMPLETE",
+          "source": "ACTION-2929-ADD-ADDRESS-WARM",
+          "target": "STATE-2929-ACCESS-COMPLETE",
+          "label": "Access complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-WARM-ACCOUNT-COMPLETE",
+          "source": "ACTION-2929-CHARGE-WARM-ACCOUNT",
+          "target": "STATE-2929-ACCESS-COMPLETE",
+          "label": "Access complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-SLOT-ADD-COMPLETE",
+          "source": "ACTION-2929-ADD-SLOT-WARM",
+          "target": "STATE-2929-ACCESS-COMPLETE",
+          "label": "Access complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-2929-WARM-SLOAD-COMPLETE",
+          "source": "ACTION-2929-CHARGE-WARM-SLOAD",
+          "target": "STATE-2929-ACCESS-COMPLETE",
+          "label": "Access complete",
+          "data_involved": []
+        }
+      ]
+    }
+  ],
+  "pending_sub_graphs": []
+}

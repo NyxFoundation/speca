@@ -1,0 +1,299 @@
+{
+  "metadata": {
+    "run_id": 7,
+    "timestamp": "2025-12-24T00:00:00Z",
+    "batch_size": 20,
+    "processed_ids_start": "CHECK-ST-REFUND-GAS-001",
+    "processed_ids_end": "CL-PROP-EVM-NODE-ACTION-EVM-CREATE-CONTRACT-001-ACTION-EVM-CREATE-CONTRACT"
+  },
+  "audit_items": [
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-EIP7702-PROCESS-001-ACTION-ST-EIP7702-PROCESS",
+      "file": "core/state_transition.go",
+      "line": 514,
+      "classification": "code-quality-issue",
+      "summary": "EIP-7702 authorization errors are silently ignored in loop without logging",
+      "attack_vector": "Faulty Error Handling",
+      "severity": "Low",
+      "confidence": "High",
+      "counterexample": {
+        "preconditions": "User submits transaction with EIP-7702 authorization list containing invalid authorizations",
+        "attack_sequence": [
+          "1. User creates transaction with 10 authorization entries",
+          "2. Some authorizations have invalid signatures or wrong chain IDs",
+          "3. Invalid authorizations are silently skipped (line 514-516)"
+        ],
+        "expected_outcome": "No direct security impact, but users may not understand why their authorizations weren't applied. This could lead to unexpected behavior but is not exploitable."
+      },
+      "evidence": {
+        "phase1_static": "Line 514-516 shows 'Note errors are ignored, we simply skip invalid authorizations here.' Analyzed all 5 attack vectors: Input Validation Bypass - N/A (signatures are validated in validateAuthorization), State Transition - N/A (state only changes for valid auths), Resource Exhaustion - N/A (bounded by auth list size), Error Handling - code quality issue identified, Race Conditions - N/A (single-threaded per tx).",
+        "phase2_counterexample_attempts": "Tried: invalid signatures (skipped correctly), wrong chain ID (skipped correctly), nonce mismatch (skipped correctly), combination (all skipped). No security exploit possible, just silent behavior.",
+        "phase3_guard_search": "Guard exists: applyAuthorization validates before applying. However, the silent failure without logging is a code quality concern for debugging."
+      }
+    },
+    {
+      "check_id": "CL-PROP-EVM-NODE-ACTION-EVM-LOOKUP-OPERATION-001-ACTION-EVM-LOOKUP-OPERATION",
+      "file": "core/vm/interpreter.go",
+      "line": 188,
+      "classification": "needs-verification",
+      "summary": "Jump table lookup for undefined opcodes requires verification of all fork-specific tables",
+      "attack_vector": "Input Validation Bypass",
+      "severity": "High",
+      "confidence": "Medium",
+      "counterexample": {
+        "preconditions": "Attacker submits contract with opcode not defined in current fork's jump table",
+        "attack_sequence": [
+          "1. Attacker deploys contract containing undefined opcode byte",
+          "2. EVM fetches opcode at line 187: op = contract.GetOp(pc)",
+          "3. Jump table lookup at line 188: operation := jumpTable[op]",
+          "4. If operation is nil or has nil execute, behavior depends on handler"
+        ],
+        "expected_outcome": "Static analysis cannot verify all 256 opcode entries across all 14 fork-specific jump tables are correctly defined"
+      },
+      "evidence": {
+        "phase1_static": "Line 188 looks up operation from jumpTable without explicit nil check before accessing operation.constantGas at line 189. All 5 vectors analyzed.",
+        "phase2_counterexample_attempts": "Tried: undefined opcode (needs dynamic test), boundary opcode 0xFF (needs dynamic test), fork boundary opcodes (needs test). Cannot statically verify all fork tables.",
+        "phase3_guard_search": "Jump tables are initialized in evm.go lines 151-183 for each fork. Line 167 does nil-check jumpTable[0] to catch nil table. However, individual undefined opcodes within valid tables need dynamic verification.",
+        "verification_required": "Fuzzing with all 256 opcode values across each fork transition point. Test vectors for fork-specific opcode activation boundaries."
+      }
+    }
+  ],
+  "verified_items": [
+    {
+      "check_id": "CHECK-ST-REFUND-GAS-001",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "640-673",
+        "counterexample_attempts": "Tried: overflow in refund calculation (protected by cap), underflow (impossible due to min operation), TOCTOU (single-threaded), boundary (max refund capped at gasUsed/5)",
+        "guard_identified": "calcRefund() at line 641 caps refund: refund = min(state.GetRefund(), gasUsed / params.RefundQuotientEIP3529). returnGas() at line 661 correctly multiplies remaining by gasPrice.",
+        "guard_strength": "STRONG - mathematically capped at 20% of gas used per EIP-3529. Integer overflow impossible due to uint64 operations with bounded inputs.",
+        "analysis": "Refund calculation follows EIP-3529 spec. Pre-London uses /2 cap (line 645), post-London uses /5 cap (line 648). Guard at line 650-652 ensures refund never exceeds accumulated refund counter."
+      }
+    },
+    {
+      "check_id": "CHECK-ST-CREATE-RECEIPT-001",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_processor.go",
+        "line_range": "186-216",
+        "counterexample_attempts": "Tried: status corruption (enum values hardcoded), gas manipulation (computed from result.UsedGas), log tampering (deep copied from statedb), bloom corruption (computed from logs)",
+        "guard_identified": "MakeReceipt at line 187 creates receipt with correct Status (line 191-195 checks result.Failed()), correct GasUsed (line 197), correct logs from statedb.GetLogs (line 210), and correct bloom filter (line 211).",
+        "guard_strength": "STRONG - receipt fields are deterministically computed from execution result. Status is binary (0 or 1). No external inputs affect receipt construction.",
+        "analysis": "Receipt generation is deterministic. All 5 attack vectors analyzed: no input bypass possible, state transition is atomic, no resource exhaustion, errors correctly set status to 0, no concurrency issues."
+      }
+    },
+    {
+      "check_id": "CL-PROP-BP-EDGE-BP-REQUESTS-001-EDGE-BP-REQUESTS",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_processor.go",
+        "line_range": "109-139",
+        "counterexample_attempts": "Tried: out-of-order execution (code structure prevents), system call before user tx (code order prevents), request injection (parsed from logs only), combination attacks (ordering is deterministic)",
+        "guard_identified": "Process() function at line 71 shows clear ordering: (1) ApplyDAOHardFork if applicable (line 89-91), (2) ProcessBeaconBlockRoot (line 101-103), (3) ProcessParentBlockHash (line 104-106), (4) for loop over block.Transactions() (line 109-122), (5) ParseDepositLogs/ProcessWithdrawalQueue/ProcessConsolidationQueue (lines 124-139).",
+        "guard_strength": "STRONG - code structure enforces ordering. System calls only execute after all user transactions complete. No conditional branches can alter this ordering.",
+        "analysis": "Sequential code execution guarantees ordering. All 5 vectors verified: inputs are block-level, state transitions are ordered, no DoS via ordering, error in one phase terminates processing, single-threaded execution."
+      }
+    },
+    {
+      "check_id": "CL-PROP-BP-EDGE-BP-FINALIZE-001-EDGE-BP-FINALIZE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_processor.go",
+        "line_range": "141-150",
+        "counterexample_attempts": "Tried: early finalization (code structure prevents), finalization bypass (always called on success path), state mutation after finalize (no code after line 142), race condition (single-threaded)",
+        "guard_identified": "Finalize is called at line 142: p.chain.Engine().Finalize(p.chain, header, tracingStateDB, block.Body()). This occurs after all transaction processing (line 122) and after request processing (line 139).",
+        "guard_strength": "STRONG - Finalize is the last state mutation before ProcessResult is returned. Code structure guarantees this ordering.",
+        "analysis": "Block finalization ordering is enforced by sequential execution. Result struct (lines 144-149) is only constructed after Finalize completes."
+      }
+    },
+    {
+      "check_id": "CL-PROP-BP-EDGE-BP-COMPLETE-001-EDGE-BP-COMPLETE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_processor.go",
+        "line_range": "144-150",
+        "counterexample_attempts": "Tried: missing receipts (append in loop ensures all), incorrect gas sum (accumulated in usedGas), missing logs (appended from each receipt), missing requests (collected before return)",
+        "guard_identified": "ProcessResult struct at line 144-149 contains Receipts, Requests, Logs, and GasUsed. Receipts appended at line 120 for each tx. Logs appended at line 121. Requests collected at lines 127-138. GasUsed dereferenced at line 148.",
+        "guard_strength": "STRONG - loop structure ensures all receipts are collected. Error at any point returns early, preventing incomplete results.",
+        "analysis": "All 5 attack vectors verified: no input manipulation affects result structure, state transitions produce correct outputs, no DoS via result size (bounded by block), errors terminate cleanly, single-threaded."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-STATE-ST-START-001-STATE-ST-START",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "175-203",
+        "counterexample_attempts": "Tried: sender forgery (types.Sender validates), field extraction errors (direct tx method calls), missing fields (all Transaction methods return defaults for missing fields), signature malleability (handled by signer)",
+        "guard_identified": "TransactionToMessage at line 176 correctly extracts: Nonce (line 178), GasLimit (line 179), GasPrice (lines 180-198 with EIP-1559 handling), To (line 183), Value (line 184), Data (line 185), AccessList (line 186), SetCodeAuthorizations (line 187), BlobHashes (line 190). Sender recovered at line 201 via types.Sender().",
+        "guard_strength": "STRONG - all fields extracted through typed Transaction interface methods. Sender recovery uses cryptographic signature verification.",
+        "analysis": "Message construction is deterministic from Transaction. Signature verification (types.Sender) is the cryptographic guard."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-VERIFY-SIGNATURE-001-ACTION-ST-VERIFY-SIGNATURE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "201",
+        "counterexample_attempts": "Tried: invalid R/S (crypto validates), V manipulation (signer verifies), signature malleability (prevented by S <= N/2 check), replay (chain ID in signature)",
+        "guard_identified": "types.Sender(s, tx) at line 201 calls into transaction_signing.go which uses crypto.Ecrecover for secp256k1 signature recovery. ValidateSignatureValues checks R, S are in valid range and S is not malleable.",
+        "guard_strength": "STRONG - cryptographic guarantee. secp256k1 ECDSA signature verification. Invalid signatures return error, preventing address recovery.",
+        "analysis": "Signature verification is cryptographic. All 5 vectors: signature is external input but cryptographically validated, state transition only proceeds with valid signature, no resource exhaustion (constant time), errors propagate, no concurrency."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-SET-NONCE-001-ACTION-ST-SET-NONCE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "316-328",
+        "counterexample_attempts": "Tried: nonce replay (exact match required), nonce gap (ErrNonceTooHigh), nonce underflow (ErrNonceTooLow), nonce overflow (line 325-327 checks nonce+1 < nonce)",
+        "guard_identified": "preCheck() at lines 316-328 validates nonce: stNonce < msgNonce returns ErrNonceTooHigh, stNonce > msgNonce returns ErrNonceTooLow, stNonce+1 < stNonce (overflow) returns ErrNonceMax.",
+        "guard_strength": "STRONG - exact nonce match required. Overflow check prevents nonce manipulation attacks.",
+        "analysis": "Nonce validation prevents replay attacks. All 5 vectors verified: nonce is validated before any state change, exact match enforced, no DoS vector, errors propagate correctly, single-threaded per tx."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-BUY-GAS-001-ACTION-ST-BUY-GAS",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "266-308",
+        "counterexample_attempts": "Tried: balance underflow (checked at line 292), overflow in cost calculation (uint256 used), blob gas bypass (added at lines 276-286), insufficient balance with blob (combined check at line 292)",
+        "guard_identified": "buyGas() checks balance >= balanceCheck (line 292) before SubBalance (line 306). balanceCheck includes gas cost (line 267-273), value (line 274), and blob gas cost (lines 277-286 for Cancun+).",
+        "guard_strength": "STRONG - balance verified before deduction. uint256 prevents overflow. All cost components included in check.",
+        "analysis": "Gas purchase is atomic and verified. Overflow protection via uint256. EIP-4844 blob gas correctly included. Errors return before any state modification."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-INTRINSIC-GAS-001-ACTION-ST-INTRINSIC-GAS",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "71-117",
+        "counterexample_attempts": "Tried: overflow in gas calculation (checked at lines 91-93, 96-98, 103-105), zero byte manipulation (correctly counted at line 83), initcode size attack (EIP-3860 check at line 101-107)",
+        "guard_identified": "IntrinsicGas function checks for overflow at each addition: line 91-93 for non-zero bytes, line 96-98 for zero bytes, line 103-105 for initcode words. Returns ErrGasUintOverflow on any overflow.",
+        "guard_strength": "STRONG - explicit overflow checks before each multiplication/addition. All gas components per spec: base tx gas, data gas, access list gas, auth list gas, initcode gas.",
+        "analysis": "Intrinsic gas calculation follows EIPs precisely. Overflow-safe arithmetic. All 5 vectors: no input bypass, deterministic calculation, bounded by tx size, errors propagate, single-threaded."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-TRANSFER-VALUE-001-ACTION-ST-TRANSFER-VALUE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "483-489",
+        "counterexample_attempts": "Tried: overflow in value (uint256 from big.Int checked at line 483-486), underflow (CanTransfer checked at line 487), transfer to self (handled by Context.Transfer), zero value (IsZero short-circuit at line 487)",
+        "guard_identified": "Value overflow checked at line 483-486 (uint256.FromBig returns overflow flag). Balance check at line 487 via evm.Context.CanTransfer. Transfer only proceeds if both checks pass.",
+        "guard_strength": "STRONG - balance verified before transfer. uint256 prevents overflow. CanTransfer checks sender has sufficient balance.",
+        "analysis": "Value transfer is guarded by balance check. Atomic transfer via Context.Transfer. All 5 vectors verified."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-CREATE-OR-CALL-001-ACTION-ST-CREATE-OR-CALL",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "505-530",
+        "counterexample_attempts": "Tried: wrong branch (To == nil is clear), bypass create checks (depth, balance verified in evm.Create), bypass call checks (depth, balance verified in evm.Call)",
+        "guard_identified": "Branch logic at line 505: if contractCreation (To == nil) calls evm.Create at line 506, else calls evm.Call at line 529. Both paths verify depth limit and balance in core/vm/evm.go.",
+        "guard_strength": "STRONG - branch is deterministic based on To field. Both Create and Call have identical security guards (depth < 1024, balance sufficient).",
+        "analysis": "Create/Call branching is simple nil check. Both execution paths have depth limits, balance checks, and state snapshot/revert."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-REFUND-GAS-001-ACTION-ST-REFUND-GAS",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "537-551",
+        "counterexample_attempts": "Tried: refund overflow (capped by calcRefund), floor gas bypass (EIP-7623 enforced at lines 538-550), refund manipulation (counter is read-only here)",
+        "guard_identified": "calcRefund() at line 537 returns capped refund. EIP-7623 floor gas check at lines 538-550 ensures minimum data gas is paid. st.returnGas() at line 551 returns remaining to sender.",
+        "guard_strength": "STRONG - refund is capped mathematically. Floor gas prevents refund exploitation for data-heavy transactions.",
+        "analysis": "Gas refund follows EIP-3529 (20% cap) and EIP-7623 (floor data gas). All calculations are bounded."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-ACTION-ST-CREATE-RECEIPT-001-ACTION-ST-CREATE-RECEIPT",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_processor.go",
+        "line_range": "186-216",
+        "counterexample_attempts": "Tried: wrong status (result.Failed() determines), wrong gas (result.UsedGas is authoritative), wrong logs (GetLogs from statedb is deterministic), wrong contract address (crypto.CreateAddress is deterministic)",
+        "guard_identified": "MakeReceipt at line 187: Status set from result.Failed() (lines 191-195), GasUsed from result.UsedGas (line 197), Logs from statedb.GetLogs (line 210), Bloom from CreateBloom (line 211).",
+        "guard_strength": "STRONG - all receipt fields computed deterministically from execution result and state. No external manipulation possible.",
+        "analysis": "Receipt is deterministic summary of execution. Contract address for CREATE computed via crypto.CreateAddress(origin, nonce) at line 206."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-STATE-ST-COMPLETE-001-STATE-ST-COMPLETE",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "428-580",
+        "counterexample_attempts": "Tried: early return (only on error), skipped steps (linear code flow), partial completion (atomic via single return), state corruption (journaled and reverted on error)",
+        "guard_identified": "execute() function: preCheck at line 440, intrinsic gas at line 452-458, value check at line 483-489, EVM execution at line 505-530, refund at line 537-551, coinbase payment at line 553-572, return at line 574-579.",
+        "guard_strength": "STRONG - sequential execution with single return point. Each step must complete before next. Errors terminate early.",
+        "analysis": "State transition is complete and atomic. All steps execute in order. Receipt returned only on successful completion."
+      }
+    },
+    {
+      "check_id": "CL-PROP-ST-NODE-STATE-ST-FAILED-001-STATE-ST-FAILED",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/state_transition.go",
+        "line_range": "313-413",
+        "counterexample_attempts": "Tried: nonce bypass (checked at 316-328), balance bypass (checked in buyGas at 292), gas bypass (checked at 456-458), state leak (preCheck returns before any state change except in buyGas which is after balance check)",
+        "guard_identified": "preCheck at line 313 validates: nonce (316-328), sender is EOA (337-341), gas fee cap (344-366), blob hashes (369-387), blob fee cap (389-401), auth list (404-410). buyGas (412) only called after all checks pass.",
+        "guard_strength": "STRONG - all validation occurs before state modification. Errors return immediately with no side effects.",
+        "analysis": "Pre-execution failures terminate cleanly. No state modification occurs before buyGas, which is guarded by balance check."
+      }
+    },
+    {
+      "check_id": "CL-PROP-EVM-NODE-STATE-EVM-START-001-STATE-EVM-START",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/vm/interpreter.go",
+        "line_range": "97-148",
+        "counterexample_attempts": "Tried: wrong code (contract.Code set by caller), wrong gas (contract.Gas set by caller), wrong PC (initialized to 0 at line 131), wrong memory (NewMemory at line 121), stack corruption (newstack at line 122)",
+        "guard_identified": "Run() initializes: depth++ (line 99), readOnly flag (line 104-107), returnData = nil (line 111), memory and stack (lines 121-127), pc = 0 (line 131). Empty code short-circuits at line 114-116.",
+        "guard_strength": "STRONG - all state is freshly initialized for each call. No carried-over state from previous calls.",
+        "analysis": "EVM entry point correctly initializes all execution context. Depth tracked, memory/stack fresh, PC at 0."
+      }
+    },
+    {
+      "check_id": "CL-PROP-EVM-NODE-ACTION-EVM-CHECK-DEPTH-001-ACTION-EVM-CHECK-DEPTH",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/vm/evm.go",
+        "line_range": "252-254",
+        "counterexample_attempts": "Tried: depth bypass (checked before execution), depth off-by-one (> not >= used with 1024 limit), depth underflow (depth is int, starts at 0), reentrancy (depth incremented in Run at line 99)",
+        "guard_identified": "Call depth check at line 252: 'if evm.depth > int(params.CallCreateDepth)'. params.CallCreateDepth is 1024. Depth incremented in interpreter.go Run() at line 99 and decremented in defer at line 100.",
+        "guard_strength": "STRONG - depth limit of 1024 is enforced before any execution. ErrDepth returned immediately.",
+        "analysis": "Call depth limit prevents stack overflow attacks. Depth tracked across all Call, Create, CallCode, DelegateCall, StaticCall."
+      }
+    },
+    {
+      "check_id": "CL-PROP-EVM-NODE-ACTION-EVM-CREATE-CONTRACT-001-ACTION-EVM-CREATE-CONTRACT",
+      "classification": "PASS",
+      "evidence": {
+        "source_file": "core/vm/contract.go",
+        "line_range": "49-62",
+        "counterexample_attempts": "Tried: wrong caller (parameter validated by caller code), wrong value (parameter from evm.go Create), wrong gas (parameter from evm.go Create), wrong address (computed deterministically in Create/Create2)",
+        "guard_identified": "NewContract at line 50 correctly sets: caller (line 56), address (line 57), Gas (line 59), value (line 60). JumpDests initialized (lines 52-54). SetCallCode sets Code and CodeHash (line 162-164).",
+        "guard_strength": "STRONG - contract context is set by trusted caller (evm.go). All fields initialized from validated parameters.",
+        "analysis": "Contract context correctly captures caller, value, gas, code. Address computed via crypto.CreateAddress/CreateAddress2 in evm.go."
+      }
+    }
+  ],
+  "summary": {
+    "total_processed": 20,
+    "passed": 18,
+    "potential_vulnerabilities": 0,
+    "code_quality_issues": 1,
+    "needs_verification": 1,
+    "audit_gaps": 0
+  }
+}
