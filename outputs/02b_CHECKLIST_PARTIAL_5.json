@@ -1,0 +1,567 @@
+{
+  "metadata": {
+    "generated_at": "2026-01-07T00:00:00Z",
+    "stage": "02b_remaining_iterative",
+    "run_number": 5,
+    "description": "Partial audit checklist for non-boundary properties in zERC20 Privacy Token Protocol (Batch 5)",
+    "source_files": {
+      "property_catalog": "outputs/01c_PROP.json",
+      "state_file": "outputs/02b_STATE.json"
+    },
+    "properties_processed": [
+      "PROP-EDGE-LM-CALCULATES-FEE",
+      "PROP-EDGE-LM-BURNS-ZERC20",
+      "PROP-EDGE-LM-TRANSFERS-UNDERLYING",
+      "PROP-EDGE-UNWRAP-COMPLETE",
+      "PROP-EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY",
+      "PROP-EDGE-USER-NOW-HAS-UNDERLYING",
+      "PROP-EDGE-ZERC20-VALIDATES-VALUE",
+      "PROP-EDGE-VALUE-TOO-LARGE",
+      "PROP-EDGE-ZERC20-UPDATES-BALANCES",
+      "PROP-EDGE-ZERC20-UPDATES-HASH-CHAIN",
+      "PROP-EDGE-ZERC20-EMITS-EVENT",
+      "PROP-EDGE-TRANSFER-COMPLETE",
+      "PROP-EDGE-INDEXER-WATCHES",
+      "PROP-EDGE-INDEXER-TREE-UPDATED",
+      "PROP-EDGE-INDEXER-GENERATES-PROOF",
+      "PROP-EDGE-VERIFIER-RESERVES-CHECKPOINT",
+      "PROP-EDGE-CHECKPOINT-RESERVED",
+      "PROP-EDGE-AWAITING-NOVA-PROOF",
+      "PROP-EDGE-NOVA-PROOF-VALID",
+      "PROP-EDGE-DIVERGENT-PROOF-DETECTED"
+    ],
+    "total_checks": 20
+  },
+  "checklist": [
+    {
+      "id": "CL-PROP-EDGE-LM-CALCULATES-FEE-001",
+      "property_id": "PROP-EDGE-LM-CALCULATES-FEE",
+      "graph_element_under_test": "EDGE-LM-CALCULATES-FEE",
+      "title": "Verify fee computation uses ceiling division to protect protocol revenue",
+      "bug_class": "Arithmetic Rounding Error",
+      "risk_category": "Protocol Value Loss",
+      "severity_hint": "Medium",
+      "detection_procedure": "1. Locate IncentiveLib.getUnwrapFee() function in contracts/IncentiveLib.sol or similar\n2. Verify fee calculation uses ceiling division formula: (amount * feeRate + DENOMINATOR - 1) / DENOMINATOR\n3. Confirm no floor division is used that would benefit users at protocol expense\n4. Check edge cases: zero amount, maximum amount, boundary fee rates\n5. Verify fee rate bounds are enforced (e.g., cannot exceed 100%)\n6. Confirm fee is applied before underlying transfer calculation",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -rn 'getUnwrapFee\\|unwrapFee\\|fee.*ceil\\|ceilDiv' contracts/",
+          "assertion": "Fee calculation function exists with ceiling division"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapFeeCeilingRounding -vvv",
+          "assertion": "Fee rounds up, protecting protocol from dust loss"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapFeeEdgeCases -vvv",
+          "assertion": "Edge cases (zero, max, boundary) handled correctly"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-LM-CALCULATES-FEE -> Edge EDGE-LM-CALCULATES-FEE. Fee computation protects protocol from value extraction through rounding attacks. Ceiling division ensures protocol always receives at least the correct fee amount."
+    },
+    {
+      "id": "CL-PROP-EDGE-LM-BURNS-ZERC20-001",
+      "property_id": "PROP-EDGE-LM-BURNS-ZERC20",
+      "graph_element_under_test": "EDGE-LM-BURNS-ZERC20",
+      "title": "Verify burn-before-transfer ordering in unwrap to prevent double-spend",
+      "bug_class": "Operation Ordering Violation",
+      "risk_category": "Token Double-Spend",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate unwrap() function in LiquidityManager.sol\n2. Verify _burn() is called BEFORE safeTransfer() of underlying tokens\n3. Check that burn amount equals the full zERC20 amount being unwrapped\n4. Confirm no reentrancy can occur between burn and transfer\n5. Verify burn cannot fail silently (should revert on insufficient balance)\n6. Ensure checks-effects-interactions pattern is followed",
+      "executable_checks": [
+        {
+          "tool": "manual_review",
+          "command": "Review unwrap() control flow: burn must precede transfer",
+          "assertion": "Line number of _burn() < line number of safeTransfer()"
+        },
+        {
+          "tool": "slither",
+          "command": "slither contracts/LiquidityManager.sol --detect reentrancy-eth,reentrancy-no-eth,reentrancy-benign",
+          "assertion": "No reentrancy between burn and transfer"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapBurnBeforeTransfer -vvv",
+          "assertion": "Burn always precedes underlying transfer"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-LM-BURNS-ZERC20 -> Edge EDGE-LM-BURNS-ZERC20. Burn-before-transfer is critical for preventing attackers from reusing zERC20 tokens to claim underlying multiple times. EVM sequential execution ensures burn completes before transfer begins."
+    },
+    {
+      "id": "CL-PROP-EDGE-LM-TRANSFERS-UNDERLYING-001",
+      "property_id": "PROP-EDGE-LM-TRANSFERS-UNDERLYING",
+      "graph_element_under_test": "EDGE-LM-TRANSFERS-UNDERLYING",
+      "title": "Verify exact (amount - fee) underlying transfer using SafeERC20",
+      "bug_class": "Transfer Amount Mismatch",
+      "risk_category": "User Fund Loss",
+      "severity_hint": "High",
+      "detection_procedure": "1. Locate underlying transfer in unwrap() function\n2. Verify transfer uses SafeERC20.safeTransfer (not raw transfer)\n3. Confirm transfer amount = unwrapAmount - calculatedFee exactly\n4. Check no intermediate modifications to transfer amount\n5. Verify fee is sent to correct protocol address\n6. Ensure no truncation or rounding errors in amount calculation",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'safeTransfer' contracts/LiquidityManager.sol",
+          "assertion": "SafeERC20.safeTransfer used for underlying transfers"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapExactAmount -vvv",
+          "assertion": "User receives exact (amount - fee) underlying tokens"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapFeeDestination -vvv",
+          "assertion": "Fee is sent to correct protocol address"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-LM-TRANSFERS-UNDERLYING -> Edge EDGE-LM-TRANSFERS-UNDERLYING. Transfer amount must be computed as amount - fee without modification between computation and actual transfer. SafeERC20 ensures transfer reverts on failure."
+    },
+    {
+      "id": "CL-PROP-EDGE-UNWRAP-COMPLETE-001",
+      "property_id": "PROP-EDGE-UNWRAP-COMPLETE",
+      "graph_element_under_test": "EDGE-UNWRAP-COMPLETE",
+      "title": "Verify Unwrapped event emits accurate amounts matching actual transfers",
+      "bug_class": "Event Data Inconsistency",
+      "risk_category": "Off-chain Tracking Failure",
+      "severity_hint": "Medium",
+      "detection_procedure": "1. Locate Unwrapped event definition and emission\n2. Verify event parameters include: user, amount, fee, netAmount\n3. Confirm event uses same computed values as actual transfer\n4. Check event emission occurs after successful transfer\n5. Verify no code paths emit event without completing transfer\n6. Ensure event is not emitted on revert paths",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'event Unwrapped\\|emit Unwrapped' contracts/LiquidityManager.sol",
+          "assertion": "Unwrapped event defined and emitted"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapEventAccuracy -vvv",
+          "assertion": "Event amounts match actual transfer amounts"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-UNWRAP-COMPLETE -> Edge EDGE-UNWRAP-COMPLETE. Event accuracy is essential for off-chain indexing and user experience. Single transaction ensures event data matches transfer data."
+    },
+    {
+      "id": "CL-PROP-EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY-001",
+      "property_id": "PROP-EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY",
+      "graph_element_under_test": "EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY",
+      "title": "Verify clean revert on insufficient liquidity with no state changes",
+      "bug_class": "Partial State Mutation",
+      "risk_category": "User Fund Loss",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate liquidity check in unwrap() function\n2. Verify check occurs BEFORE burn operation\n3. Confirm InsufficientLiquidity error is defined and used\n4. Check revert happens cleanly without partial state changes\n5. Verify underlying token balance check is accurate\n6. Ensure no gas-only attacks possible via failed unwrap",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'InsufficientLiquidity\\|balance.*<\\|require.*liquidity' contracts/LiquidityManager.sol",
+          "assertion": "Insufficient liquidity check exists"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapInsufficientLiquidity -vvv",
+          "assertion": "Unwrap reverts cleanly when liquidity insufficient"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapNoPartialState -vvv",
+          "assertion": "No state changes on liquidity failure"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY -> Edge EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY. Liquidity check must occur before burn to prevent tokens being destroyed without underlying delivery. Clean revert ensures user can retry."
+    },
+    {
+      "id": "CL-PROP-EDGE-USER-NOW-HAS-UNDERLYING-001",
+      "property_id": "PROP-EDGE-USER-NOW-HAS-UNDERLYING",
+      "graph_element_under_test": "EDGE-USER-NOW-HAS-UNDERLYING",
+      "title": "Verify state transition only after successful underlying transfer",
+      "bug_class": "State-Transfer Desync",
+      "risk_category": "User Fund Loss",
+      "severity_hint": "High",
+      "detection_procedure": "1. Verify safeTransfer is used (reverts on failure)\n2. Confirm no state indicates completion before transfer succeeds\n3. Check for fee-on-transfer token handling if applicable\n4. Verify transfer to msg.sender (correct recipient)\n5. Ensure transfer amount matches expected value",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'safeTransfer.*msg.sender\\|safeTransfer.*user' contracts/LiquidityManager.sol",
+          "assertion": "SafeTransfer to user exists"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapTransferSuccess -vvv",
+          "assertion": "User receives underlying after unwrap"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testUnwrapTransferFailure -vvv",
+          "assertion": "Failed transfer reverts entire transaction"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-USER-NOW-HAS-UNDERLYING -> Edge EDGE-USER-NOW-HAS-UNDERLYING. safeTransfer reverts on failure, ensuring state transition only occurs on successful transfer. EVM atomicity guarantees consistency."
+    },
+    {
+      "id": "CL-PROP-EDGE-ZERC20-VALIDATES-VALUE-001",
+      "property_id": "PROP-EDGE-ZERC20-VALIDATES-VALUE",
+      "graph_element_under_test": "EDGE-ZERC20-VALIDATES-VALUE",
+      "title": "Verify strict value <= 2^248-1 comparison for BN254 field bounds",
+      "bug_class": "Off-by-one Boundary Error",
+      "risk_category": "Cryptographic Overflow",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate MAX_VALUE constant in zERC20.sol\n2. Verify MAX_VALUE = 2^248 - 1 (not 2^248)\n3. Confirm comparison uses <= (not <)\n4. Check validation occurs in _afterTokenTransfer hook\n5. Verify all transfer entry points are covered\n6. Ensure mint operations also validate value",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'MAX_VALUE\\|2\\*\\*248\\|type(uint248).max' contracts/zERC20.sol",
+          "assertion": "MAX_VALUE constant equals 2^248 - 1"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -n 'value.*<=.*MAX_VALUE\\|value.*>.*MAX_VALUE' contracts/zERC20.sol",
+          "assertion": "Correct comparison operator used"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testValueBoundaryExact -vvv",
+          "assertion": "2^248 - 1 accepted, 2^248 rejected"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-ZERC20-VALIDATES-VALUE -> Edge EDGE-ZERC20-VALIDATES-VALUE. BN254 field element constraint requires values < 2^248. Off-by-one error could allow invalid values into hash chain, breaking ZK proofs."
+    },
+    {
+      "id": "CL-PROP-EDGE-VALUE-TOO-LARGE-001",
+      "property_id": "PROP-EDGE-VALUE-TOO-LARGE",
+      "graph_element_under_test": "EDGE-VALUE-TOO-LARGE",
+      "title": "Verify ValueTooLarge custom error provides clear failure reason",
+      "bug_class": "Error Handling",
+      "risk_category": "User Experience",
+      "severity_hint": "Low",
+      "detection_procedure": "1. Locate ValueTooLarge error definition\n2. Verify error includes relevant parameters (value, maxValue)\n3. Confirm error is used consistently across all validation points\n4. Check error message is clear for debugging\n5. Verify no silent failures on value overflow",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'error ValueTooLarge' contracts/zERC20.sol",
+          "assertion": "ValueTooLarge custom error is defined"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -n 'revert ValueTooLarge' contracts/zERC20.sol",
+          "assertion": "Error is used on value overflow"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testValueTooLargeError -vvv",
+          "assertion": "ValueTooLarge error thrown with correct data"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-VALUE-TOO-LARGE -> Edge EDGE-VALUE-TOO-LARGE. Clear error reporting aids debugging and user experience. Custom errors are gas-efficient and informative."
+    },
+    {
+      "id": "CL-PROP-EDGE-ZERC20-UPDATES-BALANCES-001",
+      "property_id": "PROP-EDGE-ZERC20-UPDATES-BALANCES",
+      "graph_element_under_test": "EDGE-ZERC20-UPDATES-BALANCES",
+      "title": "Verify atomic balance updates in transfer (debit and credit together)",
+      "bug_class": "Balance Atomicity Violation",
+      "risk_category": "Token Supply Corruption",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Verify zERC20 inherits from OpenZeppelin ERC20\n2. Confirm _transfer() is used (atomic balance update)\n3. Check no custom balance manipulation outside _transfer\n4. Verify overflow protection (Solidity 0.8+ or SafeMath)\n5. Ensure no intermediate state where balances are inconsistent",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'ERC20\\|_transfer\\|balanceOf' contracts/zERC20.sol",
+          "assertion": "Uses OpenZeppelin ERC20 with _transfer"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testTransferBalanceConsistency -vvv",
+          "assertion": "Sum of balances equals total supply after transfer"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testTransferAtomicity -vvv",
+          "assertion": "Both sender debit and recipient credit occur"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-ZERC20-UPDATES-BALANCES -> Edge EDGE-ZERC20-UPDATES-BALANCES. OpenZeppelin ERC20._transfer performs atomic balance updates within single storage operation batch. Solidity 0.8+ provides overflow protection."
+    },
+    {
+      "id": "CL-PROP-EDGE-ZERC20-UPDATES-HASH-CHAIN-001",
+      "property_id": "PROP-EDGE-ZERC20-UPDATES-HASH-CHAIN",
+      "graph_element_under_test": "EDGE-ZERC20-UPDATES-HASH-CHAIN",
+      "title": "Verify SHA-256 hash chain computation matches Nova circuit exactly",
+      "bug_class": "Cryptographic Inconsistency",
+      "risk_category": "ZK Proof Failure",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate hash chain update in _afterTokenTransfer\n2. Verify formula: SHA256(prevHash || to || value)\n3. Confirm truncation to 248 bits matches Nova circuit\n4. Check endianness and padding are correct\n5. Verify hash chain index is updated atomically\n6. Compare with Nova circuit implementation",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'sha256\\|keccak256' contracts/zERC20.sol",
+          "assertion": "Hash function used for chain update"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -n 'hashChain\\|transferHash' contracts/zERC20.sol",
+          "assertion": "Hash chain state variable exists"
+        },
+        {
+          "tool": "manual_review",
+          "command": "Compare on-chain hash with Nova circuit implementation",
+          "assertion": "Hash computation identical to ZK circuit"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testHashChainConsistency -vvv",
+          "assertion": "Hash chain matches expected deterministic output"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-ZERC20-UPDATES-HASH-CHAIN -> Edge EDGE-ZERC20-UPDATES-HASH-CHAIN. Hash chain consistency between on-chain contract and Nova circuit is critical. Any mismatch causes proof verification failure. SHA-256 collision resistance ensures chain integrity."
+    },
+    {
+      "id": "CL-PROP-EDGE-ZERC20-EMITS-EVENT-001",
+      "property_id": "PROP-EDGE-ZERC20-EMITS-EVENT",
+      "graph_element_under_test": "EDGE-ZERC20-EMITS-EVENT",
+      "title": "Verify IndexedTransfer event has strictly monotonic index",
+      "bug_class": "Index Sequencing Error",
+      "risk_category": "Merkle Tree Corruption",
+      "severity_hint": "High",
+      "detection_procedure": "1. Locate IndexedTransfer event definition\n2. Verify index uses post-increment (index++)\n3. Confirm no skips or duplicates in index sequence\n4. Check index survives contract state (not memory-local)\n5. Verify index is emitted atomically with transfer\n6. Ensure index type has sufficient range",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'event IndexedTransfer\\|transferIndex\\|index++' contracts/zERC20.sol",
+          "assertion": "IndexedTransfer event with monotonic index"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testIndexMonotonicity -vvv",
+          "assertion": "Each transfer has unique, sequential index"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testIndexNoGaps -vvv",
+          "assertion": "No gaps in index sequence"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-ZERC20-EMITS-EVENT -> Edge EDGE-ZERC20-EMITS-EVENT. Index monotonicity is essential for Merkle tree construction. Post-increment pattern (index++) ensures sequential values without skips or duplicates."
+    },
+    {
+      "id": "CL-PROP-EDGE-TRANSFER-COMPLETE-001",
+      "property_id": "PROP-EDGE-TRANSFER-COMPLETE",
+      "graph_element_under_test": "EDGE-TRANSFER-COMPLETE",
+      "title": "Verify atomic transfer completion with no partial state",
+      "bug_class": "Transaction Atomicity",
+      "risk_category": "State Inconsistency",
+      "severity_hint": "High",
+      "detection_procedure": "1. Verify all transfer operations are in single transaction\n2. Confirm no partial state possible on revert\n3. Check balance update, hash chain update, and event are atomic\n4. Verify no external calls that could fail after state changes\n5. Ensure reentrancy guards if callbacks possible",
+      "executable_checks": [
+        {
+          "tool": "manual_review",
+          "command": "Trace complete transfer execution path",
+          "assertion": "All operations complete or all revert"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testTransferAtomicComplete -vvv",
+          "assertion": "Transfer is atomic end-to-end"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-TRANSFER-COMPLETE -> Edge EDGE-TRANSFER-COMPLETE. EVM atomic transactions guarantee either all operations complete or all revert. No partial transfer state can persist."
+    },
+    {
+      "id": "CL-PROP-EDGE-INDEXER-WATCHES-001",
+      "property_id": "PROP-EDGE-INDEXER-WATCHES",
+      "graph_element_under_test": "EDGE-INDEXER-WATCHES",
+      "title": "Verify indexer monitors only authorized zERC20 contract addresses",
+      "bug_class": "Event Source Spoofing",
+      "risk_category": "Merkle Tree Poisoning",
+      "severity_hint": "Medium",
+      "detection_procedure": "1. Review indexer configuration for contract address whitelist\n2. Verify event filtering by contract address\n3. Check no spoofed events can be indexed\n4. Verify defense in depth: even spoofed events fail Merkle proof verification\n5. Confirm indexer validates chain ID\n6. Check for proper RPC endpoint authentication",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -rn 'contract.*address\\|filter.*address\\|watch.*address' cli/",
+          "assertion": "Indexer has contract address filtering"
+        },
+        {
+          "tool": "manual_review",
+          "command": "Review indexer configuration and event filtering",
+          "assertion": "Only authorized contract events are processed"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-INDEXER-WATCHES -> Edge EDGE-INDEXER-WATCHES. Even if spoofed events are indexed, Merkle proofs generated from them fail on-chain verification. Defense in depth protects against indexer compromise."
+    },
+    {
+      "id": "CL-PROP-EDGE-INDEXER-TREE-UPDATED-001",
+      "property_id": "PROP-EDGE-INDEXER-TREE-UPDATED",
+      "graph_element_under_test": "EDGE-INDEXER-TREE-UPDATED",
+      "title": "Verify indexer Merkle tree consistency with on-chain hash chain",
+      "bug_class": "Tree Divergence",
+      "risk_category": "Invalid Proof Generation",
+      "severity_hint": "High",
+      "detection_procedure": "1. Verify Merkle tree construction matches on-chain hash algorithm\n2. Confirm tree updates are applied in correct order\n3. Check tree root can be verified against on-chain state\n4. Verify no event reordering or missing events\n5. Ensure tree survives indexer restarts\n6. Check proof generation produces verifiable proofs",
+      "executable_checks": [
+        {
+          "tool": "manual_review",
+          "command": "Compare indexer tree algorithm with on-chain hash chain",
+          "assertion": "Tree construction matches on-chain exactly"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -rn 'MerkleTree\\|merkle.*update\\|tree.*insert' cli/",
+          "assertion": "Merkle tree implementation exists"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-INDEXER-TREE-UPDATED -> Edge EDGE-INDEXER-TREE-UPDATED. Divergent trees produce invalid proofs that fail on-chain verification. Users can verify proofs against on-chain roots to detect indexer issues."
+    },
+    {
+      "id": "CL-PROP-EDGE-INDEXER-GENERATES-PROOF-001",
+      "property_id": "PROP-EDGE-INDEXER-GENERATES-PROOF",
+      "graph_element_under_test": "EDGE-INDEXER-GENERATES-PROOF",
+      "title": "Verify indexer generates valid Merkle inclusion proofs",
+      "bug_class": "Proof Generation Failure",
+      "risk_category": "User Cannot Withdraw",
+      "severity_hint": "High",
+      "detection_procedure": "1. Verify proof generation algorithm matches verification algorithm\n2. Check proof includes all necessary siblings\n3. Confirm proof direction bits are correct\n4. Verify proof can be verified against known root\n5. Test proof generation for various tree sizes\n6. Ensure historical proofs remain valid",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -rn 'generateProof\\|getProof\\|merkleProof' cli/",
+          "assertion": "Proof generation function exists"
+        },
+        {
+          "tool": "manual_review",
+          "command": "Test proof generation and verification round-trip",
+          "assertion": "Generated proofs pass verification"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-INDEXER-GENERATES-PROOF -> Edge EDGE-INDEXER-GENERATES-PROOF. Invalid proofs fail ZK circuit verification. Users can detect and report indexer issues. Merkle proof verification provides cryptographic guarantee."
+    },
+    {
+      "id": "CL-PROP-EDGE-VERIFIER-RESERVES-CHECKPOINT-001",
+      "property_id": "PROP-EDGE-VERIFIER-RESERVES-CHECKPOINT",
+      "graph_element_under_test": "EDGE-VERIFIER-RESERVES-CHECKPOINT",
+      "title": "Verify checkpoint creates immutable index-to-hashchain binding",
+      "bug_class": "Checkpoint Mutability",
+      "risk_category": "Proof Manipulation",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate reservedHashChains mapping in Verifier.sol\n2. Verify no update function exists for existing checkpoints\n3. Confirm only initial write path available\n4. Check checkpoint cannot be overwritten\n5. Verify checkpoint survives contract upgrade (if upgradeable)\n6. Ensure checkpoint value cannot be zero (sentinel value)",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'reservedHashChains' contracts/Verifier.sol",
+          "assertion": "reservedHashChains mapping exists"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -n 'reservedHashChains\\[.*\\]\\s*=' contracts/Verifier.sol",
+          "assertion": "Only single write path, no updates"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testCheckpointImmutable -vvv",
+          "assertion": "Cannot overwrite existing checkpoint"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-VERIFIER-RESERVES-CHECKPOINT -> Edge EDGE-VERIFIER-RESERVES-CHECKPOINT. Immutable checkpoints prevent attackers from changing the expected hash chain after proof generation begins. Only single write path ensures binding integrity."
+    },
+    {
+      "id": "CL-PROP-EDGE-CHECKPOINT-RESERVED-001",
+      "property_id": "PROP-EDGE-CHECKPOINT-RESERVED",
+      "graph_element_under_test": "EDGE-CHECKPOINT-RESERVED",
+      "title": "Verify HashChainReserved event matches stored checkpoint data",
+      "bug_class": "Event-Storage Mismatch",
+      "risk_category": "Off-chain Tracking",
+      "severity_hint": "Medium",
+      "detection_procedure": "1. Locate HashChainReserved event definition\n2. Verify event parameters match storage write values\n3. Confirm event and storage use same transaction\n4. Check event is emitted after successful storage\n5. Verify no code paths emit event without storage",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'event HashChainReserved\\|emit HashChainReserved' contracts/Verifier.sol",
+          "assertion": "HashChainReserved event defined and emitted"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testCheckpointEventMatch -vvv",
+          "assertion": "Event parameters match stored values"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-CHECKPOINT-RESERVED -> Edge EDGE-CHECKPOINT-RESERVED. Event-storage consistency ensures off-chain systems can accurately track checkpoints. Same values used in single transaction guarantees match."
+    },
+    {
+      "id": "CL-PROP-EDGE-AWAITING-NOVA-PROOF-001",
+      "property_id": "PROP-EDGE-AWAITING-NOVA-PROOF",
+      "graph_element_under_test": "EDGE-AWAITING-NOVA-PROOF",
+      "title": "Verify proof submission requires prior checkpoint reservation",
+      "bug_class": "Missing Prerequisite Check",
+      "risk_category": "Invalid Proof Acceptance",
+      "severity_hint": "High",
+      "detection_procedure": "1. Locate proveTransferRoot() function\n2. Verify check: reservedHashChains[index] != 0\n3. Confirm missing checkpoint causes revert\n4. Check proof cannot be submitted for arbitrary index\n5. Verify checkpoint must match proof's claimed state",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'reservedHashChains.*!=.*0\\|require.*reserved' contracts/Verifier.sol",
+          "assertion": "Checkpoint existence check in proveTransferRoot"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testProofWithoutCheckpoint -vvv",
+          "assertion": "Proof without checkpoint reverts"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-AWAITING-NOVA-PROOF -> Edge EDGE-AWAITING-NOVA-PROOF. Checkpoint prerequisite ensures provers commit to a specific state before proof generation. Prevents proof submission for non-reserved indices."
+    },
+    {
+      "id": "CL-PROP-EDGE-NOVA-PROOF-VALID-001",
+      "property_id": "PROP-EDGE-NOVA-PROOF-VALID",
+      "graph_element_under_test": "EDGE-NOVA-PROOF-VALID",
+      "title": "Verify transfer root storage only after successful Groth16 verification",
+      "bug_class": "Verification Bypass",
+      "risk_category": "Invalid Root Storage",
+      "severity_hint": "Critical",
+      "detection_procedure": "1. Locate proveTransferRoot() control flow\n2. Verify verify() call returns before storage write\n3. Confirm failed verify() causes revert (no storage)\n4. Check no code paths store root without verification\n5. Verify verification key is correct for circuit\n6. Ensure public inputs match expected structure",
+      "executable_checks": [
+        {
+          "tool": "manual_review",
+          "command": "Trace proveTransferRoot: verify() must precede storage",
+          "assertion": "Control flow: verify returns before provedTransferRoots write"
+        },
+        {
+          "tool": "grep",
+          "command": "grep -n 'verifyProof\\|provedTransferRoots' contracts/Verifier.sol",
+          "assertion": "Verification precedes root storage"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testInvalidProofNoStorage -vvv",
+          "assertion": "Invalid proof does not store root"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-NOVA-PROOF-VALID -> Edge EDGE-NOVA-PROOF-VALID. Verification-before-storage ensures only valid proofs result in stored roots. Failed verify() reverts entire transaction. Groth16 provides cryptographic soundness guarantee."
+    },
+    {
+      "id": "CL-PROP-EDGE-DIVERGENT-PROOF-DETECTED-001",
+      "property_id": "PROP-EDGE-DIVERGENT-PROOF-DETECTED",
+      "graph_element_under_test": "EDGE-DIVERGENT-PROOF-DETECTED",
+      "title": "Verify emergency trigger only on actual proof divergence (two valid different proofs)",
+      "bug_class": "False Emergency Trigger",
+      "risk_category": "Protocol Availability",
+      "severity_hint": "High",
+      "detection_procedure": "1. Locate divergence detection logic in proveTransferRoot()\n2. Verify check: provedTransferRoots[index] != 0 AND provedTransferRoots[index] != newRoot\n3. Confirm both proofs must be valid for divergence\n4. Check emergency is not triggered falsely\n5. Verify first proof for index triggers no emergency\n6. Ensure matching roots don't trigger emergency",
+      "executable_checks": [
+        {
+          "tool": "grep",
+          "command": "grep -n 'diverge\\|emergency\\|isEmergency' contracts/Verifier.sol",
+          "assertion": "Divergence detection and emergency trigger exist"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testDivergentProofEmergency -vvv",
+          "assertion": "Different valid proofs for same index trigger emergency"
+        },
+        {
+          "tool": "foundry",
+          "command": "forge test --match-test testMatchingProofNoEmergency -vvv",
+          "assertion": "Same proof twice does not trigger emergency"
+        }
+      ],
+      "notes": "Traceability: Property PROP-EDGE-DIVERGENT-PROOF-DETECTED -> Edge EDGE-DIVERGENT-PROOF-DETECTED. Divergence detection requires two independent valid proofs producing different roots. This indicates a soundness breach in the ZK system and triggers emergency mode for investigation."
+    }
+  ]
+}

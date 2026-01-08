@@ -1,8 +1,8 @@
 # Configuration variables
-TARGET_REPO ?= ethereum/go-ethereum
-TARGET_REF ?= master
-KEYWORDS ?= "geth,ethereum client,execution specs,EIP"
-SPEC_URLS ?= "https://ethereum.github.io/execution-specs/src/,https://geth.ethereum.org/docs"
+TARGET_REPO ?= kbizikav/zERC20
+TARGET_REF ?= dev
+KEYWORDS ?= "zkSNARKs,zkWormhole,zERC20,"
+SPEC_URLS ?= "https://raw.githubusercontent.com/kbizikav/zERC20/refs/heads/dev/docs/contract_spec.md"
 WORKDIR ?= target_workspace
 OUTPUT_DIR ?= outputs
 LOG_DIR ?= outputs/logs

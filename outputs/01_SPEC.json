@@ -1,0 +1,3089 @@
+{
+  "metadata": {
+    "title": "zERC20 Privacy Token Protocol - Formal Specification",
+    "version": "1.0.0",
+    "generated_at": "2026-01-06T00:00:00Z",
+    "keywords": ["zkSNARKs", "zkWormhole", "zERC20"],
+    "spec_sources": [
+      "https://raw.githubusercontent.com/kbizikav/zERC20/refs/heads/dev/docs/contract_spec.md"
+    ],
+    "description": "Program Graph formal specification for the zERC20 multi-chain privacy token protocol. This system enables private ERC20 transfers using Nova folding schemes and Groth16 proofs, with cross-chain coordination via LayerZero v2."
+  },
+  "trusted_entities": [
+    {
+      "id": "ACTOR-USER",
+      "entity": "End User",
+      "description": "External user interacting with the protocol via CLI or dApp to perform wraps, unwraps, transfers, and private teleports."
+    },
+    {
+      "id": "ACTOR-ZERC20-CONTRACT",
+      "entity": "zERC20 Token Contract",
+      "description": "Upgradeable ERC-20 implementation that enforces value <= 2^248-1 for BN254 scalar field compatibility. Maintains SHA-256 hash chain for transfer history and emits IndexedTransfer events."
+    },
+    {
+      "id": "ACTOR-VERIFIER-CONTRACT",
+      "entity": "Verifier Contract",
+      "description": "LayerZero OApp managing Nova/Groth16 proof validation and cross-chain coordination. Records hash chain checkpoints, validates transfer root proofs, verifies withdrawal proofs, and relays proved roots to Hub."
+    },
+    {
+      "id": "ACTOR-HUB-CONTRACT",
+      "entity": "Hub Contract",
+      "description": "Central aggregation point tracking per-token transfer roots and monotonic tree indices. Computes PoseidonT3 aggregation trees and broadcasts global roots to verifiers."
+    },
+    {
+      "id": "ACTOR-LIQUIDITY-MANAGER",
+      "entity": "LiquidityManager Contract",
+      "description": "Sole liquidity authority for minting/burning zERC20. Implements incentive curves for wrap rewards and unwrap fees, anchoring supply to underlying reserves."
+    },
+    {
+      "id": "ACTOR-ADAPTOR-CONTRACT",
+      "entity": "Adaptor Contract",
+      "description": "Cross-chain exit coordination using Stargate bridge transport. Preserves user intent through slippage limits and refund mechanisms."
+    },
+    {
+      "id": "ACTOR-INDEXER-SERVICE",
+      "entity": "Indexer Service",
+      "description": "Off-chain service that indexes zERC20 transfer events and generates Merkle proofs for historical transfers. Provides tree index lookups and batch proof generation."
+    },
+    {
+      "id": "ACTOR-DECIDER-PROVER-SERVICE",
+      "entity": "Decider/Prover Service",
+      "description": "Off-chain service that converts Nova IVC folding proofs into Groth16 final proofs for on-chain verification."
+    },
+    {
+      "id": "ACTOR-LAYERZERO-NETWORK",
+      "entity": "LayerZero v2 Network",
+      "description": "Cross-chain messaging protocol enabling reliable message passing between Hub and Verifier contracts across different EVM chains."
+    },
+    {
+      "id": "ACTOR-STARGATE-BRIDGE",
+      "entity": "Stargate Bridge",
+      "description": "Cross-chain liquidity bridge used by Adaptor for asset transfers between chains."
+    },
+    {
+      "id": "ACTOR-IC-KEY-MANAGER",
+      "entity": "IC Key Manager Canister",
+      "description": "Internet Computer canister managing stealth address secrets for privacy-preserving operations."
+    },
+    {
+      "id": "ACTOR-IC-STORAGE",
+      "entity": "IC Storage Canister",
+      "description": "Internet Computer canister providing encrypted state storage for user data."
+    },
+    {
+      "id": "ACTOR-POSEIDON-CIRCUIT",
+      "entity": "Poseidon Hash Circuit",
+      "description": "ZK-friendly hash function implementation using light-poseidon library with circom-compatible configurations (PoseidonT2 and PoseidonT3)."
+    },
+    {
+      "id": "ACTOR-BABYJUBJUB-CIRCUIT",
+      "entity": "Baby JubJub Curve Operations",
+      "description": "Elliptic curve operations on the Baby JubJub curve (embedded in BN254) for zkSNARK-friendly cryptographic operations."
+    },
+    {
+      "id": "ACTOR-NOVA-CIRCUIT",
+      "entity": "Nova Folding Circuit",
+      "description": "Incrementally verifiable computation circuit using sonobe/folding-schemes library for efficient proof aggregation."
+    }
+  ],
+  "data_structures": [
+    {
+      "id": "DATA-ZERC20-TOKEN",
+      "name": "zERC20 Token",
+      "description": "Privacy-enabled ERC20 token with value constrained to <= 2^248-1 for BN254 field compatibility. Tracks balances, allowances, and transfer history via hash chain."
+    },
+    {
+      "id": "DATA-HASH-CHAIN",
+      "name": "SHA-256 Hash Chain",
+      "description": "Truncated 248-bit SHA-256 hash chain appending (to, value) for each transfer. Provides deterministic commitment to transfer history."
+    },
+    {
+      "id": "DATA-INDEXED-TRANSFER-EVENT",
+      "name": "IndexedTransfer Event",
+      "description": "Event emitted on each transfer containing: index (incrementing counter), from address, to address, value. Used by indexer to build Merkle trees."
+    },
+    {
+      "id": "DATA-TRANSFER-ROOT",
+      "name": "Transfer Root",
+      "description": "Merkle root of indexed transfers at a given index. Used as public input for Nova proofs and stored in provedTransferRoots mapping."
+    },
+    {
+      "id": "DATA-GLOBAL-TRANSFER-ROOT",
+      "name": "Global Transfer Root",
+      "description": "Hub-aggregated root combining transfer roots from all registered tokens across chains. Stored in globalTransferRoots mapping."
+    },
+    {
+      "id": "DATA-AGGREGATION-ROOT",
+      "name": "PoseidonT3 Aggregation Root",
+      "description": "Root of height-6 Poseidon tree aggregating up to 64 token transfer roots. Computed by Hub during broadcast."
+    },
+    {
+      "id": "DATA-NOVA-IVC-PROOF",
+      "name": "Nova IVC Proof",
+      "description": "Incrementally verifiable computation proof generated via Nova folding scheme. Proves transitions from oldRoot to newRoot using reserved checkpoint as public input."
+    },
+    {
+      "id": "DATA-GROTH16-PROOF",
+      "name": "Groth16 Final Proof",
+      "description": "Succinct zkSNARK proof generated from Nova IVC proof. Verifiable on-chain via Solidity verifier contract."
+    },
+    {
+      "id": "DATA-GENERAL-RECIPIENT",
+      "name": "GeneralRecipient",
+      "description": "Encoded recipient structure containing: chain_id, address, tweak plus version byte. Used for cross-chain recipient validation in proofs."
+    },
+    {
+      "id": "DATA-STEALTH-ADDRESS",
+      "name": "Stealth Burn Address",
+      "description": "Derived address computed from secret using compute_burn_address_from_secret(). Requires proof-of-work validation."
+    },
+    {
+      "id": "DATA-HISTORICAL-PROOF",
+      "name": "Historical Merkle Proof",
+      "description": "Proof structure containing: target_index, leaf_index, root, hash_chain, siblings[]. Provides Merkle inclusion proof for historical transfers."
+    },
+    {
+      "id": "DATA-INCENTIVE-CURVE-PARAMS",
+      "name": "Incentive Curve Parameters",
+      "description": "Linear density curve parameters: k (basis point strength), T (target liquidity). Used for calculating wrap rewards and unwrap fees."
+    },
+    {
+      "id": "DATA-WRAP-REQUEST",
+      "name": "Wrap Request",
+      "description": "Request to convert underlying tokens to zERC20. Contains: amount, recipient. Triggers reward calculation and minting."
+    },
+    {
+      "id": "DATA-UNWRAP-REQUEST",
+      "name": "Unwrap Request",
+      "description": "Request to convert zERC20 to underlying tokens. Contains: amount, recipient. Triggers fee calculation and burning."
+    },
+    {
+      "id": "DATA-TELEPORT-REQUEST",
+      "name": "Teleport Request",
+      "description": "Privacy-preserving transfer request with zkSNARK proof. Contains: proof data, recipient hash, transfer root reference, amount delta."
+    },
+    {
+      "id": "DATA-RESERVED-HASH-CHAIN",
+      "name": "Reserved Hash Chain Checkpoint",
+      "description": "Snapshot of zERC20 state at reservation time. Maps index to (index, hashChain) pair for proof public input binding."
+    },
+    {
+      "id": "DATA-LAYERZERO-MESSAGE",
+      "name": "LayerZero Cross-Chain Message",
+      "description": "Message structure for Hub-Verifier communication. Contains: eid (endpoint ID), payload, options. Requires supermajority guardian signing."
+    },
+    {
+      "id": "DATA-TOKEN-INFO",
+      "name": "Token Registration Info",
+      "description": "Hub registry entry for registered tokens. Contains: chain EID, token address, verifier address, capacity limits."
+    },
+    {
+      "id": "DATA-BRIDGE-PARAMS",
+      "name": "Stargate Bridge Parameters",
+      "description": "Parameters for cross-chain bridging via Adaptor. Contains: destination chain, slippage limits, refund address."
+    },
+    {
+      "id": "DATA-SECRET-AND-TWEAK",
+      "name": "SecretAndTweak Structure",
+      "description": "Derived cryptographic values for burn address generation. Contains: secret (PoW-adjusted), tweak (keccak256 derived). Used in stealth address computation."
+    },
+    {
+      "id": "DATA-FULL-BURN-ADDRESS",
+      "name": "Full Burn Address",
+      "description": "Complete stealth burn address structure containing: GeneralRecipient, secret. Serializable with version byte prefix (105 bytes total)."
+    },
+    {
+      "id": "DATA-POW-NONCE",
+      "name": "Proof-of-Work Nonce",
+      "description": "Nonce value found via find_pow_nonce() that when combined with secret_seed produces a valid burn address secret."
+    },
+    {
+      "id": "DATA-POSEIDON-STATE",
+      "name": "Poseidon Sponge State",
+      "description": "Internal state of Poseidon hash function containing field elements being hashed. Uses rate-1 sponge construction."
+    },
+    {
+      "id": "DATA-FR-SCALAR",
+      "name": "BN254 Scalar Field Element (Fr)",
+      "description": "Element of the BN254 scalar field used for all ZK circuit computations. 254-bit value representing a point coordinate or scalar."
+    },
+    {
+      "id": "DATA-IVC-STATE",
+      "name": "Nova IVC State Vector",
+      "description": "State vector for Nova IVC containing: [merkle_root, recipient, total_value, delta]. Updated after each folding step."
+    },
+    {
+      "id": "DATA-EXTERNAL-INPUTS",
+      "name": "Withdraw External Inputs",
+      "description": "Per-step external inputs for Nova withdraw circuit: is_dummy, from_address, value, secret, leaf_index, siblings[]."
+    },
+    {
+      "id": "DATA-BRIDGE-REQUEST",
+      "name": "Adaptor Bridge Request",
+      "description": "Request structure for Stargate bridging: dstEid, to, minAmountOut, extraOptions, composeMsg, oftCmd."
+    },
+    {
+      "id": "DATA-FEE-QUOTE",
+      "name": "Adaptor Fee Quote",
+      "description": "Fee breakdown from Adaptor: tokenUnwrapFee, nativeBridgeFee, tokenBridgeFee. Used for user quote display."
+    },
+    {
+      "id": "DATA-VETKEY-DERIVED-SECRET",
+      "name": "VetKey Derived Secret",
+      "description": "Secret derived from IC VetKey infrastructure for stealth address management. Uses vetKd_derive_key canister call."
+    },
+    {
+      "id": "DATA-ENCRYPTED-STATE",
+      "name": "IC Encrypted State",
+      "description": "AES-GCM encrypted user state stored in IC Storage canister. Contains serialized payment advice and invoice data."
+    }
+  ],
+  "program_graph": {
+    "id": "GRAPH-ZERC20-MAIN",
+    "title": "zERC20 Privacy Token Protocol - Main Flow",
+    "nodes": [
+      {
+        "id": "STATE-USER-IDLE",
+        "label": "User Idle",
+        "actor_id": "ACTOR-USER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-USER-HAS-UNDERLYING",
+        "label": "User Holds Underlying Tokens",
+        "actor_id": "ACTOR-USER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-USER-HAS-ZERC20",
+        "label": "User Holds zERC20 Tokens",
+        "actor_id": "ACTOR-USER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-LM-AWAITING-WRAP",
+        "label": "LiquidityManager Awaiting Wrap Request",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-LM-CALCULATE-REWARD",
+        "label": "Calculate Wrap Reward via Incentive Curve",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-LM-PULL-LIQUIDITY",
+        "label": "Pull Underlying Liquidity from User",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-LM-MINT-ZERC20",
+        "label": "Mint zERC20 (amount + reward)",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-WRAP-COMPLETE",
+        "label": "Wrap Operation Complete",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-LM-AWAITING-UNWRAP",
+        "label": "LiquidityManager Awaiting Unwrap Request",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-LM-CALCULATE-FEE",
+        "label": "Calculate Unwrap Fee via Incentive Curve",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-LM-BURN-ZERC20",
+        "label": "Burn zERC20 from User",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-LM-TRANSFER-UNDERLYING",
+        "label": "Transfer Underlying (amount - fee)",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-UNWRAP-COMPLETE",
+        "label": "Unwrap Operation Complete",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY",
+        "label": "Unwrap Failed - Insufficient Liquidity",
+        "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+        "type": "State"
+      },
+      {
+        "id": "STATE-ZERC20-AWAITING-TRANSFER",
+        "label": "zERC20 Awaiting Transfer",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-ZERC20-VALIDATE-VALUE",
+        "label": "Validate Value <= 2^248-1",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-ZERC20-UPDATE-BALANCES",
+        "label": "Update Sender and Recipient Balances",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-ZERC20-UPDATE-HASH-CHAIN",
+        "label": "Update SHA-256 Hash Chain with (to, value)",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-ZERC20-EMIT-INDEXED-TRANSFER",
+        "label": "Emit IndexedTransfer(index++, from, to, value)",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-TRANSFER-COMPLETE",
+        "label": "Standard Transfer Complete",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-TRANSFER-REJECTED-VALUE-TOO-LARGE",
+        "label": "Transfer Rejected - ValueTooLarge",
+        "actor_id": "ACTOR-ZERC20-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-VERIFIER-IDLE",
+        "label": "Verifier Idle",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-VERIFIER-RESERVE-HASH-CHAIN",
+        "label": "Reserve Hash Chain Checkpoint at Index",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-HASH-CHAIN-RESERVED",
+        "label": "Hash Chain Checkpoint Reserved",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-AWAITING-TRANSFER-ROOT-PROOF",
+        "label": "Awaiting Transfer Root Nova Proof",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-VERIFIER-VALIDATE-NOVA-PROOF",
+        "label": "Validate Nova Transfer Root Proof via IRootDecider",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action",
+        "sub_graph_id": "GRAPH-NOVA-PROOF-VERIFICATION"
+      },
+      {
+        "id": "STATE-TRANSFER-ROOT-PROVED",
+        "label": "Transfer Root Proved and Stored",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-EMERGENCY-TRIGGERED",
+        "label": "Emergency Triggered - Divergent Proofs",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-AWAITING-TELEPORT-PROOF",
+        "label": "Awaiting Teleport Withdrawal Proof",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-VERIFIER-VALIDATE-ROOT-REFERENCE",
+        "label": "Validate Root Against provedTransferRoots or globalTransferRoots",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-VERIFIER-VALIDATE-RECIPIENT-HASH",
+        "label": "Validate Recipient Hash Binding",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-VERIFIER-CHECK-MONOTONICITY",
+        "label": "Enforce Strictly Increasing totalTeleported",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-VERIFIER-VALIDATE-WITHDRAWAL-PROOF",
+        "label": "Validate Withdrawal Proof (Nova or Groth16)",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action",
+        "sub_graph_id": "GRAPH-WITHDRAWAL-PROOF-VERIFICATION"
+      },
+      {
+        "id": "ACTION-VERIFIER-CALL-TELEPORT",
+        "label": "Call zERC20.teleport() with Delta Amount",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-TELEPORT-COMPLETE",
+        "label": "Teleport Complete - Tokens Minted to Recipient",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-TELEPORT-REJECTED",
+        "label": "Teleport Rejected - Invalid Proof or Double-Spend",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-VERIFIER-RELAY-ROOT",
+        "label": "Relay Proved Root to Hub via LayerZero",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-ROOT-RELAYED",
+        "label": "Transfer Root Relayed to Hub",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-HUB-IDLE",
+        "label": "Hub Idle",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-HUB-RECEIVE-ROOT",
+        "label": "Receive Transfer Root via _lzReceive",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-HUB-UPDATE-TRANSFER-ROOT",
+        "label": "Update transferRoots[tokenIndex] with New Root",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-TRANSFER-ROOT-UPDATED",
+        "label": "Per-Token Transfer Root Updated",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-AWAITING-BROADCAST",
+        "label": "Awaiting Broadcast Trigger",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-HUB-COMPUTE-AGGREGATION",
+        "label": "Compute PoseidonT3 Aggregation Tree (height 6)",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-HUB-INCREMENT-AGG-SEQ",
+        "label": "Increment aggSeq Counter",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-HUB-BROADCAST-ROOT",
+        "label": "Broadcast Aggregation Root to Verifiers via LayerZero",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-GLOBAL-ROOT-BROADCAST",
+        "label": "Global Aggregation Root Broadcast",
+        "actor_id": "ACTOR-HUB-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-VERIFIER-SAVE-GLOBAL-ROOT",
+        "label": "Save Global Root to globalTransferRoots",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-GLOBAL-ROOT-SAVED",
+        "label": "Global Root Available for Cross-Chain Teleports",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-INDEXER-IDLE",
+        "label": "Indexer Service Idle",
+        "actor_id": "ACTOR-INDEXER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-INDEXER-WATCH-EVENTS",
+        "label": "Watch for IndexedTransfer Events",
+        "actor_id": "ACTOR-INDEXER-SERVICE",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-INDEXER-BUILD-TREE",
+        "label": "Build/Update Merkle Tree from Events",
+        "actor_id": "ACTOR-INDEXER-SERVICE",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-INDEXER-TREE-READY",
+        "label": "Merkle Tree Ready for Proofs",
+        "actor_id": "ACTOR-INDEXER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-INDEXER-GENERATE-PROOFS",
+        "label": "Generate Historical Merkle Proofs",
+        "actor_id": "ACTOR-INDEXER-SERVICE",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-PROVER-IDLE",
+        "label": "Decider/Prover Service Idle",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-PROVER-RECEIVE-IVC",
+        "label": "Receive Nova IVC Proof Submission",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-JOB-QUEUED",
+        "label": "Proof Job Queued",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "STATE-JOB-PROCESSING",
+        "label": "Proof Job Processing",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-PROVER-CONVERT-TO-GROTH16",
+        "label": "Convert Nova IVC to Groth16 Final Proof",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "Action",
+        "sub_graph_id": "GRAPH-NOVA-TO-GROTH16"
+      },
+      {
+        "id": "STATE-JOB-COMPLETED",
+        "label": "Proof Job Completed - Groth16 Proof Ready",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "STATE-JOB-FAILED",
+        "label": "Proof Job Failed",
+        "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+        "type": "State"
+      },
+      {
+        "id": "STATE-ADAPTOR-IDLE",
+        "label": "Adaptor Idle",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-ADAPTOR-RECEIVE-UNWRAP-BRIDGE",
+        "label": "Receive unwrapAndBridge Request",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-ADAPTOR-UNWRAP-VIA-LM",
+        "label": "Unwrap zERC20 via LiquidityManager",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-ADAPTOR-BRIDGE-VIA-STARGATE",
+        "label": "Bridge Underlying via Stargate",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-BRIDGE-INITIATED",
+        "label": "Cross-Chain Bridge Initiated",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "STATE-BRIDGE-FAILED",
+        "label": "Bridge Operation Failed",
+        "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-USER-GENERATE-STEALTH",
+        "label": "Generate Stealth Burn Address from Secret",
+        "actor_id": "ACTOR-USER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-USER-GENERATE-NOVA-PROOF",
+        "label": "Generate Nova IVC Proof Locally (CLI)",
+        "actor_id": "ACTOR-USER",
+        "type": "Action",
+        "sub_graph_id": "GRAPH-NOVA-PROOF-GENERATION"
+      },
+      {
+        "id": "STATE-USER-HAS-NOVA-PROOF",
+        "label": "User Has Nova IVC Proof",
+        "actor_id": "ACTOR-USER",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-USER-SUBMIT-TO-PROVER",
+        "label": "Submit IVC Proof to Decider/Prover Service",
+        "actor_id": "ACTOR-USER",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-USER-HAS-GROTH16-PROOF",
+        "label": "User Has Groth16 Final Proof",
+        "actor_id": "ACTOR-USER",
+        "type": "State"
+      },
+      {
+        "id": "ACTION-USER-SUBMIT-TELEPORT",
+        "label": "Submit Teleport with Groth16 Proof to Verifier",
+        "actor_id": "ACTOR-USER",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-VERIFIER-ROTATE-VERIFIERS",
+        "label": "Rotate Verifier Addresses (Emergency Recovery)",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "ACTION-VERIFIER-DEACTIVATE-EMERGENCY",
+        "label": "Deactivate Emergency State",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "Action"
+      },
+      {
+        "id": "STATE-EMERGENCY-RECOVERED",
+        "label": "Emergency Recovered - Normal Operation Resumed",
+        "actor_id": "ACTOR-VERIFIER-CONTRACT",
+        "type": "State"
+      }
+    ],
+    "edges": [
+      {
+        "id": "EDGE-USER-INITIATES-WRAP",
+        "source": "STATE-USER-HAS-UNDERLYING",
+        "target": "STATE-LM-AWAITING-WRAP",
+        "label": "User calls wrap() with amount",
+        "data_involved": ["DATA-WRAP-REQUEST"]
+      },
+      {
+        "id": "EDGE-LM-CALCULATES-REWARD",
+        "source": "STATE-LM-AWAITING-WRAP",
+        "target": "ACTION-LM-CALCULATE-REWARD",
+        "label": "Calculate incentive curve reward",
+        "data_involved": ["DATA-INCENTIVE-CURVE-PARAMS"]
+      },
+      {
+        "id": "EDGE-LM-PULLS-LIQUIDITY",
+        "source": "ACTION-LM-CALCULATE-REWARD",
+        "target": "ACTION-LM-PULL-LIQUIDITY",
+        "label": "Transfer underlying from user to LiquidityManager",
+        "data_involved": ["DATA-WRAP-REQUEST"]
+      },
+      {
+        "id": "EDGE-LM-MINTS-ZERC20",
+        "source": "ACTION-LM-PULL-LIQUIDITY",
+        "target": "ACTION-LM-MINT-ZERC20",
+        "label": "Mint zERC20 tokens (amount + reward)",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-WRAP-COMPLETE",
+        "source": "ACTION-LM-MINT-ZERC20",
+        "target": "STATE-WRAP-COMPLETE",
+        "label": "Emit Wrapped event",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-NOW-HAS-ZERC20",
+        "source": "STATE-WRAP-COMPLETE",
+        "target": "STATE-USER-HAS-ZERC20",
+        "label": "User receives zERC20 tokens",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-USER-INITIATES-UNWRAP",
+        "source": "STATE-USER-HAS-ZERC20",
+        "target": "STATE-LM-AWAITING-UNWRAP",
+        "label": "User calls unwrap() with amount",
+        "data_involved": ["DATA-UNWRAP-REQUEST"]
+      },
+      {
+        "id": "EDGE-LM-CALCULATES-FEE",
+        "source": "STATE-LM-AWAITING-UNWRAP",
+        "target": "ACTION-LM-CALCULATE-FEE",
+        "label": "Calculate incentive curve fee",
+        "data_involved": ["DATA-INCENTIVE-CURVE-PARAMS"]
+      },
+      {
+        "id": "EDGE-LM-BURNS-ZERC20",
+        "source": "ACTION-LM-CALCULATE-FEE",
+        "target": "ACTION-LM-BURN-ZERC20",
+        "label": "Burn zERC20 from user",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-LM-TRANSFERS-UNDERLYING",
+        "source": "ACTION-LM-BURN-ZERC20",
+        "target": "ACTION-LM-TRANSFER-UNDERLYING",
+        "label": "Transfer underlying (amount - fee) to user",
+        "data_involved": ["DATA-UNWRAP-REQUEST"]
+      },
+      {
+        "id": "EDGE-UNWRAP-COMPLETE",
+        "source": "ACTION-LM-TRANSFER-UNDERLYING",
+        "target": "STATE-UNWRAP-COMPLETE",
+        "label": "Emit Unwrapped event",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-UNWRAP-INSUFFICIENT-LIQUIDITY",
+        "source": "ACTION-LM-CALCULATE-FEE",
+        "target": "STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY",
+        "label": "Revert: amount > underlyingBalance - feeSurplus",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-NOW-HAS-UNDERLYING",
+        "source": "STATE-UNWRAP-COMPLETE",
+        "target": "STATE-USER-HAS-UNDERLYING",
+        "label": "User receives underlying tokens",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-INITIATES-TRANSFER",
+        "source": "STATE-USER-HAS-ZERC20",
+        "target": "STATE-ZERC20-AWAITING-TRANSFER",
+        "label": "User calls transfer(to, value)",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-ZERC20-VALIDATES-VALUE",
+        "source": "STATE-ZERC20-AWAITING-TRANSFER",
+        "target": "ACTION-ZERC20-VALIDATE-VALUE",
+        "label": "Check value <= 2^248-1 in _afterTokenTransfer",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-VALUE-TOO-LARGE",
+        "source": "ACTION-ZERC20-VALIDATE-VALUE",
+        "target": "STATE-TRANSFER-REJECTED-VALUE-TOO-LARGE",
+        "label": "Revert: ValueTooLarge",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-ZERC20-UPDATES-BALANCES",
+        "source": "ACTION-ZERC20-VALIDATE-VALUE",
+        "target": "ACTION-ZERC20-UPDATE-BALANCES",
+        "label": "Value valid, update balances",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-ZERC20-UPDATES-HASH-CHAIN",
+        "source": "ACTION-ZERC20-UPDATE-BALANCES",
+        "target": "ACTION-ZERC20-UPDATE-HASH-CHAIN",
+        "label": "Append (to, value) to SHA-256 hash chain",
+        "data_involved": ["DATA-HASH-CHAIN"]
+      },
+      {
+        "id": "EDGE-ZERC20-EMITS-EVENT",
+        "source": "ACTION-ZERC20-UPDATE-HASH-CHAIN",
+        "target": "ACTION-ZERC20-EMIT-INDEXED-TRANSFER",
+        "label": "Emit IndexedTransfer event",
+        "data_involved": ["DATA-INDEXED-TRANSFER-EVENT"]
+      },
+      {
+        "id": "EDGE-TRANSFER-COMPLETE",
+        "source": "ACTION-ZERC20-EMIT-INDEXED-TRANSFER",
+        "target": "STATE-TRANSFER-COMPLETE",
+        "label": "Transfer finalized",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-INDEXER-WATCHES",
+        "source": "STATE-INDEXER-IDLE",
+        "target": "ACTION-INDEXER-WATCH-EVENTS",
+        "label": "Start watching for IndexedTransfer events",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-INDEXER-EVENT-RECEIVED",
+        "source": "ACTION-INDEXER-WATCH-EVENTS",
+        "target": "ACTION-INDEXER-BUILD-TREE",
+        "label": "IndexedTransfer event received",
+        "data_involved": ["DATA-INDEXED-TRANSFER-EVENT"]
+      },
+      {
+        "id": "EDGE-INDEXER-TREE-UPDATED",
+        "source": "ACTION-INDEXER-BUILD-TREE",
+        "target": "STATE-INDEXER-TREE-READY",
+        "label": "Merkle tree updated with new leaf",
+        "data_involved": ["DATA-TRANSFER-ROOT"]
+      },
+      {
+        "id": "EDGE-INDEXER-GENERATES-PROOF",
+        "source": "STATE-INDEXER-TREE-READY",
+        "target": "ACTION-INDEXER-GENERATE-PROOFS",
+        "label": "Proof request received",
+        "data_involved": ["DATA-HISTORICAL-PROOF"]
+      },
+      {
+        "id": "EDGE-VERIFIER-RESERVES-CHECKPOINT",
+        "source": "STATE-VERIFIER-IDLE",
+        "target": "ACTION-VERIFIER-RESERVE-HASH-CHAIN",
+        "label": "reserveHashChain(index) called",
+        "data_involved": ["DATA-HASH-CHAIN"]
+      },
+      {
+        "id": "EDGE-CHECKPOINT-RESERVED",
+        "source": "ACTION-VERIFIER-RESERVE-HASH-CHAIN",
+        "target": "STATE-HASH-CHAIN-RESERVED",
+        "label": "Emit HashChainReserved, store in reservedHashChains[index]",
+        "data_involved": ["DATA-RESERVED-HASH-CHAIN"]
+      },
+      {
+        "id": "EDGE-AWAITING-NOVA-PROOF",
+        "source": "STATE-HASH-CHAIN-RESERVED",
+        "target": "STATE-AWAITING-TRANSFER-ROOT-PROOF",
+        "label": "Checkpoint ready for proof submission",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-NOVA-PROOF-SUBMITTED",
+        "source": "STATE-AWAITING-TRANSFER-ROOT-PROOF",
+        "target": "ACTION-VERIFIER-VALIDATE-NOVA-PROOF",
+        "label": "proveTransferRoot() called with Nova proof",
+        "data_involved": ["DATA-NOVA-IVC-PROOF", "DATA-GROTH16-PROOF"]
+      },
+      {
+        "id": "EDGE-NOVA-PROOF-VALID",
+        "source": "ACTION-VERIFIER-VALIDATE-NOVA-PROOF",
+        "target": "STATE-TRANSFER-ROOT-PROVED",
+        "label": "IRootDecider.verifyOpaqueNovaProof succeeds",
+        "data_involved": ["DATA-TRANSFER-ROOT"]
+      },
+      {
+        "id": "EDGE-DIVERGENT-PROOF-DETECTED",
+        "source": "ACTION-VERIFIER-VALIDATE-NOVA-PROOF",
+        "target": "STATE-EMERGENCY-TRIGGERED",
+        "label": "Proof diverges from existing root at same index",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-VERIFIER-RELAYS-ROOT",
+        "source": "STATE-TRANSFER-ROOT-PROVED",
+        "target": "ACTION-VERIFIER-RELAY-ROOT",
+        "label": "relayTransferRoot() called",
+        "data_involved": ["DATA-TRANSFER-ROOT", "DATA-LAYERZERO-MESSAGE"]
+      },
+      {
+        "id": "EDGE-ROOT-RELAYED",
+        "source": "ACTION-VERIFIER-RELAY-ROOT",
+        "target": "STATE-ROOT-RELAYED",
+        "label": "LayerZero message sent to Hub",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-HUB-RECEIVES-ROOT",
+        "source": "STATE-ROOT-RELAYED",
+        "target": "ACTION-HUB-RECEIVE-ROOT",
+        "label": "_lzReceive callback on Hub",
+        "data_involved": ["DATA-LAYERZERO-MESSAGE"]
+      },
+      {
+        "id": "EDGE-HUB-UPDATES-ROOT",
+        "source": "ACTION-HUB-RECEIVE-ROOT",
+        "target": "ACTION-HUB-UPDATE-TRANSFER-ROOT",
+        "label": "Validate sender EID, update transferRoots",
+        "data_involved": ["DATA-TRANSFER-ROOT", "DATA-TOKEN-INFO"]
+      },
+      {
+        "id": "EDGE-ROOT-STORED",
+        "source": "ACTION-HUB-UPDATE-TRANSFER-ROOT",
+        "target": "STATE-TRANSFER-ROOT-UPDATED",
+        "label": "Emit TransferRootUpdated",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-AWAITING-BROADCAST",
+        "source": "STATE-TRANSFER-ROOT-UPDATED",
+        "target": "STATE-AWAITING-BROADCAST",
+        "label": "Wait for broadcast trigger",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-BROADCAST-TRIGGERED",
+        "source": "STATE-AWAITING-BROADCAST",
+        "target": "ACTION-HUB-COMPUTE-AGGREGATION",
+        "label": "broadcast() called",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-AGGREGATION-COMPUTED",
+        "source": "ACTION-HUB-COMPUTE-AGGREGATION",
+        "target": "ACTION-HUB-INCREMENT-AGG-SEQ",
+        "label": "PoseidonT3 tree computed over <= 64 tokens",
+        "data_involved": ["DATA-AGGREGATION-ROOT"]
+      },
+      {
+        "id": "EDGE-AGG-SEQ-INCREMENTED",
+        "source": "ACTION-HUB-INCREMENT-AGG-SEQ",
+        "target": "ACTION-HUB-BROADCAST-ROOT",
+        "label": "aggSeq++ for monotonicity",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-GLOBAL-ROOT-SENT",
+        "source": "ACTION-HUB-BROADCAST-ROOT",
+        "target": "STATE-GLOBAL-ROOT-BROADCAST",
+        "label": "LayerZero messages sent to all registered Verifiers",
+        "data_involved": ["DATA-LAYERZERO-MESSAGE", "DATA-GLOBAL-TRANSFER-ROOT"]
+      },
+      {
+        "id": "EDGE-VERIFIER-RECEIVES-GLOBAL",
+        "source": "STATE-GLOBAL-ROOT-BROADCAST",
+        "target": "ACTION-VERIFIER-SAVE-GLOBAL-ROOT",
+        "label": "_lzReceive callback on Verifier",
+        "data_involved": ["DATA-GLOBAL-TRANSFER-ROOT"]
+      },
+      {
+        "id": "EDGE-GLOBAL-ROOT-SAVED",
+        "source": "ACTION-VERIFIER-SAVE-GLOBAL-ROOT",
+        "target": "STATE-GLOBAL-ROOT-SAVED",
+        "label": "Emit GlobalRootSaved, store in globalTransferRoots",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-GENERATES-STEALTH",
+        "source": "STATE-USER-IDLE",
+        "target": "ACTION-USER-GENERATE-STEALTH",
+        "label": "User initiates private transfer",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-STEALTH-GENERATED",
+        "source": "ACTION-USER-GENERATE-STEALTH",
+        "target": "ACTION-USER-GENERATE-NOVA-PROOF",
+        "label": "Stealth burn address computed from secret with PoW",
+        "data_involved": ["DATA-STEALTH-ADDRESS", "DATA-GENERAL-RECIPIENT"]
+      },
+      {
+        "id": "EDGE-NOVA-PROOF-GENERATED",
+        "source": "ACTION-USER-GENERATE-NOVA-PROOF",
+        "target": "STATE-USER-HAS-NOVA-PROOF",
+        "label": "Nova IVC proof generated locally via CLI",
+        "data_involved": ["DATA-NOVA-IVC-PROOF", "DATA-HISTORICAL-PROOF"]
+      },
+      {
+        "id": "EDGE-USER-SUBMITS-TO-PROVER",
+        "source": "STATE-USER-HAS-NOVA-PROOF",
+        "target": "ACTION-USER-SUBMIT-TO-PROVER",
+        "label": "Submit Nova IVC proof to decider-prover service",
+        "data_involved": ["DATA-NOVA-IVC-PROOF"]
+      },
+      {
+        "id": "EDGE-PROVER-RECEIVES-IVC",
+        "source": "ACTION-USER-SUBMIT-TO-PROVER",
+        "target": "ACTION-PROVER-RECEIVE-IVC",
+        "label": "Base64-encoded IVC proof received",
+        "data_involved": ["DATA-NOVA-IVC-PROOF"]
+      },
+      {
+        "id": "EDGE-JOB-QUEUED",
+        "source": "ACTION-PROVER-RECEIVE-IVC",
+        "target": "STATE-JOB-QUEUED",
+        "label": "Job created and queued",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-JOB-STARTS-PROCESSING",
+        "source": "STATE-JOB-QUEUED",
+        "target": "STATE-JOB-PROCESSING",
+        "label": "Job picked up for processing",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-PROVER-CONVERTS",
+        "source": "STATE-JOB-PROCESSING",
+        "target": "ACTION-PROVER-CONVERT-TO-GROTH16",
+        "label": "Nova folding -> Groth16 conversion",
+        "data_involved": ["DATA-NOVA-IVC-PROOF"]
+      },
+      {
+        "id": "EDGE-JOB-COMPLETED",
+        "source": "ACTION-PROVER-CONVERT-TO-GROTH16",
+        "target": "STATE-JOB-COMPLETED",
+        "label": "Groth16 proof generated successfully",
+        "data_involved": ["DATA-GROTH16-PROOF"]
+      },
+      {
+        "id": "EDGE-JOB-FAILED",
+        "source": "ACTION-PROVER-CONVERT-TO-GROTH16",
+        "target": "STATE-JOB-FAILED",
+        "label": "Proof conversion failed",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-RETRIEVES-GROTH16",
+        "source": "STATE-JOB-COMPLETED",
+        "target": "STATE-USER-HAS-GROTH16-PROOF",
+        "label": "User polls and retrieves Groth16 proof",
+        "data_involved": ["DATA-GROTH16-PROOF"]
+      },
+      {
+        "id": "EDGE-USER-SUBMITS-TELEPORT",
+        "source": "STATE-USER-HAS-GROTH16-PROOF",
+        "target": "ACTION-USER-SUBMIT-TELEPORT",
+        "label": "Submit teleport() or singleTeleport() to Verifier",
+        "data_involved": ["DATA-TELEPORT-REQUEST", "DATA-GROTH16-PROOF"]
+      },
+      {
+        "id": "EDGE-VERIFIER-RECEIVES-TELEPORT",
+        "source": "ACTION-USER-SUBMIT-TELEPORT",
+        "target": "STATE-AWAITING-TELEPORT-PROOF",
+        "label": "Verifier receives teleport request",
+        "data_involved": ["DATA-TELEPORT-REQUEST"]
+      },
+      {
+        "id": "EDGE-VALIDATE-ROOT-REF",
+        "source": "STATE-AWAITING-TELEPORT-PROOF",
+        "target": "ACTION-VERIFIER-VALIDATE-ROOT-REFERENCE",
+        "label": "Check root against provedTransferRoots (local) or globalTransferRoots (global)",
+        "data_involved": ["DATA-TRANSFER-ROOT", "DATA-GLOBAL-TRANSFER-ROOT"]
+      },
+      {
+        "id": "EDGE-VALIDATE-RECIPIENT-HASH",
+        "source": "ACTION-VERIFIER-VALIDATE-ROOT-REFERENCE",
+        "target": "ACTION-VERIFIER-VALIDATE-RECIPIENT-HASH",
+        "label": "Root valid, check recipient hash binding",
+        "data_involved": ["DATA-GENERAL-RECIPIENT"]
+      },
+      {
+        "id": "EDGE-CHECK-MONOTONICITY",
+        "source": "ACTION-VERIFIER-VALIDATE-RECIPIENT-HASH",
+        "target": "ACTION-VERIFIER-CHECK-MONOTONICITY",
+        "label": "Recipient hash valid, check totalTeleported",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-VALIDATE-WITHDRAWAL-PROOF",
+        "source": "ACTION-VERIFIER-CHECK-MONOTONICITY",
+        "target": "ACTION-VERIFIER-VALIDATE-WITHDRAWAL-PROOF",
+        "label": "Monotonicity check passed, validate withdrawal proof",
+        "data_involved": ["DATA-GROTH16-PROOF", "DATA-NOVA-IVC-PROOF"]
+      },
+      {
+        "id": "EDGE-PROOF-VALID-CALL-TELEPORT",
+        "source": "ACTION-VERIFIER-VALIDATE-WITHDRAWAL-PROOF",
+        "target": "ACTION-VERIFIER-CALL-TELEPORT",
+        "label": "Proof valid, call zERC20.teleport() with delta",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-TELEPORT-MINTED",
+        "source": "ACTION-VERIFIER-CALL-TELEPORT",
+        "target": "STATE-TELEPORT-COMPLETE",
+        "label": "zERC20 minted to recipient, emit Teleport event",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-TELEPORT-REJECTED-INVALID-ROOT",
+        "source": "ACTION-VERIFIER-VALIDATE-ROOT-REFERENCE",
+        "target": "STATE-TELEPORT-REJECTED",
+        "label": "Root not found in proved/global roots",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-TELEPORT-REJECTED-BAD-RECIPIENT",
+        "source": "ACTION-VERIFIER-VALIDATE-RECIPIENT-HASH",
+        "target": "STATE-TELEPORT-REJECTED",
+        "label": "Recipient hash mismatch",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-TELEPORT-REJECTED-DOUBLE-SPEND",
+        "source": "ACTION-VERIFIER-CHECK-MONOTONICITY",
+        "target": "STATE-TELEPORT-REJECTED",
+        "label": "totalTeleported not strictly increasing (double-spend attempt)",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-TELEPORT-REJECTED-INVALID-PROOF",
+        "source": "ACTION-VERIFIER-VALIDATE-WITHDRAWAL-PROOF",
+        "target": "STATE-TELEPORT-REJECTED",
+        "label": "Nova/Groth16 proof verification failed",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-USER-INITIATES-BRIDGE",
+        "source": "STATE-USER-HAS-ZERC20",
+        "target": "STATE-ADAPTOR-IDLE",
+        "label": "User wants to exit cross-chain",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-ADAPTOR-RECEIVES-REQUEST",
+        "source": "STATE-ADAPTOR-IDLE",
+        "target": "ACTION-ADAPTOR-RECEIVE-UNWRAP-BRIDGE",
+        "label": "unwrapAndBridge() called with params",
+        "data_involved": ["DATA-UNWRAP-REQUEST", "DATA-BRIDGE-PARAMS"]
+      },
+      {
+        "id": "EDGE-ADAPTOR-UNWRAPS",
+        "source": "ACTION-ADAPTOR-RECEIVE-UNWRAP-BRIDGE",
+        "target": "ACTION-ADAPTOR-UNWRAP-VIA-LM",
+        "label": "Call LiquidityManager.unwrap()",
+        "data_involved": ["DATA-ZERC20-TOKEN"]
+      },
+      {
+        "id": "EDGE-ADAPTOR-BRIDGES",
+        "source": "ACTION-ADAPTOR-UNWRAP-VIA-LM",
+        "target": "ACTION-ADAPTOR-BRIDGE-VIA-STARGATE",
+        "label": "Send underlying via Stargate bridge",
+        "data_involved": ["DATA-BRIDGE-PARAMS"]
+      },
+      {
+        "id": "EDGE-BRIDGE-INITIATED",
+        "source": "ACTION-ADAPTOR-BRIDGE-VIA-STARGATE",
+        "target": "STATE-BRIDGE-INITIATED",
+        "label": "Emit UnwrapAndBridge event",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-BRIDGE-FAILED",
+        "source": "ACTION-ADAPTOR-BRIDGE-VIA-STARGATE",
+        "target": "STATE-BRIDGE-FAILED",
+        "label": "Stargate bridge fails, emit failure event",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-EMERGENCY-ROTATE-VERIFIERS",
+        "source": "STATE-EMERGENCY-TRIGGERED",
+        "target": "ACTION-VERIFIER-ROTATE-VERIFIERS",
+        "label": "Admin calls setVerifiers() with new addresses",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-DEACTIVATE-EMERGENCY",
+        "source": "ACTION-VERIFIER-ROTATE-VERIFIERS",
+        "target": "ACTION-VERIFIER-DEACTIVATE-EMERGENCY",
+        "label": "Admin calls deactivateEmergency()",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-EMERGENCY-RECOVERED",
+        "source": "ACTION-VERIFIER-DEACTIVATE-EMERGENCY",
+        "target": "STATE-EMERGENCY-RECOVERED",
+        "label": "Normal operation resumed",
+        "data_involved": []
+      },
+      {
+        "id": "EDGE-BACK-TO-IDLE",
+        "source": "STATE-EMERGENCY-RECOVERED",
+        "target": "STATE-VERIFIER-IDLE",
+        "label": "Verifier returns to idle state",
+        "data_involved": []
+      }
+    ]
+  },
+  "sub_graphs": [
+    {
+      "id": "GRAPH-NOVA-PROOF-GENERATION",
+      "title": "Nova IVC Proof Generation (Client-Side)",
+      "nodes": [
+        {
+          "id": "STATE-NOVA-GEN-INIT",
+          "label": "Initialize Nova Circuit Parameters",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-NOVA-FETCH-MERKLE-PROOFS",
+          "label": "Fetch Historical Merkle Proofs from Indexer",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-LOAD-CIRCUIT-PARAMS",
+          "label": "Load Nova Proving Parameters (*_nova_pp.bin)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-SETUP-WITNESS",
+          "label": "Setup Circuit Witness with Transfer Data",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-FOLD-STEP",
+          "label": "Execute Nova Folding Step",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-NOVA-FOLDING-LOOP",
+          "label": "Nova Folding Loop (Accumulate Transfers)",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-NOVA-FINALIZE-IVC",
+          "label": "Finalize IVC Proof",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-NOVA-IVC-COMPLETE",
+          "label": "Nova IVC Proof Complete",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-NOVA-GEN-START",
+          "source": "STATE-NOVA-GEN-INIT",
+          "target": "ACTION-NOVA-FETCH-MERKLE-PROOFS",
+          "label": "Begin proof generation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-PROOFS-FETCHED",
+          "source": "ACTION-NOVA-FETCH-MERKLE-PROOFS",
+          "target": "ACTION-NOVA-LOAD-CIRCUIT-PARAMS",
+          "label": "Historical proofs received from indexer",
+          "data_involved": ["DATA-HISTORICAL-PROOF"]
+        },
+        {
+          "id": "EDGE-NOVA-PARAMS-LOADED",
+          "source": "ACTION-NOVA-LOAD-CIRCUIT-PARAMS",
+          "target": "ACTION-NOVA-SETUP-WITNESS",
+          "label": "Circuit parameters loaded",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-WITNESS-READY",
+          "source": "ACTION-NOVA-SETUP-WITNESS",
+          "target": "ACTION-NOVA-FOLD-STEP",
+          "label": "Witness data prepared",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-FOLD-CONTINUE",
+          "source": "ACTION-NOVA-FOLD-STEP",
+          "target": "STATE-NOVA-FOLDING-LOOP",
+          "label": "More transfers to fold",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-FOLD-NEXT",
+          "source": "STATE-NOVA-FOLDING-LOOP",
+          "target": "ACTION-NOVA-FOLD-STEP",
+          "label": "Fold next transfer",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-FOLD-DONE",
+          "source": "ACTION-NOVA-FOLD-STEP",
+          "target": "ACTION-NOVA-FINALIZE-IVC",
+          "label": "All transfers folded",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-IVC-FINALIZED",
+          "source": "ACTION-NOVA-FINALIZE-IVC",
+          "target": "STATE-NOVA-IVC-COMPLETE",
+          "label": "IVC proof serialized",
+          "data_involved": ["DATA-NOVA-IVC-PROOF"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-NOVA-TO-GROTH16",
+      "title": "Nova to Groth16 Conversion (Decider/Prover Service)",
+      "nodes": [
+        {
+          "id": "STATE-DECIDER-INIT",
+          "label": "Decider Receives IVC Proof",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-DECIDER-DESERIALIZE-IVC",
+          "label": "Deserialize Nova IVC Proof (Base64)",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-DECIDER-LOAD-GROTH16-PK",
+          "label": "Load Groth16 Proving Key (*_groth16_pk.bin)",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-DECIDER-EXTRACT-CIRCUIT-TYPE",
+          "label": "Determine Circuit Type (Root/WithdrawLocal/WithdrawGlobal)",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-DECIDER-VERIFY-IVC-LOCALLY",
+          "label": "Locally Verify Nova IVC Correctness",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-DECIDER-GENERATE-GROTH16",
+          "label": "Generate Groth16 Proof via ark-groth16",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-DECIDER-SERIALIZE-PROOF",
+          "label": "Serialize Groth16 Proof for Solidity",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-DECIDER-PROOF-READY",
+          "label": "Groth16 Proof Ready for On-Chain Verification",
+          "actor_id": "ACTOR-DECIDER-PROVER-SERVICE",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-DECIDER-START",
+          "source": "STATE-DECIDER-INIT",
+          "target": "ACTION-DECIDER-DESERIALIZE-IVC",
+          "label": "Begin conversion process",
+          "data_involved": ["DATA-NOVA-IVC-PROOF"]
+        },
+        {
+          "id": "EDGE-DECIDER-IVC-DESERIALIZED",
+          "source": "ACTION-DECIDER-DESERIALIZE-IVC",
+          "target": "ACTION-DECIDER-LOAD-GROTH16-PK",
+          "label": "IVC proof deserialized",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-DECIDER-PK-LOADED",
+          "source": "ACTION-DECIDER-LOAD-GROTH16-PK",
+          "target": "ACTION-DECIDER-EXTRACT-CIRCUIT-TYPE",
+          "label": "Proving key loaded",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-DECIDER-TYPE-EXTRACTED",
+          "source": "ACTION-DECIDER-EXTRACT-CIRCUIT-TYPE",
+          "target": "ACTION-DECIDER-VERIFY-IVC-LOCALLY",
+          "label": "Circuit type determined",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-DECIDER-IVC-VERIFIED",
+          "source": "ACTION-DECIDER-VERIFY-IVC-LOCALLY",
+          "target": "ACTION-DECIDER-GENERATE-GROTH16",
+          "label": "IVC verification passed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-DECIDER-GROTH16-GENERATED",
+          "source": "ACTION-DECIDER-GENERATE-GROTH16",
+          "target": "ACTION-DECIDER-SERIALIZE-PROOF",
+          "label": "Groth16 proof generated",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-DECIDER-PROOF-SERIALIZED",
+          "source": "ACTION-DECIDER-SERIALIZE-PROOF",
+          "target": "STATE-DECIDER-PROOF-READY",
+          "label": "Proof serialized for Solidity verifier",
+          "data_involved": ["DATA-GROTH16-PROOF"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-NOVA-PROOF-VERIFICATION",
+      "title": "Nova Transfer Root Proof Verification (On-Chain)",
+      "nodes": [
+        {
+          "id": "STATE-VERIFY-ROOT-INIT",
+          "label": "Verifier Receives proveTransferRoot Call",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-VERIFY-CHECK-INDEX-EXISTS",
+          "label": "Check if Index Already Has Proved Root",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-VERIFY-LOAD-RESERVED-CHECKPOINT",
+          "label": "Load Reserved Hash Chain Checkpoint",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-VERIFY-CALL-ROOT-DECIDER",
+          "label": "Call IRootDecider.verifyOpaqueNovaProof()",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-VERIFY-CHECK-PROOF-CONSISTENCY",
+          "label": "Check Proof Consistency with Existing Root",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-VERIFY-STORE-ROOT",
+          "label": "Store Proved Root in provedTransferRoots[index]",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-VERIFY-ROOT-STORED",
+          "label": "Transfer Root Proved and Stored",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-VERIFY-EMERGENCY",
+          "label": "Divergent Proof - Emergency Triggered",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-VERIFY-ROOT-START",
+          "source": "STATE-VERIFY-ROOT-INIT",
+          "target": "ACTION-VERIFY-CHECK-INDEX-EXISTS",
+          "label": "Begin verification",
+          "data_involved": ["DATA-GROTH16-PROOF"]
+        },
+        {
+          "id": "EDGE-VERIFY-LOAD-CHECKPOINT",
+          "source": "ACTION-VERIFY-CHECK-INDEX-EXISTS",
+          "target": "ACTION-VERIFY-LOAD-RESERVED-CHECKPOINT",
+          "label": "Check reserved checkpoint",
+          "data_involved": ["DATA-RESERVED-HASH-CHAIN"]
+        },
+        {
+          "id": "EDGE-VERIFY-CALL-DECIDER",
+          "source": "ACTION-VERIFY-LOAD-RESERVED-CHECKPOINT",
+          "target": "ACTION-VERIFY-CALL-ROOT-DECIDER",
+          "label": "Invoke on-chain proof verifier",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-VERIFY-CHECK-CONSISTENCY",
+          "source": "ACTION-VERIFY-CALL-ROOT-DECIDER",
+          "target": "ACTION-VERIFY-CHECK-PROOF-CONSISTENCY",
+          "label": "Proof valid, check consistency",
+          "data_involved": ["DATA-TRANSFER-ROOT"]
+        },
+        {
+          "id": "EDGE-VERIFY-STORE",
+          "source": "ACTION-VERIFY-CHECK-PROOF-CONSISTENCY",
+          "target": "ACTION-VERIFY-STORE-ROOT",
+          "label": "Root consistent or new",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-VERIFY-STORED",
+          "source": "ACTION-VERIFY-STORE-ROOT",
+          "target": "STATE-VERIFY-ROOT-STORED",
+          "label": "Emit TransferRootProved",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-VERIFY-DIVERGENT",
+          "source": "ACTION-VERIFY-CHECK-PROOF-CONSISTENCY",
+          "target": "STATE-VERIFY-EMERGENCY",
+          "label": "Root differs from existing - divergent proof!",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-WITHDRAWAL-PROOF-VERIFICATION",
+      "title": "Withdrawal Proof Verification (Nova or Groth16)",
+      "nodes": [
+        {
+          "id": "STATE-WITHDRAW-VERIFY-INIT",
+          "label": "Verifier Receives Withdrawal Proof",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-WITHDRAW-DETERMINE-MODE",
+          "label": "Determine Local vs Global Mode (isGlobal)",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-WITHDRAW-SELECT-DECIDER",
+          "label": "Select Appropriate Decider (withdrawLocalDecider or withdrawGlobalDecider)",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-WITHDRAW-VERIFY-NOVA",
+          "label": "Verify Nova Withdrawal Proof",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-WITHDRAW-VERIFY-GROTH16",
+          "label": "Verify Groth16 Single Teleport Proof",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-WITHDRAW-EXTRACT-PUBLIC-INPUTS",
+          "label": "Extract Public Inputs (root, recipientHash, amount)",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-WITHDRAW-VERIFIED",
+          "label": "Withdrawal Proof Verified",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-WITHDRAW-FAILED",
+          "label": "Withdrawal Proof Verification Failed",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-WITHDRAW-START",
+          "source": "STATE-WITHDRAW-VERIFY-INIT",
+          "target": "ACTION-WITHDRAW-DETERMINE-MODE",
+          "label": "Begin withdrawal verification",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-WITHDRAW-MODE-DETERMINED",
+          "source": "ACTION-WITHDRAW-DETERMINE-MODE",
+          "target": "ACTION-WITHDRAW-SELECT-DECIDER",
+          "label": "Privacy mode determined",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-WITHDRAW-NOVA-PATH",
+          "source": "ACTION-WITHDRAW-SELECT-DECIDER",
+          "target": "ACTION-WITHDRAW-VERIFY-NOVA",
+          "label": "Full teleport via Nova decider",
+          "data_involved": ["DATA-NOVA-IVC-PROOF"]
+        },
+        {
+          "id": "EDGE-WITHDRAW-GROTH16-PATH",
+          "source": "ACTION-WITHDRAW-SELECT-DECIDER",
+          "target": "ACTION-WITHDRAW-VERIFY-GROTH16",
+          "label": "Single teleport via Groth16",
+          "data_involved": ["DATA-GROTH16-PROOF"]
+        },
+        {
+          "id": "EDGE-WITHDRAW-NOVA-VALID",
+          "source": "ACTION-WITHDRAW-VERIFY-NOVA",
+          "target": "ACTION-WITHDRAW-EXTRACT-PUBLIC-INPUTS",
+          "label": "Nova proof valid",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-WITHDRAW-GROTH16-VALID",
+          "source": "ACTION-WITHDRAW-VERIFY-GROTH16",
+          "target": "ACTION-WITHDRAW-EXTRACT-PUBLIC-INPUTS",
+          "label": "Groth16 proof valid",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-WITHDRAW-INPUTS-EXTRACTED",
+          "source": "ACTION-WITHDRAW-EXTRACT-PUBLIC-INPUTS",
+          "target": "STATE-WITHDRAW-VERIFIED",
+          "label": "Public inputs extracted successfully",
+          "data_involved": ["DATA-TRANSFER-ROOT", "DATA-GENERAL-RECIPIENT"]
+        },
+        {
+          "id": "EDGE-WITHDRAW-NOVA-INVALID",
+          "source": "ACTION-WITHDRAW-VERIFY-NOVA",
+          "target": "STATE-WITHDRAW-FAILED",
+          "label": "Nova proof invalid",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-WITHDRAW-GROTH16-INVALID",
+          "source": "ACTION-WITHDRAW-VERIFY-GROTH16",
+          "target": "STATE-WITHDRAW-FAILED",
+          "label": "Groth16 proof invalid",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-INCENTIVE-CURVE",
+      "title": "Incentive Curve Calculation (IncentiveLib)",
+      "nodes": [
+        {
+          "id": "STATE-INCENTIVE-INIT",
+          "label": "Incentive Calculation Requested",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-INCENTIVE-GET-CURRENT-LIQUIDITY",
+          "label": "Get Current Liquidity (underlyingBalance - feeSurplus)",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-GET-TARGET",
+          "label": "Get Target Liquidity T and Strength k",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-CALC-DENSITY",
+          "label": "Calculate Density: k * (1 - x/T)",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-INTEGRATE-WRAP",
+          "label": "Integrate for Wrap Reward [L, L+amount]",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-INTEGRATE-UNWRAP",
+          "label": "Integrate for Unwrap Fee [L-amount, L]",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-APPLY-ROUNDING",
+          "label": "Apply Rounding (floor for rewards, ceil for fees)",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-INCENTIVE-CLAMP-TO-TARGET",
+          "label": "Clamp Integration Bounds to [0, T]",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-INCENTIVE-COMPLETE",
+          "label": "Incentive/Fee Calculated",
+          "actor_id": "ACTOR-LIQUIDITY-MANAGER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-INCENTIVE-START",
+          "source": "STATE-INCENTIVE-INIT",
+          "target": "ACTION-INCENTIVE-GET-CURRENT-LIQUIDITY",
+          "label": "Begin calculation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-LIQUIDITY-FETCHED",
+          "source": "ACTION-INCENTIVE-GET-CURRENT-LIQUIDITY",
+          "target": "ACTION-INCENTIVE-GET-TARGET",
+          "label": "Current liquidity L determined",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-TARGET-FETCHED",
+          "source": "ACTION-INCENTIVE-GET-TARGET",
+          "target": "ACTION-INCENTIVE-CALC-DENSITY",
+          "label": "Target and strength parameters loaded",
+          "data_involved": ["DATA-INCENTIVE-CURVE-PARAMS"]
+        },
+        {
+          "id": "EDGE-INCENTIVE-DENSITY-FOR-WRAP",
+          "source": "ACTION-INCENTIVE-CALC-DENSITY",
+          "target": "ACTION-INCENTIVE-INTEGRATE-WRAP",
+          "label": "Wrap operation requested",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-DENSITY-FOR-UNWRAP",
+          "source": "ACTION-INCENTIVE-CALC-DENSITY",
+          "target": "ACTION-INCENTIVE-INTEGRATE-UNWRAP",
+          "label": "Unwrap operation requested",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-WRAP-INTEGRATED",
+          "source": "ACTION-INCENTIVE-INTEGRATE-WRAP",
+          "target": "ACTION-INCENTIVE-CLAMP-TO-TARGET",
+          "label": "Reward integral computed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-UNWRAP-INTEGRATED",
+          "source": "ACTION-INCENTIVE-INTEGRATE-UNWRAP",
+          "target": "ACTION-INCENTIVE-CLAMP-TO-TARGET",
+          "label": "Fee integral computed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-CLAMPED",
+          "source": "ACTION-INCENTIVE-CLAMP-TO-TARGET",
+          "target": "ACTION-INCENTIVE-APPLY-ROUNDING",
+          "label": "Bounds clamped",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-INCENTIVE-ROUNDED",
+          "source": "ACTION-INCENTIVE-APPLY-ROUNDING",
+          "target": "STATE-INCENTIVE-COMPLETE",
+          "label": "Final value calculated",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-HUB-AGGREGATION",
+      "title": "Hub PoseidonT3 Aggregation Tree Computation",
+      "nodes": [
+        {
+          "id": "STATE-HUB-AGG-INIT",
+          "label": "Hub Broadcast Triggered",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-HUB-COLLECT-ROOTS",
+          "label": "Collect Transfer Roots from All Registered Tokens",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-HUB-CHECK-CAPACITY",
+          "label": "Check Token Count <= POSEIDON_MAX_LEAVES (64)",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-HUB-BUILD-TREE-LEVEL-0",
+          "label": "Build Tree Level 0 (Leaf Nodes = Token Roots)",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-HUB-POSEIDON-HASH",
+          "label": "Compute PoseidonT3 Hash for Node Pairs",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-HUB-TREE-LEVEL-COMPLETE",
+          "label": "Tree Level Complete",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-HUB-COMPUTE-ROOT",
+          "label": "Compute Final Aggregation Root (Height 6)",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-HUB-ROOT-COMPUTED",
+          "label": "Aggregation Root Computed",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-HUB-AGG-START",
+          "source": "STATE-HUB-AGG-INIT",
+          "target": "ACTION-HUB-COLLECT-ROOTS",
+          "label": "Begin aggregation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-ROOTS-COLLECTED",
+          "source": "ACTION-HUB-COLLECT-ROOTS",
+          "target": "ACTION-HUB-CHECK-CAPACITY",
+          "label": "All token roots collected",
+          "data_involved": ["DATA-TRANSFER-ROOT"]
+        },
+        {
+          "id": "EDGE-HUB-CAPACITY-OK",
+          "source": "ACTION-HUB-CHECK-CAPACITY",
+          "target": "ACTION-HUB-BUILD-TREE-LEVEL-0",
+          "label": "Token count within capacity",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-LEVEL-0-BUILT",
+          "source": "ACTION-HUB-BUILD-TREE-LEVEL-0",
+          "target": "ACTION-HUB-POSEIDON-HASH",
+          "label": "Leaf nodes ready",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-HASH-COMPUTED",
+          "source": "ACTION-HUB-POSEIDON-HASH",
+          "target": "STATE-HUB-TREE-LEVEL-COMPLETE",
+          "label": "Node pair hashed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-NEXT-LEVEL",
+          "source": "STATE-HUB-TREE-LEVEL-COMPLETE",
+          "target": "ACTION-HUB-POSEIDON-HASH",
+          "label": "More levels to compute",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-FINAL-LEVEL",
+          "source": "STATE-HUB-TREE-LEVEL-COMPLETE",
+          "target": "ACTION-HUB-COMPUTE-ROOT",
+          "label": "Tree height = 6 reached",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-HUB-ROOT-DONE",
+          "source": "ACTION-HUB-COMPUTE-ROOT",
+          "target": "STATE-HUB-ROOT-COMPUTED",
+          "label": "Final aggregation root computed",
+          "data_involved": ["DATA-AGGREGATION-ROOT"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-LAYERZERO-MESSAGE-FLOW",
+      "title": "LayerZero v2 Cross-Chain Message Flow",
+      "nodes": [
+        {
+          "id": "STATE-LZ-SENDER-INIT",
+          "label": "Sender Contract Initiates Message",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-LZ-QUOTE-FEE",
+          "label": "Quote LayerZero Messaging Fee",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-LZ-SEND-MESSAGE",
+          "label": "Call _lzSend with Payload and Options",
+          "actor_id": "ACTOR-VERIFIER-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-LZ-MESSAGE-PENDING",
+          "label": "Message Pending in LayerZero Network",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-LZ-GUARDIAN-SIGN",
+          "label": "Guardians Sign Message (13/19 Supermajority)",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-LZ-MESSAGE-VALIDATED",
+          "label": "Message Validated by Guardian Network",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-LZ-DELIVER-MESSAGE",
+          "label": "Deliver Message to Destination Chain",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-LZ-VALIDATE-EID",
+          "label": "Receiver Validates Source EID",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-LZ-RECEIVE-CALLBACK",
+          "label": "Call _lzReceive on Destination Contract",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-LZ-MESSAGE-DELIVERED",
+          "label": "Message Successfully Delivered",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-LZ-MESSAGE-REJECTED",
+          "label": "Message Rejected - Invalid Source EID",
+          "actor_id": "ACTOR-HUB-CONTRACT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-LZ-START",
+          "source": "STATE-LZ-SENDER-INIT",
+          "target": "ACTION-LZ-QUOTE-FEE",
+          "label": "Prepare cross-chain message",
+          "data_involved": ["DATA-LAYERZERO-MESSAGE"]
+        },
+        {
+          "id": "EDGE-LZ-FEE-QUOTED",
+          "source": "ACTION-LZ-QUOTE-FEE",
+          "target": "ACTION-LZ-SEND-MESSAGE",
+          "label": "Fee paid, send message",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-MESSAGE-SENT",
+          "source": "ACTION-LZ-SEND-MESSAGE",
+          "target": "STATE-LZ-MESSAGE-PENDING",
+          "label": "Message submitted to LayerZero",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-GUARDIANS-SIGN",
+          "source": "STATE-LZ-MESSAGE-PENDING",
+          "target": "ACTION-LZ-GUARDIAN-SIGN",
+          "label": "Guardians receive message",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-MESSAGE-SIGNED",
+          "source": "ACTION-LZ-GUARDIAN-SIGN",
+          "target": "STATE-LZ-MESSAGE-VALIDATED",
+          "label": "Supermajority achieved",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-DELIVER",
+          "source": "STATE-LZ-MESSAGE-VALIDATED",
+          "target": "ACTION-LZ-DELIVER-MESSAGE",
+          "label": "Relay to destination chain",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-VALIDATE-SENDER",
+          "source": "ACTION-LZ-DELIVER-MESSAGE",
+          "target": "ACTION-LZ-VALIDATE-EID",
+          "label": "Check source endpoint ID",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-EID-VALID",
+          "source": "ACTION-LZ-VALIDATE-EID",
+          "target": "ACTION-LZ-RECEIVE-CALLBACK",
+          "label": "Source EID in registered list",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-EID-INVALID",
+          "source": "ACTION-LZ-VALIDATE-EID",
+          "target": "STATE-LZ-MESSAGE-REJECTED",
+          "label": "Unknown source EID",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-LZ-CALLBACK-EXECUTED",
+          "source": "ACTION-LZ-RECEIVE-CALLBACK",
+          "target": "STATE-LZ-MESSAGE-DELIVERED",
+          "label": "Message processed by receiver",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-STEALTH-ADDRESS-GENERATION",
+      "title": "Stealth Burn Address Generation with PoW",
+      "nodes": [
+        {
+          "id": "STATE-STEALTH-INIT",
+          "label": "Stealth Address Generation Requested",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-STEALTH-CREATE-GR",
+          "label": "Create GeneralRecipient(chain_id, address, tweak)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-DERIVE-BASE-SECRET",
+          "label": "Derive Base Secret via keccak256(domain || seed || id)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-DERIVE-TWEAK",
+          "label": "Derive Tweak via keccak256(tweak_domain || seed || id)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-CONVERT-TO-FR",
+          "label": "Convert recipient and secret to BN254 Fr scalars",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-FIND-POW-NONCE",
+          "label": "Find PoW Nonce via find_pow_nonce(recipient_fr, secret_seed_fr)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-STEALTH-POW-SEARCH",
+          "label": "PoW Search Loop (Incrementing Nonce)",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-STEALTH-COMPUTE-SECRET",
+          "label": "Compute Final Secret via secret_from_nonce(seed, nonce)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-COMPUTE-BURN-ADDRESS",
+          "label": "Compute Burn Address via compute_burn_address_from_secret()",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-STEALTH-CONVERT-TO-ADDRESS",
+          "label": "Convert Fr result to 20-byte EVM Address",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-STEALTH-ADDRESS-READY",
+          "label": "Stealth Burn Address Ready",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-STEALTH-SERIALIZE",
+          "label": "Serialize FullBurnAddress (version || chain_id || address || tweak || secret)",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-STEALTH-SERIALIZED",
+          "label": "FullBurnAddress Serialized (105 bytes)",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-STEALTH-START",
+          "source": "STATE-STEALTH-INIT",
+          "target": "ACTION-STEALTH-DERIVE-BASE-SECRET",
+          "label": "Begin stealth address derivation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-STEALTH-SECRET-DERIVED",
+          "source": "ACTION-STEALTH-DERIVE-BASE-SECRET",
+          "target": "ACTION-STEALTH-DERIVE-TWEAK",
+          "label": "Base secret computed from seed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-STEALTH-TWEAK-DERIVED",
+          "source": "ACTION-STEALTH-DERIVE-TWEAK",
+          "target": "ACTION-STEALTH-CREATE-GR",
+          "label": "Tweak value derived",
+          "data_involved": ["DATA-SECRET-AND-TWEAK"]
+        },
+        {
+          "id": "EDGE-STEALTH-GR-CREATED",
+          "source": "ACTION-STEALTH-CREATE-GR",
+          "target": "ACTION-STEALTH-CONVERT-TO-FR",
+          "label": "GeneralRecipient created",
+          "data_involved": ["DATA-GENERAL-RECIPIENT"]
+        },
+        {
+          "id": "EDGE-STEALTH-FR-CONVERTED",
+          "source": "ACTION-STEALTH-CONVERT-TO-FR",
+          "target": "ACTION-STEALTH-FIND-POW-NONCE",
+          "label": "Values converted to scalar field",
+          "data_involved": ["DATA-FR-SCALAR"]
+        },
+        {
+          "id": "EDGE-STEALTH-POW-STARTED",
+          "source": "ACTION-STEALTH-FIND-POW-NONCE",
+          "target": "STATE-STEALTH-POW-SEARCH",
+          "label": "Begin PoW nonce search",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-STEALTH-POW-CONTINUE",
+          "source": "STATE-STEALTH-POW-SEARCH",
+          "target": "ACTION-STEALTH-FIND-POW-NONCE",
+          "label": "Nonce invalid, try next",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-STEALTH-POW-FOUND",
+          "source": "ACTION-STEALTH-FIND-POW-NONCE",
+          "target": "ACTION-STEALTH-COMPUTE-SECRET",
+          "label": "Valid PoW nonce found",
+          "data_involved": ["DATA-POW-NONCE"]
+        },
+        {
+          "id": "EDGE-STEALTH-SECRET-COMPUTED",
+          "source": "ACTION-STEALTH-COMPUTE-SECRET",
+          "target": "ACTION-STEALTH-COMPUTE-BURN-ADDRESS",
+          "label": "Final secret derived from nonce",
+          "data_involved": ["DATA-SECRET-AND-TWEAK"]
+        },
+        {
+          "id": "EDGE-STEALTH-BURN-COMPUTED",
+          "source": "ACTION-STEALTH-COMPUTE-BURN-ADDRESS",
+          "target": "ACTION-STEALTH-CONVERT-TO-ADDRESS",
+          "label": "Burn address Fr computed",
+          "data_involved": ["DATA-FR-SCALAR"]
+        },
+        {
+          "id": "EDGE-STEALTH-ADDRESS-CONVERTED",
+          "source": "ACTION-STEALTH-CONVERT-TO-ADDRESS",
+          "target": "STATE-STEALTH-ADDRESS-READY",
+          "label": "EVM address derived",
+          "data_involved": ["DATA-STEALTH-ADDRESS"]
+        },
+        {
+          "id": "EDGE-STEALTH-SERIALIZE",
+          "source": "STATE-STEALTH-ADDRESS-READY",
+          "target": "ACTION-STEALTH-SERIALIZE",
+          "label": "Serialize for storage/transmission",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-STEALTH-SERIALIZED",
+          "source": "ACTION-STEALTH-SERIALIZE",
+          "target": "STATE-STEALTH-SERIALIZED",
+          "label": "105-byte encoding complete",
+          "data_involved": ["DATA-FULL-BURN-ADDRESS"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-POSEIDON-HASH-CIRCUIT",
+      "title": "Poseidon Hash Circuit Implementation",
+      "nodes": [
+        {
+          "id": "STATE-POSEIDON-INIT",
+          "label": "Poseidon Hash Requested",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-POSEIDON-LOAD-CONFIG",
+          "label": "Load Circom-Compatible Configuration (T=2 or T=3)",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-POSEIDON-INIT-STATE",
+          "label": "Initialize Sponge State Vector (all zeros)",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-POSEIDON-ABSORB",
+          "label": "Absorb Input Elements into State",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-POSEIDON-ADD-ROUND-CONSTANTS",
+          "label": "Add Round Constants to State",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-POSEIDON-SBOX",
+          "label": "Apply S-box (x^5 for BN254)",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-POSEIDON-MDS-MIX",
+          "label": "Apply MDS Matrix Multiplication",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-POSEIDON-ROUND-COMPLETE",
+          "label": "Permutation Round Complete",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-POSEIDON-SQUEEZE",
+          "label": "Squeeze Output Element from State",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-POSEIDON-COMPLETE",
+          "label": "Poseidon Hash Output Ready",
+          "actor_id": "ACTOR-POSEIDON-CIRCUIT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-POSEIDON-START",
+          "source": "STATE-POSEIDON-INIT",
+          "target": "ACTION-POSEIDON-LOAD-CONFIG",
+          "label": "Begin Poseidon hash computation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-CONFIG-LOADED",
+          "source": "ACTION-POSEIDON-LOAD-CONFIG",
+          "target": "ACTION-POSEIDON-INIT-STATE",
+          "label": "Configuration loaded (T, rounds, constants)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-STATE-INITIALIZED",
+          "source": "ACTION-POSEIDON-INIT-STATE",
+          "target": "ACTION-POSEIDON-ABSORB",
+          "label": "State vector zeroed",
+          "data_involved": ["DATA-POSEIDON-STATE"]
+        },
+        {
+          "id": "EDGE-POSEIDON-ABSORBED",
+          "source": "ACTION-POSEIDON-ABSORB",
+          "target": "ACTION-POSEIDON-ADD-ROUND-CONSTANTS",
+          "label": "Input absorbed into state",
+          "data_involved": ["DATA-FR-SCALAR"]
+        },
+        {
+          "id": "EDGE-POSEIDON-CONSTANTS-ADDED",
+          "source": "ACTION-POSEIDON-ADD-ROUND-CONSTANTS",
+          "target": "ACTION-POSEIDON-SBOX",
+          "label": "Round constants XORed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-SBOX-APPLIED",
+          "source": "ACTION-POSEIDON-SBOX",
+          "target": "ACTION-POSEIDON-MDS-MIX",
+          "label": "S-box applied (full or partial round)",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-MDS-APPLIED",
+          "source": "ACTION-POSEIDON-MDS-MIX",
+          "target": "STATE-POSEIDON-ROUND-COMPLETE",
+          "label": "MDS mixing complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-NEXT-ROUND",
+          "source": "STATE-POSEIDON-ROUND-COMPLETE",
+          "target": "ACTION-POSEIDON-ADD-ROUND-CONSTANTS",
+          "label": "More rounds remaining",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-ROUNDS-DONE",
+          "source": "STATE-POSEIDON-ROUND-COMPLETE",
+          "target": "ACTION-POSEIDON-SQUEEZE",
+          "label": "All rounds complete",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-POSEIDON-OUTPUT",
+          "source": "ACTION-POSEIDON-SQUEEZE",
+          "target": "STATE-POSEIDON-COMPLETE",
+          "label": "Hash output extracted",
+          "data_involved": ["DATA-FR-SCALAR"]
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-BABY-JUBJUB-OPERATIONS",
+      "title": "Baby JubJub Elliptic Curve Operations",
+      "nodes": [
+        {
+          "id": "STATE-BJJ-INIT",
+          "label": "Baby JubJub Operation Requested",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-BJJ-LOAD-PARAMS",
+          "label": "Load Curve Parameters (a, d, order, base point)",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-BJJ-VALIDATE-POINT",
+          "label": "Validate Point On Curve (ax^2 + y^2 = 1 + dx^2y^2)",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-BJJ-POINT-ADD",
+          "label": "Compute Point Addition (twisted Edwards)",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-BJJ-SCALAR-MUL",
+          "label": "Compute Scalar Multiplication (double-and-add)",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-BJJ-DOUBLE-LOOP",
+          "label": "Scalar Multiplication Loop",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-BJJ-POINT-DOUBLE",
+          "label": "Double Current Point",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-BJJ-CONDITIONAL-ADD",
+          "label": "Conditional Add Based on Scalar Bit",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-BJJ-DERIVE-PUBKEY",
+          "label": "Derive Public Key from Private Scalar",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-BJJ-RESULT-READY",
+          "label": "Curve Operation Result Ready",
+          "actor_id": "ACTOR-BABYJUBJUB-CIRCUIT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-BJJ-START",
+          "source": "STATE-BJJ-INIT",
+          "target": "ACTION-BJJ-LOAD-PARAMS",
+          "label": "Begin curve operation",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-PARAMS-LOADED",
+          "source": "ACTION-BJJ-LOAD-PARAMS",
+          "target": "ACTION-BJJ-VALIDATE-POINT",
+          "label": "BN254-embedded curve params loaded",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-POINT-VALID-ADD",
+          "source": "ACTION-BJJ-VALIDATE-POINT",
+          "target": "ACTION-BJJ-POINT-ADD",
+          "label": "Point addition requested",
+          "data_involved": ["DATA-FR-SCALAR"]
+        },
+        {
+          "id": "EDGE-BJJ-POINT-VALID-MUL",
+          "source": "ACTION-BJJ-VALIDATE-POINT",
+          "target": "ACTION-BJJ-SCALAR-MUL",
+          "label": "Scalar multiplication requested",
+          "data_involved": ["DATA-FR-SCALAR"]
+        },
+        {
+          "id": "EDGE-BJJ-ADD-COMPLETE",
+          "source": "ACTION-BJJ-POINT-ADD",
+          "target": "STATE-BJJ-RESULT-READY",
+          "label": "Point addition computed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-MUL-INIT",
+          "source": "ACTION-BJJ-SCALAR-MUL",
+          "target": "STATE-BJJ-DOUBLE-LOOP",
+          "label": "Initialize accumulator",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-DOUBLE",
+          "source": "STATE-BJJ-DOUBLE-LOOP",
+          "target": "ACTION-BJJ-POINT-DOUBLE",
+          "label": "Process next bit",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-DOUBLED",
+          "source": "ACTION-BJJ-POINT-DOUBLE",
+          "target": "ACTION-BJJ-CONDITIONAL-ADD",
+          "label": "Point doubled",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-BIT-PROCESSED",
+          "source": "ACTION-BJJ-CONDITIONAL-ADD",
+          "target": "STATE-BJJ-DOUBLE-LOOP",
+          "label": "More bits to process",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-MUL-COMPLETE",
+          "source": "ACTION-BJJ-CONDITIONAL-ADD",
+          "target": "STATE-BJJ-RESULT-READY",
+          "label": "All bits processed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-DERIVE-KEY",
+          "source": "ACTION-BJJ-VALIDATE-POINT",
+          "target": "ACTION-BJJ-DERIVE-PUBKEY",
+          "label": "Key derivation requested",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-BJJ-PUBKEY-DERIVED",
+          "source": "ACTION-BJJ-DERIVE-PUBKEY",
+          "target": "STATE-BJJ-RESULT-READY",
+          "label": "Public key = scalar * base_point",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-IC-CANISTER-INTERACTION",
+      "title": "Internet Computer Canister Interactions",
+      "nodes": [
+        {
+          "id": "STATE-IC-INIT",
+          "label": "IC Canister Interaction Requested",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-IC-CREATE-AGENT",
+          "label": "Create IC Agent with Identity",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-IC-CALL-KEY-MANAGER",
+          "label": "Call Key Manager Canister (vetKd_derive_key)",
+          "actor_id": "ACTOR-IC-KEY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-IC-DERIVE-ENCRYPTION-KEY",
+          "label": "Derive User Encryption Key from VetKey",
+          "actor_id": "ACTOR-IC-KEY-MANAGER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-IC-KEY-DERIVED",
+          "label": "Encryption Key Derived",
+          "actor_id": "ACTOR-IC-KEY-MANAGER",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-IC-ENCRYPT-STATE",
+          "label": "Encrypt User State with AES-GCM",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-IC-CALL-STORAGE-PUT",
+          "label": "Call Storage Canister put(key, encrypted_data)",
+          "actor_id": "ACTOR-IC-STORAGE",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-IC-STATE-STORED",
+          "label": "Encrypted State Stored in IC",
+          "actor_id": "ACTOR-IC-STORAGE",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-IC-CALL-STORAGE-GET",
+          "label": "Call Storage Canister get(key)",
+          "actor_id": "ACTOR-IC-STORAGE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-IC-DECRYPT-STATE",
+          "label": "Decrypt Retrieved State with AES-GCM",
+          "actor_id": "ACTOR-USER",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-IC-STATE-RETRIEVED",
+          "label": "User State Retrieved and Decrypted",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        },
+        {
+          "id": "STATE-IC-ERROR",
+          "label": "IC Operation Failed",
+          "actor_id": "ACTOR-USER",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-IC-START",
+          "source": "STATE-IC-INIT",
+          "target": "ACTION-IC-CREATE-AGENT",
+          "label": "Initialize IC client",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-AGENT-CREATED",
+          "source": "ACTION-IC-CREATE-AGENT",
+          "target": "ACTION-IC-CALL-KEY-MANAGER",
+          "label": "Agent ready with identity",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-KEY-REQUESTED",
+          "source": "ACTION-IC-CALL-KEY-MANAGER",
+          "target": "ACTION-IC-DERIVE-ENCRYPTION-KEY",
+          "label": "VetKey derivation initiated",
+          "data_involved": ["DATA-VETKEY-DERIVED-SECRET"]
+        },
+        {
+          "id": "EDGE-IC-KEY-READY",
+          "source": "ACTION-IC-DERIVE-ENCRYPTION-KEY",
+          "target": "STATE-IC-KEY-DERIVED",
+          "label": "User-specific key derived",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-ENCRYPT-FOR-STORE",
+          "source": "STATE-IC-KEY-DERIVED",
+          "target": "ACTION-IC-ENCRYPT-STATE",
+          "label": "Prepare data for storage",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-DATA-ENCRYPTED",
+          "source": "ACTION-IC-ENCRYPT-STATE",
+          "target": "ACTION-IC-CALL-STORAGE-PUT",
+          "label": "AES-GCM encryption complete",
+          "data_involved": ["DATA-ENCRYPTED-STATE"]
+        },
+        {
+          "id": "EDGE-IC-STORED",
+          "source": "ACTION-IC-CALL-STORAGE-PUT",
+          "target": "STATE-IC-STATE-STORED",
+          "label": "Data persisted in stable storage",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-RETRIEVE-START",
+          "source": "STATE-IC-KEY-DERIVED",
+          "target": "ACTION-IC-CALL-STORAGE-GET",
+          "label": "Request stored data",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-DATA-FETCHED",
+          "source": "ACTION-IC-CALL-STORAGE-GET",
+          "target": "ACTION-IC-DECRYPT-STATE",
+          "label": "Encrypted data received",
+          "data_involved": ["DATA-ENCRYPTED-STATE"]
+        },
+        {
+          "id": "EDGE-IC-DECRYPTED",
+          "source": "ACTION-IC-DECRYPT-STATE",
+          "target": "STATE-IC-STATE-RETRIEVED",
+          "label": "Plaintext state recovered",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-KEY-FAILED",
+          "source": "ACTION-IC-CALL-KEY-MANAGER",
+          "target": "STATE-IC-ERROR",
+          "label": "VetKey derivation failed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-IC-STORAGE-FAILED",
+          "source": "ACTION-IC-CALL-STORAGE-PUT",
+          "target": "STATE-IC-ERROR",
+          "label": "Storage write failed",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-STARGATE-BRIDGE-FLOW",
+      "title": "Stargate Bridge Detailed Flow",
+      "nodes": [
+        {
+          "id": "STATE-SG-INIT",
+          "label": "Stargate Bridge Request Initiated",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-SG-QUOTE-FEE",
+          "label": "Quote Bridge Fee (quoteFee)",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-BUILD-REQUEST",
+          "label": "Build BridgeRequest(dstEid, to, minAmountOut, options)",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-VALIDATE-SLIPPAGE",
+          "label": "Validate minAmountOut Against Slippage Limit",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-APPROVE-UNDERLYING",
+          "label": "Approve Underlying Token Spend to Stargate",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-CALL-STARGATE-SEND",
+          "label": "Call Stargate.send() with Payload",
+          "actor_id": "ACTOR-STARGATE-BRIDGE",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-SG-MESSAGE-PENDING",
+          "label": "Cross-Chain Message Pending",
+          "actor_id": "ACTOR-STARGATE-BRIDGE",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-SG-RELAY-MESSAGE",
+          "label": "LayerZero Relays Message to Destination",
+          "actor_id": "ACTOR-LAYERZERO-NETWORK",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-RECEIVE-ON-DST",
+          "label": "Stargate Receives on Destination Chain",
+          "actor_id": "ACTOR-STARGATE-BRIDGE",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-SG-CREDIT-USER",
+          "label": "Credit Underlying Tokens to User",
+          "actor_id": "ACTOR-STARGATE-BRIDGE",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-SG-COMPLETE",
+          "label": "Bridge Transfer Complete",
+          "actor_id": "ACTOR-STARGATE-BRIDGE",
+          "type": "State"
+        },
+        {
+          "id": "STATE-SG-FAILED-SLIPPAGE",
+          "label": "Bridge Failed - Slippage Exceeded",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-SG-REFUND",
+          "label": "Refund Tokens to User on Source Chain",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-SG-REFUNDED",
+          "label": "Bridge Failed - User Refunded",
+          "actor_id": "ACTOR-ADAPTOR-CONTRACT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-SG-START",
+          "source": "STATE-SG-INIT",
+          "target": "ACTION-SG-QUOTE-FEE",
+          "label": "Begin bridge operation",
+          "data_involved": ["DATA-BRIDGE-REQUEST"]
+        },
+        {
+          "id": "EDGE-SG-FEE-QUOTED",
+          "source": "ACTION-SG-QUOTE-FEE",
+          "target": "ACTION-SG-BUILD-REQUEST",
+          "label": "Fee quote received",
+          "data_involved": ["DATA-FEE-QUOTE"]
+        },
+        {
+          "id": "EDGE-SG-REQUEST-BUILT",
+          "source": "ACTION-SG-BUILD-REQUEST",
+          "target": "ACTION-SG-VALIDATE-SLIPPAGE",
+          "label": "BridgeRequest constructed",
+          "data_involved": ["DATA-BRIDGE-REQUEST"]
+        },
+        {
+          "id": "EDGE-SG-SLIPPAGE-OK",
+          "source": "ACTION-SG-VALIDATE-SLIPPAGE",
+          "target": "ACTION-SG-APPROVE-UNDERLYING",
+          "label": "Slippage within limits",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-SLIPPAGE-EXCEEDED",
+          "source": "ACTION-SG-VALIDATE-SLIPPAGE",
+          "target": "STATE-SG-FAILED-SLIPPAGE",
+          "label": "minAmountOut too low",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-APPROVED",
+          "source": "ACTION-SG-APPROVE-UNDERLYING",
+          "target": "ACTION-SG-CALL-STARGATE-SEND",
+          "label": "Token approval granted",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-SENT",
+          "source": "ACTION-SG-CALL-STARGATE-SEND",
+          "target": "STATE-SG-MESSAGE-PENDING",
+          "label": "Cross-chain message sent",
+          "data_involved": ["DATA-LAYERZERO-MESSAGE"]
+        },
+        {
+          "id": "EDGE-SG-RELAYED",
+          "source": "STATE-SG-MESSAGE-PENDING",
+          "target": "ACTION-SG-RELAY-MESSAGE",
+          "label": "LayerZero processing",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-DELIVERED",
+          "source": "ACTION-SG-RELAY-MESSAGE",
+          "target": "ACTION-SG-RECEIVE-ON-DST",
+          "label": "Message delivered to destination",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-CREDIT",
+          "source": "ACTION-SG-RECEIVE-ON-DST",
+          "target": "ACTION-SG-CREDIT-USER",
+          "label": "Destination pool has liquidity",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-CREDITED",
+          "source": "ACTION-SG-CREDIT-USER",
+          "target": "STATE-SG-COMPLETE",
+          "label": "User receives tokens on destination",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-DST-FAILED",
+          "source": "ACTION-SG-RECEIVE-ON-DST",
+          "target": "ACTION-SG-REFUND",
+          "label": "Destination delivery failed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-SG-REFUNDED",
+          "source": "ACTION-SG-REFUND",
+          "target": "STATE-SG-REFUNDED",
+          "label": "Tokens returned to user",
+          "data_involved": []
+        }
+      ]
+    },
+    {
+      "id": "GRAPH-NOVA-FOLDING-SCHEME",
+      "title": "Nova Folding Scheme Circuit Details",
+      "nodes": [
+        {
+          "id": "STATE-NOVA-FOLD-INIT",
+          "label": "Nova Folding Scheme Initialized",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-NOVA-LOAD-PP",
+          "label": "Load Public Parameters (pp, vp)",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-INIT-ACCUMULATOR",
+          "label": "Initialize Relaxed R1CS Accumulator",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-SET-INITIAL-STATE",
+          "label": "Set Initial State Vector z_0 = [root, recipient, 0, 0]",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-NOVA-READY-FOR-STEP",
+          "label": "Nova Ready for Folding Step",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-NOVA-RECEIVE-EXTERNAL-INPUT",
+          "label": "Receive External Inputs (from, value, secret, siblings)",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-COMPUTE-STEP-CIRCUIT",
+          "label": "Execute Step Circuit F(z_i, w_i) -> z_{i+1}",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-VERIFY-MERKLE-PATH",
+          "label": "Verify Merkle Path Against Root",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-UPDATE-ACCUMULATORS",
+          "label": "Update Running Instance (acc_i -> acc_{i+1})",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-COMPUTE-RANDOM-T",
+          "label": "Compute Cross-Term T and Challenge r",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-FOLD-INSTANCES",
+          "label": "Fold (u_i, w_i) into Running Accumulator",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-NOVA-STEP-COMPLETE",
+          "label": "Folding Step Complete",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "ACTION-NOVA-FINALIZE-IVC-PROOF",
+          "label": "Finalize IVC Proof (Serialize Accumulator)",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "ACTION-NOVA-VERIFY-IVC",
+          "label": "Verify IVC Proof Locally",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "Action"
+        },
+        {
+          "id": "STATE-NOVA-IVC-VALID",
+          "label": "IVC Proof Valid and Complete",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "State"
+        },
+        {
+          "id": "STATE-NOVA-VERIFICATION-FAILED",
+          "label": "IVC Verification Failed",
+          "actor_id": "ACTOR-NOVA-CIRCUIT",
+          "type": "State"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-NOVA-FOLD-START",
+          "source": "STATE-NOVA-FOLD-INIT",
+          "target": "ACTION-NOVA-LOAD-PP",
+          "label": "Initialize Nova scheme",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-PP-LOADED",
+          "source": "ACTION-NOVA-LOAD-PP",
+          "target": "ACTION-NOVA-INIT-ACCUMULATOR",
+          "label": "Parameters loaded from file",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-ACC-INIT",
+          "source": "ACTION-NOVA-INIT-ACCUMULATOR",
+          "target": "ACTION-NOVA-SET-INITIAL-STATE",
+          "label": "Relaxed R1CS accumulator created",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-STATE-SET",
+          "source": "ACTION-NOVA-SET-INITIAL-STATE",
+          "target": "STATE-NOVA-READY-FOR-STEP",
+          "label": "Initial state z_0 configured",
+          "data_involved": ["DATA-IVC-STATE"]
+        },
+        {
+          "id": "EDGE-NOVA-STEP-START",
+          "source": "STATE-NOVA-READY-FOR-STEP",
+          "target": "ACTION-NOVA-RECEIVE-EXTERNAL-INPUT",
+          "label": "Begin folding step",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-INPUT-RECEIVED",
+          "source": "ACTION-NOVA-RECEIVE-EXTERNAL-INPUT",
+          "target": "ACTION-NOVA-COMPUTE-STEP-CIRCUIT",
+          "label": "External inputs received",
+          "data_involved": ["DATA-EXTERNAL-INPUTS"]
+        },
+        {
+          "id": "EDGE-NOVA-STEP-COMPUTED",
+          "source": "ACTION-NOVA-COMPUTE-STEP-CIRCUIT",
+          "target": "ACTION-NOVA-VERIFY-MERKLE-PATH",
+          "label": "Step function executed",
+          "data_involved": ["DATA-IVC-STATE"]
+        },
+        {
+          "id": "EDGE-NOVA-MERKLE-VERIFIED",
+          "source": "ACTION-NOVA-VERIFY-MERKLE-PATH",
+          "target": "ACTION-NOVA-UPDATE-ACCUMULATORS",
+          "label": "Merkle path valid",
+          "data_involved": ["DATA-HISTORICAL-PROOF"]
+        },
+        {
+          "id": "EDGE-NOVA-ACC-UPDATED",
+          "source": "ACTION-NOVA-UPDATE-ACCUMULATORS",
+          "target": "ACTION-NOVA-COMPUTE-RANDOM-T",
+          "label": "Accumulator updated",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-T-COMPUTED",
+          "source": "ACTION-NOVA-COMPUTE-RANDOM-T",
+          "target": "ACTION-NOVA-FOLD-INSTANCES",
+          "label": "Cross-term and challenge ready",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-FOLDED",
+          "source": "ACTION-NOVA-FOLD-INSTANCES",
+          "target": "STATE-NOVA-STEP-COMPLETE",
+          "label": "Instances folded into accumulator",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-MORE-STEPS",
+          "source": "STATE-NOVA-STEP-COMPLETE",
+          "target": "STATE-NOVA-READY-FOR-STEP",
+          "label": "More transfers to fold",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-ALL-FOLDED",
+          "source": "STATE-NOVA-STEP-COMPLETE",
+          "target": "ACTION-NOVA-FINALIZE-IVC-PROOF",
+          "label": "All transfers folded",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-IVC-FINALIZED",
+          "source": "ACTION-NOVA-FINALIZE-IVC-PROOF",
+          "target": "ACTION-NOVA-VERIFY-IVC",
+          "label": "IVC proof serialized",
+          "data_involved": ["DATA-NOVA-IVC-PROOF"]
+        },
+        {
+          "id": "EDGE-NOVA-VERIFY-OK",
+          "source": "ACTION-NOVA-VERIFY-IVC",
+          "target": "STATE-NOVA-IVC-VALID",
+          "label": "IVC verification passed",
+          "data_involved": []
+        },
+        {
+          "id": "EDGE-NOVA-VERIFY-FAILED",
+          "source": "ACTION-NOVA-VERIFY-IVC",
+          "target": "STATE-NOVA-VERIFICATION-FAILED",
+          "label": "IVC verification failed",
+          "data_involved": []
+        }
+      ]
+    }
+  ],
+  "pending_sub_graphs": []
+}
