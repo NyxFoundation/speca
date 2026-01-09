@@ -1,0 +1,687 @@
+{
+  "metadata": {
+    "title": "Zephyr Protocol Security Audit Checklist - Batch 7",
+    "version": "1.0.0",
+    "generated_by": "security-agent",
+    "generation_date": "2026-01-09",
+    "batch_number": 7,
+    "properties_covered": 20,
+    "description": "Partial checklist covering teleport rejection edges, bridge edges, emergency recovery edges, and subsystem properties (Nova, Withdrawal, Incentive, Hub Aggregation, LayerZero, Stealth, Poseidon, BJJ, IC, Stargate)"
+  },
+  "checklist": [
+    {
+      "id": "CHK-138-TELEPORT-REJECTED-INVALID-ROOT-001",
+      "property_id": "PROP-138-EDGE-TELEPORT-REJECTED-INVALID-ROOT",
+      "title": "Teleport Rejection on Invalid Root Reference",
+      "bug_class": "Validation Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that EDGE-TELEPORT-REJECTED-INVALID-ROOT correctly rejects unknown root references.",
+        "steps": [
+          "Locate root validation logic in Verifier withdrawLocal/withdrawGlobal functions",
+          "Verify root lookup in provedTransferRoots or globalTransferRoots mapping",
+          "Check that non-existent root lookup causes revert with appropriate error",
+          "Verify no fallback path bypasses root existence check",
+          "Test with fabricated root values that don't exist in storage"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "provedTransferRoots|globalTransferRoots|rootIndex",
+          "focus": "Root existence validation before processing"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit teleport with non-existent root",
+          "focus": "Must revert with InvalidRoot or similar error"
+        },
+        {
+          "type": "fuzz_test",
+          "description": "Generate random root values and attempt teleport",
+          "focus": "All unknown roots must be rejected"
+        }
+      ],
+      "notes": "First rejection path in teleport validation chain. Deterministic mapping lookup ensures consistent behavior."
+    },
+    {
+      "id": "CHK-139-TELEPORT-REJECTED-BAD-RECIPIENT-001",
+      "property_id": "PROP-139-EDGE-TELEPORT-REJECTED-BAD-RECIPIENT",
+      "title": "Teleport Rejection on Recipient Hash Mismatch",
+      "bug_class": "Recipient Binding Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that EDGE-TELEPORT-REJECTED-BAD-RECIPIENT rejects recipient hash mismatches to prevent front-running.",
+        "steps": [
+          "Locate recipient hash validation in Verifier teleport logic",
+          "Verify hash is computed from msg.sender (not user parameter)",
+          "Check hash comparison with proof public input is strict equality",
+          "Verify mismatch triggers revert with appropriate error",
+          "Test front-running scenario where attacker submits victim's proof"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "recipientHash|keccak256.*msg.sender|validateRecipient",
+          "focus": "Hash binding to msg.sender, not caller-controlled value"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit valid proof from different address than proof's recipient",
+          "focus": "Must revert with BadRecipient error"
+        },
+        {
+          "type": "integration_test",
+          "description": "Simulate front-running attack with mempool observation",
+          "focus": "Attacker cannot claim victim's funds"
+        }
+      ],
+      "notes": "Critical anti-front-running protection. Hash collision resistance provides cryptographic guarantee."
+    },
+    {
+      "id": "CHK-140-TELEPORT-REJECTED-DOUBLE-SPEND-001",
+      "property_id": "PROP-140-EDGE-TELEPORT-REJECTED-DOUBLE-SPEND",
+      "title": "Teleport Rejection on Double-Spend Attempt",
+      "bug_class": "Double-Spend",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that EDGE-TELEPORT-REJECTED-DOUBLE-SPEND blocks replay attempts via monotonicity check.",
+        "steps": [
+          "Locate totalTeleported tracking and comparison logic",
+          "Verify strict inequality check (newTotal > storedTotal, not >=)",
+          "Check that replayed proof has equal totalTeleported, triggering rejection",
+          "Verify comparison happens before any minting operation",
+          "Test replay of previously successful teleport proof"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "totalTeleported|monotonic|>\\s*storedTotal",
+          "focus": "Strict inequality comparison before minting"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit same valid proof twice",
+          "focus": "Second submission must revert with DoubleSpend or similar"
+        },
+        {
+          "type": "invariant_test",
+          "description": "totalTeleported must be monotonically increasing",
+          "focus": "No execution path decreases totalTeleported"
+        }
+      ],
+      "notes": "CRITICAL double-spend prevention. Strict inequality guarantees replay rejection."
+    },
+    {
+      "id": "CHK-141-TELEPORT-REJECTED-INVALID-PROOF-001",
+      "property_id": "PROP-141-EDGE-TELEPORT-REJECTED-INVALID-PROOF",
+      "title": "Teleport Rejection on Invalid Cryptographic Proof",
+      "bug_class": "Proof Verification Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that EDGE-TELEPORT-REJECTED-INVALID-PROOF rejects cryptographically invalid proofs via Groth16 verification.",
+        "steps": [
+          "Locate proof verification call to withdrawal decider",
+          "Verify Groth16 pairing check is correctly implemented",
+          "Check that verification failure causes immediate revert",
+          "Verify no execution path bypasses cryptographic verification",
+          "Test with malformed proof elements (modified points, scalars)"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "verifyProof|IDecider|pairing|ecPairing",
+          "focus": "Proof verification as gate before minting"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit proof with modified elements",
+          "focus": "Must revert with InvalidProof error"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit proof with wrong public inputs",
+          "focus": "Pairing check must fail"
+        }
+      ],
+      "notes": "Cryptographic rejection path. Groth16 soundness provides overwhelming probability of catching invalid proofs."
+    },
+    {
+      "id": "CHK-144-ADAPTOR-UNWRAPS-001",
+      "property_id": "PROP-144-EDGE-ADAPTOR-UNWRAPS",
+      "title": "Adaptor Unwraps zERC20 Before Bridge",
+      "bug_class": "Order of Operations",
+      "severity_hint": "High",
+      "detection_procedure": {
+        "description": "Verify that EDGE-ADAPTOR-UNWRAPS ensures zERC20 is burned via LiquidityManager.unwrap() before Stargate bridge.",
+        "steps": [
+          "Locate Adaptor's unwrapAndBridge function",
+          "Verify LiquidityManager.unwrap() is called before Stargate.send()",
+          "Check that unwrap burns the zERC20 tokens",
+          "Verify underlying tokens are received before bridge call",
+          "Test that bridge cannot proceed without successful unwrap"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Adaptor",
+          "pattern": "unwrap|LiquidityManager|burn.*bridge|unwrapAndBridge",
+          "focus": "Unwrap must precede bridge operation"
+        },
+        {
+          "type": "unit_test",
+          "description": "Verify zERC20 balance decreases before Stargate call",
+          "focus": "Order of operations: burn then bridge"
+        },
+        {
+          "type": "slither",
+          "command": "slither contracts/Adaptor.sol --print call-graph",
+          "focus": "Verify unwrap is on path to bridge"
+        }
+      ],
+      "notes": "Prerequisite ordering ensures atomicity - no path to bridge without burning zERC20."
+    },
+    {
+      "id": "CHK-146-BRIDGE-INITIATED-001",
+      "property_id": "PROP-146-EDGE-BRIDGE-INITIATED",
+      "title": "Bridge Initiated Event Emission",
+      "bug_class": "Event Emission Failure",
+      "severity_hint": "Medium",
+      "detection_procedure": {
+        "description": "Verify that EDGE-BRIDGE-INITIATED emits UnwrapAndBridge event atomically with successful Stargate.send().",
+        "steps": [
+          "Locate event emission in Adaptor's bridge function",
+          "Verify UnwrapAndBridge event is emitted after Stargate.send() success",
+          "Check event parameters include user, amount, destination chain",
+          "Verify no execution path completes bridge without event",
+          "Test via transaction log verification"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Adaptor",
+          "pattern": "UnwrapAndBridge|emit.*Bridge|bridgeInitiated",
+          "focus": "Event emission co-located with Stargate.send()"
+        },
+        {
+          "type": "unit_test",
+          "description": "Verify event emission in successful bridge transaction",
+          "focus": "Event logs contain correct parameters"
+        }
+      ],
+      "notes": "Success path completion event. Atomic with Stargate.send() success."
+    },
+    {
+      "id": "CHK-147-BRIDGE-FAILED-001",
+      "property_id": "PROP-147-EDGE-BRIDGE-FAILED",
+      "title": "Bridge Failure Handling and Fund Recovery",
+      "bug_class": "Incomplete Error Handling",
+      "severity_hint": "High",
+      "detection_procedure": {
+        "description": "Verify that EDGE-BRIDGE-FAILED handles Stargate failure appropriately without leaving user without funds.",
+        "steps": [
+          "Locate error handling for Stargate.send() failures in Adaptor",
+          "Verify if unwrap already occurred, refund mechanism exists",
+          "Check that underlying tokens are not stuck in Adaptor",
+          "Verify user receives either underlying or zERC20 back",
+          "Test Stargate failure scenarios (reverts, insufficient liquidity)"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Adaptor",
+          "pattern": "revert|try.*catch|refund|rescue|failure",
+          "focus": "Error handling preserves user funds"
+        },
+        {
+          "type": "unit_test",
+          "description": "Simulate Stargate.send() failure after unwrap",
+          "focus": "User must be able to recover underlying tokens"
+        },
+        {
+          "type": "integration_test",
+          "description": "Test with mock Stargate that always fails",
+          "focus": "No fund loss scenario"
+        }
+      ],
+      "notes": "Potential fund risk if unwrap succeeds but bridge fails. Implementation must ensure recovery path."
+    },
+    {
+      "id": "CHK-150-EMERGENCY-RECOVERED-001",
+      "property_id": "PROP-150-EDGE-EMERGENCY-RECOVERED",
+      "title": "Emergency Recovery State Transition",
+      "bug_class": "State Machine Violation",
+      "severity_hint": "Medium",
+      "detection_procedure": {
+        "description": "Verify that EDGE-EMERGENCY-RECOVERED correctly transitions to recovered state under owner control.",
+        "steps": [
+          "Locate deactivateEmergency or equivalent function",
+          "Verify owner-only access control",
+          "Check that emergency flag is cleared",
+          "Verify transition only possible from emergency state",
+          "Test recovery can only be performed by owner"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "deactivateEmergency|emergencyRecovered|onlyOwner.*emergency",
+          "focus": "Owner-gated recovery transition"
+        },
+        {
+          "type": "unit_test",
+          "description": "Attempt recovery from non-owner account",
+          "focus": "Must revert with Unauthorized error"
+        },
+        {
+          "type": "unit_test",
+          "description": "Recovery from owner during emergency state",
+          "focus": "State transitions to recovered"
+        }
+      ],
+      "notes": "Admin-controlled recovery. Accepted trust assumption that owner makes sound judgment."
+    },
+    {
+      "id": "CHK-151-BACK-TO-IDLE-001",
+      "property_id": "PROP-151-EDGE-BACK-TO-IDLE",
+      "title": "Return to Idle State After Recovery",
+      "bug_class": "State Machine Violation",
+      "severity_hint": "Medium",
+      "detection_procedure": {
+        "description": "Verify that EDGE-BACK-TO-IDLE correctly returns Verifier to normal operation after recovery.",
+        "steps": [
+          "Locate the state transition logic after emergency deactivation",
+          "Verify normal protocol functions are re-enabled",
+          "Check that idle state allows standard operations (prove, teleport)",
+          "Verify no residual emergency state affects behavior",
+          "Test normal operations work after recovery"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "isEmergency|emergencyMode|normalOperation",
+          "focus": "Emergency flag cleared enables normal functions"
+        },
+        {
+          "type": "unit_test",
+          "description": "After recovery, attempt standard prove operation",
+          "focus": "Normal operations must succeed"
+        },
+        {
+          "type": "integration_test",
+          "description": "Full cycle: normal -> emergency -> recovered -> normal",
+          "focus": "State machine completes full cycle correctly"
+        }
+      ],
+      "notes": "Final recovery step. Transition only from STATE-EMERGENCY-RECOVERED."
+    },
+    {
+      "id": "CHK-SUB-NOVA-GEN-001",
+      "property_id": "PROP-SUB-NOVA-GEN-001",
+      "title": "Nova IVC Proof Generation Soundness",
+      "bug_class": "Cryptographic Implementation Error",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-NOVA-PROOF-GENERATION produces valid Nova IVC proofs from historical transfer data without leaking private information.",
+        "steps": [
+          "Review Nova proof generation code in CLI client",
+          "Verify correct R1CS circuit instantiation for transfer history",
+          "Check witness assignment includes only authorized user data",
+          "Verify local IVC verification before submission",
+          "Test proof generation with known test vectors"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "cli/src/proof",
+          "pattern": "Nova|IVC|fold|witness|R1CS",
+          "focus": "Correct Nova folding implementation"
+        },
+        {
+          "type": "unit_test",
+          "description": "Generate proof and verify locally",
+          "focus": "Local verification must pass"
+        },
+        {
+          "type": "unit_test",
+          "description": "Verify proof doesn't contain witness data",
+          "focus": "Zero-knowledge property preserved"
+        }
+      ],
+      "notes": "Client-side proof generation. Nova soundness guarantees invalid witness fails."
+    },
+    {
+      "id": "CHK-SUB-NOVA-GROTH16-001",
+      "property_id": "PROP-SUB-NOVA-GROTH16-001",
+      "title": "Nova to Groth16 Conversion Correctness",
+      "bug_class": "Cryptographic Conversion Error",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-NOVA-TO-GROTH16 correctly converts IVC proofs to Groth16 format for on-chain verification.",
+        "steps": [
+          "Locate Decider/Prover service conversion code",
+          "Verify same circuit is used for both Nova and Groth16",
+          "Check public input extraction matches circuit expectations",
+          "Verify Groth16 proving key is correctly configured",
+          "Test conversion with known valid IVC proofs"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "decider-prover/src",
+          "pattern": "Groth16|convert|decider|prove",
+          "focus": "Correct circuit equivalence during conversion"
+        },
+        {
+          "type": "integration_test",
+          "description": "Generate IVC, convert to Groth16, verify on-chain",
+          "focus": "End-to-end proof verification succeeds"
+        }
+      ],
+      "notes": "Mathematical equivalence ensures proof correspondence between formats."
+    },
+    {
+      "id": "CHK-SUB-NOVA-VERIFY-001",
+      "property_id": "PROP-SUB-NOVA-VERIFY-001",
+      "title": "On-Chain Nova Proof Verification",
+      "bug_class": "Verification Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-NOVA-PROOF-VERIFICATION performs complete on-chain verification of transfer root proofs.",
+        "steps": [
+          "Locate proveTransferRoot function in Verifier",
+          "Verify IRootDecider.verifyOpaqueNovaProof is called",
+          "Check reserved checkpoint is used as public input",
+          "Verify storage only occurs after successful verification",
+          "Test with invalid proofs to confirm rejection"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "verifyOpaqueNovaProof|IRootDecider|proveTransferRoot",
+          "focus": "Verification gate before root storage"
+        },
+        {
+          "type": "unit_test",
+          "description": "Submit invalid Nova proof",
+          "focus": "Must revert before any storage"
+        },
+        {
+          "type": "forge",
+          "command": "forge test --match-test testProveRoot -vvv",
+          "focus": "All proof verification tests pass"
+        }
+      ],
+      "notes": "Groth16 zkSNARK verification. Invalid proofs fail pairing check."
+    },
+    {
+      "id": "CHK-SUB-WITHDRAWAL-001",
+      "property_id": "PROP-SUB-WITHDRAWAL-001",
+      "title": "Withdrawal Proof Verification Completeness",
+      "bug_class": "Verification Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-WITHDRAWAL-PROOF-VERIFICATION verifies withdrawal proofs for all teleport operations.",
+        "steps": [
+          "Locate withdrawLocal and withdrawGlobal functions",
+          "Verify proof type detection (Nova vs Groth16)",
+          "Check correct decider selection based on proof type",
+          "Verify public input extraction is consistent",
+          "Test both local and global withdrawal paths"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Verifier",
+          "pattern": "withdrawLocal|withdrawGlobal|IDecider|selectDecider",
+          "focus": "Both paths require cryptographic verification"
+        },
+        {
+          "type": "unit_test",
+          "description": "Test local withdrawal with valid proof",
+          "focus": "Local path verification succeeds"
+        },
+        {
+          "type": "unit_test",
+          "description": "Test global withdrawal with valid proof",
+          "focus": "Global path verification succeeds"
+        }
+      ],
+      "notes": "Both Nova and Groth16 paths perform cryptographic verification."
+    },
+    {
+      "id": "CHK-SUB-INCENTIVE-001",
+      "property_id": "PROP-SUB-INCENTIVE-001",
+      "title": "Incentive Curve Calculation Correctness",
+      "bug_class": "Calculation Error",
+      "severity_hint": "High",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-INCENTIVE-CURVE correctly computes incentives using linear density integration with proper rounding.",
+        "steps": [
+          "Locate IncentiveLib in LiquidityManager",
+          "Verify density calculation formula matches specification",
+          "Check floor rounding for rewards, ceiling for fees",
+          "Verify target clamping prevents over-incentivization",
+          "Test edge cases (zero liquidity, at target, max liquidity)"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/LiquidityManager",
+          "pattern": "IncentiveLib|computeReward|computeFee|density",
+          "focus": "Formula matches specification, correct rounding"
+        },
+        {
+          "type": "unit_test",
+          "description": "Test incentive calculation at various liquidity levels",
+          "focus": "Results match expected values"
+        },
+        {
+          "type": "fuzz_test",
+          "description": "Fuzz liquidity amounts and verify invariants",
+          "focus": "Rewards <= maxReward, fees >= minFee"
+        }
+      ],
+      "notes": "Deterministic formula. Rounding direction protects protocol from manipulation."
+    },
+    {
+      "id": "CHK-SUB-HUB-AGG-001",
+      "property_id": "PROP-SUB-HUB-AGG-001",
+      "title": "Hub Aggregation Tree Computation",
+      "bug_class": "Merkle Tree Error",
+      "severity_hint": "High",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-HUB-AGGREGATION computes correct PoseidonT3 aggregation tree from token roots.",
+        "steps": [
+          "Locate aggregation logic in Hub contract",
+          "Verify PoseidonT3 hash function is used",
+          "Check tree construction follows correct ordering",
+          "Verify circom compatibility for circuit matching",
+          "Test aggregation with known roots and expected output"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Hub",
+          "pattern": "PoseidonT3|aggregate|computeRoot|buildTree",
+          "focus": "Correct tree construction and hash usage"
+        },
+        {
+          "type": "unit_test",
+          "description": "Compute aggregation with test vectors",
+          "focus": "Result matches expected root"
+        },
+        {
+          "type": "integration_test",
+          "description": "Verify aggregated root is usable in withdrawal proofs",
+          "focus": "Circuit accepts aggregated root"
+        }
+      ],
+      "notes": "PoseidonT3 is deterministic. Circom-compatible configuration ensures circuit compatibility."
+    },
+    {
+      "id": "CHK-SUB-LZ-FLOW-001",
+      "property_id": "PROP-SUB-LZ-FLOW-001",
+      "title": "LayerZero Message Flow with EID Validation",
+      "bug_class": "Source Authentication Bypass",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-LAYERZERO-MESSAGE-FLOW delivers cross-chain messages with proper EID validation on receive.",
+        "steps": [
+          "Locate all _lzReceive implementations (Hub, Verifier)",
+          "Verify EID validation is first check in each handler",
+          "Check that unknown EIDs cause message rejection",
+          "Verify peer registry is correctly maintained",
+          "Test message reception from unauthorized source"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/Hub,contracts/Verifier",
+          "pattern": "_lzReceive|validateEid|trustedPeers|origin",
+          "focus": "EID validation before payload processing"
+        },
+        {
+          "type": "unit_test",
+          "description": "Send message from unregistered EID",
+          "focus": "Must be rejected"
+        },
+        {
+          "type": "unit_test",
+          "description": "Send message from registered peer",
+          "focus": "Must be accepted and processed"
+        }
+      ],
+      "notes": "EID validation on receiver rejects unknown sources. Guardian supermajority provides integrity."
+    },
+    {
+      "id": "CHK-SUB-STEALTH-001",
+      "property_id": "PROP-SUB-STEALTH-001",
+      "title": "Stealth Address Generation Unlinkability",
+      "bug_class": "Privacy Leak",
+      "severity_hint": "High",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-STEALTH-ADDRESS-GENERATION produces unlinkable stealth addresses with PoW protection.",
+        "steps": [
+          "Locate stealth address generation code in CLI",
+          "Verify keccak256-based derivation is used",
+          "Check Baby JubJub scalar multiplication is correct",
+          "Verify PoW nonce search prevents enumeration",
+          "Test that generated addresses cannot be linked to sender"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "cli/src/stealth",
+          "pattern": "stealth|deriveAddress|keccak256|BabyJubJub|pow",
+          "focus": "Cryptographic derivation preserves unlinkability"
+        },
+        {
+          "type": "unit_test",
+          "description": "Generate multiple stealth addresses from same sender",
+          "focus": "Addresses must be unlinkable"
+        },
+        {
+          "type": "statistical_test",
+          "description": "Check address distribution for patterns",
+          "focus": "No statistical correlation to sender"
+        }
+      ],
+      "notes": "keccak256 preimage resistance and BJJ discrete log hardness provide cryptographic guarantee."
+    },
+    {
+      "id": "CHK-SUB-POSEIDON-001",
+      "property_id": "PROP-SUB-POSEIDON-001",
+      "title": "Poseidon Hash Circuit Compatibility",
+      "bug_class": "Hash Incompatibility",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-POSEIDON-HASH-CIRCUIT computes circom-compatible Poseidon hashes.",
+        "steps": [
+          "Locate Poseidon implementation in Solidity and Rust",
+          "Verify configuration matches circom light-poseidon",
+          "Check round constants and MDS matrix are identical",
+          "Compare output with circom reference implementation",
+          "Test with known test vectors"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "contracts/libs/Poseidon,zkp/src/poseidon",
+          "pattern": "PoseidonT3|roundConstants|mds|sbox",
+          "focus": "Configuration matches circom"
+        },
+        {
+          "type": "unit_test",
+          "description": "Compare hash output with circom reference",
+          "focus": "Outputs must be identical"
+        },
+        {
+          "type": "integration_test",
+          "description": "Use on-chain hash in ZK circuit",
+          "focus": "Circuit accepts on-chain computed hash"
+        }
+      ],
+      "notes": "Same parameters as circom produce identical output. Critical for ZK circuit compatibility."
+    },
+    {
+      "id": "CHK-SUB-BJJ-001",
+      "property_id": "PROP-SUB-BJJ-001",
+      "title": "Baby JubJub Curve Operations Correctness",
+      "bug_class": "Elliptic Curve Implementation Error",
+      "severity_hint": "Critical",
+      "detection_procedure": {
+        "description": "Verify that GRAPH-BABY-JUBJUB-OPERATIONS performs correct elliptic curve operations on Baby JubJub.",
+        "steps": [
+          "Locate BJJ implementation in SDK/CLI",
+          "Verify curve parameters match specification",
+          "Check point addition and scalar multiplication",
+          "Verify point validation rejects invalid points",
+          "Test with known test vectors for curve operations"
+        ]
+      },
+      "executable_checks": [
+        {
+          "type": "code_review",
+          "target": "sdk/src/crypto,cli/src/crypto",
+          "pattern": "BabyJubJub|pointAdd|scalarMul|validatePoint",
+          "focus": "Correct curve arithmetic implementation"
+        },
+        {
+          "type": "unit_test",
+          "description": "Test curve operations with known vectors",
+          "focus": "Results match expected values"
+        },
+        {
+          "type": "unit_test",
+          "description": "Attempt operations with invalid points",
+          "focus": "Must be rejected"
+        }
+      ],
+      "notes": "Deterministic curve arithmetic. ECDLP hardness protects private scalars."
+    }
+  ]
+}

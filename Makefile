@@ -11,8 +11,11 @@ LOG_DIR ?= outputs/logs
 export CLAUDE_CODE_PERMISSIONS := bypassPermissions
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS := 100000
 
+# Serena MCP configuration
+SERENA_MCP_CONFIG := {"mcpServers":{"serena":{"command":"uvx","args":["--from","git+https://github.com/oraios/serena","serena","start-mcp-server","--context","claude-code","--project","$(CURDIR)/$(WORKDIR)"]}}}
+
 # Claude configuration
-CLAUDE_FLAGS ?= --dangerously-skip-permissions --agent serena --output-format json
+CLAUDE_FLAGS ?= --dangerously-skip-permissions --output-format json --mcp-config '$(SERENA_MCP_CONFIG)'
 
 .PHONY: all preparation audit init 01 01a 01b 01c 02a 02b 02c 03 04 clean help
 
