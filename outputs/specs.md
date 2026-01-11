@@ -1534,3 +1534,429 @@ flowchart TD
 
 いただいたフィードバックを反映し、最終的な監査計画を策定いたします。
 
+---
+
+## 付録
+
+### 付録A: トラストモデル一覧表
+
+#### A.1 信頼レベル定義
+
+| レベル | 説明 | 監査対応 |
+|:---|:---|:---|
+| **TRUSTED** | 完全に信頼。侵害は監査範囲外 | 検証不要 |
+| **IN_SCOPE** | 監査対象。実装の正当性を検証 | 詳細検証 |
+| **SEMI_TRUSTED** | 部分的に信頼。検証/確認が必要 | 境界検証 |
+| **UNTRUSTED** | 信頼しない。すべての入力を検証 | 入力検証必須 |
+
+#### A.2 オンチェーンコンポーネント
+
+| コンポーネントID | 名称 | Owner | Deployer | Caller (User) | Caller (Internal) |
+|:---|:---|:---|:---|:---|:---|
+| COMP-VERIFIER | Verifier Contract | TRUSTED | TRUSTED | UNTRUSTED | SEMI_TRUSTED (LayerZero) |
+| COMP-ZERC20 | zERC20 Token Contract | TRUSTED | TRUSTED | UNTRUSTED | IN_SCOPE (LiquidityManager) |
+| COMP-LIQUIDITY-MANAGER | LiquidityManager Contract | TRUSTED | TRUSTED | UNTRUSTED | - |
+| COMP-HUB | Hub Contract | TRUSTED | TRUSTED | UNTRUSTED | SEMI_TRUSTED (LayerZero) |
+| COMP-ADAPTOR | Adaptor Contract | TRUSTED | TRUSTED | UNTRUSTED | SEMI_TRUSTED (Stargate) |
+
+#### A.3 オフチェーンコンポーネント
+
+| コンポーネントID | 名称 | Operator | Caller | Output |
+|:---|:---|:---|:---|:---|
+| COMP-PROVER | Prover/Decider Service | SEMI_TRUSTED | UNTRUSTED | UNTRUSTED |
+| COMP-INDEXER | Indexer Service | SEMI_TRUSTED | UNTRUSTED | SEMI_TRUSTED |
+| COMP-CROSSCHAIN-JOB | Cross-Chain Job | SEMI_TRUSTED | - | - |
+| COMP-IC-KEY-MANAGER | IC Key Manager Canister | SEMI_TRUSTED | UNTRUSTED | - |
+| COMP-IC-STORAGE | IC Storage Canister | SEMI_TRUSTED | UNTRUSTED | - |
+
+#### A.4 外部依存関係
+
+| 依存関係ID | 名称 | 信頼レベル | 検証要件 |
+|:---|:---|:---|:---|
+| DEP-LAYERZERO | LayerZero v2 Network | SEMI_TRUSTED | Source EID validation required |
+| DEP-STARGATE | Stargate Bridge | SEMI_TRUSTED | minAmountOut slippage limits enforced |
+
+#### A.5 信頼境界エッジ一覧
+
+| エッジID | Source → Target | 信頼レベル遷移 | Critical |
+|:---|:---|:---|:---|
+| EDGE-USER-INITIATES-WRAP | User → LiquidityManager | UNTRUSTED → IN_SCOPE | - |
+| EDGE-USER-INITIATES-UNWRAP | User → LiquidityManager | UNTRUSTED → IN_SCOPE | - |
+| EDGE-USER-INITIATES-TRANSFER | User → zERC20 | UNTRUSTED → IN_SCOPE | - |
+| EDGE-USER-SUBMITS-TELEPORT | User → Verifier | UNTRUSTED → IN_SCOPE | ✓ |
+| EDGE-USER-INITIATES-BRIDGE | User → Adaptor | UNTRUSTED → IN_SCOPE | - |
+| EDGE-LAYERZERO-TO-HUB | LayerZero → Hub | SEMI_TRUSTED → IN_SCOPE | ✓ |
+| EDGE-LAYERZERO-TO-VERIFIER | LayerZero → Verifier | SEMI_TRUSTED → IN_SCOPE | ✓ |
+| EDGE-VERIFIER-TO-LAYERZERO | Verifier → LayerZero | IN_SCOPE → SEMI_TRUSTED | - |
+| EDGE-HUB-TO-LAYERZERO | Hub → LayerZero | IN_SCOPE → SEMI_TRUSTED | - |
+| EDGE-ADAPTOR-TO-STARGATE | Adaptor → Stargate | IN_SCOPE → SEMI_TRUSTED | - |
+| EDGE-STARGATE-TO-ADAPTOR | Stargate → Adaptor | SEMI_TRUSTED → IN_SCOPE | ✓ |
+| EDGE-LIQUIDITY-MANAGER-TO-ZERC20 | LiquidityManager → zERC20 | IN_SCOPE → IN_SCOPE | - |
+| EDGE-VERIFIER-TO-ZERC20-TELEPORT | Verifier → zERC20 | IN_SCOPE → IN_SCOPE | ✓ |
+| EDGE-OWNER-UPGRADE | Owner → Contracts | TRUSTED → IN_SCOPE | OOS |
+| EDGE-OWNER-SET-MINTER | Owner → zERC20 | TRUSTED → IN_SCOPE | OOS |
+| EDGE-OWNER-REGISTER-TOKEN | Owner → Hub | TRUSTED → IN_SCOPE | OOS |
+| EDGE-OWNER-SET-VERIFIERS | Owner → Verifier | TRUSTED → IN_SCOPE | OOS |
+| EDGE-OWNER-SET-FEE-PARAMS | Owner → LiquidityManager | TRUSTED → IN_SCOPE | OOS |
+| EDGE-PROVER-OUTPUT-TO-USER | Prover → User | UNTRUSTED → UNTRUSTED | - |
+| EDGE-INDEXER-OUTPUT-TO-USER | Indexer → User | SEMI_TRUSTED → UNTRUSTED | - |
+
+*OOS = Out of Scope (Owner操作は信頼されており、監査対象外)*
+
+---
+
+### 付録B: プロパティ一覧表
+
+#### B.1 カテゴリ別プロパティ数
+
+| カテゴリ | 件数 | 説明 |
+|:---|---:|:---|
+| STATE_INVARIANT | 37 | 特定のプログラム状態で保持すべき性質 |
+| INTEGRITY | 23 | データの破損・改ざんを防ぐ性質 |
+| BOUNDARY_SECURITY | 19 | 信頼境界が適切に保護されている性質 |
+| TRANSITION_SECURITY | 18 | 状態遷移中に保持すべき性質 |
+| SOUNDNESS | 13 | 暗号学的証明システムの健全性 |
+| AUTHORIZATION | 13 | 権限を持つアクターのみがアクションを実行できる性質 |
+| DATA_PROTECTION | 5 | データの機密性と転送中の整合性 |
+| MONOTONICITY | 4 | 値が必要に応じて増加または減少のみする性質 |
+| **合計** | **132** | |
+
+#### B.2 プロパティ完全一覧（132件）
+
+##### ノードプロパティ（73件）
+
+| カテゴリ | プロパティ内容 |
+|:---|:---|
+| STATE_INVARIANT | ユーザー初期状態(IDLE)からの遷移は受信コンポーネントで検証される必要がある |
+| STATE_INVARIANT | ユーザーがUnderlying保有状態に達するにはunwrap完了または外部トークン取得が必要 |
+| STATE_INVARIANT | ユーザーがzERC20保有状態に達するにはwrap完了またはteleport完了が必要 |
+| STATE_INVARIANT | wrap待機状態はBN254フィールド制約内の金額を持つ有効なリクエストが必要 |
+| INTEGRITY | 報酬計算はプロトコル損失防止のためfloor丸めを使用する必要がある |
+| INTEGRITY | 流動性引出しはユーザーから正確な要求金額を転送する必要がある |
+| AUTHORIZATION | zERC20ミントは認可されたminterアドレスのみ実行可能 |
+| STATE_INVARIANT | wrap完了状態はLiquidityManagerがunderlyingを保持しzERC20がユーザーにミントされたことを意味する |
+| STATE_INVARIANT | unwrap待機状態はユーザーが要求金額分のzERC20残高を持つことが必要 |
+| INTEGRITY | 手数料計算はプロトコル損失防止のためceiling丸めを使用する必要がある |
+| AUTHORIZATION | zERC20バーンは認可されたminterアドレスのみ実行可能 |
+| INTEGRITY | underlying転送は手数料を正しく計算した(amount - fee)を転送する |
+| STATE_INVARIANT | unwrap完了状態はzERC20がバーンされunderlyingが手数料差引でユーザーに転送されたことを意味する |
+| STATE_INVARIANT | 流動性不足によるunwrap失敗は amount > underlyingBalance - feeSurplus の場合に発生 |
+| STATE_INVARIANT | zERC20転送待機状態は送信者が十分なzERC20残高を持つことが必要 |
+| INTEGRITY | 値検証はBN254フィールド互換性のため value <= 2^248-1 を強制する |
+| INTEGRITY | 残高更新は送信者から減算し受信者に正確な転送額を加算する |
+| INTEGRITY | ハッシュチェーン更新は(to, value)を248ビット切り捨てのSHA-256で追加する |
+| MONOTONICITY | IndexedTransfer発行は単調増加するインデックス値を出力する |
+| STATE_INVARIANT | 転送完了状態は残高更新・ハッシュチェーン更新・イベント発行がすべて完了したことを意味する |
+| STATE_INVARIANT | 転送拒否(値過大)状態は value > 2^248-1 の場合に発生する |
+| STATE_INVARIANT | Verifier待機状態はハッシュチェーン予約と証明処理の準備完了を表す |
+| INTEGRITY | ハッシュチェーン予約は将来の証明公開入力バインディング用の不変チェックポイントを保存する |
+| STATE_INVARIANT | ハッシュチェーン予約済状態はreservedHashChainsマッピングにチェックポイントが保存されたことを意味する |
+| STATE_INVARIANT | 転送ルート証明待機状態は対象インデックスでの事前ハッシュチェーン予約が必要 |
+| SOUNDNESS | Nova証明検証は正しい公開入力でIRootDecider.verifyOpaqueNovaProofを呼び出す |
+| SOUNDNESS | 転送ルート証明済状態はZKP検証成功後にのみ到達可能 |
+| STATE_INVARIANT | 緊急事態発生状態は同一インデックスで2つの有効な証明が異なるルートを生成した場合にのみ発生 |
+| STATE_INVARIANT | teleport証明待機状態は証明データを含む有効なteleportリクエストが必要 |
+| INTEGRITY | ルート参照検証はprovedTransferRootsまたはglobalTransferRootsにルートが存在することを確認する |
+| INTEGRITY | 受信者ハッシュ検証は証明の受信者がmsg.sender派生ハッシュと一致することを保証する |
+| MONOTONICITY | 単調性チェックは newTotalTeleported > totalTeleported[recipient] を強制する |
+| SOUNDNESS | 引出し証明検証は引出し請求のNovaまたはGroth16証明を検証する |
+| INTEGRITY | teleport呼出しは delta = newTotal - oldTotal でzERC20.teleport()を呼び出す |
+| STATE_INVARIANT | teleport完了状態は有効な証明の検証・単調性チェック・正しい受信者へのトークンミントを意味する |
+| STATE_INVARIANT | teleport拒否状態はいずれかの検証ステップ失敗時に発生する |
+| INTEGRITY | ルートリレーは正しいペイロードエンコーディングでLayerZero経由でHubに証明済ルートを送信する |
+| STATE_INVARIANT | ルートリレー済状態はLayerZeroメッセージがクロスチェーン配信のため送信されたことを意味する |
+| STATE_INVARIANT | Hub待機状態はルート受信とブロードキャストトリガーの準備完了を表す |
+| AUTHORIZATION | Hubルート受信は処理前に登録済Verifierリストに対してソースEIDを検証する |
+| INTEGRITY | Hub転送ルート更新は正しいトークンインデックススロットにルートを保存する |
+| STATE_INVARIANT | 転送ルート更新済状態はtransferRoots[tokenIndex]に新しいルートが含まれることを意味する |
+| STATE_INVARIANT | ブロードキャスト待機状態は認可された呼出者によるブロードキャストトリガーを許可する |
+| INTEGRITY | Hub集約計算は64トークンルート以下でPoseidonT3ツリーを正しく計算する |
+| MONOTONICITY | aggSeqは単調に増加する |
+| INTEGRITY | Hubルートブロードキャストは登録済全Verifierに集約ルートを送信する |
+| STATE_INVARIANT | グローバルルートブロードキャスト済状態は登録済全VerifierにLayerZeroメッセージが送信されたことを意味する |
+| AUTHORIZATION | Verifierグローバルルート保存は保存前にソースEIDが認可されたHubであることを検証する |
+| STATE_INVARIANT | グローバルルート保存済状態はglobalTransferRoots[aggSeq]に受信ルートが含まれることを意味する |
+| STATE_INVARIANT | Indexer待機状態はオフチェーンIndexerがイベント処理準備完了であることを表す |
+| INTEGRITY | Indexerイベント監視はすべてのIndexedTransferイベントを損失なく取得する |
+| INTEGRITY | Indexerツリービルドはオンチェーンハッシュチェーン計算と一致するMerkleツリーを構築する |
+| STATE_INVARIANT | Indexerツリー準備完了状態はMerkleツリーがオンチェーン状態と一致することを意味する |
+| INTEGRITY | Indexer証明生成は有効なMerkle包含証明を提供する |
+| STATE_INVARIANT | Prover待機状態はdecider-proverサービスが証明変換準備完了であることを表す |
+| STATE_INVARIANT | ProverはすべてのユーザーからNova IVC証明を受け入れる |
+| STATE_INVARIANT | ジョブキュー済状態はジョブが処理用に保存されたことを意味する |
+| STATE_INVARIANT | ジョブ処理中状態はジョブが積極的にGroth16に変換中であることを意味する |
+| SOUNDNESS | Groth16変換はIVCセマンティクスを保持する有効なGroth16証明を生成する |
+| STATE_INVARIANT | ジョブ完了状態は取得可能な有効なGroth16証明が利用可能であることを意味する |
+| STATE_INVARIANT | ジョブ失敗状態はエラー詳細を含む証明変換失敗を示す |
+| STATE_INVARIANT | Adaptor待機状態はブリッジリクエスト処理準備完了を表す |
+| INTEGRITY | Adaptorブリッジリクエスト受信はスリッページ制限を含むブリッジパラメータを検証する |
+| AUTHORIZATION | Adaptor経由unwrapはLiquidityManager unwrapを正しく呼び出す |
+| DATA_PROTECTION | Stargate経由ブリッジはminAmountOutスリッページ保護を強制する |
+| STATE_INVARIANT | ブリッジ開始済状態はunwrap完了とStargateブリッジリクエスト送信を意味する |
+| STATE_INVARIANT | ブリッジ失敗状態は資金が安全に保たれたまま操作失敗を示す |
+| DATA_PROTECTION | ステルスアドレス生成はシークレットから暗号学的に安全なステルスアドレスを生成する |
+| SOUNDNESS | Nova証明生成はユーザーの転送履歴から有効なIVC証明を生成する |
+| STATE_INVARIANT | ユーザーNova証明保有状態はユーザーが請求転送の有効なIVC証明を保持することを意味する |
+| AUTHORIZATION | Verifierローテーションは緊急状態中にオーナーのみ呼出可能 |
+| AUTHORIZATION | 緊急解除はVerifierローテーション後にオーナーのみ呼出可能 |
+| STATE_INVARIANT | 緊急回復済状態は新しいVerifierがアクティブで緊急フラグがクリアされたことを意味する |
+
+##### エッジプロパティ（37件）
+
+| カテゴリ | プロパティ内容 |
+|:---|:---|
+| BOUNDARY_SECURITY | wrap開始はBN254制約内の有効なwrap金額とユーザー残高が必要 |
+| TRANSITION_SECURITY | 報酬計算遷移は正しいパラメータでIncentiveLibを使用する |
+| TRANSITION_SECURITY | 流動性引出しはセキュアなトークン転送のためSafeERC20.safeTransferFromを使用する |
+| TRANSITION_SECURITY | zERC20ミントは正確な(amount + reward)をユーザーにミントする |
+| TRANSITION_SECURITY | wrap完了は正確なパラメータでWrappedイベントを発行する |
+| TRANSITION_SECURITY | zERC20取得はユーザー残高がミント金額分増加することを意味する |
+| BOUNDARY_SECURITY | unwrap開始はユーザーのzERC20残高内の有効なunwrap金額が必要 |
+| TRANSITION_SECURITY | 手数料計算はプロトコル保護のためceiling除算を使用する |
+| TRANSITION_SECURITY | zERC20バーンはユーザーから正確なunwrap金額をバーンする |
+| TRANSITION_SECURITY | underlying転送はSafeERC20を使用して(amount - fee)を転送する |
+| TRANSITION_SECURITY | unwrap完了は正確なパラメータでUnwrappedイベントを発行する |
+| TRANSITION_SECURITY | 流動性不足検出は流動性不足時に正しく検出しリバートする |
+| TRANSITION_SECURITY | underlying取得はunderlyingトークンがユーザーに転送されたことを意味する |
+| BOUNDARY_SECURITY | 転送開始は value <= 2^248-1 と送信者残高を検証する |
+| TRANSITION_SECURITY | 値検証は転送後の受信者残高にBN254制約を適用する |
+| TRANSITION_SECURITY | 値過大は正しくValueTooLargeリバートをトリガーする |
+| TRANSITION_SECURITY | 残高更新は送信者と受信者の残高を原子的に更新する |
+| TRANSITION_SECURITY | ハッシュチェーン更新は(to, value)をハッシュチェーンに決定論的に追加する |
+| TRANSITION_SECURITY | イベント発行は単調インデックスでIndexedTransferを発行する |
+| TRANSITION_SECURITY | 転送完了はすべての状態更新(残高、ハッシュ、イベント)の完了を意味する |
+| BOUNDARY_SECURITY | teleport送信は有効なGroth16証明と単調なtotalTeleportedが必要 |
+| TRANSITION_SECURITY | チェックポイント予約は証明バインディング用の不変チェックポイントを保存する |
+| BOUNDARY_SECURITY | LayerZero→Hubはペイロード処理前にソースEIDが認可されたVerifierであることを検証する |
+| BOUNDARY_SECURITY | LayerZero→Verifierはグローバルルート保存前にソースEIDが認可されたHubであることを検証する |
+| BOUNDARY_SECURITY | Verifier→LayerZeroは正しいエンコーディングで証明済ルートをLayerZeroに送信する |
+| BOUNDARY_SECURITY | Hub→LayerZeroは省略なく登録済全Verifierにブロードキャストする |
+| BOUNDARY_SECURITY | Adaptor→StargateはminAmountOutスリッページ保護を強制する |
+| BOUNDARY_SECURITY | Stargate→Adaptorは送信者が認可されたStargateエンドポイントで金額がスリッページを満たすことを検証する |
+| BOUNDARY_SECURITY | LiquidityManager→zERC20は呼出者が認可されたminterであることが必要 |
+| BOUNDARY_SECURITY | Verifier→zERC20(teleport)は呼出者が認可されたverifierで証明が有効であることが必要 |
+| BOUNDARY_SECURITY | オーナーアップグレードは呼出者がコントラクトオーナーであることが必要（対象外） |
+| BOUNDARY_SECURITY | オーナーminter設定は呼出者がコントラクトオーナーであることが必要（対象外） |
+| BOUNDARY_SECURITY | オーナートークン登録は呼出者がコントラクトオーナーであることが必要（対象外） |
+| BOUNDARY_SECURITY | オーナーVerifier設定は呼出者がコントラクトオーナーであることが必要（対象外） |
+| BOUNDARY_SECURITY | オーナー手数料設定は呼出者がコントラクトオーナーであることが必要（対象外） |
+| BOUNDARY_SECURITY | Prover出力はオンチェーン検証で健全性により検証された証明を提供する |
+| BOUNDARY_SECURITY | Indexer出力は回路実行中に検証されたMerkle証明を提供する |
+
+##### サブグラフプロパティ（17件）
+
+| カテゴリ | プロパティ内容 |
+|:---|:---|
+| SOUNDNESS | Nova IVC証明生成はユーザーのシークレットが所有する転送に対してのみ有効な証明を生成する |
+| SOUNDNESS | Nova→Groth16変換は証明された文のセマンティック等価性を保持する |
+| SOUNDNESS | 転送ルート証明検証はZKPを正しく検証し乖離証明を検出する |
+| SOUNDNESS | 引出し証明検証はNovaまたはGroth16証明を正しく検証し公開入力を抽出する |
+| INTEGRITY | インセンティブカーブ計算は正しい丸め方向を使用する（報酬はfloor、手数料はceiling） |
+| INTEGRITY | Hub集約は登録トークンルート上でPoseidonT3 Merkleツリーを正しく計算する |
+| AUTHORIZATION | LayerZeroメッセージフローはペイロード処理前にソースEIDを検証する |
+| DATA_PROTECTION | ステルスアドレス生成はシークレットから暗号学的にリンク不可能なアドレスを生成する |
+| SOUNDNESS | Poseidonハッシュ実装は衝突耐性がありcircom互換である |
+| SOUNDNESS | Baby JubJub曲線演算はBN254埋込曲線上で数学的に正しい |
+| DATA_PROTECTION | ICキャニスター連携は機密鍵導出と暗号化ストレージを提供する |
+| DATA_PROTECTION | Stargateブリッジフローはスリッページ保護を強制し払戻しを正しく処理する |
+| SOUNDNESS | Nova折畳スキームは証明を正しく蓄積しIVC健全性を維持する |
+| AUTHORIZATION | SelfCallパターンは保護関数への外部再入を防止する |
+| INTEGRITY | ネイティブETH処理はmsg.valueを検証しWETHに適切にラップする |
+| AUTHORIZATION | ガバナンス関数はonlyOwner修飾子を必要とする（対象外） |
+| AUTHORIZATION | lzComposeコールバックは送信者がLayerZeroエンドポイントでオリジンが登録済Stargateプールであることを検証する |
+
+##### システムワイドプロパティ（5件）
+
+| カテゴリ | プロパティ内容 |
+|:---|:---|
+| SOUNDNESS | ZKPシステム(Nova + Groth16)は128ビットセキュリティレベルと健全性を維持する |
+| MONOTONICITY | 単調なtotalTeleportedにより二重支払いを防止する（同一teleportの二重実行不可） |
+| AUTHORIZATION | クロスチェーンメッセージはソースEID検証により認証される |
+| AUTHORIZATION | zERC20ミントはLiquidityManager.mint()とVerifier.teleport()の2つの認可経路のみで実行可能 |
+| INTEGRITY | すべてのzERC20値はBN254スカラーフィールド互換性のため <= 2^248-1 に制約される |
+
+#### C.2 重要度別チェックリスト分布
+
+| 重要度 | 件数 | 説明 |
+|:---|---:|:---|
+| Critical | 52 | ZKP健全性、二重支払い防止、クロスチェーン認証 |
+| High | 58 | 入力検証、状態整合性、暗号実装 |
+| Medium | 25 | 丸め誤差、シリアライズ整合性 |
+| Low | 12 | サービス可用性、マイナーな状態不整合 |
+| Informational | 5 | Owner操作（監査対象外） |
+
+#### C.3 チェックリスト完全一覧（170件）
+
+##### 境界セキュリティチェック（33件）
+
+| 重要度 | チェック内容 |
+|:---|:---|
+| High | LiquidityManagerエントリでのユーザーwrap金額検証の信頼境界整合性を検証する |
+| High | wrap処理前にwrapリクエストデータを正しく検証する実装を確認する |
+| High | LiquidityManagerエントリでのユーザーunwrap金額検証の信頼境界整合性を検証する |
+| Medium | 手数料計算がceiling丸めを使用しプロトコルを過少徴収から保護することを確認する |
+| Critical | zERC20転送時のBN254フィールド制約適用の信頼境界整合性を検証する |
+| Critical | SHA-256を248ビット切り捨てで使用して転送データを追加する実装を確認する |
+| Critical | ミント前のGroth16証明検証の信頼境界整合性を検証する |
+| Critical | totalTeleportedの厳密な増加を強制し二重支払いを防止する実装を確認する |
+| Critical | ルートが証明済またはグローバルルートに存在することを確認する実装を検証する |
+| Critical | LayerZeroメッセージ処理前のソースEID検証の信頼境界整合性を検証する |
+| High | 正しいトークンインデックススロットにルートを保存する実装を確認する |
+| Critical | グローバルルート保存前のHub EID検証の信頼境界整合性を検証する |
+| High | 集約シーケンスと共にグローバルルートを正しく保存する実装を確認する |
+| High | アウトバウンドメッセージのエンコーディングと宛先正確性の信頼境界整合性を検証する |
+| High | 登録済全Verifierへの省略なしブロードキャストの信頼境界整合性を検証する |
+| Critical | PoseidonT3 Merkleツリーを正しく計算する実装を確認する |
+| High | minAmountOutスリッページ保護適用の信頼境界整合性を検証する |
+| Critical | lzComposeコールバック認証とスリッページ検証の信頼境界整合性を検証する |
+| High | OFTコンポーズメッセージ構造を正しくデコードする実装を確認する |
+| Critical | mint/burn呼出しでのMinter認可の信頼境界整合性を検証する |
+| Critical | teleportミンティングでのVerifier認可の信頼境界整合性を検証する |
+| Critical | ミント金額をdeltaとして正しく計算する実装を確認する |
+| Informational | UUPSアップグレードでのOwner認可の信頼境界整合性を検証する（対象外） |
+| Informational | minter変更でのOwner認可の信頼境界整合性を検証する（対象外） |
+| Informational | トークン登録でのOwner認可の信頼境界整合性を検証する（対象外） |
+| Informational | Verifierローテーションでのowner認可の信頼境界整合性を検証する（対象外） |
+| Informational | 手数料設定でのOwner認可の信頼境界整合性を検証する（対象外） |
+| High | 証明がオンチェーン検証で健全性により検証されることを確認する |
+| Medium | Groth16証明構造がオンチェーン検証者の期待と一致することを確認する |
+| High | ZK回路検証によるMerkle証明有効性保証を検証する |
+| High | Merkle構造がオンチェーンハッシュチェーン計算と一致することを確認する |
+| Critical | LiquidityManagerとVerifier以外の不正なミント経路が存在しないことを検証する |
+| Critical | 全受信コントラクトでEID検証によるクロスチェーンメッセージ分離完全性を検証する |
+
+##### ノードプロパティチェック（73件）
+
+| 重要度 | チェック内容 |
+|:---|:---|
+| Medium | ユーザー初期状態からの遷移が受信コンポーネントで検証されることを確認する |
+| High | Underlying保有状態が有効なunwrap完了経由でのみ到達可能であることを検証する |
+| Critical | zERC20保有状態がwrapまたはteleport完了経由でのみ到達可能であることを検証する |
+| Critical | wrap待機状態がwrap金額にBN254フィールド制約を適用することを検証する |
+| Medium | wrap報酬計算がfloor丸めを使用することを検証する |
+| High | 流動性引出しが正確な要求金額を転送することを検証する |
+| Critical | zERC20ミントが認可されたminterを必要とすることを検証する |
+| High | wrap完了状態がpull+mint操作の原子性を意味することを検証する |
+| High | unwrap待機状態が十分なzERC20残高を必要とすることを検証する |
+| Medium | 手数料計算がceiling丸めを使用することを検証する |
+| Critical | zERC20バーンが認可されたminterを必要とすることを検証する |
+| High | underlying転送が正しい(amount - fee)をユーザーに送信することを検証する |
+| High | unwrap完了状態がburn+transfer操作の原子性を意味することを検証する |
+| High | 流動性不足時にunwrap失敗状態に到達することを検証する |
+| High | zERC20転送待機状態が十分な送信者残高を必要とすることを検証する |
+| Critical | 値検証がBN254フィールド制約を適用することを検証する |
+| Critical | 残高更新が値の保存を維持することを検証する |
+| Critical | ハッシュチェーン更新が248ビット切り捨てでSHA-256を使用することを検証する |
+| High | IndexedTransfer発行が単調インデックスを出力することを検証する |
+| High | 転送完了状態が全転送操作の原子的完了を意味することを検証する |
+| Medium | 転送拒否状態が value > 2^248-1 の場合にのみ到達することを検証する |
+| Medium | Verifierコントラクトがステートレスで操作準備完了であることを確認する |
+| High | ハッシュチェーンチェックポイントが予約後不変であることを検証する |
+| Medium | ハッシュチェーン予約済状態がマッピングにチェックポイント保存を意味することを検証する |
+| Critical | 転送ルート証明が事前ハッシュチェーン予約を必要とすることを検証する |
+| Critical | Nova証明検証が予約済チェックポイントからの正しい公開入力を使用することを検証する |
+| Critical | 転送ルート証明済状態が有効なZKP検証後にのみ到達可能であることを検証する |
+| Critical | 緊急状態が乖離する有効な証明によってのみトリガーされることを検証する |
+| High | teleport処理が有効な証明データ提出を必要とすることを検証する |
+| Critical | ルート参照検証が証明済とグローバルルートマッピング両方をチェックすることを検証する |
+| Critical | 受信者ハッシュが証明をmsg.senderにバインドすることを検証する |
+| Critical | 単調性チェックが二重支払いを防止することを検証する |
+| Critical | 引出し証明が正しい入力でGroth16検証を使用することを検証する |
+| Critical | teleport delta計算が正しいことを検証する |
+| Critical | teleport完了状態が全検証パスを必要とすることを検証する |
+| Low | teleport拒否が適切なエラー表示を提供することを検証する |
+| High | ルートリレーが正しいLayerZeroエンコーディングと宛先を使用することを検証する |
+| Medium | ルートリレー済状態がLayerZeroメッセージ送信を意味することを検証する |
+| Medium | Hubコントラクトがステートレスで操作準備完了であることを確認する |
+| Critical | Hubが登録済Verifierリストに対してソースEIDを検証することを検証する |
+| Critical | Hubが正しいトークンインデックススロットに転送ルートを保存することを検証する |
+| High | 転送ルート更新済状態がストレージ完了を意味することを検証する |
+| Medium | ブロードキャスト待機状態がパーミッションレスブロードキャストトリガーを許可することを検証する |
+| Critical | HubがPoseidonT3集約ツリーを正しく計算することを検証する |
+| Critical | aggSeqがリセットなく単調増加することを検証する |
+| High | Hubが登録済全Verifierにブロードキャストすることを検証する |
+| High | グローバルルートブロードキャスト済状態が完全なメッセージ配信を意味することを検証する |
+| Critical | Verifierがグローバルルート保存前にHubを認証することを検証する |
+| High | グローバルルート保存済状態が正しいストレージを意味することを検証する |
+| Low | Indexer可用性監視が存在することを確認する |
+| Medium | IndexerがすべてのIndexedTransferイベントを損失なく取得することを検証する |
+| High | Indexer Merkleツリーがオンチェーン計算と一致することを検証する |
+| Medium | Indexerツリー準備完了状態がオンチェーン一貫性を意味することを検証する |
+| Medium | Indexerが有効なMerkle包含証明を生成することを検証する |
+| Low | Decider-Proverサービス可用性監視を確認する |
+| Medium | Proverが検閲なしにすべてのユーザーからIVC証明を受け入れることを検証する |
+| Low | キュー済ジョブが永続化され損失されないことを検証する |
+| Low | 処理中ジョブがタイムアウトとリカバリを持つことを検証する |
+| Critical | Nova→Groth16変換が証明セマンティクスを保持することを検証する |
+| Medium | ジョブ完了状態が有効なGroth16証明利用可能を意味することを検証する |
+| Low | ジョブ失敗状態が証明変換失敗のエラー詳細を提供することを検証する |
+| Low | Adaptorがステートレスでブリッジリクエスト準備完了であることを確認する |
+| High | スリッページ制限を含むブリッジリクエスト検証を検証する |
+| Critical | AdaptorがLiquidityManagerを正しく呼び出してunwrapすることを検証する |
+| High | StargateブリッジがminAmountOutスリッページ保護を強制することを検証する |
+| High | ブリッジ開始済状態が事前unwrap完了を意味することを検証する |
+| Critical | ブリッジ失敗がユーザー資金を安全に保つことを検証する |
+| Critical | ステルスアドレス生成が暗号学的に安全であることを検証する |
+| Critical | Nova IVC証明生成がシークレット対アドレスバインディングを検証することを確認する |
+| Critical | ユーザーNova証明保有状態が有効なIVC証明所有権を意味することを検証する |
+| Critical | Verifierローテーションが緊急時のオーナーに制限されることを検証する |
+| Critical | 緊急解除が事前Verifierローテーションを必要とすることを検証する |
+| High | 緊急回復済状態が新しいVerifierアクティブを意味することを検証する |
+
+##### エッジプロパティチェック（21件）
+
+| 重要度 | チェック内容 |
+|:---|:---|
+| Medium | 報酬計算が正しいIncentiveLibパラメータを使用することを検証する |
+| High | トークン引出しにSafeERC20.safeTransferFromを使用することを検証する |
+| Critical | 正確な(amount + reward)をユーザーにミントすることを検証する |
+| Low | 正確なパラメータでWrappedイベントが発行されることを検証する |
+| Critical | ユーザー残高がミント金額分増加することを検証する |
+| Medium | 手数料計算がceiling除算を使用することを検証する |
+| Critical | 正確なunwrap金額がユーザーからバーンされることを検証する |
+| High | LiquidityManagerがSafeERC20を使用して正確な(amount - fee)を転送することを検証する |
+| Low | 正確なパラメータでUnwrappedイベントが発行されることを検証する |
+| Critical | 流動性不足時にunwrapがリバートすることを検証する |
+| High | SafeERC20.safeTransferがユーザーのトークン受領を保証することを検証する |
+| Critical | _afterTokenTransferが全転送にBN254制約を適用することを検証する |
+| High | ValueTooLargeリバートが正しくトリガーされることを検証する |
+| Medium | OpenZeppelin _transferを使用した原子的残高更新を検証する |
+| Critical | ハッシュチェーン更新が248ビット切り捨ての決定論的SHA-256であることを検証する |
+| Medium | 単調インデックスでIndexedTransferイベントが発行されることを検証する |
+| Medium | 転送完了が全状態更新完了を意味することを検証する |
+| Critical | チェックポイント予約がインデックスごとに一度だけ書込み可能であることを検証する |
+
+##### サブグラフチェック（17件）
+
+| 重要度 | チェック内容 |
+|:---|:---|
+| Critical | Nova IVC証明生成がシークレット所有権を必要とすることを検証する |
+| Critical | Nova→Groth16変換がセマンティック等価性を保持することを検証する |
+| Critical | IRootDecider経由のオンチェーンルート証明検証を検証する |
+| Critical | 引出し証明検証と公開入力抽出を検証する |
+| Medium | インセンティブカーブが正しい丸め方向を使用することを検証する |
+| High | Hub PoseidonT3 Merkleツリー計算を検証する |
+| Critical | LayerZeroメッセージフローがソースEIDを検証することを確認する |
+| High | ステルスアドレスのリンク不可能性を検証する |
+| Critical | Poseidonハッシュ衝突耐性とcircom互換性を検証する |
+| Critical | BN254上のBaby JubJub曲線演算が数学的に正しいことを検証する |
+| High | ICキャニスターがvetKd経由で機密鍵導出を提供することを検証する |
+| High | Stargateブリッジがスリッページ保護を強制し払戻しを処理することを検証する |
+| Critical | Nova折畳スキームがIVC健全性を維持することを検証する |
+| High | SelfCallパターンが外部再入を防止することを検証する |
+| Medium | ネイティブETH処理がmsg.valueを検証し正しくラップすることを検証する |
+| Critical | ガバナンス関数がonlyOwner修飾子で制限されることを検証する（対象外） |
+| Critical | lzComposeコールバックが送信者を認証しStargateオリジンを検証することを確認する |
+
+##### システムワイドチェック（5件）
+
+| 重要度 | チェック内容 |
+|:---|:---|
+| Critical | **重要**: ZKPシステムが128ビットセキュリティと健全性を維持することを検証する |
+| Critical | **重要**: 単調なtotalTeleportedによる二重支払い防止を検証する |
+| Critical | **重要**: ソースEIDによるクロスチェーンメッセージ認証を検証する |
+| Critical | **重要**: zERC20ミントが認可経路のみに制限されることを検証する |
+| Critical | **重要**: 全zERC20値がBN254スカラーフィールドに制約されることを検証する |
+
+---
+
