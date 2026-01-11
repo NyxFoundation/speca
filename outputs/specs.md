@@ -756,6 +756,46 @@ StargateからのlzComposeコールバック処理フローを表現します。
 
 ### 5.11 Poseidon Hash Circuit Implementation
 
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+
+    STATE_POSEIDON_INIT["Poseidon Hash Requested"]
+    ACTION_POSEIDON_LOAD_CONFIG[["Load Circom-Compatible Configuration [T=2 or T=3]"]]
+    ACTION_POSEIDON_INIT_STATE[["Initialize Sponge State Vector [all zeros]"]]
+    ACTION_POSEIDON_ABSORB[["Absorb Input Elements into State"]]
+    ACTION_POSEIDON_ADD_ROUND_CONSTANTS[["Add Round Constants to State"]]
+    ACTION_POSEIDON_SBOX[["Apply S-box [x^5 for BN254]"]]
+    ACTION_POSEIDON_MDS_MIX[["Apply MDS Matrix Multiplication"]]
+    STATE_POSEIDON_ROUND_COMPLETE["Permutation Round Complete"]
+    ACTION_POSEIDON_SQUEEZE[["Squeeze Output Element from State"]]
+    STATE_POSEIDON_COMPLETE["Poseidon Hash Output Ready"]
+
+    STATE_POSEIDON_INIT -->|Begin Poseidon hash computation| ACTION_POSEIDON_LOAD_CONFIG
+    ACTION_POSEIDON_LOAD_CONFIG -->|Configuration loaded| ACTION_POSEIDON_INIT_STATE
+    ACTION_POSEIDON_INIT_STATE -->|State vector zeroed| ACTION_POSEIDON_ABSORB
+    ACTION_POSEIDON_ABSORB -->|Input absorbed into state| ACTION_POSEIDON_ADD_ROUND_CONSTANTS
+    ACTION_POSEIDON_ADD_ROUND_CONSTANTS -->|Round constants XORed| ACTION_POSEIDON_SBOX
+    ACTION_POSEIDON_SBOX -->|S-box applied| ACTION_POSEIDON_MDS_MIX
+    ACTION_POSEIDON_MDS_MIX -->|MDS mixing complete| STATE_POSEIDON_ROUND_COMPLETE
+    STATE_POSEIDON_ROUND_COMPLETE -->|More rounds remaining| ACTION_POSEIDON_ADD_ROUND_CONSTANTS
+    STATE_POSEIDON_ROUND_COMPLETE -->|All rounds complete| ACTION_POSEIDON_SQUEEZE
+    ACTION_POSEIDON_SQUEEZE -->|Hash output extracted| STATE_POSEIDON_COMPLETE
+
+    class STATE_POSEIDON_INIT stateNode
+    class ACTION_POSEIDON_LOAD_CONFIG actionNode
+    class ACTION_POSEIDON_INIT_STATE actionNode
+    class ACTION_POSEIDON_ABSORB actionNode
+    class ACTION_POSEIDON_ADD_ROUND_CONSTANTS actionNode
+    class ACTION_POSEIDON_SBOX actionNode
+    class ACTION_POSEIDON_MDS_MIX actionNode
+    class STATE_POSEIDON_ROUND_COMPLETE stateNode
+    class ACTION_POSEIDON_SQUEEZE actionNode
+    class STATE_POSEIDON_COMPLETE stateNode
+```
+*図10: Poseidon Hash Circuit Implementation フロー*
+
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-POSEIDON-HASH-CIRCUIT |
@@ -772,6 +812,48 @@ Poseidonハッシュ関数のZK回路実装フローを表現します。light-p
 | `PROP-POSEIDON-SPONGE-SECURITY` | Poseidonスポンジ構造は暗号学的セキュリティを維持する | SOUNDNESS |
 
 ### 5.12 Baby JubJub Elliptic Curve Operations
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+
+    STATE_BJJ_INIT["Baby JubJub Operation Requested"]
+    ACTION_BJJ_LOAD_PARAMS[["Load Curve Parameters [a, d, order, base point]"]]
+    ACTION_BJJ_VALIDATE_POINT[["Validate Point On Curve"]]
+    ACTION_BJJ_POINT_ADD[["Compute Point Addition [twisted Edwards]"]]
+    ACTION_BJJ_SCALAR_MUL[["Compute Scalar Multiplication [double-and-add]"]]
+    STATE_BJJ_DOUBLE_LOOP["Scalar Multiplication Loop"]
+    ACTION_BJJ_POINT_DOUBLE[["Double Current Point"]]
+    ACTION_BJJ_CONDITIONAL_ADD[["Conditional Add Based on Scalar Bit"]]
+    ACTION_BJJ_DERIVE_PUBKEY[["Derive Public Key from Private Scalar"]]
+    STATE_BJJ_RESULT_READY["Curve Operation Result Ready"]
+
+    STATE_BJJ_INIT -->|Begin curve operation| ACTION_BJJ_LOAD_PARAMS
+    ACTION_BJJ_LOAD_PARAMS -->|BN254-embedded curve params loaded| ACTION_BJJ_VALIDATE_POINT
+    ACTION_BJJ_VALIDATE_POINT -->|Point addition requested| ACTION_BJJ_POINT_ADD
+    ACTION_BJJ_VALIDATE_POINT -->|Scalar multiplication requested| ACTION_BJJ_SCALAR_MUL
+    ACTION_BJJ_VALIDATE_POINT -->|Key derivation requested| ACTION_BJJ_DERIVE_PUBKEY
+    ACTION_BJJ_POINT_ADD -->|Point addition computed| STATE_BJJ_RESULT_READY
+    ACTION_BJJ_SCALAR_MUL -->|Initialize accumulator| STATE_BJJ_DOUBLE_LOOP
+    STATE_BJJ_DOUBLE_LOOP -->|Process next bit| ACTION_BJJ_POINT_DOUBLE
+    ACTION_BJJ_POINT_DOUBLE -->|Point doubled| ACTION_BJJ_CONDITIONAL_ADD
+    ACTION_BJJ_CONDITIONAL_ADD -->|More bits to process| STATE_BJJ_DOUBLE_LOOP
+    ACTION_BJJ_CONDITIONAL_ADD -->|All bits processed| STATE_BJJ_RESULT_READY
+    ACTION_BJJ_DERIVE_PUBKEY -->|Public key derived| STATE_BJJ_RESULT_READY
+
+    class STATE_BJJ_INIT stateNode
+    class ACTION_BJJ_LOAD_PARAMS actionNode
+    class ACTION_BJJ_VALIDATE_POINT actionNode
+    class ACTION_BJJ_POINT_ADD actionNode
+    class ACTION_BJJ_SCALAR_MUL actionNode
+    class STATE_BJJ_DOUBLE_LOOP stateNode
+    class ACTION_BJJ_POINT_DOUBLE actionNode
+    class ACTION_BJJ_CONDITIONAL_ADD actionNode
+    class ACTION_BJJ_DERIVE_PUBKEY actionNode
+    class STATE_BJJ_RESULT_READY stateNode
+```
+*図11: Baby JubJub Elliptic Curve Operations フロー*
 
 | 項目 | 値 |
 |:---|:---|
@@ -790,6 +872,53 @@ BN254に埋め込まれたBaby JubJub曲線上の楕円曲線演算フローを�
 
 ### 5.13 Internet Computer Canister Interactions
 
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_IC_INIT["IC Canister Interaction Requested"]
+    ACTION_IC_CREATE_AGENT[["Create IC Agent with Identity"]]
+    ACTION_IC_CALL_KEY_MANAGER[["Call Key Manager Canister [vetKd_derive_key]"]]
+    ACTION_IC_DERIVE_ENCRYPTION_KEY[["Derive User Encryption Key from VetKey"]]
+    STATE_IC_KEY_DERIVED["Encryption Key Derived"]
+    ACTION_IC_ENCRYPT_STATE[["Encrypt User State with AES-GCM"]]
+    ACTION_IC_CALL_STORAGE_PUT[["Call Storage Canister put[key, encrypted_data]"]]
+    STATE_IC_STATE_STORED["Encrypted State Stored in IC"]
+    ACTION_IC_CALL_STORAGE_GET[["Call Storage Canister get[key]"]]
+    ACTION_IC_DECRYPT_STATE[["Decrypt Retrieved State with AES-GCM"]]
+    STATE_IC_STATE_RETRIEVED["User State Retrieved and Decrypted"]
+    STATE_IC_ERROR(("IC Operation Failed"))
+
+    STATE_IC_INIT -->|Initialize IC client| ACTION_IC_CREATE_AGENT
+    ACTION_IC_CREATE_AGENT -->|Agent ready with identity| ACTION_IC_CALL_KEY_MANAGER
+    ACTION_IC_CALL_KEY_MANAGER -->|VetKey derivation initiated| ACTION_IC_DERIVE_ENCRYPTION_KEY
+    ACTION_IC_CALL_KEY_MANAGER -->|VetKey derivation failed| STATE_IC_ERROR
+    ACTION_IC_DERIVE_ENCRYPTION_KEY -->|User-specific key derived| STATE_IC_KEY_DERIVED
+    STATE_IC_KEY_DERIVED -->|Prepare data for storage| ACTION_IC_ENCRYPT_STATE
+    STATE_IC_KEY_DERIVED -->|Request stored data| ACTION_IC_CALL_STORAGE_GET
+    ACTION_IC_ENCRYPT_STATE -->|AES-GCM encryption complete| ACTION_IC_CALL_STORAGE_PUT
+    ACTION_IC_CALL_STORAGE_PUT -->|Data persisted| STATE_IC_STATE_STORED
+    ACTION_IC_CALL_STORAGE_PUT -->|Storage write failed| STATE_IC_ERROR
+    ACTION_IC_CALL_STORAGE_GET -->|Encrypted data received| ACTION_IC_DECRYPT_STATE
+    ACTION_IC_DECRYPT_STATE -->|Plaintext state recovered| STATE_IC_STATE_RETRIEVED
+
+    class STATE_IC_INIT stateNode
+    class ACTION_IC_CREATE_AGENT actionNode
+    class ACTION_IC_CALL_KEY_MANAGER actionNode
+    class ACTION_IC_DERIVE_ENCRYPTION_KEY actionNode
+    class STATE_IC_KEY_DERIVED stateNode
+    class ACTION_IC_ENCRYPT_STATE actionNode
+    class ACTION_IC_CALL_STORAGE_PUT actionNode
+    class STATE_IC_STATE_STORED stateNode
+    class ACTION_IC_CALL_STORAGE_GET actionNode
+    class ACTION_IC_DECRYPT_STATE actionNode
+    class STATE_IC_STATE_RETRIEVED stateNode
+    class STATE_IC_ERROR errorNode
+```
+*図12: Internet Computer Canister Interactions フロー*
+
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-IC-CANISTER-INTERACTION |
@@ -806,6 +935,65 @@ Internet Computer（IC）キャニスターとのインタラクションフロ�
 | `PROP-IC-STORAGE-ENCRYPTION` | ICストレージに保存されるすべての状態はAES-GCMで暗号化される | DATA_PROTECTION |
 
 ### 5.14 Nova Folding Scheme Internal Operations
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_NOVA_FOLD_INIT["Nova Folding Scheme Initialized"]
+    ACTION_NOVA_LOAD_PP[["Load Public Parameters [pp, vp]"]]
+    ACTION_NOVA_INIT_ACCUMULATOR[["Initialize Relaxed R1CS Accumulator"]]
+    ACTION_NOVA_SET_INITIAL_STATE[["Set Initial State Vector z_0"]]
+    STATE_NOVA_READY_FOR_STEP["Nova Ready for Folding Step"]
+    ACTION_NOVA_RECEIVE_EXTERNAL_INPUT[["Receive External Inputs"]]
+    ACTION_NOVA_COMPUTE_STEP_CIRCUIT[["Execute Step Circuit F[z_i, w_i]"]]
+    ACTION_NOVA_VERIFY_MERKLE_PATH[["Verify Merkle Path Against Root"]]
+    ACTION_NOVA_UPDATE_ACCUMULATORS[["Update Running Instance"]]
+    ACTION_NOVA_COMPUTE_RANDOM_T[["Compute Cross-Term T and Challenge r"]]
+    ACTION_NOVA_FOLD_INSTANCES[["Fold Instances into Running Accumulator"]]
+    STATE_NOVA_STEP_COMPLETE["Folding Step Complete"]
+    ACTION_NOVA_FINALIZE_IVC_PROOF[["Finalize IVC Proof"]]
+    ACTION_NOVA_VERIFY_IVC[["Verify IVC Proof Locally"]]
+    STATE_NOVA_IVC_VALID["IVC Proof Valid and Complete"]
+    STATE_NOVA_VERIFICATION_FAILED(("IVC Verification Failed"))
+
+    STATE_NOVA_FOLD_INIT -->|Initialize Nova scheme| ACTION_NOVA_LOAD_PP
+    ACTION_NOVA_LOAD_PP -->|Parameters loaded| ACTION_NOVA_INIT_ACCUMULATOR
+    ACTION_NOVA_INIT_ACCUMULATOR -->|Accumulator created| ACTION_NOVA_SET_INITIAL_STATE
+    ACTION_NOVA_SET_INITIAL_STATE -->|Initial state configured| STATE_NOVA_READY_FOR_STEP
+    STATE_NOVA_READY_FOR_STEP -->|Begin folding step| ACTION_NOVA_RECEIVE_EXTERNAL_INPUT
+    ACTION_NOVA_RECEIVE_EXTERNAL_INPUT -->|Inputs received| ACTION_NOVA_COMPUTE_STEP_CIRCUIT
+    ACTION_NOVA_COMPUTE_STEP_CIRCUIT -->|Step function executed| ACTION_NOVA_VERIFY_MERKLE_PATH
+    ACTION_NOVA_VERIFY_MERKLE_PATH -->|Merkle path valid| ACTION_NOVA_UPDATE_ACCUMULATORS
+    ACTION_NOVA_UPDATE_ACCUMULATORS -->|Accumulator updated| ACTION_NOVA_COMPUTE_RANDOM_T
+    ACTION_NOVA_COMPUTE_RANDOM_T -->|Cross-term ready| ACTION_NOVA_FOLD_INSTANCES
+    ACTION_NOVA_FOLD_INSTANCES -->|Instances folded| STATE_NOVA_STEP_COMPLETE
+    STATE_NOVA_STEP_COMPLETE -->|More transfers to fold| STATE_NOVA_READY_FOR_STEP
+    STATE_NOVA_STEP_COMPLETE -->|All transfers folded| ACTION_NOVA_FINALIZE_IVC_PROOF
+    ACTION_NOVA_FINALIZE_IVC_PROOF -->|IVC proof serialized| ACTION_NOVA_VERIFY_IVC
+    ACTION_NOVA_VERIFY_IVC -->|Verification passed| STATE_NOVA_IVC_VALID
+    ACTION_NOVA_VERIFY_IVC -->|Verification failed| STATE_NOVA_VERIFICATION_FAILED
+
+    class STATE_NOVA_FOLD_INIT stateNode
+    class ACTION_NOVA_LOAD_PP actionNode
+    class ACTION_NOVA_INIT_ACCUMULATOR actionNode
+    class ACTION_NOVA_SET_INITIAL_STATE actionNode
+    class STATE_NOVA_READY_FOR_STEP stateNode
+    class ACTION_NOVA_RECEIVE_EXTERNAL_INPUT actionNode
+    class ACTION_NOVA_COMPUTE_STEP_CIRCUIT actionNode
+    class ACTION_NOVA_VERIFY_MERKLE_PATH actionNode
+    class ACTION_NOVA_UPDATE_ACCUMULATORS actionNode
+    class ACTION_NOVA_COMPUTE_RANDOM_T actionNode
+    class ACTION_NOVA_FOLD_INSTANCES actionNode
+    class STATE_NOVA_STEP_COMPLETE stateNode
+    class ACTION_NOVA_FINALIZE_IVC_PROOF actionNode
+    class ACTION_NOVA_VERIFY_IVC actionNode
+    class STATE_NOVA_IVC_VALID stateNode
+    class STATE_NOVA_VERIFICATION_FAILED errorNode
+```
+*図13: Nova Folding Scheme Internal Operations フロー*
 
 | 項目 | 値 |
 |:---|:---|
@@ -825,6 +1013,43 @@ Nova folding schemeの内部操作フローを表現します。IVC状態ベク�
 
 ### 5.15 SelfCall Utility Pattern for Reentrancy Prevention
 
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_SELFCALL_DISABLED["SelfCall Disabled [Default State]"]
+    ACTION_ENABLE_SELFCALL[["enableSelfCall[] - Set Context Flag"]]
+    STATE_SELFCALL_ENABLED["SelfCall Enabled [Temporary Context]"]
+    ACTION_PERFORM_INTERNAL_CALL[["Execute Self-Call to Protected Function"]]
+    ACTION_ONLY_SELFCALL_CHECK[["onlySelfCall Modifier Validation"]]
+    STATE_SELFCALL_REJECTED(("External Call Rejected"))
+    ACTION_EXECUTE_PROTECTED_LOGIC[["Execute Protected Function Logic"]]
+    ACTION_DISABLE_SELFCALL[["Reset SelfCall Flag"]]
+    STATE_SELFCALL_COMPLETE["SelfCall Pattern Complete"]
+
+    STATE_SELFCALL_DISABLED -->|External function needs internal call| ACTION_ENABLE_SELFCALL
+    ACTION_ENABLE_SELFCALL -->|Context flag set| STATE_SELFCALL_ENABLED
+    STATE_SELFCALL_ENABLED -->|this.protectedFunction[]| ACTION_PERFORM_INTERNAL_CALL
+    ACTION_PERFORM_INTERNAL_CALL -->|Modifier verifies caller| ACTION_ONLY_SELFCALL_CHECK
+    ACTION_ONLY_SELFCALL_CHECK -->|msg.sender == address[this] && flag set| ACTION_EXECUTE_PROTECTED_LOGIC
+    ACTION_ONLY_SELFCALL_CHECK -->|External caller or flag not set| STATE_SELFCALL_REJECTED
+    ACTION_EXECUTE_PROTECTED_LOGIC -->|Protected logic executed| ACTION_DISABLE_SELFCALL
+    ACTION_DISABLE_SELFCALL -->|Flag reset, pattern complete| STATE_SELFCALL_COMPLETE
+
+    class STATE_SELFCALL_DISABLED stateNode
+    class ACTION_ENABLE_SELFCALL actionNode
+    class STATE_SELFCALL_ENABLED stateNode
+    class ACTION_PERFORM_INTERNAL_CALL actionNode
+    class ACTION_ONLY_SELFCALL_CHECK actionNode
+    class STATE_SELFCALL_REJECTED errorNode
+    class ACTION_EXECUTE_PROTECTED_LOGIC actionNode
+    class ACTION_DISABLE_SELFCALL actionNode
+    class STATE_SELFCALL_COMPLETE stateNode
+```
+*図14: SelfCall Utility Pattern フロー*
+
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-SELFCALL-PATTERN |
@@ -842,6 +1067,43 @@ Nova folding schemeの内部操作フローを表現します。IVC状態ベク�
 
 ### 5.16 Native Token (ETH) Processing Flow
 
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_LM_AWAITING_ETH["LiquidityManager Ready to Receive ETH"]
+    ACTION_RECEIVE_ETH[["receive[] Function Invoked"]]
+    ACTION_VALIDATE_MSG_VALUE[["Validate msg.value Against Amount Parameter"]]
+    STATE_ETH_RECEIVED["ETH Received in Contract"]
+    ACTION_WRAP_ETH_TO_WETH[["Wrap ETH to WETH via WETH.deposit[]"]]
+    STATE_WETH_READY["WETH Ready for Protocol Use"]
+    ACTION_REFUND_EXCESS_ETH[["Refund Excess ETH to Sender"]]
+    STATE_ETH_REFUNDED["Excess ETH Refunded"]
+    STATE_ETH_REJECTED(("ETH Transfer Rejected"))
+
+    STATE_LM_AWAITING_ETH -->|User sends ETH to contract| ACTION_RECEIVE_ETH
+    ACTION_RECEIVE_ETH -->|Check msg.value matches expected| ACTION_VALIDATE_MSG_VALUE
+    ACTION_VALIDATE_MSG_VALUE -->|msg.value == amount parameter| STATE_ETH_RECEIVED
+    ACTION_VALIDATE_MSG_VALUE -->|msg.value != expected amount| STATE_ETH_REJECTED
+    STATE_ETH_RECEIVED -->|Convert to WETH for ERC20 compatibility| ACTION_WRAP_ETH_TO_WETH
+    STATE_ETH_RECEIVED -->|msg.value > required amount| ACTION_REFUND_EXCESS_ETH
+    ACTION_WRAP_ETH_TO_WETH -->|WETH.deposit{value: amount}[]| STATE_WETH_READY
+    ACTION_REFUND_EXCESS_ETH -->|Excess ETH returned to sender| STATE_ETH_REFUNDED
+
+    class STATE_LM_AWAITING_ETH stateNode
+    class ACTION_RECEIVE_ETH actionNode
+    class ACTION_VALIDATE_MSG_VALUE actionNode
+    class STATE_ETH_RECEIVED stateNode
+    class ACTION_WRAP_ETH_TO_WETH actionNode
+    class STATE_WETH_READY stateNode
+    class ACTION_REFUND_EXCESS_ETH actionNode
+    class STATE_ETH_REFUNDED stateNode
+    class STATE_ETH_REJECTED errorNode
+```
+*図15: Native Token (ETH) Processing Flow*
+
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-NATIVE-TOKEN-HANDLING |
@@ -858,6 +1120,48 @@ LiquidityManagerでのネイティブETH処理フローを表現します。rece
 | `PROP-ETH-REFUND-SAFETY` | ETH返金はリエントランシーガードを使用する | TRANSITION_SECURITY |
 
 ### 5.17 Governance and Administrative Functions
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+
+    STATE_OWNER_IDLE["Contract Owner Ready"]
+    ACTION_OWNER_SET_FEE_PARAMS[["setFeeParams[k, T] - Update Incentive Curve"]]
+    ACTION_OWNER_WITHDRAW_REWARDS[["withdrawRewards[amount] - Extract Fee Surplus"]]
+    ACTION_OWNER_SET_VERIFIERS[["setVerifiers[addresses] - Rotate Verifier Set"]]
+    ACTION_OWNER_REGISTER_TOKEN[["registerToken[tokenInfo] - Add Token to Hub"]]
+    ACTION_OWNER_UPDATE_TOKEN[["updateToken[tokenIndex, newInfo] - Modify Config"]]
+    ACTION_OWNER_SET_MINTER[["setMinter[address] - Update Minting Authority"]]
+    ACTION_OWNER_UPGRADE_CONTRACT[["upgradeToAndCall[impl, data] - UUPS Upgrade"]]
+    STATE_ADMIN_ACTION_COMPLETE["Administrative Action Complete"]
+
+    STATE_OWNER_IDLE -->|Owner updates fee parameters| ACTION_OWNER_SET_FEE_PARAMS
+    STATE_OWNER_IDLE -->|Owner extracts accumulated fees| ACTION_OWNER_WITHDRAW_REWARDS
+    STATE_OWNER_IDLE -->|Owner rotates verifier set| ACTION_OWNER_SET_VERIFIERS
+    STATE_OWNER_IDLE -->|Owner adds new token to Hub| ACTION_OWNER_REGISTER_TOKEN
+    STATE_OWNER_IDLE -->|Owner modifies token configuration| ACTION_OWNER_UPDATE_TOKEN
+    STATE_OWNER_IDLE -->|Owner changes minting authority| ACTION_OWNER_SET_MINTER
+    STATE_OWNER_IDLE -->|Owner upgrades contract implementation| ACTION_OWNER_UPGRADE_CONTRACT
+    ACTION_OWNER_SET_FEE_PARAMS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_WITHDRAW_REWARDS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_SET_VERIFIERS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_REGISTER_TOKEN -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_UPDATE_TOKEN -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_SET_MINTER -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_OWNER_UPGRADE_CONTRACT -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+
+    class STATE_OWNER_IDLE stateNode
+    class ACTION_OWNER_SET_FEE_PARAMS actionNode
+    class ACTION_OWNER_WITHDRAW_REWARDS actionNode
+    class ACTION_OWNER_SET_VERIFIERS actionNode
+    class ACTION_OWNER_REGISTER_TOKEN actionNode
+    class ACTION_OWNER_UPDATE_TOKEN actionNode
+    class ACTION_OWNER_SET_MINTER actionNode
+    class ACTION_OWNER_UPGRADE_CONTRACT actionNode
+    class STATE_ADMIN_ACTION_COMPLETE stateNode
+```
+*図16: Governance and Administrative Functions フロー*
 
 | 項目 | 値 |
 |:---|:---|
@@ -906,14 +1210,14 @@ LiquidityManagerでのネイティブETH処理フローを表現します。rece
 ### 6.3 クロスチェーンメッセージング
 
 | ID | チェック項目 | バグクラス | 重大度ヒント |
-|:---|:---|:---|
+|:---|:---|:---|:---|
 | `CL-PROP-EDGE-028-LAYERZERO-TO-HUB-01` | Hubが_lzReceiveでソースEIDを登録Verifierリストに対して検証することを確認 | Cross-Chain Message Spoofing | Critical |
 | `CL-PROP-EDGE-029-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認 | Cross-Chain Message Spoofing | Critical |
 
 ### 6.4 Stargateコールバック
 
 | ID | チェック項目 | バグクラス | 重大度ヒント |
-|:---|:---|:---|
+|:---|:---|:---|:---|
 | `CL-PROP-EDGE-033-STARGATE-TO-ADAPTOR-01` | AdaptorがlzComposeで送信者が認可されたStargateエンドポイントであることを検証することを確認 | Unauthorized Callback | Critical |
 | `CL-PROP-EDGE-033-STARGATE-TO-ADAPTOR-02` | amountReceivedLDがminAmountOutスリッページ制限を満たすことを検証し、リファンドロジックを正しく処理することを確認 | Slippage Bypass | High |
 
