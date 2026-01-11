@@ -40,6 +40,7 @@
    - [5.19 IncentiveLib Fee Parameter Validation](#519-incentivelib-fee-parameter-validation)
    - [5.20 Adaptor Withdraw Function Flow](#520-adaptor-withdraw-function-flow)
    - [5.21 LiquidityManager receive() Native Token Handling](#521-liquiditymanager-receive-native-token-handling)
+   - [5.22 Adaptor _removeStargateDust Decimal Handling](#522-adaptor-_removestargateDust-decimal-handling)
 6. [境界セキュリティチェックリスト](#6-境界セキュリティチェックリスト)
    - [6.1 ユーザー入力検証](#61-ユーザー入力検証)
    - [6.2 ZKP検証](#62-zkp検証)
@@ -1758,9 +1759,76 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 
 ---
 
+### 5.22 Adaptor _removeStargateDust Decimal Handling
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_DUST_INPUT["Amount Input for Dust Removal"]
+    ACTION_GET_SHARED[["Get stargate.sharedDecimals()"]]
+    ACTION_GET_LOCAL[["Get localDecimals (18 for native, token.decimals() otherwise)"]]
+    ACTION_CHECK_COMPAT[["Check localDecimals >= sharedDecimals"]]
+    STATE_INCOMPATIBLE(("Return 0 - Token Incompatible"))
+    ACTION_CALC_RATE[["conversionRate = 10^(localDecimals - sharedDecimals)"]]
+    ACTION_REMOVE_DUST[["dustlessAmount = amount - (amount % conversionRate)"]]
+    STATE_DUST_REMOVED["Return dustlessAmount"]
+    ACTION_QUOTEFEE_HANDLE[["quoteFee: Return tokenBridgeFee = amountAfterUnwrap"]]
+    ACTION_EXECUTE_HANDLE[["_executeBridge: Revert OutputTooLow(0, minAmountOut)"]]
+
+    STATE_DUST_INPUT -->|Begin dust removal| ACTION_GET_SHARED
+    ACTION_GET_SHARED -->|sharedDecimals obtained| ACTION_GET_LOCAL
+    ACTION_GET_LOCAL -->|localDecimals obtained| ACTION_CHECK_COMPAT
+    ACTION_CHECK_COMPAT -->|localDecimals < sharedDecimals| STATE_INCOMPATIBLE
+    ACTION_CHECK_COMPAT -->|localDecimals >= sharedDecimals| ACTION_CALC_RATE
+    ACTION_CALC_RATE -->|conversionRate calculated| ACTION_REMOVE_DUST
+    ACTION_REMOVE_DUST -->|Dust removed successfully| STATE_DUST_REMOVED
+    STATE_INCOMPATIBLE -->|Called from quoteFee| ACTION_QUOTEFEE_HANDLE
+    STATE_INCOMPATIBLE -->|Called from _executeBridge| ACTION_EXECUTE_HANDLE
+
+    class STATE_DUST_INPUT stateNode
+    class ACTION_GET_SHARED actionNode
+    class ACTION_GET_LOCAL actionNode
+    class ACTION_CHECK_COMPAT actionNode
+    class STATE_INCOMPATIBLE errorNode
+    class ACTION_CALC_RATE actionNode
+    class ACTION_REMOVE_DUST actionNode
+    class STATE_DUST_REMOVED stateNode
+    class ACTION_QUOTEFEE_HANDLE actionNode
+    class ACTION_EXECUTE_HANDLE errorNode
+```
+*図21: Adaptor _removeStargateDust Decimal Handling フロー*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-ADAPTOR-REMOVE-STARGATE-DUST |
+| **ノード数** | 10 |
+| **エッジ数** | 9 |
+
+Adaptor._removeStargateDust()関数の詳細フローを表現します。StargateブリッジのsharedDecimalsとローカルトークンのdecimalsの互換性をチェックし、互換性がない場合（localDecimals < sharedDecimals）は0を返します。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-ADAPTOR-STARGATE-DUST-001` | _removeStargateDustはlocalDecimals < sharedDecimalsの場合0を返し、呼び出し元が適切に処理する | INTEGRITY |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **アンダーフロー防止** | localDecimals < sharedDecimalsチェックにより10^(local-shared)計算でのアンダーフローを防止 |
+| **呼び出し元の責任** | 呼び出し元は0返却値を適切に処理する必要がある - quoteFeeはfee quoteを返し、_executeBridgeはリバート |
+| **意図的な精度損失** | ダスト除去はStargateのsharedDecimals精度に合わせるため意図的に切り捨てる |
+| **互換性確認** | このエッジケースは通常発生しないが、不正なトークン設定や将来の変更に対する防御となる |
+
+---
+
 ## 6. 境界セキュリティチェックリスト
 
-境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧146件)を参照してください。
+境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧156件)を参照してください。
 
 ### 6.1 ユーザー入力検証
 
@@ -1795,7 +1863,7 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 
 ## 7. プロパティカテゴリ別サマリ
 
-本プロトコルには132のプロパティが定義されており、以下の8カテゴリに分類されています。
+本プロトコルには143のプロパティが定義されており、以下の8カテゴリに分類されています。
 
 | カテゴリ | 説明 | プロパティ数 |
 |:---|:---|:---|
@@ -1826,10 +1894,10 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 
 本文書では、zERC20プライバシートークンプロトコルの監査に先立ち、以下の内容を整理して提示しました。
 
-1. **プロトコル仕様**: 16のエンティティ、36のデータ構造、メインプログラムグラフと21のサブグラフ
+1. **プロトコル仕様**: 16のエンティティ、36のデータ構造、メインプログラムグラフと22のサブグラフ
 2. **トラストモデル**: 4段階の信頼レベル、5つのオンチェーンコンポーネント、5つのオフチェーンコンポーネント、2つの外部依存関係、20の信頼境界エッジ
-3. **プロパティ**: 8カテゴリ、142のプロパティ（100%カバレッジ）
-4. **チェックリスト**: 33の境界セキュリティチェックリスト、122のプロパティベースチェックリスト（合計155件）
+3. **プロパティ**: 8カテゴリ、143のプロパティ（100%カバレッジ）
+4. **チェックリスト**: 33の境界セキュリティチェックリスト、123のプロパティベースチェックリスト（合計156件）
 
 本文書で提示した仕様、トラストモデル、プロパティ、およびチェックリストについて、貴社からのフィードバックをいただきたく存じます。特に以下の点についてご確認ください。
 
@@ -1925,9 +1993,9 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 | SOUNDNESS | 13 | 暗号学的証明システムの健全性 |
 | DATA_PROTECTION | 5 | データの機密性と転送中の整合性 |
 | MONOTONICITY | 4 | 値が必要に応じて増加または減少のみする性質 |
-| **合計** | **142** | |
+| **合計** | **143** | |
 
-#### B.2 プロパティ完全一覧（142件）
+#### B.2 プロパティ完全一覧（143件）
 
 ##### ノードプロパティ（73件）
 
@@ -2079,6 +2147,7 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 | INTEGRITY | LiquidityManager receive()は_isNativeUnderlyingがtrueの場合のみETHを受け入れる |
 | STATE_INVARIANT | LiquidityManagerはunderlyingBalance >= feeSurplus不変条件を維持し手数料余剰が常に引出し可能であることを保証する |
 | AUTHORIZATION | IMintableBurnableERC20インターフェース実装(zERC20)はmintとburn関数にonlyMinter認可を必要とする |
+| INTEGRITY | Adaptor._removeStargateDust()はlocalDecimals < sharedDecimals時に0を返し、呼び出し元はこのエッジケースを適切に処理する |
 
 ##### システムワイドプロパティ（5件）
 
@@ -2108,7 +2177,7 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 | Low | 12 | サービス可用性、マイナーな状態不整合 |
 | Informational | 5 | Owner操作（監査対象外） |
 
-#### C.3 チェックリスト完全一覧（155件）
+#### C.3 チェックリスト完全一覧（156件）
 
 ##### 境界セキュリティチェック（33件）
 
@@ -2249,7 +2318,7 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 | `CL-PROP-EDGE-020-TRANSFER-COMPLETE-01` | Medium | 転送完了が全状態更新完了を意味することを検証する |
 | `CL-PROP-EDGE-022-VERIFIER-RESERVES-CHECKPOINT-01` | Critical | チェックポイント予約がインデックスごとに一度だけ書込み可能であることを検証する |
 
-##### サブグラフチェック（26件）
+##### サブグラフチェック（27件）
 
 | ID | 重要度 | チェック内容 |
 |:---|:---|:---|
@@ -2278,6 +2347,7 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 | `CL-PROP-SUBGRAPH-LM-RECEIVE-NATIVE-001-01` | Medium | LiquidityManager receive()がネイティブunderlying時のみETHを受け入れることを検証する |
 | `CL-PROP-LM-BALANCE-CONSISTENCY-001-01` | High | LiquidityManagerがunderlyingBalance >= feeSurplus不変条件を維持することを検証する |
 | `CL-PROP-INTERFACE-MINTABLE-BURNABLE-001-01` | Critical | IMintableBurnableERC20実装がonlyMinterを強制することを検証する |
+| `CL-PROP-ADAPTOR-STARGATE-DUST-001-01` | Medium | _removeStargateDustがlocalDecimals < sharedDecimals時に0を返し呼び出し元が適切に処理することを検証する |
 
 ##### システムワイドチェック（5件）
 
