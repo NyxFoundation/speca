@@ -36,6 +36,10 @@
    - [5.15 SelfCall Utility Pattern for Reentrancy Prevention](#515-selfcall-utility-pattern-for-reentrancy-prevention)
    - [5.16 Native Token (ETH) Processing Flow](#516-native-token-eth-processing-flow)
    - [5.17 Governance and Administrative Functions](#517-governance-and-administrative-functions)
+   - [5.18 Adaptor SelfCall Protected Functions](#518-adaptor-selfcall-protected-functions)
+   - [5.19 IncentiveLib Fee Parameter Validation](#519-incentivelib-fee-parameter-validation)
+   - [5.20 Adaptor Withdraw Function Flow](#520-adaptor-withdraw-function-flow)
+   - [5.21 LiquidityManager receive() Native Token Handling](#521-liquiditymanager-receive-native-token-handling)
 6. [境界セキュリティチェックリスト](#6-境界セキュリティチェックリスト)
    - [6.1 ユーザー入力検証](#61-ユーザー入力検証)
    - [6.2 ZKP検証](#62-zkp検証)
@@ -134,6 +138,9 @@
 | `DATA-FEE-QUOTE` | Adaptor Fee Quote | Adaptorの手数料内訳: tokenUnwrapFee, nativeBridgeFee, tokenBridgeFee |
 | `DATA-VETKEY-DERIVED-SECRET` | VetKey Derived Secret | IC VetKeyインフラからの派生シークレット。vetKd_derive_keyキャニスター呼び出しを使用 |
 | `DATA-ENCRYPTED-STATE` | IC Encrypted State | IC Storageキャニスターに保存されるAES-GCM暗号化ユーザー状態 |
+| `DATA-MINTABLE-BURNABLE-INTERFACE` | IMintableBurnableERC20 Interface | mint(address to, uint256 amount)とburn(address from, uint256 amount)を公開するERC20トークンの最小インターフェース。LiquidityManagerがzERC20と対話するために使用 |
+| `DATA-ADAPTOR-USER-BALANCES` | Adaptor User Balance Mappings | Adaptor内部バランス追跡: zerc20Balances[user], nativeBalances[user], underlingTokenBalances[user]。クロスチェーン操作中および失敗したcompose処理時のユーザー保留残高を追跡 |
+| `DATA-INCENTIVE-FEE-PARAMS` | IncentiveLib Fee Parameters | 検証済み手数料カーブパラメータ: k（ベーシスポイント強度、K_BPS_DENOM以下）、T（目標流動性、0より大きくMAX_TARGET_LIQUIDITY以下）。LiquidityManagerストレージに保存され_validateFeeParamsで検証 |
 
 ---
 
@@ -1500,6 +1507,257 @@ flowchart TD
 
 ---
 
+### 5.18 Adaptor SelfCall Protected Functions
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_ADAPTOR_ENTRY["Adaptor Entry Point - unwrapAndBridge/bridgeZerc20"]
+    ACTION_ADAPTOR_ENABLE_SELFCALL[["enableSelfCall - Set Context Flag"]]
+    ACTION_ADAPTOR_CALL_UNWRAP_SELF[["this.unwrapSelf - amount, receiver"]]
+    ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF[["this.bridgeUnderlyingTokenSelf - params"]]
+    ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF[["this.bridgeZerc20Self - amount, bridgeRequest"]]
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK[["onlySelfCall Modifier Validation"]]
+    STATE_ADAPTOR_SELFCALL_REJECTED(("External Call Rejected - SelfCallNotAllowed"))
+    ACTION_ADAPTOR_EXECUTE_UNWRAP[["Execute unwrap via LiquidityManager"]]
+    ACTION_ADAPTOR_EXECUTE_BRIDGE[["Execute Stargate bridge with slippage"]]
+    STATE_ADAPTOR_SELFCALL_COMPLETE["SelfCall Operation Complete"]
+
+    STATE_ADAPTOR_ENTRY -->|Begin protected operation| ACTION_ADAPTOR_ENABLE_SELFCALL
+    ACTION_ADAPTOR_ENABLE_SELFCALL -->|Invoke unwrapSelf| ACTION_ADAPTOR_CALL_UNWRAP_SELF
+    ACTION_ADAPTOR_ENABLE_SELFCALL -->|Invoke bridgeUnderlyingTokenSelf| ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF
+    ACTION_ADAPTOR_ENABLE_SELFCALL -->|Invoke bridgeZerc20Self| ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF
+    ACTION_ADAPTOR_CALL_UNWRAP_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
+    ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
+    ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|msg.sender == address and flag set| ACTION_ADAPTOR_EXECUTE_UNWRAP
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|External caller - revert| STATE_ADAPTOR_SELFCALL_REJECTED
+    ACTION_ADAPTOR_EXECUTE_UNWRAP -->|Unwrap complete| ACTION_ADAPTOR_EXECUTE_BRIDGE
+    ACTION_ADAPTOR_EXECUTE_BRIDGE -->|Bridge initiated| STATE_ADAPTOR_SELFCALL_COMPLETE
+
+    class STATE_ADAPTOR_ENTRY stateNode
+    class ACTION_ADAPTOR_ENABLE_SELFCALL actionNode
+    class ACTION_ADAPTOR_CALL_UNWRAP_SELF actionNode
+    class ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF actionNode
+    class ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF actionNode
+    class ACTION_ADAPTOR_ONLY_SELFCALL_CHECK actionNode
+    class STATE_ADAPTOR_SELFCALL_REJECTED errorNode
+    class ACTION_ADAPTOR_EXECUTE_UNWRAP actionNode
+    class ACTION_ADAPTOR_EXECUTE_BRIDGE actionNode
+    class STATE_ADAPTOR_SELFCALL_COMPLETE stateNode
+```
+*図17: Adaptor SelfCall Protected Functions フロー*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-ADAPTOR-SELFCALL-FUNCTIONS |
+| **ノード数** | 10 |
+| **エッジ数** | 11 |
+
+AdaptorがSelfCallパターンを使用してunwrapSelf、bridgeUnderlyingTokenSelf、bridgeZerc20Selfを保護し、外部リエントランシーを防止しながら複雑なブリッジ操作を可能にするフローを表現します。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-SUBGRAPH-ADAPTOR-SELFCALL-001` | Adaptor SelfCall保護関数は外部呼出し元によって呼び出せない | AUTHORIZATION |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **外部呼出し防止** | unwrapSelf、bridgeUnderlyingTokenSelf、bridgeZerc20Selfは外部から呼び出せない |
+| **モディファイア強制** | onlySelfCallはmsg.sender == address(this) AND _isSelfCallAllowedフラグの両方をチェック |
+| **アトミック操作** | SelfCallフラグは操作完了またはリバート後にリセットされる |
+
+---
+
+### 5.19 IncentiveLib Fee Parameter Validation
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_FEE_PARAMS_INPUT["Fee Parameters Received - k, T"]
+    ACTION_VALIDATE_TARGET_NONZERO[["Check targetLiquidity > 0"]]
+    STATE_ZERO_TARGET_REJECTED(("Zero Target Liquidity - InvalidFeeParams"))
+    ACTION_VALIDATE_TARGET_MAX[["Check targetLiquidity <= MAX_TARGET_LIQUIDITY"]]
+    STATE_EXCESS_TARGET_REJECTED(("Excessive Target Liquidity - InvalidFeeParams"))
+    ACTION_VALIDATE_K_MAX[["Check k <= K_BPS_DENOM - 10000"]]
+    STATE_EXCESS_K_REJECTED(("Excessive k Value - InvalidFeeParams"))
+    ACTION_VALIDATE_OVERFLOW[["Check k * T * T <= type uint256 max"]]
+    STATE_OVERFLOW_REJECTED(("Potential Overflow - InvalidFeeParams"))
+    STATE_FEE_PARAMS_VALID["Fee Parameters Valid - Store in Storage"]
+
+    STATE_FEE_PARAMS_INPUT -->|Begin validation| ACTION_VALIDATE_TARGET_NONZERO
+    ACTION_VALIDATE_TARGET_NONZERO -->|targetLiquidity == 0| STATE_ZERO_TARGET_REJECTED
+    ACTION_VALIDATE_TARGET_NONZERO -->|targetLiquidity > 0| ACTION_VALIDATE_TARGET_MAX
+    ACTION_VALIDATE_TARGET_MAX -->|targetLiquidity > MAX| STATE_EXCESS_TARGET_REJECTED
+    ACTION_VALIDATE_TARGET_MAX -->|targetLiquidity <= MAX| ACTION_VALIDATE_K_MAX
+    ACTION_VALIDATE_K_MAX -->|k > K_BPS_DENOM| STATE_EXCESS_K_REJECTED
+    ACTION_VALIDATE_K_MAX -->|k <= K_BPS_DENOM| ACTION_VALIDATE_OVERFLOW
+    ACTION_VALIDATE_OVERFLOW -->|k * T * T would overflow| STATE_OVERFLOW_REJECTED
+    ACTION_VALIDATE_OVERFLOW -->|All validations passed| STATE_FEE_PARAMS_VALID
+
+    class STATE_FEE_PARAMS_INPUT stateNode
+    class ACTION_VALIDATE_TARGET_NONZERO actionNode
+    class STATE_ZERO_TARGET_REJECTED errorNode
+    class ACTION_VALIDATE_TARGET_MAX actionNode
+    class STATE_EXCESS_TARGET_REJECTED errorNode
+    class ACTION_VALIDATE_K_MAX actionNode
+    class STATE_EXCESS_K_REJECTED errorNode
+    class ACTION_VALIDATE_OVERFLOW actionNode
+    class STATE_OVERFLOW_REJECTED errorNode
+    class STATE_FEE_PARAMS_VALID stateNode
+```
+*図18: IncentiveLib Fee Parameter Validation フロー*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-INCENTIVE-VALIDATION |
+| **ノード数** | 10 |
+| **エッジ数** | 9 |
+
+IncentiveLibの手数料パラメータ検証フローを表現します。kとTの値がオーバーフローを防ぎ正確なインセンティブ計算を保証する許容範囲内であることを確認します。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-SUBGRAPH-INCENTIVE-VALIDATION-001` | _validateFeeParamsは無効な手数料パラメータを正しくリジェクトする | INTEGRITY |
+| `PROP-INCENTIVE-OVERFLOW-PROTECTION-001` | IncentiveLib計算は検証済みパラメータ境界によりuint256をオーバーフローできない | INTEGRITY |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **ゼロ除算防止** | 目標流動性はゼロにできない（密度計算でのゼロ除算を回避） |
+| **オーバーフロー防止** | k * T * Tは安全な算術のためuint256に収まる必要がある |
+| **境界強制** | kは過剰な手数料を防ぐため100%（10000 bps）で上限 |
+
+---
+
+### 5.20 Adaptor Withdraw Function Flow
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+
+    STATE_WITHDRAW_REQUESTED["User Requests Withdraw"]
+    ACTION_CHECK_ZERC20_BALANCE[["Check zerc20Balances - msg.sender"]]
+    ACTION_TRANSFER_ZERC20[["Transfer zERC20 to User"]]
+    ACTION_CHECK_UNDERLYING_BALANCE[["Check underlingTokenBalances - msg.sender"]]
+    ACTION_TRANSFER_UNDERLYING[["Transfer Underlying to User"]]
+    ACTION_CHECK_NATIVE_BALANCE[["Check nativeBalances - msg.sender"]]
+    ACTION_DEBIT_COMBINED_NATIVE[["_debitCombinedNativeBalance - msg.sender"]]
+    ACTION_TRANSFER_NATIVE[["Transfer Native ETH to User"]]
+    STATE_WITHDRAW_COMPLETE["All Balances Withdrawn"]
+
+    STATE_WITHDRAW_REQUESTED -->|User calls withdraw| ACTION_CHECK_ZERC20_BALANCE
+    ACTION_CHECK_ZERC20_BALANCE -->|Balance > 0| ACTION_TRANSFER_ZERC20
+    ACTION_CHECK_ZERC20_BALANCE -->|Balance == 0| ACTION_CHECK_UNDERLYING_BALANCE
+    ACTION_TRANSFER_ZERC20 -->|zERC20 transferred| ACTION_CHECK_UNDERLYING_BALANCE
+    ACTION_CHECK_UNDERLYING_BALANCE -->|Balance > 0| ACTION_TRANSFER_UNDERLYING
+    ACTION_CHECK_UNDERLYING_BALANCE -->|Balance == 0| ACTION_CHECK_NATIVE_BALANCE
+    ACTION_TRANSFER_UNDERLYING -->|Underlying transferred| ACTION_CHECK_NATIVE_BALANCE
+    ACTION_CHECK_NATIVE_BALANCE -->|Balance > 0| ACTION_DEBIT_COMBINED_NATIVE
+    ACTION_CHECK_NATIVE_BALANCE -->|Balance == 0| STATE_WITHDRAW_COMPLETE
+    ACTION_DEBIT_COMBINED_NATIVE -->|Native balance debited| ACTION_TRANSFER_NATIVE
+    ACTION_TRANSFER_NATIVE -->|All balances withdrawn| STATE_WITHDRAW_COMPLETE
+
+    class STATE_WITHDRAW_REQUESTED stateNode
+    class ACTION_CHECK_ZERC20_BALANCE actionNode
+    class ACTION_TRANSFER_ZERC20 actionNode
+    class ACTION_CHECK_UNDERLYING_BALANCE actionNode
+    class ACTION_TRANSFER_UNDERLYING actionNode
+    class ACTION_CHECK_NATIVE_BALANCE actionNode
+    class ACTION_DEBIT_COMBINED_NATIVE actionNode
+    class ACTION_TRANSFER_NATIVE actionNode
+    class STATE_WITHDRAW_COMPLETE stateNode
+```
+*図19: Adaptor Withdraw Function Flow*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-ADAPTOR-WITHDRAW |
+| **ノード数** | 9 |
+| **エッジ数** | 11 |
+
+Adaptor.withdraw()関数のフローを表現します。ユーザーが失敗したcompose操作やデポジットされた残高からトークンを回収できるようにします。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-ADAPTOR-BALANCE-TRACKING-001` | Adaptorユーザーバランスマッピングは保留残高を正しく追跡し、withdraw時に適切にデビットされる | INTEGRITY |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **バランス分離** | ユーザーは自分のバランスのみ引き出せる |
+| **転送前ゼロ化** | リエントランシー防止のため転送前にバランスをゼロ化 |
+| **全トークンタイプ** | zERC20、underlying、native ETHの引き出しを処理 |
+
+---
+
+### 5.21 LiquidityManager receive() Native Token Handling
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
+    classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+
+    STATE_ETH_SENT_TO_LM["Native ETH Sent to LiquidityManager"]
+    ACTION_CHECK_IS_NATIVE_UNDERLYING[["Check _isNativeUnderlying Storage Flag"]]
+    STATE_NATIVE_NOT_SUPPORTED(("Revert NativeTokenNotSupported"))
+    ACTION_ACCEPT_ETH[["Accept ETH - no-op, balance updated"]]
+    STATE_ETH_ACCEPTED["ETH Accepted for wrap Use"]
+
+    STATE_ETH_SENT_TO_LM -->|receive triggered| ACTION_CHECK_IS_NATIVE_UNDERLYING
+    ACTION_CHECK_IS_NATIVE_UNDERLYING -->|_isNativeUnderlying == false| STATE_NATIVE_NOT_SUPPORTED
+    ACTION_CHECK_IS_NATIVE_UNDERLYING -->|_isNativeUnderlying == true| ACTION_ACCEPT_ETH
+    ACTION_ACCEPT_ETH -->|ETH now in contract| STATE_ETH_ACCEPTED
+
+    class STATE_ETH_SENT_TO_LM stateNode
+    class ACTION_CHECK_IS_NATIVE_UNDERLYING actionNode
+    class STATE_NATIVE_NOT_SUPPORTED errorNode
+    class ACTION_ACCEPT_ETH actionNode
+    class STATE_ETH_ACCEPTED stateNode
+```
+*図20: LiquidityManager receive() Native Token Handling フロー*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-LM-RECEIVE-NATIVE |
+| **ノード数** | 5 |
+| **エッジ数** | 4 |
+
+LiquidityManager receive()関数の詳細フローを表現します。underlyingトークンがnative（WETH）の場合のみETHを受け入れます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-SUBGRAPH-LM-RECEIVE-NATIVE-001` | LiquidityManager receive()は_isNativeUnderlyingがtrueの場合のみETHを受け入れる | INTEGRITY |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **WETH時のみネイティブ** | receive()はunderlyingがWETHの場合のみETHを受け入れる |
+| **それ以外はリバート** | non-WETH underlyingコントラクトはETH receive時にリバート |
+| **nonReentrant** | receive()はnonReentrantモディファイアで保護される |
+
+---
+
 ## 6. 境界セキュリティチェックリスト
 
 境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧146件)を参照してください。
@@ -1568,10 +1826,10 @@ flowchart TD
 
 本文書では、zERC20プライバシートークンプロトコルの監査に先立ち、以下の内容を整理して提示しました。
 
-1. **プロトコル仕様**: 16のエンティティ、33のデータ構造、メインプログラムグラフと17のサブグラフ
+1. **プロトコル仕様**: 16のエンティティ、36のデータ構造、メインプログラムグラフと21のサブグラフ
 2. **トラストモデル**: 4段階の信頼レベル、5つのオンチェーンコンポーネント、5つのオフチェーンコンポーネント、2つの外部依存関係、20の信頼境界エッジ
-3. **プロパティ**: 8カテゴリ、132のプロパティ（100%カバレッジ）
-4. **チェックリスト**: 33の境界セキュリティチェックリスト、113のプロパティベースチェックリスト
+3. **プロパティ**: 8カテゴリ、142のプロパティ（100%カバレッジ）
+4. **チェックリスト**: 33の境界セキュリティチェックリスト、122のプロパティベースチェックリスト（合計155件）
 
 本文書で提示した仕様、トラストモデル、プロパティ、およびチェックリストについて、貴社からのフィードバックをいただきたく存じます。特に以下の点についてご確認ください。
 
@@ -1659,17 +1917,17 @@ flowchart TD
 
 | カテゴリ | 件数 | 説明 |
 |:---|---:|:---|
-| STATE_INVARIANT | 37 | 特定のプログラム状態で保持すべき性質 |
-| INTEGRITY | 23 | データの破損・改ざんを防ぐ性質 |
+| STATE_INVARIANT | 39 | 特定のプログラム状態で保持すべき性質 |
+| INTEGRITY | 30 | データの破損・改ざんを防ぐ性質 |
 | BOUNDARY_SECURITY | 19 | 信頼境界が適切に保護されている性質 |
 | TRANSITION_SECURITY | 18 | 状態遷移中に保持すべき性質 |
+| AUTHORIZATION | 16 | 権限を持つアクターのみがアクションを実行できる性質 |
 | SOUNDNESS | 13 | 暗号学的証明システムの健全性 |
-| AUTHORIZATION | 13 | 権限を持つアクターのみがアクションを実行できる性質 |
 | DATA_PROTECTION | 5 | データの機密性と転送中の整合性 |
 | MONOTONICITY | 4 | 値が必要に応じて増加または減少のみする性質 |
-| **合計** | **132** | |
+| **合計** | **142** | |
 
-#### B.2 プロパティ完全一覧（132件）
+#### B.2 プロパティ完全一覧（142件）
 
 ##### ノードプロパティ（73件）
 
@@ -1791,7 +2049,7 @@ flowchart TD
 | BOUNDARY_SECURITY | Prover出力はオンチェーン検証で健全性により検証された証明を提供する |
 | BOUNDARY_SECURITY | Indexer出力は回路実行中に検証されたMerkle証明を提供する |
 
-##### サブグラフプロパティ（17件）
+##### サブグラフプロパティ（26件）
 
 | カテゴリ | プロパティ内容 |
 |:---|:---|
@@ -1812,6 +2070,15 @@ flowchart TD
 | INTEGRITY | ネイティブETH処理はmsg.valueを検証しWETHに適切にラップする |
 | AUTHORIZATION | ガバナンス関数はonlyOwner修飾子を必要とする（対象外） |
 | AUTHORIZATION | lzComposeコールバックは送信者がLayerZeroエンドポイントでオリジンが登録済Stargateプールであることを検証する |
+| AUTHORIZATION | Adaptor SelfCall保護関数(unwrapSelf, bridgeZerc20Self等)は外部呼出し元によって呼び出せない |
+| INTEGRITY | Adaptorユーザーバランスマッピングは保留残高を正しく追跡しwithdraw時に適切にデビットされる |
+| INTEGRITY | IncentiveLib._validateFeeParamsは無効な手数料パラメータ(ゼロT、過剰T、過剰k、オーバーフロー)を正しくリジェクトする |
+| INTEGRITY | IncentiveLib計算は検証済みパラメータ境界によりuint256をオーバーフローできない |
+| INTEGRITY | IncentiveLibはエッジケースを正しく処理する: L=0(最大)、L=T(ゼロ)、L>T(ゼロクランプ)、amount=0(ゼロ) |
+| STATE_INVARIANT | enableSelfCallを_isSelfCallAllowedがtrueの状態で呼び出すとSelfCallAlreadyEnabledでリバートする |
+| INTEGRITY | LiquidityManager receive()は_isNativeUnderlyingがtrueの場合のみETHを受け入れる |
+| STATE_INVARIANT | LiquidityManagerはunderlyingBalance >= feeSurplus不変条件を維持し手数料余剰が常に引出し可能であることを保証する |
+| AUTHORIZATION | IMintableBurnableERC20インターフェース実装(zERC20)はmintとburn関数にonlyMinter認可を必要とする |
 
 ##### システムワイドプロパティ（5件）
 
@@ -1835,13 +2102,13 @@ flowchart TD
 
 | 重要度 | 件数 | 説明 |
 |:---|---:|:---|
-| Critical | 52 | ZKP健全性、二重支払い防止、クロスチェーン認証 |
-| High | 58 | 入力検証、状態整合性、暗号実装 |
-| Medium | 25 | 丸め誤差、シリアライズ整合性 |
+| Critical | 53 | ZKP健全性、二重支払い防止、クロスチェーン認証 |
+| High | 62 | 入力検証、状態整合性、暗号実装 |
+| Medium | 30 | 丸め誤差、シリアライズ整合性、パラメータ検証 |
 | Low | 12 | サービス可用性、マイナーな状態不整合 |
 | Informational | 5 | Owner操作（監査対象外） |
 
-#### C.3 チェックリスト完全一覧（146件）
+#### C.3 チェックリスト完全一覧（155件）
 
 ##### 境界セキュリティチェック（33件）
 
@@ -1982,7 +2249,7 @@ flowchart TD
 | `CL-PROP-EDGE-020-TRANSFER-COMPLETE-01` | Medium | 転送完了が全状態更新完了を意味することを検証する |
 | `CL-PROP-EDGE-022-VERIFIER-RESERVES-CHECKPOINT-01` | Critical | チェックポイント予約がインデックスごとに一度だけ書込み可能であることを検証する |
 
-##### サブグラフチェック（17件）
+##### サブグラフチェック（26件）
 
 | ID | 重要度 | チェック内容 |
 |:---|:---|:---|
@@ -2003,6 +2270,14 @@ flowchart TD
 | `CL-PROP-SUBGRAPH-NATIVE-TOKEN-001-01` | Medium | ネイティブETH処理がmsg.valueを検証し正しくラップすることを検証する |
 | `CL-PROP-SUBGRAPH-GOVERNANCE-001-01` | Critical | ガバナンス関数がonlyOwner修飾子で制限されることを検証する（対象外） |
 | `CL-PROP-SUBGRAPH-LZCOMPOSE-001-01` | Critical | lzComposeコールバックが送信者を認証しStargateオリジンを検証することを確認する |
+| `CL-PROP-SUBGRAPH-ADAPTOR-SELFCALL-001-01` | High | Adaptor SelfCall保護関数が外部呼出しを拒否することを検証する |
+| `CL-PROP-ADAPTOR-BALANCE-TRACKING-001-01` | High | Adaptor withdraw()が全トークンタイプを正しく処理することを検証する |
+| `CL-PROP-SUBGRAPH-INCENTIVE-VALIDATION-001-01` | Medium | IncentiveLib._validateFeeParamsが無効パラメータを拒否することを検証する |
+| `CL-PROP-INCENTIVE-EDGE-CASES-001-01` | Medium | IncentiveLibが数学的エッジケースを正しく処理することを検証する |
+| `CL-PROP-SELFCALL-ALREADY-ENABLED-001-01` | Medium | enableSelfCallが既に有効な状態でリバートすることを検証する |
+| `CL-PROP-SUBGRAPH-LM-RECEIVE-NATIVE-001-01` | Medium | LiquidityManager receive()がネイティブunderlying時のみETHを受け入れることを検証する |
+| `CL-PROP-LM-BALANCE-CONSISTENCY-001-01` | High | LiquidityManagerがunderlyingBalance >= feeSurplus不変条件を維持することを検証する |
+| `CL-PROP-INTERFACE-MINTABLE-BURNABLE-001-01` | Critical | IMintableBurnableERC20実装がonlyMinterを強制することを検証する |
 
 ##### システムワイドチェック（5件）
 
