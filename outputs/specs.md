@@ -255,8 +255,8 @@ flowchart TD
 |:---|:---|
 | **グラフID** | GRAPH-ZERC20-MAIN |
 | **タイトル** | zERC20 Privacy Token Protocol - Main Flow |
-| **ノード数** | 76 |
-| **エッジ数** | 75 |
+| **ノード数** | 70 |
+| **エッジ数** | 83 |
 
 メイングラフは以下の主要なフローを含みます：
 
@@ -754,6 +754,134 @@ StargateからのlzComposeコールバック処理フローを表現します。
 | `PROP-LZCOMPOSE-SENDER-VALIDATION` | lzComposeは、送信者が認可されたStargateエンドポイントであることを検証 | BOUNDARY_SECURITY |
 | `PROP-LZCOMPOSE-REENTRANCY-PROTECTION` | lzComposeコールバックはリエントランシー攻撃から保護されている | TRANSITION_SECURITY |
 
+### 5.11 Poseidon Hash Circuit Implementation
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-POSEIDON-HASH-CIRCUIT |
+| **ノード数** | 9 |
+| **エッジ数** | 10 |
+
+Poseidonハッシュ関数のZK回路実装フローを表現します。light-poseidonライブラリを使用し、circom互換の設定（PoseidonT2およびPoseidonT3）でハッシュ計算を行います。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-POSEIDON-CIRCOM-COMPATIBILITY` | PoseidonハッシュパラメータはcircomとRust実装間で一致する | INTEGRITY |
+| `PROP-POSEIDON-SPONGE-SECURITY` | Poseidonスポンジ構造は暗号学的セキュリティを維持する | SOUNDNESS |
+
+### 5.12 Baby JubJub Elliptic Curve Operations
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-BABY-JUBJUB-OPERATIONS |
+| **ノード数** | 10 |
+| **エッジ数** | 11 |
+
+BN254に埋め込まれたBaby JubJub曲線上の楕円曲線演算フローを表現します。スカラー乗算、ポイント加算、公開鍵導出などの操作を含みます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-BJJ-POINT-VALIDATION` | すべての入力ポイントは曲線上にあることが検証される | INTEGRITY |
+| `PROP-BJJ-SCALAR-MUL-CORRECTNESS` | スカラー乗算は数学的に正しい結果を生成する | SOUNDNESS |
+
+### 5.13 Internet Computer Canister Interactions
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-IC-CANISTER-INTERACTION |
+| **ノード数** | 12 |
+| **エッジ数** | 12 |
+
+Internet Computer（IC）キャニスターとのインタラクションフローを表現します。VetKeyを使用した暗号鍵導出、AES-GCMによる状態暗号化、ICストレージキャニスターでの永続化を含みます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-IC-VETKEY-DERIVATION` | VetKeyから導出された暗号鍵はユーザー固有である | DATA_PROTECTION |
+| `PROP-IC-STORAGE-ENCRYPTION` | ICストレージに保存されるすべての状態はAES-GCMで暗号化される | DATA_PROTECTION |
+
+### 5.14 Nova Folding Scheme Internal Operations
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-NOVA-FOLDING-SCHEME |
+| **ノード数** | 16 |
+| **エッジ数** | 15 |
+
+Nova folding schemeの内部操作フローを表現します。IVC状態ベクトルの初期化、外部入力の受信、ステップ回路の計算、Merkleパス検証、アキュムレータ更新、インスタンスのフォールディングを含みます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-NOVA-IVC-SOUNDNESS` | Nova IVC証明は、すべての中間ステップが正しく実行された場合にのみ検証可能 | SOUNDNESS |
+| `PROP-NOVA-ACCUMULATOR-INTEGRITY` | フォールディング後のアキュムレータは正しい累積状態を反映する | INTEGRITY |
+| `PROP-NOVA-MERKLE-VERIFICATION` | 各フォールディングステップでMerkleパスが検証される | INTEGRITY |
+
+### 5.15 SelfCall Utility Pattern for Reentrancy Prevention
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-SELFCALL-PATTERN |
+| **ノード数** | 9 |
+| **エッジ数** | 8 |
+
+外部リエントランシーを防止しながら内部状態遷移を許可するSelfCallパターンのフローを表現します。enableSelfCall()でコンテキストフラグを設定し、onlySelfCallモディファイアで保護された関数への自己呼び出しを可能にします。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-SELFCALL-REENTRANCY-PREVENTION` | 外部呼び出し元はonlySelfCall保護関数を直接呼び出せない | TRANSITION_SECURITY |
+| `PROP-SELFCALL-CONTEXT-ISOLATION` | SelfCallフラグは単一トランザクション内で一時的 | STATE_INVARIANT |
+
+### 5.16 Native Token (ETH) Processing Flow
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-NATIVE-TOKEN-HANDLING |
+| **ノード数** | 9 |
+| **エッジ数** | 8 |
+
+LiquidityManagerでのネイティブETH処理フローを表現します。receive()関数、msg.value処理、ETH/WETHラッピング、余剰ETHの返金を含みます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-ETH-MSG-VALUE-VALIDATION` | msg.valueは期待される金額と一致する必要がある | INTEGRITY |
+| `PROP-ETH-REFUND-SAFETY` | ETH返金はリエントランシーガードを使用する | TRANSITION_SECURITY |
+
+### 5.17 Governance and Administrative Functions
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-GOVERNANCE-ADMIN-FUNCTIONS |
+| **ノード数** | 8 |
+| **エッジ数** | 8 |
+
+オーナー制限付きの管理機能フローを表現します。手数料パラメータ設定、報酬引き出し、Verifierローテーション、トークン登録、minter設定、コントラクトアップグレードを含みます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-ADMIN-ONLY-OWNER` | すべての管理関数はonlyOwnerモディファイアで保護される | AUTHORIZATION |
+| `PROP-ADMIN-NO-TIMELOCK` | 管理操作はタイムロックなしで即時に効果を発揮する | STATE_INVARIANT |
+
+#### セキュリティ考慮事項
+
+| 項目 | 説明 |
+|:---|:---|
+| **タイムロックなし** | 管理操作は遅延なしで即時に効果を発揮 |
+| **オーナー鍵リスク** | オーナー鍵の侵害はプロトコル完全制御を可能にする |
+| **推奨事項** | 重要な操作にはタイムロックまたはマルチシグの実装を検討 |
+
 ---
 
 ## 6. 境界セキュリティチェックリスト
@@ -812,7 +940,7 @@ StargateからのlzComposeコールバック処理フローを表現します。
 |:---|:---|
 | グラフ内の総ノード数 | 241 |
 | グラフ内の総エッジ数 | 244 |
-| 総境界エッジ数 | 21 |
+| 総境界エッジ数 | 20 |
 | プロパティを持つノード数 | 241 |
 | プロパティを持つエッジ数 | 244 |
 | ノードカバレッジ | 100% |
