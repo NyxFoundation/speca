@@ -242,14 +242,25 @@ flowchart TD
 
 ### 3.3 信頼境界エッジ
 
+#### 信頼境界の定義
+
+本ドキュメントでは、**信頼境界エッジ**を以下のように定義します：
+
+- **狭義の信頼境界**: UNTRUSTED ↔ TRUSTED/IN_SCOPE 間の境界。検証が**必須**
+- **広義の信頼境界**: 異なる信頼レベル間（SEMI_TRUSTED ↔ IN_SCOPE を含む）の境界。検証が**推奨**
+
+本プロトコルでは広義の定義を採用し、SEMI_TRUSTED → IN_SCOPE の境界も信頼境界エッジとして扱います。ただし、LayerZero/Stargateを完全にTRUSTEDと仮定する場合、これらの境界での明示的な検証は厳密には必須ではなく、多層防御（defense-in-depth）として推奨されます。
+
+> **注記**: setPeer設定によりLayerZeroレベルで既に送信元検証が行われるため、_lzReceive内でのソースEID検証は多層防御として推奨されますが、厳密には必須ではありません。
+
 本プロトコルには20の信頼境界エッジが定義されています。以下に**クリティカル**なものを示します。
 
 | エッジID | 説明 | 検証要件 | クリティカル |
 |:---|:---|:---|:---:|
 | `EDGE-USER-SUBMITS-TELEPORT` | 信頼されないユーザーがGroth16証明を含むテレポートリクエストをVerifierに送信 | Groth16証明を完全に検証、転送ルートの存在を確認、受信者バインディングを検証、単調増加totalTeleportedを強制 | **Yes** |
 | `EDGE-LAYERZERO-TO-HUB` | LayerZeroがクロスチェーンメッセージをHubに配信 | ペイロードを受け入れる前に、ソースEIDを登録Verifierリストに対して検証 | **Yes** |
-| `EDGE-LAYERZERO-TO-VERIFIER` | LayerZeroがHubからVerifierにグローバルルートを配信 | グローバルルートを保存する前に、ソースEIDが認可されたHubであることを検証 | **Yes** |
-| `EDGE-LAYERZERO-TO-ADAPTOR` | LayerZeroエンドポイントがクロスチェーンOFT転送完了後にAdaptorでlzComposeコールバックを呼び出し | msg.senderがLayerZeroエンドポイントであることを検証。_fromが登録されたzerc20アドレスであることを確認。デコードエラー時はrevertせずイベント発行+returnで資産ロックを防止 | **Yes** |
+| `EDGE-LAYERZERO-TO-VERIFIER` | LayerZeroがHubからVerifierにグローバルルートを配信 | グローバルルートを保存する前に、ソースEIDが認可されたHubであることを検証（推奨：setPeerにより既に送信元検証済みのため厳密には必須ではない） | **Yes** |
+| `EDGE-LAYERZERO-TO-ADAPTOR` | LayerZeroエンドポイントがクロスチェーンOFT転送完了後にAdaptorでlzComposeコールバックを呼び出し | msg.senderがLayerZeroエンドポイントであることを検証。_fromが登録されたzerc20アドレスであることを確認。デコードエラー時はrevertせずイベント発行+returnで資産ロックを防止（LayerZeroをTRUSTEDと仮定する場合、厳密には信頼境界ではないが多層防御として検証推奨） | **Yes** |
 | `EDGE-VERIFIER-TO-ZERC20-TELEPORT` | VerifierがZKP検証成功後にzERC20でteleportを呼び出してトークンをmint | zERC20.teleport()はmsg.sender == verifier()を検証する必要がある。これはLiquidityManagerとは別の特権mintingパスウェイ | **Yes** |
 
 #### クリティカル境界サマリ
@@ -260,7 +271,7 @@ flowchart TD
 | **CROSS_CHAIN_MESSAGING** | HubとVerifierコントラクト間のLayerZeroメッセージパッシング | ソースエンドポイントID（EID）は、メッセージペイロードを受け入れる前に登録ピアリストに対して検証される必要がある |
 | **OFF_CHAIN_OUTPUT** | オンチェーンで使用されるオフチェーンサービスからのデータ | すべてのオフチェーンデータはオンチェーンで暗号学的に検証される（ZK証明、Merkle証明） |
 | **INTER_CONTRACT** | 両方のmintingパスウェイを含むプロトコルコントラクト間の呼び出し | 呼び出し元認可を検証する必要がある。両方のパスウェイがzERC20をmintできる - 二重カウントやバイパスがないことを確認 |
-| **OWNER_PRIVILEGED** | 信頼されたオーナーによる管理操作 | オーナー侵害は範囲外。タイムロックなし。補償コントロールが必要（マルチシグ、監視） |
+| **OWNER_PRIVILEGED** | 信頼されたオーナーによる管理操作 | オーナー侵害は範囲外。タイムロックなし（設計上の意図：タイムロックはSafe wallet等のowner walletの責務であり、コントラクト個別の責務ではない） |
 | **EXTERNAL_BRIDGE** | Stargate/LayerZeroを介した双方向クロスチェーン資産ブリッジング | アウトバウンド: スリッページ制限が保護。インバウンド (lzCompose via LayerZero): msg.senderがLayerZeroエンドポイントであること、_fromが登録zerc20であることを検証、デコードエラー時はrevertせずイベント+returnで資産ロック防止 |
 
 ### 3.4 監査範囲
@@ -357,7 +368,7 @@ flowchart TD
         ACTION_LM_BURN_ZERC20[["Burn zERC20"]]
         ACTION_LM_TRANSFER_UNDERLYING[["Transfer Underlying [amount - fee]"]]
         STATE_UNWRAP_COMPLETE["Unwrap Complete"]
-        STATE_UNWRAP_FAILED(("Insufficient Liquidity"))
+        STATE_UNWRAP_HIGH_FEE["Low Liquidity - High Fee Applied"]
     end
 
     subgraph zERC20["zERC20 Token"]
@@ -421,11 +432,26 @@ flowchart TD
 
     subgraph Adaptor["Adaptor Contract"]
         STATE_ADAPTOR_IDLE["Adaptor Idle"]
-        ACTION_ADAPTOR_RECEIVE[["Receive unwrapAndBridge"]]
+        ACTION_ADAPTOR_RECEIVE[["Receive unwrapAndBridge - Local"]]
         ACTION_ADAPTOR_UNWRAP[["Unwrap via LiquidityManager"]]
         ACTION_ADAPTOR_BRIDGE[["Bridge via Stargate"]]
         STATE_BRIDGE_INITIATED["Bridge Initiated"]
         STATE_BRIDGE_FAILED(("Bridge Failed"))
+        ACTION_ADAPTOR_LZCOMPOSE[["lzCompose Callback - Cross-Chain"]]
+        ACTION_ADAPTOR_VALIDATE_SENDER[["Validate msg.sender is LZ Endpoint"]]
+        ACTION_ADAPTOR_VALIDATE_FROM[["Validate _from is registered zERC20"]]
+        ACTION_ADAPTOR_DECODE_REQUEST[["Decode BridgeRequest"]]
+        STATE_ADAPTOR_DECODE_FAILED(("Decode Failed - Emit Event"))
+        ACTION_ADAPTOR_UNWRAP_RECEIVED[["Unwrap Received zERC20"]]
+        ACTION_ADAPTOR_BRIDGE_BACK[["Bridge Underlying to Origin Chain"]]
+        STATE_CROSS_CHAIN_COMPLETE["Cross-Chain Unwrap Complete"]
+    end
+
+    subgraph CrossChainFlow["Cross-Chain zERC20 Bridge Flow - Chain A to B"]
+        STATE_USER_CHAIN_A["User on Chain A with zERC20"]
+        ACTION_SEND_OFT[["Send zERC20 via OFT to Chain B Adaptor"]]
+        STATE_OFT_IN_TRANSIT["OFT Transfer In Transit"]
+        ACTION_LZ_DELIVER[["LayerZero Delivers to Chain B"]]
     end
 
     %% Wrap Flow
@@ -440,7 +466,8 @@ flowchart TD
     STATE_USER_HAS_ZERC20 -->|"unwrap()"| STATE_LM_AWAITING_UNWRAP
     STATE_LM_AWAITING_UNWRAP --> ACTION_LM_CALCULATE_FEE
     ACTION_LM_CALCULATE_FEE --> ACTION_LM_BURN_ZERC20
-    ACTION_LM_CALCULATE_FEE -->|Insufficient liquidity| STATE_UNWRAP_FAILED
+    ACTION_LM_CALCULATE_FEE -->|Low liquidity| STATE_UNWRAP_HIGH_FEE
+    STATE_UNWRAP_HIGH_FEE --> ACTION_LM_BURN_ZERC20
     ACTION_LM_BURN_ZERC20 --> ACTION_LM_TRANSFER_UNDERLYING
     ACTION_LM_TRANSFER_UNDERLYING --> STATE_UNWRAP_COMPLETE
     STATE_UNWRAP_COMPLETE --> STATE_USER_HAS_UNDERLYING
@@ -509,12 +536,26 @@ flowchart TD
     ACTION_VERIFIER_VALIDATE_WITHDRAWAL -->|Invalid proof| STATE_TELEPORT_REJECTED
     ACTION_VERIFIER_CALL_TELEPORT --> STATE_TELEPORT_COMPLETE
 
-    %% Bridge Flow
+    %% Local Bridge Flow - Same Chain
     STATE_USER_HAS_ZERC20 -->|"unwrapAndBridge()"| ACTION_ADAPTOR_RECEIVE
     ACTION_ADAPTOR_RECEIVE --> ACTION_ADAPTOR_UNWRAP
     ACTION_ADAPTOR_UNWRAP --> ACTION_ADAPTOR_BRIDGE
     ACTION_ADAPTOR_BRIDGE -->|Success| STATE_BRIDGE_INITIATED
     ACTION_ADAPTOR_BRIDGE -->|Fail| STATE_BRIDGE_FAILED
+
+    %% Cross-Chain Bridge Flow - lzCompose
+    %% User on Chain A wants to unwrap using Chain B liquidity
+    STATE_USER_CHAIN_A -->|"bridgeZerc20() on Chain A"| ACTION_SEND_OFT
+    ACTION_SEND_OFT --> STATE_OFT_IN_TRANSIT
+    STATE_OFT_IN_TRANSIT --> ACTION_LZ_DELIVER
+    ACTION_LZ_DELIVER -->|"lzCompose callback on Chain B"| ACTION_ADAPTOR_LZCOMPOSE
+    ACTION_ADAPTOR_LZCOMPOSE --> ACTION_ADAPTOR_VALIDATE_SENDER
+    ACTION_ADAPTOR_VALIDATE_SENDER -->|Valid| ACTION_ADAPTOR_VALIDATE_FROM
+    ACTION_ADAPTOR_VALIDATE_FROM -->|Valid| ACTION_ADAPTOR_DECODE_REQUEST
+    ACTION_ADAPTOR_DECODE_REQUEST -->|Success| ACTION_ADAPTOR_UNWRAP_RECEIVED
+    ACTION_ADAPTOR_DECODE_REQUEST -->|Fail| STATE_ADAPTOR_DECODE_FAILED
+    ACTION_ADAPTOR_UNWRAP_RECEIVED --> ACTION_ADAPTOR_BRIDGE_BACK
+    ACTION_ADAPTOR_BRIDGE_BACK -->|"Stargate to Chain A"| STATE_CROSS_CHAIN_COMPLETE
 
     %% Styling
     class STATE_USER_IDLE,STATE_USER_HAS_UNDERLYING,STATE_USER_HAS_ZERC20,STATE_USER_HAS_NOVA_PROOF,STATE_USER_HAS_GROTH16_PROOF userNode
@@ -531,7 +572,11 @@ flowchart TD
     class STATE_INDEXER_IDLE,ACTION_INDEXER_WATCH,ACTION_INDEXER_BUILD_TREE,STATE_INDEXER_READY,ACTION_INDEXER_GENERATE_PROOFS offchainNode
     class STATE_PROVER_IDLE,ACTION_PROVER_RECEIVE,STATE_JOB_QUEUED,STATE_JOB_PROCESSING,ACTION_PROVER_CONVERT,STATE_JOB_COMPLETED offchainNode
     class STATE_ADAPTOR_IDLE,ACTION_ADAPTOR_RECEIVE,ACTION_ADAPTOR_UNWRAP,ACTION_ADAPTOR_BRIDGE,STATE_BRIDGE_INITIATED adaptorNode
-    class STATE_UNWRAP_FAILED,STATE_TRANSFER_REJECTED,STATE_EMERGENCY,STATE_TELEPORT_REJECTED,STATE_JOB_FAILED,STATE_BRIDGE_FAILED errorNode
+    class ACTION_ADAPTOR_LZCOMPOSE,ACTION_ADAPTOR_VALIDATE_SENDER,ACTION_ADAPTOR_VALIDATE_FROM,ACTION_ADAPTOR_DECODE_REQUEST adaptorNode
+    class ACTION_ADAPTOR_UNWRAP_RECEIVED,ACTION_ADAPTOR_BRIDGE_BACK,STATE_CROSS_CHAIN_COMPLETE adaptorNode
+    class STATE_USER_CHAIN_A,ACTION_SEND_OFT,STATE_OFT_IN_TRANSIT,ACTION_LZ_DELIVER userNode
+    class STATE_UNWRAP_HIGH_FEE lmNode
+    class STATE_TRANSFER_REJECTED,STATE_EMERGENCY,STATE_TELEPORT_REJECTED,STATE_JOB_FAILED,STATE_BRIDGE_FAILED,STATE_ADAPTOR_DECODE_FAILED errorNode
 ```
 *図: zERC20 Privacy Token Protocol - Main Flow*
 
@@ -539,8 +584,8 @@ flowchart TD
 |:---|:---|
 | **グラフID** | GRAPH-ZERC20-MAIN |
 | **タイトル** | zERC20 Privacy Token Protocol - Main Flow |
-| **ノード数** | 70 |
-| **エッジ数** | 83 |
+| **ノード数** | 81 |
+| **エッジ数** | 95 |
 
 メイングラフは以下の主要なフローを含みます：
 
@@ -549,7 +594,12 @@ flowchart TD
 3. **Transfer Flow**: zERC20の標準転送とハッシュチェーン更新
 4. **Teleport Flow**: ZKP検証を伴うプライバシー保護転送
 5. **Cross-Chain Flow**: LayerZeroを介したHub-Verifier間の通信
-6. **Bridge Flow**: Stargateを介したクロスチェーン資産移動
+6. **Local Bridge Flow**: 同一チェーンでのStargateブリッジ
+7. **Cross-Chain Bridge Flow (lzCompose)**: Chain AのzERC20をChain Bの流動性でunwrapし、Stargateで送り返すフロー
+   - ユーザーがChain AでbridgeZerc20()を呼び出し、zERC20をOFTでChain BのAdaptorに送信
+   - LayerZeroがChain BでlzComposeコールバックを呼び出し
+   - AdaptorがzERC20を受け取り、LiquidityManagerでunderlying tokenにunwrap
+   - underlying tokenをStargateでChain Aに送り返す
 
 ---
 
@@ -1463,9 +1513,9 @@ flowchart TD
 
 | 項目 | 説明 |
 |:---|:---|
-| **タイムロックなし** | 管理操作は遅延なしで即時に効果を発揮 |
+| **タイムロックなし** | 管理操作は遅延なしで即時に効果を発揮する。これは設計上の意図 |
 | **オーナー鍵リスク** | オーナー鍵の侵害はプロトコル完全制御を可能にする |
-| **推奨事項** | 重要な操作にはタイムロックまたはマルチシグの実装を検討（Safe walletの責務、監査対象外） |
+| **責務分離** | タイムロック/マルチシグはコントラクト個別の責務ではなく、Safe wallet等のowner権限を有するスマートコントラクトウォレットの責務。監査対象外 |
 
 ---
 
@@ -1479,11 +1529,11 @@ flowchart TD
 
     STATE_ADAPTOR_ENTRY["Adaptor Entry Point - unwrapAndBridge/bridgeZerc20"]
     ACTION_ADAPTOR_ENABLE_SELFCALL[["enableSelfCall - Set Context Flag"]]
-    ACTION_ADAPTOR_CALL_UNWRAP_SELF[["this.unwrapSelf - amount, receiver"]]
-    ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF[["this.bridgeUnderlyingTokenSelf - params"]]
-    ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF[["this.bridgeZerc20Self - amount, bridgeRequest"]]
+    ACTION_ADAPTOR_CALL_UNWRAP_SELF[["unwrapSelf - amount, receiver"]]
+    ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF[["bridgeUnderlyingTokenSelf - params"]]
+    ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF[["bridgeZerc20Self - amount, bridgeRequest"]]
     ACTION_ADAPTOR_ONLY_SELFCALL_CHECK[["onlySelfCall Modifier Validation"]]
-    STATE_ADAPTOR_SELFCALL_REJECTED(("External Call Rejected - SelfCallNotAllowed [理論上のみ]"))
+    STATE_ADAPTOR_SELFCALL_REJECTED(("External Call Rejected - SelfCallNotAllowed"))
     ACTION_ADAPTOR_EXECUTE_UNWRAP[["Execute unwrap via LiquidityManager"]]
     ACTION_ADAPTOR_EXECUTE_BRIDGE[["Execute Stargate bridge with slippage"]]
     STATE_ADAPTOR_SELFCALL_COMPLETE["SelfCall Operation Complete"]
@@ -1495,8 +1545,8 @@ flowchart TD
     ACTION_ADAPTOR_CALL_UNWRAP_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
     ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
     ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
-    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|msg.sender == address and flag set| ACTION_ADAPTOR_EXECUTE_UNWRAP
-    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -.->|External caller - revert [通常到達不可]| STATE_ADAPTOR_SELFCALL_REJECTED
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|msg.sender is self and flag set| ACTION_ADAPTOR_EXECUTE_UNWRAP
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -.->|External caller rejected| STATE_ADAPTOR_SELFCALL_REJECTED
     ACTION_ADAPTOR_EXECUTE_UNWRAP -->|Unwrap complete| ACTION_ADAPTOR_EXECUTE_BRIDGE
     ACTION_ADAPTOR_EXECUTE_BRIDGE -->|Bridge initiated| STATE_ADAPTOR_SELFCALL_COMPLETE
 
@@ -2028,7 +2078,7 @@ flowchart TD
 | AUTHORIZATION | zERC20バーンは認可されたminterアドレスのみ実行可能 |
 | INTEGRITY | underlying転送は手数料を正しく計算した(amount - fee)を転送する |
 | STATE_INVARIANT | unwrap完了状態はzERC20がバーンされunderlyingが手数料差引でユーザーに転送されたことを意味する |
-| STATE_INVARIANT | 流動性不足によるunwrap失敗は amount > underlyingBalance - feeSurplus の場合に発生 |
+| STATE_INVARIANT | 流動性不足時はインセンティブカーブにより手数料が増加し出力量が抑制される（revertしない） |
 | STATE_INVARIANT | zERC20転送待機状態は送信者が十分なzERC20残高を持つことが必要 |
 | INTEGRITY | 値検証はBN254フィールド互換性のため value <= 2^248-1 を強制する |
 | INTEGRITY | 残高更新は送信者から減算し受信者に正確な転送額を加算する |
@@ -2062,7 +2112,7 @@ flowchart TD
 | MONOTONICITY | aggSeqは単調に増加する |
 | INTEGRITY | Hubルートブロードキャストは登録済全Verifierに集約ルートを送信する |
 | STATE_INVARIANT | グローバルルートブロードキャスト済状態は登録済全VerifierにLayerZeroメッセージが送信されたことを意味する |
-| AUTHORIZATION | Verifierグローバルルート保存は保存前にソースEIDが認可されたHubであることを検証する |
+| AUTHORIZATION | Verifierグローバルルート保存は保存前にソースEIDが認可されたHubであることを検証する（推奨：setPeerにより既に検証済みのため厳密には必須ではない） |
 | STATE_INVARIANT | グローバルルート保存済状態はglobalTransferRoots[aggSeq]に受信ルートが含まれることを意味する |
 | STATE_INVARIANT | Indexer待機状態はオフチェーンIndexerがイベント処理準備完了であることを表す |
 | INTEGRITY | Indexerイベント監視はすべてのIndexedTransferイベントを損失なく取得する |
@@ -2104,7 +2154,7 @@ flowchart TD
 | TRANSITION_SECURITY | zERC20バーンはユーザーから正確なunwrap金額をバーンする |
 | TRANSITION_SECURITY | underlying転送はSafeERC20を使用して(amount - fee)を転送する |
 | TRANSITION_SECURITY | unwrap完了は正確なパラメータでUnwrappedイベントを発行する |
-| TRANSITION_SECURITY | 流動性不足検出は流動性不足時に正しく検出しリバートする |
+| TRANSITION_SECURITY | 流動性不足時はインセンティブカーブにより手数料を増加させ出力量を抑制する（revertしない） |
 | TRANSITION_SECURITY | underlying取得はunderlyingトークンがユーザーに転送されたことを意味する |
 | BOUNDARY_SECURITY | 転送開始は value <= 2^248-1 と送信者残高を検証する |
 | TRANSITION_SECURITY | 値検証は転送後の受信者残高にBN254制約を適用する |
@@ -2116,7 +2166,7 @@ flowchart TD
 | BOUNDARY_SECURITY | teleport送信は有効なGroth16証明と単調なtotalTeleportedが必要 |
 | TRANSITION_SECURITY | チェックポイント予約は証明バインディング用の不変チェックポイントを保存する |
 | BOUNDARY_SECURITY | LayerZero→Hubはペイロード処理前にソースEIDが認可されたVerifierであることを検証する |
-| BOUNDARY_SECURITY | LayerZero→Verifierはグローバルルート保存前にソースEIDが認可されたHubであることを検証する |
+| BOUNDARY_SECURITY | LayerZero→Verifierはグローバルルート保存前にソースEIDが認可されたHubであることを検証する（推奨：setPeerにより既に検証済みのため厳密には必須ではない） |
 | BOUNDARY_SECURITY | Verifier→LayerZeroは正しいエンコーディングで証明済ルートをLayerZeroに送信する |
 | BOUNDARY_SECURITY | Hub→LayerZeroは省略なく登録済全Verifierにブロードキャストする |
 | BOUNDARY_SECURITY | Adaptor→StargateはminAmountOutスリッページ保護を強制する |
@@ -2247,7 +2297,7 @@ flowchart TD
 | `CL-PROP-NODE-011-ACTION-LM-BURN-ZERC20-01` | Critical | zERC20バーンが認可されたminterを必要とすることを検証する |
 | `CL-PROP-NODE-012-ACTION-LM-TRANSFER-UNDERLYING-01` | High | underlying転送が正しい(amount - fee)をユーザーに送信することを検証する |
 | `CL-PROP-NODE-013-STATE-UNWRAP-COMPLETE-01` | High | unwrap完了状態がburn+transfer操作の原子性を意味することを検証する |
-| `CL-PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY-01` | High | 流動性不足時にunwrap失敗状態に到達することを検証する |
+| `CL-PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY-01` | High | 流動性不足時にインセンティブカーブで手数料を上げて出力量を抑制することを検証する（revertしない） |
 | `CL-PROP-NODE-015-STATE-ZERC20-AWAITING-TRANSFER-01` | High | zERC20転送待機状態が十分な送信者残高を必要とすることを検証する |
 | `CL-PROP-NODE-016-ACTION-ZERC20-VALIDATE-VALUE-01` | Critical | 値検証がBN254フィールド制約を適用することを検証する |
 | `CL-PROP-NODE-017-ACTION-ZERC20-UPDATE-BALANCES-01` | Critical | 残高更新が値の保存を維持することを検証する |
@@ -2321,7 +2371,7 @@ flowchart TD
 | `CL-PROP-EDGE-009-LM-BURNS-ZERC20-01` | Critical | 正確なunwrap金額がユーザーからバーンされることを検証する |
 | `CL-PROP-EDGE-010-LM-TRANSFERS-UNDERLYING-01` | High | LiquidityManagerがSafeERC20を使用して正確な(amount - fee)を転送することを検証する |
 | `CL-PROP-EDGE-011-UNWRAP-COMPLETE-01` | Low | 正確なパラメータでUnwrappedイベントが発行されることを検証する |
-| `CL-PROP-EDGE-012-UNWRAP-INSUFFICIENT-LIQUIDITY-01` | Critical | 流動性不足時にunwrapがリバートすることを検証する |
+| `CL-PROP-EDGE-012-UNWRAP-INSUFFICIENT-LIQUIDITY-01` | High | 流動性不足時にインセンティブカーブで手数料を上げて出力量を抑制することを検証する（revertしない） |
 | `CL-PROP-EDGE-013-USER-NOW-HAS-UNDERLYING-01` | High | SafeERC20.safeTransferがユーザーのトークン受領を保証することを検証する |
 | `CL-PROP-EDGE-015-ZERC20-VALIDATES-VALUE-01` | Critical | _afterTokenTransferが全転送にBN254制約を適用することを検証する |
 | `CL-PROP-EDGE-016-VALUE-TOO-LARGE-01` | High | ValueTooLargeリバートが正しくトリガーされることを検証する |
