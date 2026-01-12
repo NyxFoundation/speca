@@ -280,11 +280,39 @@ flowchart TD
 
 > **注記**: **Solidityコントラクトのみ**が監査対象です。
 
+**コアコントラクト:**
+- Hub.sol
+- zERC20.sol
+- Verifier.sol
+
+**流動性管理:**
 - liquidity/LiquidityManager.sol
 - liquidity/Adaptor.sol
+
+**ユーティリティ:**
 - utils/SelfCall.sol
+- utils/GeneralRecipientLib.sol
+- utils/PoseidonAggregationConfig.sol
+- utils/PoseidonAggregationLib.sol
+- utils/ShaHashChainLib.sol
+
+**ライブラリ:**
 - libraries/IncentiveLib.sol
-- リポジトリ内の依存インターフェース
+
+**検証器:**
+- verifiers/RootNovaDecider.sol
+- verifiers/WithdrawGlobalNovaDecider.sol
+- verifiers/WithdrawGlobalGroth16Verifier.sol
+- verifiers/WithdrawLocalNovaDecider.sol
+- verifiers/WithdrawLocalGroth16Verifier.sol
+
+**インターフェース:**
+- interfaces/IzERC20.sol
+- interfaces/IStargate.sol
+- interfaces/ILiquidityManager.sol
+- interfaces/IVerifier.sol
+- interfaces/IDecider.sol
+- interfaces/IMintableBurnableERC20.sol
 
 #### 監査対象外（Out of Scope）
 
