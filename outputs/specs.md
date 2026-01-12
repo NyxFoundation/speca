@@ -9,7 +9,7 @@
 1. [はじめに](#1-はじめに)
 2. [プロトコル仕様](#2-プロトコル仕様)
    - [2.1 概要](#21-概要)
-   - [2.2 主要な登場人物 (Trusted Entities)](#22-主要な登場人物-trusted-entities)
+   - [2.2 主要な登場人物 (Entities)](#22-主要な登場人物-trusted-entities)
    - [2.3 主要なデータ構造](#23-主要なデータ構造)
 3. [トラストモデル](#3-トラストモデル)
    - [3.1 信頼レベル定義](#31-信頼レベル定義)
@@ -28,24 +28,24 @@
    - [5.7 LayerZero v2 Cross-Chain Message Flow](#57-layerzero-v2-cross-chain-message-flow)
    - [5.8 Stealth Burn Address Generation with PoW](#58-stealth-burn-address-generation-with-pow)
    - [5.9 Stargate Bridge Detailed Flow](#59-stargate-bridge-detailed-flow)
-   - [5.10 Stargate lzCompose Callback Processing](#510-stargate-lzcompose-callback-processing)
+   - [5.10 LayerZero lzCompose Callback Processing](#510-layerzero-lzcompose-callback-processing)
    - [5.11 Poseidon Hash Circuit Implementation](#511-poseidon-hash-circuit-implementation)
-   - [5.12 Baby JubJub Elliptic Curve Operations](#512-baby-jubjub-elliptic-curve-operations)
-   - [5.13 Internet Computer Canister Interactions](#513-internet-computer-canister-interactions)
-   - [5.14 Nova Folding Scheme Internal Operations](#514-nova-folding-scheme-internal-operations)
-   - [5.15 SelfCall Utility Pattern for Reentrancy Prevention](#515-selfcall-utility-pattern-for-reentrancy-prevention)
-   - [5.16 Native Token (ETH) Processing Flow](#516-native-token-eth-processing-flow)
-   - [5.17 Governance and Administrative Functions](#517-governance-and-administrative-functions)
-   - [5.18 Adaptor SelfCall Protected Functions](#518-adaptor-selfcall-protected-functions)
-   - [5.19 IncentiveLib Fee Parameter Validation](#519-incentivelib-fee-parameter-validation)
-   - [5.20 Adaptor Withdraw Function Flow](#520-adaptor-withdraw-function-flow)
-   - [5.21 LiquidityManager receive() Native Token Handling](#521-liquiditymanager-receive-native-token-handling)
-   - [5.22 Adaptor _removeStargateDust Decimal Handling](#522-adaptor-_removestargateDust-decimal-handling)
+   - [5.12 Internet Computer Canister Interactions](#512-internet-computer-canister-interactions)
+   - [5.13 Nova Folding Scheme Internal Operations](#513-nova-folding-scheme-internal-operations)
+   - [5.14 SelfCall Utility Pattern for Reentrancy Prevention](#514-selfcall-utility-pattern-for-reentrancy-prevention)
+   - [5.15 Native Token (ETH) Processing Flow](#515-native-token-eth-processing-flow)
+   - [5.16 Governance and Administrative Functions](#516-governance-and-administrative-functions)
+   - [5.17 Adaptor SelfCall Protected Functions](#517-adaptor-selfcall-protected-functions)
+   - [5.18 IncentiveLib Fee Parameter Validation](#518-incentivelib-fee-parameter-validation)
+   - [5.19 Adaptor Withdraw Function Flow](#519-adaptor-withdraw-function-flow)
+   - [5.20 LiquidityManager receive() Native Token Handling](#520-liquiditymanager-receive-native-token-handling)
+   - [5.21 Adaptor _removeStargateDust Decimal Handling](#521-adaptor-_removestargateDust-decimal-handling)
+   - [5.22 Adaptor lzCompose Cross-Chain Unwrap Flow](#522-adaptor-lzcompose-cross-chain-unwrap-flow)
 6. [境界セキュリティチェックリスト](#6-境界セキュリティチェックリスト)
    - [6.1 ユーザー入力検証](#61-ユーザー入力検証)
    - [6.2 ZKP検証](#62-zkp検証)
    - [6.3 クロスチェーンメッセージング](#63-クロスチェーンメッセージング)
-   - [6.4 Stargateコールバック](#64-stargateコールバック)
+   - [6.4 LayerZero lzComposeコールバック](#64-layerzero-lzcomposeコールバック)
 7. [プロパティカテゴリ別サマリ](#7-プロパティカテゴリ別サマリ)
 8. [結論とフィードバック依頼](#8-結論とフィードバック依頼)
 9. [付録](#付録)
@@ -72,7 +72,7 @@
 
 > 本プロトコルは、Nova folding schemesとGroth16証明を使用してプライベートなERC20転送を実現するマルチチェーンプライバシートークンプロトコルです。LayerZero v2を介したクロスチェーン連携により、複数のEVMチェーン間でのプライバシー保護された資産移動を可能にします。
 
-### 2.2 主要な登場人物 (Trusted Entities)
+### 2.2 主要な登場人物 (Entities)
 
 本プロトコルには16のエンティティが定義されています。
 
@@ -83,7 +83,8 @@
 | `ACTOR-VERIFIER-CONTRACT` | Verifier Contract | Nova/Groth16証明検証とクロスチェーン連携を管理するLayerZero OApp |
 | `ACTOR-HUB-CONTRACT` | Hub Contract | トークンごとの転送ルートと単調増加ツリーインデックスを追跡する中央集約ポイント |
 | `ACTOR-LIQUIDITY-MANAGER` | LiquidityManager Contract | zERC20のmint/burnの唯一の権限。インセンティブカーブによるwrap報酬とunwrap手数料を実装 |
-| `ACTOR-ADAPTOR-CONTRACT` | Adaptor Contract | Stargateブリッジを使用したクロスチェーン出口調整。lzComposeコールバックを実装 |
+| `ACTOR-ADAPTOR-CONTRACT` | Adaptor Contract | Stargateブリッジを使用したクロスチェーン出口調整。LayerZero経由のlzComposeコールバックを実装 |
+| `ACTOR-FEE-MANAGER` | Fee Manager | ACTOR-LIQUIDITY-MANAGERに対してDATA-INCENTIVE-CURVE-PARAMSを設定できる権利を有するTRUSTED actor。FEE_MANAGER_ROLEを保持し、各chainごとの目標流動性 T = 全流動性/チェーン数 を定期的に更新する義務を負う |
 | `ACTOR-CONTRACT-OWNER` | Contract Owner/Protocol Admin | onlyOwnerアクセスを持つ特権EOAまたはマルチシグ。タイムロックなしで即時効果 |
 | `ACTOR-INDEXER-SERVICE` | Indexer Service | zERC20転送イベントをインデックス化し、Merkle証明を生成するオフチェーンサービス |
 | `ACTOR-DECIDER-PROVER-SERVICE` | Decider/Prover Service | Nova IVC証明をGroth16最終証明に変換するオフチェーンサービス |
@@ -92,7 +93,6 @@
 | `ACTOR-IC-KEY-MANAGER` | IC Key Manager Canister | ステルスアドレスシークレットを管理するInternet Computerキャニスター |
 | `ACTOR-IC-STORAGE` | IC Storage Canister | 暗号化された状態ストレージを提供するInternet Computerキャニスター |
 | `ACTOR-POSEIDON-CIRCUIT` | Poseidon Hash Circuit | circom互換設定のlight-poseidonライブラリを使用したZKフレンドリーハッシュ関数 |
-| `ACTOR-BABYJUBJUB-CIRCUIT` | Baby JubJub Curve Operations | BN254に埋め込まれたBaby JubJub曲線上の楕円曲線演算 |
 | `ACTOR-NOVA-CIRCUIT` | Nova Folding Circuit | sonobe/folding-schemesライブラリを使用した増分検証可能計算回路 |
 
 ### 2.3 主要なデータ構造
@@ -249,7 +249,7 @@ flowchart TD
 | `EDGE-USER-SUBMITS-TELEPORT` | 信頼されないユーザーがGroth16証明を含むテレポートリクエストをVerifierに送信 | Groth16証明を完全に検証、転送ルートの存在を確認、受信者バインディングを検証、単調増加totalTeleportedを強制 | **Yes** |
 | `EDGE-LAYERZERO-TO-HUB` | LayerZeroがクロスチェーンメッセージをHubに配信 | ペイロードを受け入れる前に、ソースEIDを登録Verifierリストに対して検証 | **Yes** |
 | `EDGE-LAYERZERO-TO-VERIFIER` | LayerZeroがHubからVerifierにグローバルルートを配信 | グローバルルートを保存する前に、ソースEIDが認可されたHubであることを検証 | **Yes** |
-| `EDGE-STARGATE-TO-ADAPTOR` | Stargateブリッジがクロスチェーントークン転送完了後にAdaptorでlzComposeコールバックを呼び出し | 送信者が認可されたStargateエンドポイントであることを検証。amountReceivedLDがminAmountOutスリッページ制限を満たすことを確認 | **Yes** |
+| `EDGE-LAYERZERO-TO-ADAPTOR` | LayerZeroエンドポイントがクロスチェーンOFT転送完了後にAdaptorでlzComposeコールバックを呼び出し | msg.senderがLayerZeroエンドポイントであることを検証。_fromが登録されたzerc20アドレスであることを確認。デコードエラー時はrevertせずイベント発行+returnで資産ロックを防止 | **Yes** |
 | `EDGE-VERIFIER-TO-ZERC20-TELEPORT` | VerifierがZKP検証成功後にzERC20でteleportを呼び出してトークンをmint | zERC20.teleport()はmsg.sender == verifier()を検証する必要がある。これはLiquidityManagerとは別の特権mintingパスウェイ | **Yes** |
 
 #### クリティカル境界サマリ
@@ -261,28 +261,44 @@ flowchart TD
 | **OFF_CHAIN_OUTPUT** | オンチェーンで使用されるオフチェーンサービスからのデータ | すべてのオフチェーンデータはオンチェーンで暗号学的に検証される（ZK証明、Merkle証明） |
 | **INTER_CONTRACT** | 両方のmintingパスウェイを含むプロトコルコントラクト間の呼び出し | 呼び出し元認可を検証する必要がある。両方のパスウェイがzERC20をmintできる - 二重カウントやバイパスがないことを確認 |
 | **OWNER_PRIVILEGED** | 信頼されたオーナーによる管理操作 | オーナー侵害は範囲外。タイムロックなし。補償コントロールが必要（マルチシグ、監視） |
-| **EXTERNAL_BRIDGE** | Stargateを介した双方向クロスチェーン資産ブリッジング | アウトバウンド: スリッページ制限が保護。インバウンド: 送信者エンドポイントを検証、受信額を確認、リファンドを正しく処理 |
+| **EXTERNAL_BRIDGE** | Stargate/LayerZeroを介した双方向クロスチェーン資産ブリッジング | アウトバウンド: スリッページ制限が保護。インバウンド (lzCompose via LayerZero): msg.senderがLayerZeroエンドポイントであること、_fromが登録zerc20であることを検証、デコードエラー時はrevertせずイベント+returnで資産ロック防止 |
 
 ### 3.4 監査範囲
 
 #### 監査対象（In Scope）
 
-- コントラクトロジックバグ
-- ZKP soundness検証
-- 入力検証
-- 状態管理
-- コントラクト間呼び出しの正当性
-- 信頼境界越え検証
+> **注記**: **Solidityコントラクトのみ**が監査対象です。
+
+- liquidity/LiquidityManager.sol
+- liquidity/Adaptor.sol
+- utils/SelfCall.sol
+- libraries/IncentiveLib.sol
+- リポジトリ内の依存インターフェース
 
 #### 監査対象外（Out of Scope）
 
 | 項目 | 説明 |
 |:---|:---|
-| **DEPLOYMENT_AND_OWNER_PRIVILEGES** | デプロイ時パラメータの操作またはコントラクトオーナー権限を必要とする脆弱性 |
+| **DEPLOYMENT_AND_OWNER_PRIVILEGES** | デプロイ時パラメータの操作またはコントラクトオーナー権限を必要とする脆弱性。オーナー権限はTRUSTED actor |
 | **TRUSTED_SETUP** | 回路のtrusted setupに関連する攻撃。現在の実装は開発/テスト用に固定シードを使用 |
 | **VOLUME_BASED_DOS** | 大量の転送を発行することのみで達成されるDoS |
 | **SELF_INFLICTED_ATTACKS** | 攻撃者自身のみに影響するバグ |
 | **RECOVERABLE_CROSS_CHAIN_GRIEFING** | 不十分なガスによる意図的に失敗するクロスチェーンメッセージの送信 |
+| **Nova to Groth16 Conversion** | オフチェーン処理 |
+| **Stealth Burn Address Generation** | オフチェーン処理 |
+| **Poseidon Hash Circuit Implementation** | ZKP回路実装 |
+| **Internet Computer Canister Interactions** | オフチェーン処理 |
+| **Nova Folding Scheme Internal Operations** | ZKP内部処理 |
+| **Timelock/Multisig Implementation** | Safe walletの責務。オーナー権限はTRUSTED actor |
+| **89-bit burn address collision** | 別監査済み、既知問題（下記参照） |
+
+#### 既知の問題（Known Issues）
+
+| ID | 説明 | ステータス |
+|:---|:---|:---|
+| **KNOWN-001** | ZKPはbn254を使用しているため100bit以下のセキュリティ。burn addressの衝突耐性のため89bitまで低下 | ACCEPTED |
+
+> **注記**: 89bitのburn address衝突耐性は別途監査済みであり、スコープ外として扱います。
 
 #### 監査対象外の例外
 
@@ -1005,23 +1021,24 @@ Stargateブリッジの詳細フローを表現します。
 | `PROP-STARGATE-SLIPPAGE-PROTECTION` | minAmountOutスリッページ制限が強制され、ユーザーは予想より少ない額を受け取らない | INTEGRITY |
 | `PROP-STARGATE-REFUND-HANDLING` | スリッページ超過時、リファンドアドレスに正しく返金される | INTEGRITY |
 
-### 5.10 Stargate lzCompose Callback Processing
+### 5.10 LayerZero lzCompose Callback Processing
 
 ```mermaid
 flowchart TD
     classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     classDef errorState fill:#ffcdd2,stroke:#c62828,stroke-width:2px
+    classDef warningState fill:#fff9c4,stroke:#f9a825,stroke-width:2px
 
     STATE_AWAITING_COMPOSE["Adaptor Awaiting lzCompose Callback"]
     ACTION_RECEIVE_LZCOMPOSE[["lzCompose(_from, _guid, _message, _executor, _extraData)"]]
     ACTION_VALIDATE_CALLER[["Validate msg.sender == LayerZero Endpoint"]]
     STATE_CALLER_REJECTED(("Unauthorized Caller - Revert"))
     ACTION_DECODE_COMPOSE_MSG[["Decode _composeMsg (OFTComposeMessage)"]]
-    STATE_DECODE_FAILED(("Malformed Message - Revert"))
+    STATE_DECODE_FAILED(("Malformed Message - DecodeBridgeRequestFailed event + return"))
     ACTION_EXTRACT_PAYLOAD[["Extract (amountLD, composeMsg) from Message"]]
-    ACTION_VALIDATE_STARGATE_ORIGIN[["Validate _from Matches Registered Stargate Pool"]]
-    STATE_INVALID_ORIGIN(("Unknown Stargate Origin - Revert"))
+    ACTION_VALIDATE_ZERC20_ORIGIN[["Validate _from Matches Registered zerc20"]]
+    STATE_INVALID_ORIGIN(("Unknown Origin - Emit event + return"))
     ACTION_PROCESS_RECEIVED_TOKENS[["Process Received Underlying Tokens"]]
     ACTION_EXECUTE_COMPOSE_LOGIC[["Execute Compose Logic (wrap, mint, etc.)"]]
     STATE_COMPOSE_COMPLETE["lzCompose Callback Complete"]
@@ -1032,11 +1049,11 @@ flowchart TD
     ACTION_RECEIVE_LZCOMPOSE -->|First validation step| ACTION_VALIDATE_CALLER
     ACTION_VALIDATE_CALLER -->|msg.sender != endpoint| STATE_CALLER_REJECTED
     ACTION_VALIDATE_CALLER -->|msg.sender == endpoint| ACTION_DECODE_COMPOSE_MSG
-    ACTION_DECODE_COMPOSE_MSG -->|abi.decode fails| STATE_DECODE_FAILED
+    ACTION_DECODE_COMPOSE_MSG -->|abi.decode fails - emit event, return| STATE_DECODE_FAILED
     ACTION_DECODE_COMPOSE_MSG -->|Message decoded successfully| ACTION_EXTRACT_PAYLOAD
-    ACTION_EXTRACT_PAYLOAD -->|Validate source pool| ACTION_VALIDATE_STARGATE_ORIGIN
-    ACTION_VALIDATE_STARGATE_ORIGIN -->|_from not in registered pools| STATE_INVALID_ORIGIN
-    ACTION_VALIDATE_STARGATE_ORIGIN -->|Valid Stargate origin| ACTION_PROCESS_RECEIVED_TOKENS
+    ACTION_EXTRACT_PAYLOAD -->|Validate source zerc20| ACTION_VALIDATE_ZERC20_ORIGIN
+    ACTION_VALIDATE_ZERC20_ORIGIN -->|_from not in registered zerc20| STATE_INVALID_ORIGIN
+    ACTION_VALIDATE_ZERC20_ORIGIN -->|Valid zerc20 origin| ACTION_PROCESS_RECEIVED_TOKENS
     ACTION_PROCESS_RECEIVED_TOKENS -->|Underlying tokens credited| ACTION_EXECUTE_COMPOSE_LOGIC
     ACTION_EXECUTE_COMPOSE_LOGIC -->|Compose logic executed successfully| STATE_COMPOSE_COMPLETE
     ACTION_EXECUTE_COMPOSE_LOGIC -->|Compose logic failed| ACTION_HANDLE_COMPOSE_ERROR
@@ -1047,32 +1064,36 @@ flowchart TD
     class ACTION_VALIDATE_CALLER actionNode
     class STATE_CALLER_REJECTED errorState
     class ACTION_DECODE_COMPOSE_MSG actionNode
-    class STATE_DECODE_FAILED errorState
+    class STATE_DECODE_FAILED warningState
     class ACTION_EXTRACT_PAYLOAD actionNode
-    class ACTION_VALIDATE_STARGATE_ORIGIN actionNode
-    class STATE_INVALID_ORIGIN errorState
+    class ACTION_VALIDATE_ZERC20_ORIGIN actionNode
+    class STATE_INVALID_ORIGIN warningState
     class ACTION_PROCESS_RECEIVED_TOKENS actionNode
     class ACTION_EXECUTE_COMPOSE_LOGIC actionNode
     class STATE_COMPOSE_COMPLETE stateNode
     class ACTION_HANDLE_COMPOSE_ERROR actionNode
     class STATE_COMPOSE_FAILED_STORED stateNode
 ```
-*図9: Stargate lzCompose Callback Processing フロー*
+*図9: LayerZero lzCompose Callback Processing フロー*
 
 | 項目 | 値 |
 |:---|:---|
-| **グラフID** | GRAPH-STARGATE-LZCOMPOSE-CALLBACK |
+| **グラフID** | GRAPH-LAYERZERO-LZCOMPOSE-CALLBACK |
 | **ノード数** | 14 |
 | **エッジ数** | 13 |
 
-StargateからのlzComposeコールバック処理フローを表現します。
+LayerZeroエンドポイントからのlzComposeコールバック処理フローを表現します。
+
+> **重要**: lzComposeでデコードエラーが発生した場合、revertしてはなりません。revertすると資産がスタックしてしまうため、DecodeBridgeRequestFailedイベントを発行してreturnする必要があります。
+
+> **注記**: リエントランシーが可能であったとしても、具体的な攻撃が存在しない限りは問題なしとします。
 
 #### 関連プロパティ
 
 | ID | プロパティ | カテゴリ |
 |:---|:---|:---|
-| `PROP-LZCOMPOSE-SENDER-VALIDATION` | lzComposeは、送信者が認可されたStargateエンドポイントであることを検証 | BOUNDARY_SECURITY |
-| `PROP-LZCOMPOSE-REENTRANCY-PROTECTION` | lzComposeコールバックはリエントランシー攻撃から保護されている | TRANSITION_SECURITY |
+| `PROP-LZCOMPOSE-SENDER-VALIDATION` | lzComposeは、msg.senderがLayerZeroエンドポイントであり、_fromが登録されたzerc20アドレスであることを検証 | BOUNDARY_SECURITY |
+| `PROP-LZCOMPOSE-NO-REVERT-ON-DECODE` | lzComposeはデコードエラー時にrevertせず、イベント発行+returnで資産ロックを防止 | BOUNDARY_SECURITY |
 
 ### 5.11 Poseidon Hash Circuit Implementation
 
@@ -1131,66 +1152,7 @@ Poseidonハッシュ関数のZK回路実装フローを表現します。light-p
 | `PROP-POSEIDON-CIRCOM-COMPATIBILITY` | PoseidonハッシュパラメータはcircomとRust実装間で一致する | INTEGRITY |
 | `PROP-POSEIDON-SPONGE-SECURITY` | Poseidonスポンジ構造は暗号学的セキュリティを維持する | SOUNDNESS |
 
-### 5.12 Baby JubJub Elliptic Curve Operations
-
-```mermaid
-flowchart TD
-    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-
-    STATE_BJJ_INIT["Baby JubJub Operation Requested"]
-    ACTION_BJJ_LOAD_PARAMS[["Load Curve Parameters [a, d, order, base point]"]]
-    ACTION_BJJ_VALIDATE_POINT[["Validate Point On Curve"]]
-    ACTION_BJJ_POINT_ADD[["Compute Point Addition [twisted Edwards]"]]
-    ACTION_BJJ_SCALAR_MUL[["Compute Scalar Multiplication [double-and-add]"]]
-    STATE_BJJ_DOUBLE_LOOP["Scalar Multiplication Loop"]
-    ACTION_BJJ_POINT_DOUBLE[["Double Current Point"]]
-    ACTION_BJJ_CONDITIONAL_ADD[["Conditional Add Based on Scalar Bit"]]
-    ACTION_BJJ_DERIVE_PUBKEY[["Derive Public Key from Private Scalar"]]
-    STATE_BJJ_RESULT_READY["Curve Operation Result Ready"]
-
-    STATE_BJJ_INIT -->|Begin curve operation| ACTION_BJJ_LOAD_PARAMS
-    ACTION_BJJ_LOAD_PARAMS -->|BN254-embedded curve params loaded| ACTION_BJJ_VALIDATE_POINT
-    ACTION_BJJ_VALIDATE_POINT -->|Point addition requested| ACTION_BJJ_POINT_ADD
-    ACTION_BJJ_VALIDATE_POINT -->|Scalar multiplication requested| ACTION_BJJ_SCALAR_MUL
-    ACTION_BJJ_VALIDATE_POINT -->|Key derivation requested| ACTION_BJJ_DERIVE_PUBKEY
-    ACTION_BJJ_POINT_ADD -->|Point addition computed| STATE_BJJ_RESULT_READY
-    ACTION_BJJ_SCALAR_MUL -->|Initialize accumulator| STATE_BJJ_DOUBLE_LOOP
-    STATE_BJJ_DOUBLE_LOOP -->|Process next bit| ACTION_BJJ_POINT_DOUBLE
-    ACTION_BJJ_POINT_DOUBLE -->|Point doubled| ACTION_BJJ_CONDITIONAL_ADD
-    ACTION_BJJ_CONDITIONAL_ADD -->|More bits to process| STATE_BJJ_DOUBLE_LOOP
-    ACTION_BJJ_CONDITIONAL_ADD -->|All bits processed| STATE_BJJ_RESULT_READY
-    ACTION_BJJ_DERIVE_PUBKEY -->|Public key derived| STATE_BJJ_RESULT_READY
-
-    class STATE_BJJ_INIT stateNode
-    class ACTION_BJJ_LOAD_PARAMS actionNode
-    class ACTION_BJJ_VALIDATE_POINT actionNode
-    class ACTION_BJJ_POINT_ADD actionNode
-    class ACTION_BJJ_SCALAR_MUL actionNode
-    class STATE_BJJ_DOUBLE_LOOP stateNode
-    class ACTION_BJJ_POINT_DOUBLE actionNode
-    class ACTION_BJJ_CONDITIONAL_ADD actionNode
-    class ACTION_BJJ_DERIVE_PUBKEY actionNode
-    class STATE_BJJ_RESULT_READY stateNode
-```
-*図11: Baby JubJub Elliptic Curve Operations フロー*
-
-| 項目 | 値 |
-|:---|:---|
-| **グラフID** | GRAPH-BABY-JUBJUB-OPERATIONS |
-| **ノード数** | 10 |
-| **エッジ数** | 11 |
-
-BN254に埋め込まれたBaby JubJub曲線上の楕円曲線演算フローを表現します。スカラー乗算、ポイント加算、公開鍵導出などの操作を含みます。
-
-#### 関連プロパティ
-
-| ID | プロパティ | カテゴリ |
-|:---|:---|:---|
-| `PROP-BJJ-POINT-VALIDATION` | すべての入力ポイントは曲線上にあることが検証される | INTEGRITY |
-| `PROP-BJJ-SCALAR-MUL-CORRECTNESS` | スカラー乗算は数学的に正しい結果を生成する | SOUNDNESS |
-
-### 5.13 Internet Computer Canister Interactions
+### 5.12 Internet Computer Canister Interactions
 
 ```mermaid
 flowchart TD
@@ -1254,7 +1216,7 @@ Internet Computer（IC）キャニスターとのインタラクションフロ�
 | `PROP-IC-VETKEY-DERIVATION` | VetKeyから導出された暗号鍵はユーザー固有である | DATA_PROTECTION |
 | `PROP-IC-STORAGE-ENCRYPTION` | ICストレージに保存されるすべての状態はAES-GCMで暗号化される | DATA_PROTECTION |
 
-### 5.14 Nova Folding Scheme Internal Operations
+### 5.13 Nova Folding Scheme Internal Operations
 
 ```mermaid
 flowchart TD
@@ -1331,7 +1293,7 @@ Nova folding schemeの内部操作フローを表現します。IVC状態ベク�
 | `PROP-NOVA-ACCUMULATOR-INTEGRITY` | フォールディング後のアキュムレータは正しい累積状態を反映する | INTEGRITY |
 | `PROP-NOVA-MERKLE-VERIFICATION` | 各フォールディングステップでMerkleパスが検証される | INTEGRITY |
 
-### 5.15 SelfCall Utility Pattern for Reentrancy Prevention
+### 5.14 SelfCall Utility Pattern for Reentrancy Prevention
 
 ```mermaid
 flowchart TD
@@ -1385,7 +1347,7 @@ flowchart TD
 | `PROP-SELFCALL-REENTRANCY-PREVENTION` | 外部呼び出し元はonlySelfCall保護関数を直接呼び出せない | TRANSITION_SECURITY |
 | `PROP-SELFCALL-CONTEXT-ISOLATION` | SelfCallフラグは単一トランザクション内で一時的 | STATE_INVARIANT |
 
-### 5.16 Native Token (ETH) Processing Flow
+### 5.15 Native Token (ETH) Processing Flow
 
 ```mermaid
 flowchart TD
@@ -1397,8 +1359,7 @@ flowchart TD
     ACTION_RECEIVE_ETH[["receive Function Invoked"]]
     ACTION_VALIDATE_MSG_VALUE[["Validate msg.value Against Amount Parameter"]]
     STATE_ETH_RECEIVED["ETH Received in Contract"]
-    ACTION_WRAP_ETH_TO_WETH[["Wrap ETH to WETH via WETH.deposit"]]
-    STATE_WETH_READY["WETH Ready for Protocol Use"]
+    STATE_ETH_READY["Native ETH Ready for Protocol Use"]
     ACTION_REFUND_EXCESS_ETH[["Refund Excess ETH to Sender"]]
     STATE_ETH_REFUNDED["Excess ETH Refunded"]
     STATE_ETH_REJECTED(("ETH Transfer Rejected"))
@@ -1407,17 +1368,15 @@ flowchart TD
     ACTION_RECEIVE_ETH -->|Check msg.value matches expected| ACTION_VALIDATE_MSG_VALUE
     ACTION_VALIDATE_MSG_VALUE -->|msg.value == amount parameter| STATE_ETH_RECEIVED
     ACTION_VALIDATE_MSG_VALUE -->|msg.value != expected amount| STATE_ETH_REJECTED
-    STATE_ETH_RECEIVED -->|Convert to WETH for ERC20 compatibility| ACTION_WRAP_ETH_TO_WETH
+    STATE_ETH_RECEIVED -->|Native ETH used directly| STATE_ETH_READY
     STATE_ETH_RECEIVED -->|msg.value greater than required| ACTION_REFUND_EXCESS_ETH
-    ACTION_WRAP_ETH_TO_WETH -->|WETH.deposit with value| STATE_WETH_READY
     ACTION_REFUND_EXCESS_ETH -->|Excess ETH returned to sender| STATE_ETH_REFUNDED
 
     class STATE_LM_AWAITING_ETH stateNode
     class ACTION_RECEIVE_ETH actionNode
     class ACTION_VALIDATE_MSG_VALUE actionNode
     class STATE_ETH_RECEIVED stateNode
-    class ACTION_WRAP_ETH_TO_WETH actionNode
-    class STATE_WETH_READY stateNode
+    class STATE_ETH_READY stateNode
     class ACTION_REFUND_EXCESS_ETH actionNode
     class STATE_ETH_REFUNDED stateNode
     class STATE_ETH_REJECTED errorNode
@@ -1427,10 +1386,12 @@ flowchart TD
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-NATIVE-TOKEN-HANDLING |
-| **ノード数** | 9 |
-| **エッジ数** | 8 |
+| **ノード数** | 8 |
+| **エッジ数** | 6 |
 
-LiquidityManagerでのネイティブETH処理フローを表現します。receive()関数、msg.value処理、ETH/WETHラッピング、余剰ETHの返金を含みます。
+LiquidityManagerでのネイティブETH処理フローを表現します。receive()関数、msg.value処理、余剰ETHの返金を含みます。
+
+> **注記**: WETHラッピングは使用していません。ネイティブETHは直接処理されます。
 
 #### 関連プロパティ
 
@@ -1439,7 +1400,7 @@ LiquidityManagerでのネイティブETH処理フローを表現します。rece
 | `PROP-ETH-MSG-VALUE-VALIDATION` | msg.valueは期待される金額と一致する必要がある | INTEGRITY |
 | `PROP-ETH-REFUND-SAFETY` | ETH返金はリエントランシーガードを使用する | TRANSITION_SECURITY |
 
-### 5.17 Governance and Administrative Functions
+### 5.16 Governance and Administrative Functions
 
 ```mermaid
 flowchart TD
@@ -1508,7 +1469,7 @@ flowchart TD
 
 ---
 
-### 5.18 Adaptor SelfCall Protected Functions
+### 5.17 Adaptor SelfCall Protected Functions
 
 ```mermaid
 flowchart TD
@@ -1576,7 +1537,7 @@ AdaptorがSelfCallパターンを使用してunwrapSelf、bridgeUnderlyingTokenS
 
 ---
 
-### 5.19 IncentiveLib Fee Parameter Validation
+### 5.18 IncentiveLib Fee Parameter Validation
 
 ```mermaid
 flowchart TD
@@ -1643,7 +1604,7 @@ IncentiveLibの手数料パラメータ検証フローを表現します。kとT
 
 ---
 
-### 5.20 Adaptor Withdraw Function Flow
+### 5.19 Adaptor Withdraw Function Flow
 
 ```mermaid
 flowchart TD
@@ -1708,7 +1669,7 @@ Adaptor.withdraw()関数のフローを表現します。ユーザーが失敗�
 
 ---
 
-### 5.21 LiquidityManager receive() Native Token Handling
+### 5.20 LiquidityManager receive() Native Token Handling
 
 ```mermaid
 flowchart TD
@@ -1741,7 +1702,9 @@ flowchart TD
 | **ノード数** | 5 |
 | **エッジ数** | 4 |
 
-LiquidityManager receive()関数の詳細フローを表現します。underlyingトークンがnative（WETH）の場合のみETHを受け入れます。
+LiquidityManager receive()関数の詳細フローを表現します。underlyingトークンがnative ETHの場合のみETHを受け入れます。
+
+> **注記**: WETHラッピングは使用していません。ネイティブETHは直接処理されます。
 
 #### 関連プロパティ
 
@@ -1753,13 +1716,13 @@ LiquidityManager receive()関数の詳細フローを表現します。underlyin
 
 | 項目 | 説明 |
 |:---|:---|
-| **WETH時のみネイティブ** | receive()はunderlyingがWETHの場合のみETHを受け入れる |
-| **それ以外はリバート** | non-WETH underlyingコントラクトはETH receive時にリバート |
+| **ネイティブETH時のみ** | receive()は_isNativeUnderlyingがtrueの場合のみETHを受け入れる |
+| **それ以外はリバート** | non-native underlyingコントラクトはETH receive時にリバート |
 | **nonReentrant** | receive()はnonReentrantモディファイアで保護される |
 
 ---
 
-### 5.22 Adaptor _removeStargateDust Decimal Handling
+### 5.21 Adaptor _removeStargateDust Decimal Handling
 
 ```mermaid
 flowchart TD
@@ -1826,6 +1789,54 @@ Adaptor._removeStargateDust()関数の詳細フローを表現します。Starga
 
 ---
 
+### 5.22 Adaptor lzCompose Cross-Chain Unwrap Flow
+
+```mermaid
+flowchart TD
+    classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
+    classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+
+    STATE_USER_CHAIN_A["User on Chain A with zerc20"]
+    ACTION_SEND_VIA_OFT[["Send zerc20 via OFT from Chain A to Adaptor on Chain B"]]
+    STATE_ADAPTOR_RECEIVES["Adaptor receives zerc20 on Chain B via lzCompose"]
+    ACTION_CALL_UNWRAP[["Adaptor calls LiquidityManager.unwrap() on Chain B"]]
+    STATE_UNDERLYING_RECEIVED["Underlying token received on Chain B"]
+    ACTION_BRIDGE_BACK[["Send underlying via Stargate bridge back to Chain A"]]
+    STATE_USER_RECEIVES["User receives underlying on Chain A"]
+
+    STATE_USER_CHAIN_A -->|Initiate cross-chain unwrap| ACTION_SEND_VIA_OFT
+    ACTION_SEND_VIA_OFT -->|LayerZero delivers via lzCompose| STATE_ADAPTOR_RECEIVES
+    STATE_ADAPTOR_RECEIVES -->|Process received zerc20| ACTION_CALL_UNWRAP
+    ACTION_CALL_UNWRAP -->|zerc20 burned, underlying released| STATE_UNDERLYING_RECEIVED
+    STATE_UNDERLYING_RECEIVED -->|Bridge underlying to origin chain| ACTION_BRIDGE_BACK
+    ACTION_BRIDGE_BACK -->|Stargate delivers to user| STATE_USER_RECEIVES
+
+    class STATE_USER_CHAIN_A stateNode
+    class ACTION_SEND_VIA_OFT actionNode
+    class STATE_ADAPTOR_RECEIVES stateNode
+    class ACTION_CALL_UNWRAP actionNode
+    class STATE_UNDERLYING_RECEIVED stateNode
+    class ACTION_BRIDGE_BACK actionNode
+    class STATE_USER_RECEIVES stateNode
+```
+*図22: Adaptor lzCompose Cross-Chain Unwrap Flow*
+
+| 項目 | 値 |
+|:---|:---|
+| **グラフID** | GRAPH-ADAPTOR-LZCOMPOSE-CROSS-CHAIN |
+| **ノード数** | 7 |
+| **エッジ数** | 6 |
+
+このフローは、ユーザーがChain Aでzerc20を保有し、Chain Bの流動性を使用してunwrapしたい場合の橋渡し役としてAdaptorが機能することを示しています。zerc20はOFT経由でChain AからChain BのAdaptorに送信され、Chain BでLiquidityManager.unwrap()を呼び出してunderlyingトークンを取得し、Stargateブリッジ経由でChain Aのユーザーに返送されます。
+
+#### 関連プロパティ
+
+| ID | プロパティ | カテゴリ |
+|:---|:---|:---|
+| `PROP-ADAPTOR-CROSS-CHAIN-UNWRAP` | Adaptorがzerc20を受け取り、unwrapし、underlyingをブリッジバックするフローが正しく実行される | INTEGRITY |
+
+---
+
 ## 6. 境界セキュリティチェックリスト
 
 境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧156件)を参照してください。
@@ -1852,12 +1863,14 @@ Adaptor._removeStargateDust()関数の詳細フローを表現します。Starga
 | `CL-PROP-EDGE-028-LAYERZERO-TO-HUB-01` | Hubが_lzReceiveでソースEIDを登録Verifierリストに対して検証することを確認 | Cross-Chain Message Spoofing | Critical |
 | `CL-PROP-EDGE-029-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認 | Cross-Chain Message Spoofing | Critical |
 
-### 6.4 Stargateコールバック
+### 6.4 LayerZero lzComposeコールバック
 
 | ID | チェック項目 | バグクラス | 重大度ヒント |
 |:---|:---|:---|:---|
-| `CL-PROP-EDGE-033-STARGATE-TO-ADAPTOR-01` | AdaptorがlzComposeで送信者が認可されたStargateエンドポイントであることを検証することを確認 | Unauthorized Callback | Critical |
-| `CL-PROP-EDGE-033-STARGATE-TO-ADAPTOR-02` | amountReceivedLDがminAmountOutスリッページ制限を満たすことを検証し、リファンドロジックを正しく処理することを確認 | Slippage Bypass | High |
+| `CL-PROP-EDGE-028-LAYERZERO-TO-ADAPTOR-01` | Adaptorがmsg.senderがLayerZeroエンドポイントであり、_fromが登録されたzerc20アドレスであることを検証。デコードエラー時はrevertせずイベント発行+returnで資産ロック防止 | Unauthorized Callback / Asset Lock | Critical |
+| `CL-PROP-EDGE-028-LAYERZERO-TO-ADAPTOR-02` | amountReceivedLDがminAmountOutスリッページ制限を満たすことを検証し、リファンドロジックを正しく処理することを確認 | Slippage Bypass | High |
+
+> **注記**: リエントランシーが可能であったとしても、具体的な攻撃が存在しない限りは問題なしとします。
 
 ---
 
@@ -1964,7 +1977,7 @@ Adaptor._removeStargateDust()関数の詳細フローを表現します。Starga
 | EDGE-VERIFIER-TO-LAYERZERO | Verifier → LayerZero | IN_SCOPE → SEMI_TRUSTED | - |
 | EDGE-HUB-TO-LAYERZERO | Hub → LayerZero | IN_SCOPE → SEMI_TRUSTED | - |
 | EDGE-ADAPTOR-TO-STARGATE | Adaptor → Stargate | IN_SCOPE → SEMI_TRUSTED | - |
-| EDGE-STARGATE-TO-ADAPTOR | Stargate → Adaptor | SEMI_TRUSTED → IN_SCOPE | ✓ |
+| EDGE-LAYERZERO-TO-ADAPTOR | LayerZero → Adaptor | SEMI_TRUSTED → IN_SCOPE | ✓ |
 | EDGE-LIQUIDITY-MANAGER-TO-ZERC20 | LiquidityManager → zERC20 | IN_SCOPE → IN_SCOPE | - |
 | EDGE-VERIFIER-TO-ZERC20-TELEPORT | Verifier → zERC20 | IN_SCOPE → IN_SCOPE | ✓ |
 | EDGE-OWNER-UPGRADE | Owner → Contracts | TRUSTED → IN_SCOPE | OOS |
@@ -2130,14 +2143,13 @@ Adaptor._removeStargateDust()関数の詳細フローを表現します。Starga
 | AUTHORIZATION | LayerZeroメッセージフローはペイロード処理前にソースEIDを検証する |
 | DATA_PROTECTION | ステルスアドレス生成はシークレットから暗号学的にリンク不可能なアドレスを生成する |
 | SOUNDNESS | Poseidonハッシュ実装は衝突耐性がありcircom互換である |
-| SOUNDNESS | Baby JubJub曲線演算はBN254埋込曲線上で数学的に正しい |
 | DATA_PROTECTION | ICキャニスター連携は機密鍵導出と暗号化ストレージを提供する |
 | DATA_PROTECTION | Stargateブリッジフローはスリッページ保護を強制し払戻しを正しく処理する |
 | SOUNDNESS | Nova折畳スキームは証明を正しく蓄積しIVC健全性を維持する |
 | AUTHORIZATION | SelfCallパターンは保護関数への外部再入を防止する |
-| INTEGRITY | ネイティブETH処理はmsg.valueを検証しWETHに適切にラップする |
+| INTEGRITY | ネイティブETH処理はmsg.valueを検証しネイティブETHを直接処理する |
 | AUTHORIZATION | ガバナンス関数はonlyOwner修飾子を必要とする（対象外） |
-| AUTHORIZATION | lzComposeコールバックは送信者がLayerZeroエンドポイントでオリジンが登録済Stargateプールであることを検証する |
+| AUTHORIZATION | lzComposeコールバックは送信者がLayerZeroエンドポイントで_fromが登録済zerc20であることを検証する |
 | AUTHORIZATION | Adaptor SelfCall保護関数(unwrapSelf, bridgeZerc20Self等)は外部呼出し元によって呼び出せない |
 | INTEGRITY | Adaptorユーザーバランスマッピングは保留残高を正しく追跡しwithdraw時に適切にデビットされる |
 | INTEGRITY | IncentiveLib._validateFeeParamsは無効な手数料パラメータ(ゼロT、過剰T、過剰k、オーバーフロー)を正しくリジェクトする |
@@ -2331,14 +2343,13 @@ Adaptor._removeStargateDust()関数の詳細フローを表現します。Starga
 | `CL-PROP-SUBGRAPH-LZ-FLOW-001-01` | Critical | LayerZeroメッセージフローがソースEIDを検証することを確認する |
 | `CL-PROP-SUBGRAPH-STEALTH-001-01` | High | ステルスアドレスのリンク不可能性を検証する |
 | `CL-PROP-SUBGRAPH-POSEIDON-001-01` | Critical | Poseidonハッシュ衝突耐性とcircom互換性を検証する |
-| `CL-PROP-SUBGRAPH-BJJ-001-01` | Critical | BN254上のBaby JubJub曲線演算が数学的に正しいことを検証する |
 | `CL-PROP-SUBGRAPH-IC-001-01` | High | ICキャニスターがvetKd経由で機密鍵導出を提供することを検証する |
 | `CL-PROP-SUBGRAPH-STARGATE-001-01` | High | Stargateブリッジがスリッページ保護を強制し払戻しを処理することを検証する |
 | `CL-PROP-SUBGRAPH-NOVA-FOLDING-001-01` | Critical | Nova折畳スキームがIVC健全性を維持することを検証する |
 | `CL-PROP-SUBGRAPH-SELFCALL-001-01` | High | SelfCallパターンが外部再入を防止することを検証する |
-| `CL-PROP-SUBGRAPH-NATIVE-TOKEN-001-01` | Medium | ネイティブETH処理がmsg.valueを検証し正しくラップすることを検証する |
+| `CL-PROP-SUBGRAPH-NATIVE-TOKEN-001-01` | Medium | ネイティブETH処理がmsg.valueを検証しネイティブETHを直接処理することを検証する |
 | `CL-PROP-SUBGRAPH-GOVERNANCE-001-01` | Critical | ガバナンス関数がonlyOwner修飾子で制限されることを検証する（対象外） |
-| `CL-PROP-SUBGRAPH-LZCOMPOSE-001-01` | Critical | lzComposeコールバックが送信者を認証しStargateオリジンを検証することを確認する |
+| `CL-PROP-SUBGRAPH-LZCOMPOSE-001-01` | Critical | lzComposeコールバックが送信者を認証し_fromが登録済zerc20であることを検証する |
 | `CL-PROP-SUBGRAPH-ADAPTOR-SELFCALL-001-01` | High | Adaptor SelfCall保護関数が外部呼出しを拒否することを検証する |
 | `CL-PROP-ADAPTOR-BALANCE-TRACKING-001-01` | High | Adaptor withdraw()が全トークンタイプを正しく処理することを検証する |
 | `CL-PROP-SUBGRAPH-INCENTIVE-VALIDATION-001-01` | Medium | IncentiveLib._validateFeeParamsが無効パラメータを拒否することを検証する |

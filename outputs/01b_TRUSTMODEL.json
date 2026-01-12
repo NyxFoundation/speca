@@ -176,14 +176,19 @@
           "rationale": "Sends bridge requests. Slippage and other params must be validated."
         },
         {
-          "role": "CALLER_STARGATE",
+          "role": "CALLER_LAYERZERO",
           "trust_level": "SEMI_TRUSTED",
-          "rationale": "lzCompose callbacks from Stargate bridge. Called when cross-chain token transfer completes on destination chain. Stargate invokes lzCompose with OFTReceipt containing amountReceivedLD. Adaptor must validate sender is authorized Stargate endpoint and handle slippage between expected and received amounts.",
+          "rationale": "lzCompose callbacks invoked by LayerZero endpoint when cross-chain token transfer completes on destination chain. LayerZero endpoint invokes lzCompose with OFTReceipt containing amountReceivedLD. Adaptor must validate msg.sender is LayerZero endpoint and _from is registered zerc20 address.",
           "callback_context": {
-            "trigger": "Stargate OFT cross-chain transfer completion",
+            "trigger": "LayerZero lzCompose callback for OFT cross-chain transfer completion",
             "data_received": ["DATA-OFT-RECEIPT", "DATA-OFT-COMPOSE-MESSAGE"],
-            "validation_required": ["Sender is Stargate endpoint", "Amount received meets minAmountOut slippage limit"]
+            "validation_required": ["msg.sender is LayerZero endpoint", "_from is registered zerc20", "Amount received meets minAmountOut slippage limit"]
           }
+        },
+        {
+          "role": "CALLER_FEE_MANAGER",
+          "trust_level": "TRUSTED",
+          "rationale": "FEE_MANAGER_ROLE holder authorized to configure fee parameters via setFeeParams. Responsible for updating target liquidity T = total_liquidity / number_of_chains for each chain."
         }
       ]
     }
@@ -312,12 +317,6 @@
       "name": "Poseidon Hash Circuit",
       "trust_level": "TRUSTED",
       "rationale": "Audited light-poseidon library with circom-compatible configurations. Mathematical soundness."
-    },
-    {
-      "primitive_id": "CRYPTO-BABYJUBJUB",
-      "name": "Baby JubJub Curve Operations",
-      "trust_level": "TRUSTED",
-      "rationale": "zkSNARK-friendly elliptic curve on BN254 embedded curve. Mathematical soundness."
     },
     {
       "primitive_id": "CRYPTO-NOVA",
@@ -610,8 +609,9 @@
         "trust_level": "IN_SCOPE"
       },
       "data_flows": ["global_transfer_root", "source_eid"],
-      "validation_requirement": "CRITICAL: Validate source EID is authorized Hub before storing global root.",
-      "critical": true
+      "validation_requirement": "RECOMMENDED: Validate source EID is authorized Hub before storing global root. Note: setPeer already validates sender at LayerZero level.",
+      "critical": false,
+      "note": "Source EID validation is recommended but not strictly required since setPeer configuration already validates the sender at LayerZero level."
     },
     {
       "edge_id": "EDGE-VERIFIER-TO-LAYERZERO",
@@ -656,10 +656,10 @@
       "validation_requirement": "Enforce minAmountOut slippage limits. Stargate security is external dependency."
     },
     {
-      "edge_id": "EDGE-STARGATE-TO-ADAPTOR",
-      "description": "Stargate bridge invokes lzCompose callback on Adaptor after cross-chain token transfer completes.",
+      "edge_id": "EDGE-LAYERZERO-TO-ADAPTOR",
+      "description": "LayerZero endpoint invokes lzCompose callback on Adaptor after cross-chain OFT transfer completes.",
       "source": {
-        "component": "DEP-STARGATE",
+        "component": "DEP-LAYERZERO",
         "trust_level": "SEMI_TRUSTED"
       },
       "target": {
@@ -669,15 +669,18 @@
       "data_flows": [
         "DATA-OFT-RECEIPT",
         "DATA-OFT-COMPOSE-MESSAGE",
-        "sender endpoint address"
+        "_from (zerc20 address)",
+        "msg.sender (LayerZero endpoint)"
       ],
-      "validation_requirement": "CRITICAL: Validate sender is authorized Stargate endpoint. Verify amountReceivedLD meets minAmountOut slippage limit. Handle refund logic if slippage exceeded. Prevent reentrancy via lzCompose callback.",
+      "validation_requirement": "CRITICAL: Validate msg.sender is LayerZero endpoint. Validate _from is registered zerc20 address. Verify amountReceivedLD meets minAmountOut slippage limit. Do NOT revert on decode errors (emit event and return instead to prevent asset lock).",
       "critical": true,
+      "trust_boundary_note": "If LayerZero is considered TRUSTED, this edge may not strictly be a trust boundary. However, validation is still recommended for defense in depth.",
       "security_notes": [
-        "lzCompose is called by Stargate after token transfer - Adaptor does not control when this is invoked",
+        "lzCompose is called by LayerZero endpoint after OFT token transfer - Adaptor does not control when this is invoked",
+        "Must NOT revert on malformed messages - emit DecodeBridgeRequestFailed event and return to prevent assets from being stuck",
         "Slippage between amountSentLD and amountReceivedLD is expected due to bridge fees",
         "Refund address in composeMsg must be validated to prevent fund misdirection",
-        "Reentrancy risk: lzCompose callback occurs before Adaptor's original transaction completes"
+        "Reentrancy note: even if reentrancy is possible, it is not a vulnerability unless a concrete exploit path exists"
       ]
     },
     {
@@ -850,12 +853,12 @@
     },
     {
       "boundary_type": "EXTERNAL_BRIDGE",
-      "description": "Bidirectional cross-chain asset bridging via Stargate",
+      "description": "Bidirectional cross-chain asset bridging via Stargate with LayerZero lzCompose callbacks",
       "edge_ids": [
         "EDGE-ADAPTOR-TO-STARGATE",
-        "EDGE-STARGATE-TO-ADAPTOR"
+        "EDGE-LAYERZERO-TO-ADAPTOR"
       ],
-      "validation_principle": "Outbound: Slippage limits (minAmountOut) protect against fees/manipulation. Inbound (lzCompose): Validate sender endpoint, verify received amount meets slippage limit, handle refunds correctly. Stargate security is external dependency."
+      "validation_principle": "Outbound: Slippage limits (minAmountOut) protect against fees/manipulation. Inbound (lzCompose via LayerZero): Validate msg.sender is LayerZero endpoint, validate _from is registered zerc20, verify received amount meets slippage limit, do NOT revert on decode errors. Stargate/LayerZero security is external dependency."
     }
   ]
 }
