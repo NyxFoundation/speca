@@ -1840,7 +1840,7 @@ flowchart TD
 
 ## 6. 境界セキュリティチェックリスト
 
-境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧156件)を参照してください。
+境界セキュリティに関する33のチェックリスト項目が定義されています。以下に主要なものを示します。完全なリストは[付録C.3](#c3-チェックリスト完全一覧154件)を参照してください。
 
 ### 6.1 ユーザー入力検証
 
@@ -1861,8 +1861,8 @@ flowchart TD
 
 | ID | チェック項目 | バグクラス | 重大度ヒント |
 |:---|:---|:---|:---|
-| `CL-PROP-EDGE-028-LAYERZERO-TO-HUB-01` | Hubが_lzReceiveでソースEIDを登録Verifierリストに対して検証することを確認 | Cross-Chain Message Spoofing | Critical |
-| `CL-PROP-EDGE-029-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認（推奨事項：setPeerにより既に送信元検証済みのため必須ではない） | Cross-Chain Message Spoofing | Critical |
+| `CL-PROP-EDGE-023-LAYERZERO-TO-HUB-01` | Hubが_lzReceiveでソースEIDを登録Verifierリストに対して検証することを確認 | Cross-Chain Message Spoofing | Critical |
+| `CL-PROP-EDGE-024-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認（推奨事項：setPeerにより既に送信元検証済みのため必須ではない） | Cross-Chain Message Spoofing | Critical |
 
 ### 6.4 LayerZero lzComposeコールバック
 
@@ -1877,7 +1877,7 @@ flowchart TD
 
 ## 7. プロパティカテゴリ別サマリ
 
-本プロトコルには143のプロパティが定義されており、以下の8カテゴリに分類されています。
+本プロトコルには142のプロパティが定義されており、以下の8カテゴリに分類されています。
 
 | カテゴリ | 説明 | プロパティ数 |
 |:---|:---|:---|
@@ -1910,8 +1910,8 @@ flowchart TD
 
 1. **プロトコル仕様**: 16のエンティティ、36のデータ構造、メインプログラムグラフと22のサブグラフ
 2. **トラストモデル**: 4段階の信頼レベル、5つのオンチェーンコンポーネント、5つのオフチェーンコンポーネント、2つの外部依存関係、20の信頼境界エッジ
-3. **プロパティ**: 8カテゴリ、143のプロパティ（100%カバレッジ）
-4. **チェックリスト**: 33の境界セキュリティチェックリスト、123のプロパティベースチェックリスト（合計156件）
+3. **プロパティ**: 8カテゴリ、142のプロパティ（100%カバレッジ）
+4. **チェックリスト**: 33の境界セキュリティチェックリスト、121のプロパティベースチェックリスト（合計154件）
 
 本文書で提示した仕様、トラストモデル、プロパティ、およびチェックリストについて、貴社からのフィードバックをいただきたく存じます。特に以下の点についてご確認ください。
 
@@ -2007,9 +2007,9 @@ flowchart TD
 | SOUNDNESS | 13 | 暗号学的証明システムの健全性 |
 | DATA_PROTECTION | 5 | データの機密性と転送中の整合性 |
 | MONOTONICITY | 4 | 値が必要に応じて増加または減少のみする性質 |
-| **合計** | **143** | |
+| **合計** | **142** | |
 
-#### B.2 プロパティ完全一覧（143件）
+#### B.2 プロパティ完全一覧（142件）
 
 ##### ノードプロパティ（73件）
 
@@ -2190,7 +2190,7 @@ flowchart TD
 | Low | 12 | サービス可用性、マイナーな状態不整合 |
 | Informational | 5 | Owner操作（監査対象外） |
 
-#### C.3 チェックリスト完全一覧（156件）
+#### C.3 チェックリスト完全一覧（154件）
 
 ##### 境界セキュリティチェック（33件）
 
@@ -2213,8 +2213,8 @@ flowchart TD
 | `CL-PROP-EDGE-026-HUB-TO-LAYERZERO-01` | High | 登録済全Verifierへの省略なしブロードキャストの信頼境界整合性を検証する |
 | `CL-PROP-EDGE-026-HUB-TO-LAYERZERO-02` | Critical | PoseidonT3 Merkleツリーを正しく計算する実装を確認する |
 | `CL-PROP-EDGE-027-ADAPTOR-TO-STARGATE-01` | High | minAmountOutスリッページ保護適用の信頼境界整合性を検証する |
-| `CL-PROP-EDGE-028-STARGATE-TO-ADAPTOR-01` | Critical | lzComposeコールバック認証とスリッページ検証の信頼境界整合性を検証する |
-| `CL-PROP-EDGE-028-STARGATE-TO-ADAPTOR-02` | High | OFTコンポーズメッセージ構造を正しくデコードする実装を確認する |
+| `CL-PROP-EDGE-028-LAYERZERO-TO-ADAPTOR-01` | Critical | lzComposeコールバック認証とスリッページ検証の信頼境界整合性を検証する |
+| `CL-PROP-EDGE-028-LAYERZERO-TO-ADAPTOR-02` | High | OFTコンポーズメッセージ構造を正しくデコードする実装を確認する |
 | `CL-PROP-EDGE-029-LIQUIDITY-MANAGER-TO-ZERC20-01` | Critical | mint/burn呼出しでのMinter認可の信頼境界整合性を検証する |
 | `CL-PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT-01` | Critical | teleportミンティングでのVerifier認可の信頼境界整合性を検証する |
 | `CL-PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT-02` | Critical | ミント金額をdeltaとして正しく計算する実装を確認する |
