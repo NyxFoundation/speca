@@ -9,7 +9,7 @@
 1. [はじめに](#1-はじめに)
 2. [プロトコル仕様](#2-プロトコル仕様)
    - [2.1 概要](#21-概要)
-   - [2.2 主要な登場人物 (Entities)](#22-主要な登場人物-trusted-entities)
+   - [2.2 主要な登場人物 (Entities)](#22-主要な登場人物-entities)
    - [2.3 主要なデータ構造](#23-主要なデータ構造)
 3. [トラストモデル](#3-トラストモデル)
    - [3.1 信頼レベル定義](#31-信頼レベル定義)
@@ -1456,7 +1456,7 @@ flowchart TD
 
 | ID | プロパティ | カテゴリ |
 |:---|:---|:---|
-| `PROP-ADMIN-ONLY-OWNER` | すべての管理関数はonlyOwnerモディファイアで保護される | AUTHORIZATION |
+| `PROP-ADMIN-ONLY-OWNER` | 管理関数はonlyOwnerまたはonlyRole(FEE_MANAGER_ROLE)モディファイアで保護される。setFeeParamsはFEE_MANAGER_ROLEを使用 | AUTHORIZATION |
 | `PROP-ADMIN-NO-TIMELOCK` | 管理操作はタイムロックなしで即時に効果を発揮する | STATE_INVARIANT |
 
 #### セキュリティ考慮事項
@@ -1465,7 +1465,7 @@ flowchart TD
 |:---|:---|
 | **タイムロックなし** | 管理操作は遅延なしで即時に効果を発揮 |
 | **オーナー鍵リスク** | オーナー鍵の侵害はプロトコル完全制御を可能にする |
-| **推奨事項** | 重要な操作にはタイムロックまたはマルチシグの実装を検討 |
+| **推奨事項** | 重要な操作にはタイムロックまたはマルチシグの実装を検討（Safe walletの責務、監査対象外） |
 
 ---
 
@@ -1483,7 +1483,7 @@ flowchart TD
     ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF[["this.bridgeUnderlyingTokenSelf - params"]]
     ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF[["this.bridgeZerc20Self - amount, bridgeRequest"]]
     ACTION_ADAPTOR_ONLY_SELFCALL_CHECK[["onlySelfCall Modifier Validation"]]
-    STATE_ADAPTOR_SELFCALL_REJECTED(("External Call Rejected - SelfCallNotAllowed"))
+    STATE_ADAPTOR_SELFCALL_REJECTED(("External Call Rejected - SelfCallNotAllowed [理論上のみ]"))
     ACTION_ADAPTOR_EXECUTE_UNWRAP[["Execute unwrap via LiquidityManager"]]
     ACTION_ADAPTOR_EXECUTE_BRIDGE[["Execute Stargate bridge with slippage"]]
     STATE_ADAPTOR_SELFCALL_COMPLETE["SelfCall Operation Complete"]
@@ -1496,7 +1496,7 @@ flowchart TD
     ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
     ACTION_ADAPTOR_CALL_BRIDGE_ZERC20_SELF -->|Modifier validates caller| ACTION_ADAPTOR_ONLY_SELFCALL_CHECK
     ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|msg.sender == address and flag set| ACTION_ADAPTOR_EXECUTE_UNWRAP
-    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -->|External caller - revert| STATE_ADAPTOR_SELFCALL_REJECTED
+    ACTION_ADAPTOR_ONLY_SELFCALL_CHECK -.->|External caller - revert [通常到達不可]| STATE_ADAPTOR_SELFCALL_REJECTED
     ACTION_ADAPTOR_EXECUTE_UNWRAP -->|Unwrap complete| ACTION_ADAPTOR_EXECUTE_BRIDGE
     ACTION_ADAPTOR_EXECUTE_BRIDGE -->|Bridge initiated| STATE_ADAPTOR_SELFCALL_COMPLETE
 
@@ -1534,6 +1534,7 @@ AdaptorがSelfCallパターンを使用してunwrapSelf、bridgeUnderlyingTokenS
 | **外部呼出し防止** | unwrapSelf、bridgeUnderlyingTokenSelf、bridgeZerc20Selfは外部から呼び出せない |
 | **モディファイア強制** | onlySelfCallはmsg.sender == address(this) AND _isSelfCallAllowedフラグの両方をチェック |
 | **アトミック操作** | SelfCallフラグは操作完了またはリバート後にリセットされる |
+| **注記** | 図中のSelfCallNotAllowedエラー分岐は、onlySelfCallモディファイアの外からの呼び出しでのみ発生する理論上のケースであり、通常のフローでは到達しない |
 
 ---
 
@@ -1861,7 +1862,7 @@ flowchart TD
 | ID | チェック項目 | バグクラス | 重大度ヒント |
 |:---|:---|:---|:---|
 | `CL-PROP-EDGE-028-LAYERZERO-TO-HUB-01` | Hubが_lzReceiveでソースEIDを登録Verifierリストに対して検証することを確認 | Cross-Chain Message Spoofing | Critical |
-| `CL-PROP-EDGE-029-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認 | Cross-Chain Message Spoofing | Critical |
+| `CL-PROP-EDGE-029-LAYERZERO-TO-VERIFIER-01` | Verifierがグローバルルートを保存する前にソースEIDが認可されたHubであることを検証することを確認（推奨事項：setPeerにより既に送信元検証済みのため必須ではない） | Cross-Chain Message Spoofing | Critical |
 
 ### 6.4 LayerZero lzComposeコールバック
 
@@ -2119,7 +2120,7 @@ flowchart TD
 | BOUNDARY_SECURITY | Verifier→LayerZeroは正しいエンコーディングで証明済ルートをLayerZeroに送信する |
 | BOUNDARY_SECURITY | Hub→LayerZeroは省略なく登録済全Verifierにブロードキャストする |
 | BOUNDARY_SECURITY | Adaptor→StargateはminAmountOutスリッページ保護を強制する |
-| BOUNDARY_SECURITY | Stargate→Adaptorは送信者が認可されたStargateエンドポイントで金額がスリッページを満たすことを検証する |
+| BOUNDARY_SECURITY | LayerZero→Adaptorは送信者がLayerZeroエンドポイントで_fromが登録zerc20、金額がスリッページを満たすことを検証する |
 | BOUNDARY_SECURITY | LiquidityManager→zERC20は呼出者が認可されたminterであることが必要 |
 | BOUNDARY_SECURITY | Verifier→zERC20(teleport)は呼出者が認可されたverifierで証明が有効であることが必要 |
 | BOUNDARY_SECURITY | オーナーアップグレードは呼出者がコントラクトオーナーであることが必要（対象外） |
@@ -2165,7 +2166,7 @@ flowchart TD
 
 | カテゴリ | プロパティ内容 |
 |:---|:---|
-| SOUNDNESS | ZKPシステム(Nova + Groth16)は128ビットセキュリティレベルと健全性を維持する |
+| SOUNDNESS | ZKPシステム(Nova + Groth16)は健全性を維持する（bn254は100bit以下のセキュリティ、burn address衝突は89bitまで低下、既知問題としてスコープ外） |
 | MONOTONICITY | 単調なtotalTeleportedにより二重支払いを防止する（同一teleportの二重実行不可） |
 | AUTHORIZATION | クロスチェーンメッセージはソースEID検証により認証される |
 | AUTHORIZATION | zERC20ミントはLiquidityManager.mint()とVerifier.teleport()の2つの認可経路のみで実行可能 |
@@ -2364,7 +2365,7 @@ flowchart TD
 
 | ID | 重要度 | チェック内容 |
 |:---|:---|:---|
-| `CL-PROP-CRITICAL-001-ZKP-SOUNDNESS-01` | Critical | **重要**: ZKPシステムが128ビットセキュリティと健全性を維持することを検証する |
+| `CL-PROP-CRITICAL-001-ZKP-SOUNDNESS-01` | Critical | **重要**: ZKPシステムが健全性を維持することを検証する（bn254は100bit以下、burn address衝突は89bit既知問題） |
 | `CL-PROP-CRITICAL-002-DOUBLE-SPEND-01` | Critical | **重要**: 単調なtotalTeleportedによる二重支払い防止を検証する |
 | `CL-PROP-CRITICAL-003-CROSS-CHAIN-INTEGRITY-01` | Critical | **重要**: ソースEIDによるクロスチェーンメッセージ認証を検証する |
 | `CL-PROP-CRITICAL-004-MINTING-AUTH-01` | Critical | **重要**: zERC20ミントが認可経路のみに制限されることを検証する |
