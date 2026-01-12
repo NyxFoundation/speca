@@ -141,7 +141,7 @@
 | `DATA-ENCRYPTED-STATE` | IC Encrypted State | IC Storageキャニスターに保存されるAES-GCM暗号化ユーザー状態 |
 | `DATA-MINTABLE-BURNABLE-INTERFACE` | IMintableBurnableERC20 Interface | mint(address to, uint256 amount)とburn(address from, uint256 amount)を公開するERC20トークンの最小インターフェース。LiquidityManagerがzERC20と対話するために使用 |
 | `DATA-ADAPTOR-USER-BALANCES` | Adaptor User Balance Mappings | Adaptor内部バランス追跡: zerc20Balances[user], nativeBalances[user], underlingTokenBalances[user]。クロスチェーン操作中および失敗したcompose処理時のユーザー保留残高を追跡 |
-| `DATA-INCENTIVE-FEE-PARAMS` | IncentiveLib Fee Parameters | 検証済み手数料カーブパラメータ: k（ベーシスポイント強度、K_BPS_DENOM以下）、T（目標流動性、0より大きくMAX_TARGET_LIQUIDITY以下）。LiquidityManagerストレージに保存され_validateFeeParamsで検証 |
+| `DATA-INCENTIVE-FEE-PARAMS` | IncentiveLib Fee Parameters | 検証済み手数料カーブパラメータ: k（ベーシスポイント強度、K_BPS_DENOM以下）、T（目標流動性、MAX_TARGET_LIQUIDITY以下）。LiquidityManagerストレージに保存され_validateFeeParamsで検証 |
 
 ---
 
@@ -1625,8 +1625,6 @@ flowchart TD
     classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
 
     STATE_FEE_PARAMS_INPUT["Fee Parameters Received - k, T"]
-    ACTION_VALIDATE_TARGET_NONZERO[["Check targetLiquidity > 0"]]
-    STATE_ZERO_TARGET_REJECTED(("Zero Target Liquidity - InvalidFeeParams"))
     ACTION_VALIDATE_TARGET_MAX[["Check targetLiquidity <= MAX_TARGET_LIQUIDITY"]]
     STATE_EXCESS_TARGET_REJECTED(("Excessive Target Liquidity - InvalidFeeParams"))
     ACTION_VALIDATE_K_MAX[["Check k <= K_BPS_DENOM - 10000"]]
@@ -1635,9 +1633,7 @@ flowchart TD
     STATE_OVERFLOW_REJECTED(("Potential Overflow - InvalidFeeParams"))
     STATE_FEE_PARAMS_VALID["Fee Parameters Valid - Store in Storage"]
 
-    STATE_FEE_PARAMS_INPUT -->|Begin validation| ACTION_VALIDATE_TARGET_NONZERO
-    ACTION_VALIDATE_TARGET_NONZERO -->|targetLiquidity == 0| STATE_ZERO_TARGET_REJECTED
-    ACTION_VALIDATE_TARGET_NONZERO -->|targetLiquidity > 0| ACTION_VALIDATE_TARGET_MAX
+    STATE_FEE_PARAMS_INPUT -->|Begin validation| ACTION_VALIDATE_TARGET_MAX
     ACTION_VALIDATE_TARGET_MAX -->|targetLiquidity > MAX| STATE_EXCESS_TARGET_REJECTED
     ACTION_VALIDATE_TARGET_MAX -->|targetLiquidity <= MAX| ACTION_VALIDATE_K_MAX
     ACTION_VALIDATE_K_MAX -->|k > K_BPS_DENOM| STATE_EXCESS_K_REJECTED
@@ -1646,8 +1642,6 @@ flowchart TD
     ACTION_VALIDATE_OVERFLOW -->|All validations passed| STATE_FEE_PARAMS_VALID
 
     class STATE_FEE_PARAMS_INPUT stateNode
-    class ACTION_VALIDATE_TARGET_NONZERO actionNode
-    class STATE_ZERO_TARGET_REJECTED errorNode
     class ACTION_VALIDATE_TARGET_MAX actionNode
     class STATE_EXCESS_TARGET_REJECTED errorNode
     class ACTION_VALIDATE_K_MAX actionNode
@@ -1661,8 +1655,8 @@ flowchart TD
 | 項目 | 値 |
 |:---|:---|
 | **グラフID** | GRAPH-INCENTIVE-VALIDATION |
-| **ノード数** | 10 |
-| **エッジ数** | 9 |
+| **ノード数** | 8 |
+| **エッジ数** | 7 |
 
 IncentiveLibの手数料パラメータ検証フローを表現します。kとTの値がオーバーフローを防ぎ正確なインセンティブ計算を保証する許容範囲内であることを確認します。
 
@@ -1677,9 +1671,9 @@ IncentiveLibの手数料パラメータ検証フローを表現します。kとT
 
 | 項目 | 説明 |
 |:---|:---|
-| **ゼロ除算防止** | 目標流動性はゼロにできない（密度計算でのゼロ除算を回避） |
 | **オーバーフロー防止** | k * T * Tは安全な算術のためuint256に収まる必要がある |
 | **境界強制** | kは過剰な手数料を防ぐため100%（10000 bps）で上限 |
+| **最大値制限** | 目標流動性はMAX_TARGET_LIQUIDITY以下に制限 |
 
 ---
 
