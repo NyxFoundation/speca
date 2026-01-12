@@ -477,7 +477,7 @@ flowchart TD
 
     subgraph CrossChainFlow["Cross-Chain zERC20 Bridge Flow - Chain A to B"]
         STATE_USER_CHAIN_A["User on Chain A with zERC20"]
-        ACTION_SEND_OFT[["Send zERC20 via OFT to Chain B Adaptor"]]
+        ACTION_SEND_OFT[["zERC20.send() with lzCompose option to Chain B Adaptor"]]
         STATE_OFT_IN_TRANSIT["OFT Transfer In Transit"]
         ACTION_LZ_DELIVER[["LayerZero Delivers to Chain B"]]
     end
@@ -573,7 +573,7 @@ flowchart TD
 
     %% Cross-Chain Bridge Flow - lzCompose
     %% User on Chain A wants to unwrap using Chain B liquidity
-    STATE_USER_CHAIN_A -->|"bridgeZerc20() on Chain A"| ACTION_SEND_OFT
+    STATE_USER_CHAIN_A -->|"zERC20.send() with lzCompose option"| ACTION_SEND_OFT
     ACTION_SEND_OFT --> STATE_OFT_IN_TRANSIT
     STATE_OFT_IN_TRANSIT --> ACTION_LZ_DELIVER
     ACTION_LZ_DELIVER -->|"lzCompose callback on Chain B"| ACTION_ADAPTOR_LZCOMPOSE
@@ -624,7 +624,7 @@ flowchart TD
 5. **Cross-Chain Flow**: LayerZeroを介したHub-Verifier間の通信
 6. **Local Bridge Flow**: 同一チェーンでのStargateブリッジ
 7. **Cross-Chain Bridge Flow (lzCompose)**: Chain AのzERC20をChain Bの流動性でunwrapし、Stargateで送り返すフロー
-   - ユーザーがChain AでbridgeZerc20()を呼び出し、zERC20をOFTでChain BのAdaptorに送信
+   - ユーザーがChain Aでzerc20のOFT send()メソッドにlzComposeオプションを付けて実行し、Chain BのAdaptorに送信
    - LayerZeroがChain BでlzComposeコールバックを呼び出し
    - AdaptorがzERC20を受け取り、LiquidityManagerでunderlying tokenにunwrap
    - underlying tokenをStargateでChain Aに送り返す
@@ -1555,7 +1555,7 @@ flowchart TD
     classDef actionNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
     classDef errorNode fill:#ffcdd2,stroke:#c62828,stroke-width:2px
 
-    STATE_ADAPTOR_ENTRY["Adaptor Entry Point - unwrapAndBridge/bridgeZerc20"]
+    STATE_ADAPTOR_ENTRY["Adaptor Entry Point - unwrapAndBridge"]
     ACTION_ADAPTOR_ENABLE_SELFCALL[["enableSelfCall - Set Context Flag"]]
     ACTION_ADAPTOR_CALL_UNWRAP_SELF[["unwrapSelf - amount, receiver"]]
     ACTION_ADAPTOR_CALL_BRIDGE_UNDERLYING_SELF[["bridgeUnderlyingTokenSelf - params"]]
@@ -1876,14 +1876,14 @@ flowchart TD
     classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
 
     STATE_USER_CHAIN_A["User on Chain A with zerc20"]
-    ACTION_SEND_VIA_OFT[["Send zerc20 via OFT from Chain A to Adaptor on Chain B"]]
+    ACTION_SEND_VIA_OFT[["zerc20.send() with lzCompose option to Adaptor on Chain B"]]
     STATE_ADAPTOR_RECEIVES["Adaptor receives zerc20 on Chain B via lzCompose"]
     ACTION_CALL_UNWRAP[["Adaptor calls LiquidityManager.unwrap() on Chain B"]]
     STATE_UNDERLYING_RECEIVED["Underlying token received on Chain B"]
     ACTION_BRIDGE_BACK[["Send underlying via Stargate bridge back to Chain A"]]
     STATE_USER_RECEIVES["User receives underlying on Chain A"]
 
-    STATE_USER_CHAIN_A -->|Initiate cross-chain unwrap| ACTION_SEND_VIA_OFT
+    STATE_USER_CHAIN_A -->|"zerc20.send() with lzCompose"| ACTION_SEND_VIA_OFT
     ACTION_SEND_VIA_OFT -->|LayerZero delivers via lzCompose| STATE_ADAPTOR_RECEIVES
     STATE_ADAPTOR_RECEIVES -->|Process received zerc20| ACTION_CALL_UNWRAP
     ACTION_CALL_UNWRAP -->|zerc20 burned, underlying released| STATE_UNDERLYING_RECEIVED
@@ -1906,7 +1906,7 @@ flowchart TD
 | **ノード数** | 7 |
 | **エッジ数** | 6 |
 
-このフローは、ユーザーがChain Aでzerc20を保有し、Chain Bの流動性を使用してunwrapしたい場合の橋渡し役としてAdaptorが機能することを示しています。zerc20はOFT経由でChain AからChain BのAdaptorに送信され、Chain BでLiquidityManager.unwrap()を呼び出してunderlyingトークンを取得し、Stargateブリッジ経由でChain Aのユーザーに返送されます。
+このフローは、ユーザーがChain Aでzerc20を保有し、Chain Bの流動性を使用してunwrapしたい場合の橋渡し役としてAdaptorが機能することを示しています。ユーザーはzerc20のOFT send()メソッドにlzComposeオプションを付けて実行し、Chain BのAdaptorを宛先として送信します。LayerZeroがChain BでlzComposeコールバックを呼び出し、AdaptorがLiquidityManager.unwrap()を実行してunderlyingトークンを取得し、Stargateブリッジ経由でChain Aのユーザーに返送されます。
 
 #### 関連プロパティ
 
