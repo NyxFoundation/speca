@@ -1407,8 +1407,8 @@ flowchart TD
     classDef stateNode fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
     classDef actionNode fill:#fff3e0,stroke:#f57c00,stroke-width:2px
 
-    STATE_OWNER_IDLE["Contract Owner Ready"]
-    ACTION_OWNER_SET_FEE_PARAMS[["setFeeParams[k, T] - Update Incentive Curve"]]
+    STATE_OWNER_IDLE["Contract Owner/Fee Manager Ready"]
+    ACTION_FEE_MANAGER_SET_FEE_PARAMS[["setFeeParams[k, T] - Update Incentive Curve [FEE_MANAGER_ROLE]"]]
     ACTION_OWNER_WITHDRAW_REWARDS[["withdrawRewards[amount] - Extract Fee Surplus"]]
     ACTION_OWNER_SET_VERIFIERS[["setVerifiers[addresses] - Rotate Verifier Set"]]
     ACTION_OWNER_REGISTER_TOKEN[["registerToken[tokenInfo] - Add Token to Hub"]]
@@ -1417,14 +1417,14 @@ flowchart TD
     ACTION_OWNER_UPGRADE_CONTRACT[["upgradeToAndCall[impl, data] - UUPS Upgrade"]]
     STATE_ADMIN_ACTION_COMPLETE["Administrative Action Complete"]
 
-    STATE_OWNER_IDLE -->|Owner updates fee parameters| ACTION_OWNER_SET_FEE_PARAMS
+    STATE_OWNER_IDLE -->|Fee Manager updates fee parameters| ACTION_FEE_MANAGER_SET_FEE_PARAMS
     STATE_OWNER_IDLE -->|Owner extracts accumulated fees| ACTION_OWNER_WITHDRAW_REWARDS
     STATE_OWNER_IDLE -->|Owner rotates verifier set| ACTION_OWNER_SET_VERIFIERS
     STATE_OWNER_IDLE -->|Owner adds new token to Hub| ACTION_OWNER_REGISTER_TOKEN
     STATE_OWNER_IDLE -->|Owner modifies token configuration| ACTION_OWNER_UPDATE_TOKEN
     STATE_OWNER_IDLE -->|Owner changes minting authority| ACTION_OWNER_SET_MINTER
     STATE_OWNER_IDLE -->|Owner upgrades contract implementation| ACTION_OWNER_UPGRADE_CONTRACT
-    ACTION_OWNER_SET_FEE_PARAMS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
+    ACTION_FEE_MANAGER_SET_FEE_PARAMS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
     ACTION_OWNER_WITHDRAW_REWARDS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
     ACTION_OWNER_SET_VERIFIERS -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
     ACTION_OWNER_REGISTER_TOKEN -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
@@ -1433,7 +1433,7 @@ flowchart TD
     ACTION_OWNER_UPGRADE_CONTRACT -->|Action completed| STATE_ADMIN_ACTION_COMPLETE
 
     class STATE_OWNER_IDLE stateNode
-    class ACTION_OWNER_SET_FEE_PARAMS actionNode
+    class ACTION_FEE_MANAGER_SET_FEE_PARAMS actionNode
     class ACTION_OWNER_WITHDRAW_REWARDS actionNode
     class ACTION_OWNER_SET_VERIFIERS actionNode
     class ACTION_OWNER_REGISTER_TOKEN actionNode
