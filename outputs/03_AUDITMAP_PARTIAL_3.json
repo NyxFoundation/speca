@@ -1,0 +1,998 @@
+{
+  "metadata": {
+    "title": "zERC20 Privacy Token Protocol - Audit Map Batch 3",
+    "version": "1.0.0",
+    "generated_at": "2026-01-13T00:00:00Z",
+    "batch_number": 3,
+    "items_in_batch": 20,
+    "methodology": "5-phase attack vector analysis with counterexample construction"
+  },
+  "audit_results": [
+    {
+      "checklist_id": "CL-PROP-NODE-008-STATE-WRAP-COMPLETE-01",
+      "property_id": "PROP-NODE-008-STATE-WRAP-COMPLETE",
+      "title": "Wrap operation atomicity verification",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to trigger wrap completion without successful underlying transfer",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:249-277",
+          "analysis": "The _wrap function performs: (1) balance check at line 255-264, (2) received validation at line 266, (3) reward calculation at 271-273, and (4) mint at 275. If underlying transfer fails, safeTransferFrom reverts. If received == 0, UnderlyingPullFailed() reverts. All operations are in single transaction with no intermediate saves.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Attempt to reach wrap completion state without mint succeeding",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:275",
+          "analysis": "ZERC20_TOKEN.mint() is called before the Wrapped event emission at line 276. If mint() fails (e.g., due to ValueTooLarge from _update), the entire transaction reverts, preventing partial state.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS by repeated wrap calls with dust amounts",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:250",
+          "analysis": "ZeroAmount check at line 250 prevents zero-amount calls. Each wrap has O(1) gas complexity. nonReentrant modifier at line 103 prevents reentrancy-based DoS. No unbounded loops exist.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Silent failure during wrap leading to lost funds",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:249-277",
+          "analysis": "All failure paths use explicit revert: ZeroAmount(), ZeroReceiver(), InvalidMsgValue(), UnderlyingPullFailed(). SafeERC20 reverts on transfer failure. No silent failures possible.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Front-run wrap to manipulate reward calculation",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:268-274",
+          "analysis": "Reward is calculated using pre-deposit liquidity (balanceBefore at line 255). A front-running wrap would affect the reward of a victim but within expected incentive curve behavior. nonReentrant prevents reentrancy. This is expected MEV behavior, not a bug.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker attempts to receive zERC20 without depositing underlying",
+        "preconditions": ["Attacker has approval but insufficient underlying balance"],
+        "attack_steps": ["Call wrap() with amount > actual balance", "safeTransferFrom reverts due to insufficient balance", "Transaction reverts - no state change"],
+        "expected_result": "Attack fails - atomicity maintained",
+        "actual_result": "Attack fails as expected"
+      },
+      "guards_identified": ["nonReentrant modifier", "ZeroAmount check", "ZeroReceiver check", "safeTransferFrom revert on failure", "received == 0 check"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "Atomicity is guaranteed by EVM transaction semantics. All operations either complete together or revert together. VERIFIED: No partial state is possible."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-009-STATE-LM-AWAITING-UNWRAP-01",
+      "property_id": "PROP-NODE-009-STATE-LM-AWAITING-UNWRAP",
+      "title": "Unwrap requires sufficient zERC20 balance",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt unwrap with amount > zERC20 balance",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:288",
+          "analysis": "ZERC20_TOKEN.burn(msg.sender, amount) at line 288 calls zERC20.burn() which calls _burn(). OpenZeppelin's _burn() at ERC20Upgradeable._update() reverts with ERC20InsufficientBalance if amount > balance. No pre-check needed - handled by ERC20.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Extract underlying without burning zERC20",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:288-297",
+          "analysis": "burn() at line 288 MUST succeed before transfer at lines 291-296. Order is: burn first, transfer second. If burn fails, revert occurs and no transfer happens.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS by repeated failed unwrap attempts",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "Failed unwraps revert immediately on burn failure. Gas cost is borne by attacker. No state pollution from failed attempts. nonReentrant prevents callback exploitation.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Unwrap fails silently without returning tokens",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "All failure paths revert: ZeroAmount(), ZeroReceiver(), ERC20 burn revert, InsufficientLiquidity(), UnderlyingSendFailed(). No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Race condition between balance check and burn",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:288",
+          "analysis": "There is no separate balance check before burn. The burn operation itself is atomic and checks balance internally via OpenZeppelin ERC20._update(). No TOCTOU vulnerability.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "User attempts unwrap with more zERC20 than they hold",
+        "preconditions": ["User has 100 zERC20", "User calls unwrap(150)"],
+        "attack_steps": ["User calls unwrap(150)", "zERC20.burn(user, 150) is called", "ERC20._update reverts with ERC20InsufficientBalance(user, 100, 150)"],
+        "expected_result": "Transaction reverts - no underlying transferred",
+        "actual_result": "Transaction reverts as expected"
+      },
+      "guards_identified": ["ERC20InsufficientBalance revert", "nonReentrant modifier", "burn-before-transfer ordering"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "Balance validation is implicit in OpenZeppelin ERC20._update(). Order of operations (burn first, transfer second) prevents extraction without burning."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-010-ACTION-LM-CALCULATE-FEE-01",
+      "property_id": "PROP-NODE-010-ACTION-LM-CALCULATE-FEE",
+      "title": "Fee calculation uses ceiling rounding",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Manipulate inputs to produce zero fee when fee should be charged",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:162-177",
+          "analysis": "quoteUnwrapFee() delegates to _rawUnwrapFee() which uses _ceilDiv() at line 278 for ceiling division. The _ceilDiv function at lines 281-285 correctly computes ceil(a/b) = (a + b - 1) / b via q + (r == 0 ? 0 : 1) pattern.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Fee calculation inconsistent between quote and execution",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:285",
+          "analysis": "_quoteUnwrapFee(amount, $) at line 285 uses the same IncentiveLib.quoteUnwrapFee() as the public quoteUnwrapFee() view function. Same code path ensures consistency.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Cause overflow in fee calculation",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:235-279",
+          "analysis": "Overflow protection via: (1) MAX_TARGET_LIQUIDITY = type(uint128).max at line 132, (2) k validation at lines 184-191 ensures k <= maxK, (3) targetLiquidity validation. Intermediate squares are bounded by uint256.",
+          "finding": "GUARD_PRESENT"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Fee calculation silently returns wrong value",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:162-177",
+          "analysis": "Edge cases handled: amount == 0 returns 0, T == 0 returns 0, L == 0 returns 0, L > T uses capped values. All branches return explicit values. No silent errors.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Fee params change between quote and unwrap",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:184-188",
+          "analysis": "setFeeParams() is FEE_MANAGER_ROLE restricted. If params change between user's quote view and unwrap execution, the unwrap uses new params. This is expected admin behavior. Users can use unwrapWithMinOut() with slippage protection.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker tries to pay less fee than expected via rounding manipulation",
+        "preconditions": ["Fee calculation would produce 10.5 units", "Attacker expects to pay 10"],
+        "attack_steps": ["Call unwrap with amount that produces fractional fee", "IncentiveLib uses _ceilDiv which rounds 10.5 -> 11", "Attacker pays 11, not 10"],
+        "expected_result": "Ceiling rounding ensures protocol never undercollects",
+        "actual_result": "Ceiling rounding works as designed"
+      },
+      "guards_identified": ["_ceilDiv function", "validateFeeParams overflow checks", "MAX_TARGET_LIQUIDITY bound"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Line 278 uses _ceilDiv for fee calculation. Line 232 uses floor division for rewards. Asymmetric rounding protects protocol (ceil for fees, floor for rewards)."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-011-ACTION-LM-BURN-ZERC20-01",
+      "property_id": "PROP-NODE-011-ACTION-LM-BURN-ZERC20",
+      "title": "Burn requires authorized minter",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Call zERC20.burn() from unauthorized address",
+          "code_location": "contracts/src/zERC20.sol:193-196",
+          "analysis": "burn() function at line 193-196 checks `if (msg.sender != minter()) revert OnlyMinter()` at line 194. This check is the first operation, preventing any unauthorized burn.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Burn tokens when minter is not set",
+          "code_location": "contracts/src/zERC20.sol:177-180",
+          "analysis": "setMinter() at line 177 allows setting minter to address(0). If minter == address(0), burn() would require msg.sender == address(0) which is impossible. Thus, if minter is unset, no burns are possible.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS minting/burning by repeated calls",
+          "code_location": "contracts/src/zERC20.sol:193-196",
+          "analysis": "Only authorized minter can call burn(). Unauthorized calls revert immediately with minimal gas cost. No DoS vector for legitimate operations.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Burn fails silently without destroying tokens",
+          "code_location": "contracts/src/zERC20.sol:193-196",
+          "analysis": "OnlyMinter() reverts on unauthorized calls. _burn() from OpenZeppelin reverts on insufficient balance. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "setMinter during pending burn transaction",
+          "code_location": "contracts/src/zERC20.sol:177-180",
+          "analysis": "setMinter() is onlyOwner. If owner changes minter while a burn is pending, the burn will revert with OnlyMinter(). This is expected owner authority behavior, per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker attempts to burn victim's tokens",
+        "preconditions": ["Attacker is not the minter", "Victim has zERC20 balance"],
+        "attack_steps": ["Attacker calls zERC20.burn(victim, 1000)", "Check: msg.sender != minter()", "Transaction reverts with OnlyMinter()"],
+        "expected_result": "Attack fails - only minter can burn",
+        "actual_result": "Attack fails as expected"
+      },
+      "guards_identified": ["msg.sender != minter() check", "OnlyMinter error", "onlyOwner on setMinter"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Line 194 enforces minter authorization. Authorization cannot be bypassed."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-012-ACTION-LM-TRANSFER-UNDERLYING-01",
+      "property_id": "PROP-NODE-012-ACTION-LM-TRANSFER-UNDERLYING",
+      "title": "Transfer underlying sends correct (amount - fee) to user",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Manipulate fee to receive more underlying than entitled",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:285-297",
+          "analysis": "amountOut = amount - feeAmount at line 286. Fee is computed from IncentiveLib which uses ceiling division. amountOut is exactly amount minus the computed fee. Transfer at lines 291-296 sends exactly amountOut.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Transfer more than available liquidity",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:289-296",
+          "analysis": "Explicit check at line 291/295: if balance < amountOut, revert InsufficientLiquidity(). This prevents sending more than contract holds. However, NOTE: burn happens first at line 288, so user's zERC20 is burned even if liquidity check fails. This could be a potential issue.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Drain all liquidity via unwrap",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:289-297",
+          "analysis": "InsufficientLiquidity check at lines 291/295 prevents transfer if balance < amountOut. The fee calculation via IncentiveLib handles low liquidity by increasing fees. amountOut can become very small or zero in extreme cases but transaction completes.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Transfer fails but fee state updated",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:288-299",
+          "analysis": "Order is: burn (288) -> liquidity check (291/295) -> transfer (292-296) -> feeSurplus update (299). If transfer fails at line 292-293 with UnderlyingSendFailed, transaction reverts, feeSurplus is NOT updated. But if InsufficientLiquidity at 291/295 reverts, burn has already happened. POTENTIAL ISSUE: burn should perhaps be after liquidity check.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "race_conditions": {
+          "attack_vector": "Liquidity drained between fee quote and unwrap",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "Fee is computed fresh at line 285. Liquidity check is at lines 291/295. If liquidity is drained between user's view call and execution, InsufficientLiquidity could revert. Users should use unwrapWithMinOut for protection.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "User unwraps but liquidity insufficient after burn",
+        "preconditions": ["User has 100 zERC20", "Contract has 50 underlying", "Fee is 10"],
+        "attack_steps": ["User calls unwrap(100)", "burn(user, 100) succeeds at line 288", "amountOut = 90 after fee", "balance(50) < amountOut(90)", "InsufficientLiquidity reverts at line 291/295"],
+        "expected_result": "Entire transaction reverts - burn is undone",
+        "actual_result": "Transaction reverts, burn is rolled back by EVM"
+      },
+      "guards_identified": ["InsufficientLiquidity check", "safeTransfer/native call with success check", "UnderlyingSendFailed error"],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "verification_notes": "The burn-before-transfer ordering is actually safe because EVM transaction semantics ensure all state changes revert on any failure. InsufficientLiquidity check placement is fine. amountOut calculation is correct: amount - fee."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-013-STATE-UNWRAP-COMPLETE-01",
+      "property_id": "PROP-NODE-013-STATE-UNWRAP-COMPLETE",
+      "title": "Unwrap atomicity of burn+transfer operations",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Trigger partial unwrap state (burn without transfer)",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "All operations (burn at 288, transfer at 291-296, feeSurplus update at 299) are in single transaction. Any revert rolls back all state changes per EVM semantics. nonReentrant prevents callback exploitation.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Complete unwrap without all operations succeeding",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "Event Unwrapped at line 301 is emitted only at the end after: burn (288), conditional transfer (289-297), feeSurplus update (299). If any operation fails, revert occurs before event emission.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS unwrap via callback during transfer",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:292",
+          "analysis": "Native transfer uses low-level call at line 292. nonReentrant modifier prevents reentry. Callback to receiver cannot re-enter _unwrap. Receiver can consume gas but that's their cost.",
+          "finding": "GUARD_PRESENT"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Silent partial unwrap on transfer failure",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:292-296",
+          "analysis": "Native: if (!success) revert UnderlyingSendFailed() at line 293. ERC20: safeTransfer at line 296 reverts on failure. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Reentrancy during unwrap to manipulate state",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:126",
+          "analysis": "nonReentrant modifier from OpenZeppelin ReentrancyGuardTransient prevents any reentry. Lock is set at function entry, cleared at function exit. No bypass possible.",
+          "finding": "GUARD_PRESENT"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker deploys malicious receiver contract to break atomicity",
+        "preconditions": ["Attacker has zERC20", "Attacker deploys contract that reverts on receive"],
+        "attack_steps": ["Attacker calls unwrap with malicious contract as receiver", "burn succeeds", "transfer to malicious contract fails", "Transaction reverts entirely", "Burn is rolled back"],
+        "expected_result": "Atomicity maintained - all or nothing",
+        "actual_result": "Atomicity maintained as expected"
+      },
+      "guards_identified": ["nonReentrant modifier", "ReentrancyGuardTransient", "EVM transaction atomicity", "explicit revert on transfer failure"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: nonReentrant modifier at line 126 plus EVM transaction semantics guarantee atomicity. All state changes revert together on any failure."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY-01",
+      "property_id": "PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY",
+      "title": "Low liquidity triggers high fee via incentive curve",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Bypass fee increase when liquidity is low",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:162-177",
+          "analysis": "quoteUnwrapFee() at lines 162-177 computes fee based on liquidity. When amount > L (insufficient liquidity case at line 169-176), fee = amount - liquidityMinusFee, which can approach the full amount. Fee increases as liquidity decreases per curve formula.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Unwrap fails when it should succeed with high fee",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "Unwrap does NOT revert on low liquidity per design. IncentiveLib handles low liquidity by computing high fee, reducing amountOut. The InsufficientLiquidity check at lines 291/295 is for actual balance vs amountOut, not for liquidity threshold. If fee is 100%, amountOut = 0 and no transfer occurs (line 289 check).",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Drain liquidity to force 100% fees on others",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:169-176",
+          "analysis": "This is expected incentive curve behavior, not an attack. As liquidity decreases, fees increase, discouraging further withdrawals. System is self-stabilizing. Users can check quoteUnwrapFee() before committing.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Fee calculation returns wrong value at boundary",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol:169-176",
+          "analysis": "When amount > L (line 169), fee = amount - max(L - fee_curve, 0) per lines 174-175. If L == 0 (line 247), returns 0 fee which seems wrong for empty pool. However, this edge case means pool is already empty, unwrap would fail anyway.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "race_conditions": {
+          "attack_vector": "Liquidity changes between fee quote and execution",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:285",
+          "analysis": "Fee is computed fresh at execution time (line 285), not at quote time. If liquidity changes, execution fee reflects current state. Users should use unwrapWithMinOut for protection.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Pool has low liquidity, user unwraps",
+        "preconditions": ["Pool has liquidity 10", "Target liquidity 1000", "User unwraps 50"],
+        "attack_steps": ["User calls quoteUnwrapFee(50) - returns high fee due to low liquidity", "User decides to proceed with unwrap", "Fee is deducted, amountOut is small", "Unwrap succeeds but with reduced output"],
+        "expected_result": "High fee charged, user receives reduced output",
+        "actual_result": "Works as designed - incentive curve protects liquidity"
+      },
+      "guards_identified": ["IncentiveLib fee curve", "quoteUnwrapFee view function", "unwrapWithMinOut slippage protection"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Per design doc and code, unwrap does NOT revert on low liquidity. Instead, fee increases via incentive curve. Edge case: if L==0, fee returns 0, but pool is empty so transfer would fail anyway."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-015-STATE-ZERC20-AWAITING-TRANSFER-01",
+      "property_id": "PROP-NODE-015-STATE-ZERC20-AWAITING-TRANSFER",
+      "title": "Transfer requires sufficient sender balance",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Transfer more tokens than sender holds",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "zERC20 inherits from OFTCoreUpgradeable -> ERC20Upgradeable. The _update function at line 153 calls super._update() at line 155 which is OpenZeppelin's ERC20Upgradeable._update(). This function has: require(fromBalance >= value) with ERC20InsufficientBalance revert.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Modify balance without going through _update",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "All balance modifications (transfer, mint, burn) go through _update override at line 153. There's no alternative path to modify balances. The override ensures hash chain is updated for every balance change.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS transfer by spamming failed transfers",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "Failed transfers revert early at OpenZeppelin ERC20._update() balance check. Gas cost is borne by attacker. No state pollution from failed transfers.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Transfer fails silently without proper error",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "OpenZeppelin ERC20 uses custom error ERC20InsufficientBalance(sender, balance, value). zERC20._update uses ValueTooLarge at line 154. Both are explicit reverts.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Balance changes between allowance check and transfer",
+          "code_location": "contracts/src/zERC20.sol",
+          "analysis": "ERC20 transferFrom uses atomic _spendAllowance and _transfer in same transaction. Balance and allowance are checked/updated atomically. No TOCTOU vulnerability.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "User attempts transfer with insufficient balance",
+        "preconditions": ["User has 50 zERC20", "User calls transfer(recipient, 100)"],
+        "attack_steps": ["transfer(recipient, 100) called", "_update checks balanceOf(user) >= 100", "Balance is 50 < 100", "Revert with ERC20InsufficientBalance(user, 50, 100)"],
+        "expected_result": "Transfer fails with clear error",
+        "actual_result": "Transfer fails as expected"
+      },
+      "guards_identified": ["ERC20Upgradeable._update balance check", "ERC20InsufficientBalance error", "atomic allowance/transfer in transferFrom"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: OpenZeppelin ERC20 balance check is inherited. zERC20._update override does not bypass this check - it calls super._update() which enforces balance requirements."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-016-ACTION-ZERC20-VALIDATE-VALUE-01",
+      "property_id": "PROP-NODE-016-ACTION-ZERC20-VALIDATE-VALUE",
+      "title": "BN254 field constraint enforcement (value <= 2^248-1)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Transfer value exceeding 248-bit limit",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "At line 154: `if (value > type(uint248).max) revert ValueTooLarge()`. This check is in _update which is called for ALL token operations (transfer, mint, burn). type(uint248).max = 2^248 - 1. Uses strict > comparison.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Accumulate balance exceeding 248-bit limit via multiple transfers",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "CRITICAL GAP: The check at line 154 validates `value` (the transfer amount), NOT the resulting balance `balanceOf(to)`. A user could accumulate balance exceeding 2^248-1 through multiple transfers each under the limit. This needs verification.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS by creating tokens that break ZK circuit",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "If the balance check gap exists, an attacker could create a balance > 2^248-1 which would be unprovable in the ZK circuit. This would effectively lock those tokens from the privacy system.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "ValueTooLarge check bypassed via overflow",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "Solidity 0.8.33 has built-in overflow protection. value > type(uint248).max uses uint256 comparison, no overflow possible. Check is correct.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Concurrent transfers to same address exceeding limit",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "Each transfer is atomic. Multiple transactions cannot be processed simultaneously in EVM. However, if value check is on transfer amount not resulting balance, multiple sequential transfers could accumulate past limit.",
+          "finding": "NEEDS_VERIFICATION"
+        }
+      },
+      "counterexample": {
+        "scenario": "User accumulates balance > 2^248-1 via multiple transfers",
+        "preconditions": ["Alice has 2^247 zERC20", "Bob has 2^247 zERC20", "Charlie has 0 zERC20"],
+        "attack_steps": ["Alice transfers 2^247 to Charlie (value check passes)", "Bob transfers 2^247 to Charlie (value check passes)", "Charlie now has 2^248 which exceeds 2^248-1 limit"],
+        "expected_result": "Second transfer should fail if balance check exists",
+        "actual_result": "UNKNOWN - needs code verification whether balance or value is checked"
+      },
+      "guards_identified": ["value > type(uint248).max check", "ValueTooLarge error"],
+      "classification": "potential-vulnerability",
+      "confidence": "medium",
+      "severity": "HIGH",
+      "verification_notes": "CRITICAL: Line 154 checks `value` not `balanceOf(to) + value`. If only transfer value is validated, accumulated balances could exceed 2^248-1, breaking ZK circuit compatibility. This is flagged as potential vulnerability requiring manual verification of whether resulting balance should be checked."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-017-ACTION-ZERC20-UPDATE-BALANCES-01",
+      "property_id": "PROP-NODE-017-ACTION-ZERC20-UPDATE-BALANCES",
+      "title": "Balance update maintains conservation of value",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Manipulate balance update to create tokens from nothing",
+          "code_location": "contracts/src/zERC20.sol:155",
+          "analysis": "super._update() at line 155 calls OpenZeppelin ERC20Upgradeable._update() which does: (1) for transfers: from_balance -= value, to_balance += value, (2) for mint: to_balance += value, totalSupply += value, (3) for burn: from_balance -= value, totalSupply -= value. All arithmetic is checked (Solidity 0.8+).",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Create tokens without increasing totalSupply",
+          "code_location": "contracts/src/zERC20.sol:185-188,146-147",
+          "analysis": "mint() at 185-188 calls _mint() which calls _update(address(0), to, value) incrementing totalSupply. teleport() at 146-147 calls _mint() same way. No path creates balance without totalSupply increase.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Overflow totalSupply",
+          "code_location": "contracts/src/zERC20.sol:155",
+          "analysis": "OpenZeppelin ERC20._update uses unchecked{} for performance but totalSupply is bounded by sum of all mints. With value <= 2^248-1 per transfer and finite transactions, overflow is impractical. Solidity 0.8 overflow protection applies to checked arithmetic elsewhere.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Balance update fails silently",
+          "code_location": "contracts/src/zERC20.sol:155",
+          "analysis": "OpenZeppelin ERC20._update has explicit error handling: ERC20InsufficientBalance, ERC20InvalidSender, ERC20InvalidReceiver. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Concurrent balance updates causing inconsistency",
+          "code_location": "contracts/src/zERC20.sol:155",
+          "analysis": "EVM executes transactions sequentially. Each _update is atomic. No race conditions possible at smart contract level.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Verify conservation: sum(balances) == totalSupply",
+        "preconditions": ["Initial state: totalSupply = 1000, sum(balances) = 1000"],
+        "attack_steps": ["User A transfers 100 to User B", "A.balance -= 100, B.balance += 100", "totalSupply unchanged", "sum(balances) still = 1000 = totalSupply"],
+        "expected_result": "Conservation maintained",
+        "actual_result": "Conservation maintained - OpenZeppelin ERC20 is well-audited"
+      },
+      "guards_identified": ["OpenZeppelin ERC20._update arithmetic", "Solidity 0.8 overflow protection", "mint/burn correctly update totalSupply"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: OpenZeppelin ERC20Upgradeable is battle-tested. Conservation invariant: totalSupply = sum(balances) is maintained by _update implementation."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-018-ACTION-ZERC20-UPDATE-HASH-CHAIN-01",
+      "property_id": "PROP-NODE-018-ACTION-ZERC20-UPDATE-HASH-CHAIN",
+      "title": "Hash chain uses SHA-256 with 248-bit truncation",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Bypass hash chain update during transfer",
+          "code_location": "contracts/src/zERC20.sol:157",
+          "analysis": "Hash chain update at line 157 is in _update override. Every balance change (transfer, mint, burn) calls _update. The hash chain update is unconditional within _update after super._update() succeeds.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Hash chain uses wrong hash function",
+          "code_location": "contracts/src/utils/ShaHashChainLib.sol:8-9",
+          "analysis": "Line 8 explicitly uses sha256(). Line 9 masks with 0x00FF...FF (248 bits). This matches specification: SHA-256 truncated to 248 bits. Not keccak256.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS by expensive hash computation",
+          "code_location": "contracts/src/utils/ShaHashChainLib.sol:8",
+          "analysis": "sha256 is a precompile (address 0x02) with fixed gas cost. Input is fixed size: 32 + 20 + 20 + 32 = 104 bytes. Gas cost is predictable and bounded.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Hash computation produces wrong result on edge inputs",
+          "code_location": "contracts/src/utils/ShaHashChainLib.sol:8",
+          "analysis": "abi.encodePacked(prev, from, to, value) produces deterministic byte sequence. sha256 precompile is cryptographically sound. Masking with & 0x00FF...FF is bitwise AND, deterministic.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Hash chain fork via concurrent updates",
+          "code_location": "contracts/src/zERC20.sol:157",
+          "analysis": "EVM transactions are sequential. Hash chain update reads $.hashChain, computes new value, writes back atomically within transaction. No forks possible.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Verify hash chain computation matches specification",
+        "preconditions": ["prevHash = 0x123...", "from = Alice", "to = Bob", "value = 100"],
+        "attack_steps": ["Compute sha256(prevHash || from || to || value)", "Mask result with 0x00FFFFFFFFFF... (248 bits)", "Verify result matches circuit expectation"],
+        "expected_result": "On-chain hash matches ZK circuit hash",
+        "actual_result": "Requires off-chain verification against circuit"
+      },
+      "guards_identified": ["sha256 precompile", "248-bit mask 0x00FF...", "abi.encodePacked for deterministic encoding"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: ShaHashChainLib uses sha256() not keccak256(). 248-bit truncation via bitmask. Encoding uses abi.encodePacked. Cross-verification with ZK circuit needed for full assurance."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-019-ACTION-ZERC20-EMIT-INDEXED-TRANSFER-01",
+      "property_id": "PROP-NODE-019-ACTION-ZERC20-EMIT-INDEXED-TRANSFER",
+      "title": "IndexedTransfer events emit monotonic indices",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Manipulate index value in event",
+          "code_location": "contracts/src/zERC20.sol:158",
+          "analysis": "Line 158: `emit IndexedTransfer($.index++, from, to, value)`. The index is read from storage, used in event, then incremented. Post-increment (index++) ensures the emitted value is current index, then storage is incremented for next transfer.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Reset or manipulate index storage",
+          "code_location": "contracts/src/zERC20.sol:82-84",
+          "analysis": "index() at line 82-84 is a public view returning $.index. There is NO setter function for index. The only modification is $.index++ at line 158. Index cannot be reset or decremented.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Overflow index counter",
+          "code_location": "contracts/src/zERC20.sol:158",
+          "analysis": "$.index is uint256. With one increment per transfer, overflow requires 2^256 transfers which is computationally impossible in the lifetime of the universe.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Index increment fails silently",
+          "code_location": "contracts/src/zERC20.sol:158",
+          "analysis": "Post-increment is a simple uint256++ with Solidity 0.8 overflow protection (which won't trigger given above analysis). Operation cannot fail.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Concurrent transfers get same index",
+          "code_location": "contracts/src/zERC20.sol:158",
+          "analysis": "EVM executes transactions sequentially. Each _update reads current $.index, emits event, increments. Next transaction sees incremented value. No duplicate indices possible.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Verify index monotonicity across transfers",
+        "preconditions": ["Current index = 100"],
+        "attack_steps": ["Transfer 1: emits IndexedTransfer with index 100, storage becomes 101", "Transfer 2: emits IndexedTransfer with index 101, storage becomes 102", "Transfer 3: emits IndexedTransfer with index 102, storage becomes 103"],
+        "expected_result": "Strictly monotonically increasing indices",
+        "actual_result": "Monotonicity maintained by post-increment pattern"
+      },
+      "guards_identified": ["uint256 index counter", "post-increment (index++)", "no setter for index", "EVM sequential execution"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Line 158 uses $.index++ which guarantees monotonic increase. No reset mechanism exists. Index is strictly increasing by 1 for each transfer."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-020-STATE-TRANSFER-COMPLETE-01",
+      "property_id": "PROP-NODE-020-STATE-TRANSFER-COMPLETE",
+      "title": "Transfer completion atomicity (balance, hash chain, event)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Complete transfer without all operations succeeding",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "_update at lines 153-159 performs: (1) value check line 154, (2) balance update via super._update() line 155, (3) hash chain update line 157, (4) event emission line 158. All in single function call within single transaction.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Balance updated but hash chain not updated",
+          "code_location": "contracts/src/zERC20.sol:155-157",
+          "analysis": "super._update() at line 155 executes first. If it reverts, hash chain update at line 157 never executes. If super._update() succeeds, hash chain update is next and cannot be skipped. Sequence is atomic.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS transfer by reverting in _afterTokenTransfer hook",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "zERC20 overrides _update, not _afterTokenTransfer. The hook pattern is: _beforeTokenTransfer -> balance update -> _afterTokenTransfer. zERC20 uses _update override instead, which wraps super._update() with pre/post logic. This is safer pattern.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Partial transfer state on hash chain computation error",
+          "code_location": "contracts/src/zERC20.sol:157",
+          "analysis": "ShaHashChainLib.compute() is pure computation using sha256 precompile. Cannot fail under normal conditions. If it somehow failed (out of gas), entire transaction reverts including balance update.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Reentrancy to manipulate transfer state",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "zERC20 inherits from ERC20Upgradeable which doesn't have hooks that could be exploited for reentrancy. _update completes atomically. No external calls between balance update and hash chain update.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Verify all operations complete together or none complete",
+        "preconditions": ["Alice has 100 zERC20", "Transfer 50 to Bob"],
+        "attack_steps": ["transfer(Bob, 50) called", "_update: value check passes (50 < 2^248-1)", "_update: super._update() succeeds (balance updated)", "_update: hash chain updated", "_update: IndexedTransfer emitted", "All operations complete atomically"],
+        "expected_result": "Atomicity maintained",
+        "actual_result": "Atomicity maintained by _update override pattern"
+      },
+      "guards_identified": ["_update override pattern", "single transaction execution", "no external calls between operations", "EVM transaction atomicity"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: _update override at lines 153-159 ensures all operations (value check, balance update, hash chain, event) execute atomically. No partial state is possible."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-021-STATE-TRANSFER-REJECTED-01",
+      "property_id": "PROP-NODE-021-STATE-TRANSFER-REJECTED-VALUE-TOO-LARGE",
+      "title": "Transfer rejection precision at MAX_VALUE boundary",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Transfer exactly at MAX_VALUE passes incorrectly",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "Line 154: `if (value > type(uint248).max) revert ValueTooLarge()`. Uses strict > comparison. type(uint248).max = 2^248 - 1. Value exactly equal to 2^248 - 1 does NOT trigger revert (correct). Value equal to 2^248 triggers revert (correct).",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Valid transfer incorrectly rejected at boundary",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "Boundary analysis: value = 2^248 - 1 -> condition false -> no revert (correct). value = 2^248 -> condition true -> revert (correct). No false positives at boundary.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Generate many ValueTooLarge errors",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "Reverts consume gas but don't pollute state. Attacker pays for failed transactions. No DoS vector.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "ValueTooLarge revert missing or unclear",
+          "code_location": "contracts/src/zERC20.sol:52,154",
+          "analysis": "ValueTooLarge error defined at line 52. Used at line 154. Custom error with no parameters - clear but could be more informative (include the actual value). Design choice, not vulnerability.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "MAX_VALUE changes during transaction",
+          "code_location": "contracts/src/zERC20.sol:154",
+          "analysis": "type(uint248).max is a compile-time constant. Cannot change at runtime. No race condition possible.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Boundary test for MAX_VALUE",
+        "preconditions": ["MAX_VALUE = 2^248 - 1 = 452312848583266388373324160190187140051835877600158453279131187530910662655"],
+        "attack_steps": ["Transfer value = MAX_VALUE: passes (value > MAX_VALUE is false)", "Transfer value = MAX_VALUE + 1: fails (value > MAX_VALUE is true)"],
+        "expected_result": "Precise boundary enforcement",
+        "actual_result": "Boundary correctly enforced"
+      },
+      "guards_identified": ["strict > comparison", "type(uint248).max compile-time constant", "ValueTooLarge custom error"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Line 154 uses strict > comparison. Transfers at exactly MAX_VALUE succeed, transfers exceeding MAX_VALUE fail. Boundary is precise."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-022-STATE-VERIFIER-IDLE-01",
+      "property_id": "PROP-NODE-022-STATE-VERIFIER-IDLE",
+      "title": "Verifier contract stateless and always ready",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Lock Verifier in blocked state",
+          "code_location": "contracts/src/Verifier.sol:23",
+          "analysis": "Verifier inherits PausableUpgradeable. Functions marked whenNotPaused (lines 265, 311, 341, 392) can be blocked by pause. Pause is triggered by: (1) emergency via conflicting proofs at line 285, (2) admin activateEmergency() at line 458. Both are controlled scenarios.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Verifier enters state that blocks operations permanently",
+          "code_location": "contracts/src/Verifier.sol:458-467",
+          "analysis": "Emergency pause can be deactivated by owner via deactivateEmergency() at line 464. Recovery path exists. However, if owner key is lost, Verifier is permanently paused. This is expected trust model for owner role.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Fill up storage mappings to DoS",
+          "code_location": "contracts/src/Verifier.sol:90-93",
+          "analysis": "Mappings (reservedHashChains, provedTransferRoots, globalTransferRoots, totalTeleported) are keyed by uint64 index or uint256 recipient. Storage is gas-paid by caller. No free storage consumption attack.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Silent failure leaves Verifier in bad state",
+          "code_location": "contracts/src/Verifier.sol",
+          "analysis": "All functions use explicit require/revert with custom errors. No silent failures. Failed operations revert cleanly without state corruption.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Concurrent operations cause state inconsistency",
+          "code_location": "contracts/src/Verifier.sol",
+          "analysis": "EVM executes transactions sequentially. Verifier doesn't have reentrancy issues - no external calls before state updates in critical paths. Storage updates are atomic.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to lock Verifier via malicious proof",
+        "preconditions": ["Attacker submits first valid proof for index N", "Root is stored in provedTransferRoots[N]"],
+        "attack_steps": ["Attacker submits second proof for same index N with different root", "Check at line 283: existingRoot != 0 && existingRoot != newRoot", "_pause() triggered at line 285", "Verifier enters emergency mode"],
+        "expected_result": "Emergency mode is intentional safety mechanism",
+        "actual_result": "Emergency triggered as designed - indicates ZK system bug"
+      },
+      "guards_identified": ["whenNotPaused modifier", "deactivateEmergency recovery", "explicit require statements"],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "verification_notes": "Verifier CAN be paused via emergency mechanism (conflicting proofs) or owner action. This is by design. Recovery via deactivateEmergency() exists. Only concern is owner key loss which is out of scope per trust model."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-023-ACTION-RESERVE-HASH-CHAIN-01",
+      "property_id": "PROP-NODE-023-ACTION-VERIFIER-RESERVE-HASH-CHAIN",
+      "title": "Hash chain checkpoint immutable once reserved",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Overwrite existing reserved hash chain",
+          "code_location": "contracts/src/Verifier.sol:251-260",
+          "analysis": "reserveHashChain() at lines 251-260 unconditionally writes: `$.reservedHashChains[index_] = hashChain_` at line 256. There is NO check whether slot is already occupied. POTENTIAL ISSUE: Existing reservations can be overwritten.",
+          "finding": "POTENTIAL_VULNERABILITY"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Modify reserved checkpoint after proof submission",
+          "code_location": "contracts/src/Verifier.sol:256",
+          "analysis": "If a reservation exists at index N and proveTransferRoot uses it, then someone calls reserveHashChain when index_ equals N again (if index hasn't advanced), the reservation is overwritten. However, index_ comes from tokenContract.index() which is monotonically increasing. Same index can only be reserved if no transfers happened since last reservation.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Reserve many indices to fill storage",
+          "code_location": "contracts/src/Verifier.sol:251-260",
+          "analysis": "reserveHashChain is permissionless (no access control). Anyone can call it to reserve the current index. Each call overwrites the slot for current index. Storage cost is borne by caller. Index advances with transfers, so historical indices become stale.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Reservation fails silently",
+          "code_location": "contracts/src/Verifier.sol:251-260",
+          "analysis": "Function always succeeds (no reverts). Emits HashChainReserved event. Returns (index, hashChain). No silent failures, but also no validation of whether reservation is meaningful.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Concurrent reservations overwrite each other",
+          "code_location": "contracts/src/Verifier.sol:256",
+          "analysis": "Two reservations at same index in same block would result in last-write-wins. However, both would reserve the same (index, hashChain) pair since zERC20 state is same for both. Overwriting with same value is harmless.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to overwrite existing reservation with different value",
+        "preconditions": ["Index N reserved with hashChain A", "No transfers since reservation"],
+        "attack_steps": ["Attacker calls reserveHashChain()", "tokenContract.index() returns N (unchanged)", "tokenContract.hashChain() returns A (unchanged)", "$.reservedHashChains[N] = A (same value)", "Overwrite with same value - no attack"],
+        "expected_result": "Same index reservation yields same value",
+        "actual_result": "Overwrite only possible with same value"
+      },
+      "guards_identified": ["zERC20 index monotonicity", "hashChain determinism", "HashChainReserved event"],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "verification_notes": "Reservation CAN be overwritten but only with same value (since zERC20 index is monotonic and hashChain is deterministic). If transfers occur between reservations, new index is different so different slot used. VERIFIED: No actual vulnerability due to deterministic nature of index and hashChain."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-024-STATE-HASH-CHAIN-RESERVED-01",
+      "property_id": "PROP-NODE-024-STATE-HASH-CHAIN-RESERVED",
+      "title": "HashChainReserved event consistency with storage",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Event emitted without storage write",
+          "code_location": "contracts/src/Verifier.sol:256-258",
+          "analysis": "Order at lines 256-258: (1) storage write at 256, (2) latestReservedIndex update at 257, (3) event emission at 258. Event is emitted AFTER both storage operations. Cannot emit event without storage update.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Event data doesn't match stored data",
+          "code_location": "contracts/src/Verifier.sol:256-258",
+          "analysis": "Event at line 258: `emit HashChainReserved(index_, hashChain_)`. Storage at line 256: `$.reservedHashChains[index_] = hashChain_`. Same variables used for both. Data matches.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Emit many events to burden indexers",
+          "code_location": "contracts/src/Verifier.sol:258",
+          "analysis": "Events are paid by gas. Each reserveHashChain call costs caller gas. No amplification attack. Log storage is chain-level, not contract-level.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Storage succeeds but event fails",
+          "code_location": "contracts/src/Verifier.sol:258",
+          "analysis": "Event emission cannot fail in Solidity. emit is a log opcode that always succeeds if transaction has enough gas. If out of gas, entire transaction reverts including storage.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Storage and event have different values due to race",
+          "code_location": "contracts/src/Verifier.sol:256-258",
+          "analysis": "index_ and hashChain_ are local variables set at lines 254-255. They cannot change between storage write and event emission within same transaction.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Verify event-storage consistency",
+        "preconditions": ["zERC20.index() = 100", "zERC20.hashChain() = 0xABC..."],
+        "attack_steps": ["Call reserveHashChain()", "index_ = 100, hashChain_ = 0xABC...", "reservedHashChains[100] = 0xABC...", "emit HashChainReserved(100, 0xABC...)", "Event and storage both have index=100, hashChain=0xABC..."],
+        "expected_result": "Event data matches storage",
+        "actual_result": "Event data matches storage"
+      },
+      "guards_identified": ["storage-before-event ordering", "same local variables for both", "emit cannot fail"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Lines 256-258 show storage write before event emission using same local variables. Event-storage consistency is guaranteed."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-025-STATE-AWAITING-PROOF-01",
+      "property_id": "PROP-NODE-025-STATE-AWAITING-TRANSFER-ROOT-PROOF",
+      "title": "Transfer root proof requires prior hash chain reservation",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit proof without prior reservation",
+          "code_location": "contracts/src/Verifier.sol:279-281",
+          "analysis": "Lines 279-281: `uint256 expectedHashChain = $.reservedHashChains[newIndex]; require(expectedHashChain != 0, ReserveHashChainNotFound(newIndex));`. Proof submission requires non-zero reservation at the target index.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Proof accepted for unreserved index",
+          "code_location": "contracts/src/Verifier.sol:279-280",
+          "analysis": "newIndex is extracted from proof at line 270. Reservation check uses this index. If reservedHashChains[newIndex] == 0, ReserveHashChainNotFound reverts. Proof cannot be accepted without reservation.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS by consuming all reservations",
+          "code_location": "contracts/src/Verifier.sol:279",
+          "analysis": "Reservations are keyed by zERC20 index which is monotonically increasing. Each index can only have one reservation. Consuming reservations requires legitimate transfers to advance index. No amplification attack.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Proof submission fails silently on missing reservation",
+          "code_location": "contracts/src/Verifier.sol:280",
+          "analysis": "Explicit revert with ReserveHashChainNotFound(newIndex) at line 280. Not silent - provides clear error with the missing index.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Reservation deleted between check and use",
+          "code_location": "contracts/src/Verifier.sol:279-281",
+          "analysis": "Reservations cannot be deleted - no delete function exists. Reservations can be overwritten but only with same value (per previous analysis). Check and use are in same transaction, atomic.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to prove root without reservation",
+        "preconditions": ["No reservation exists at index 50", "Attacker has valid proof for index 50"],
+        "attack_steps": ["Attacker calls proveTransferRoot(proof) with newIndex=50", "Check: reservedHashChains[50] == 0", "Revert with ReserveHashChainNotFound(50)"],
+        "expected_result": "Proof rejected due to missing reservation",
+        "actual_result": "Proof rejected as expected"
+      },
+      "guards_identified": ["reservedHashChains[newIndex] != 0 check", "ReserveHashChainNotFound error", "require statement at line 280"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Lines 279-280 require reservation to exist (non-zero) before proof can be accepted. Missing reservation causes explicit revert."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-026-ACTION-VALIDATE-NOVA-01",
+      "property_id": "PROP-NODE-026-ACTION-VERIFIER-VALIDATE-NOVA-PROOF",
+      "title": "Nova proof validation uses correct public inputs",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit proof with manipulated public inputs",
+          "code_location": "contracts/src/Verifier.sol:265-294",
+          "analysis": "Proof is decoded at line 266. Public inputs extracted at lines 267-272. These are passed to verifyOpaqueNovaProof at line 274. The ZK verifier checks that proof is valid for these exact inputs. Manipulation of inputs invalidates the proof.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Proof verified against wrong public inputs",
+          "code_location": "contracts/src/Verifier.sol:274-281",
+          "analysis": "After verification at line 274, additional checks at lines 275-281 ensure: (1) oldRoot matches stored provedTransferRoots[oldIndex], (2) newHashChain matches reservedHashChains[newIndex]. Public inputs are cross-validated against on-chain state.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS via expensive proof verification",
+          "code_location": "contracts/src/Verifier.sol:274",
+          "analysis": "verifyOpaqueNovaProof is external call to IRootDecider. Verification cost depends on ZK circuit complexity. Gas is bounded by block limit. Caller pays for verification. No amplification.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Invalid proof silently accepted",
+          "code_location": "contracts/src/Verifier.sol:274",
+          "analysis": "require(IRootDecider($.rootDecider).verifyOpaqueNovaProof(proof_), InvalidProof()). If verification returns false, InvalidProof error is thrown. No silent acceptance.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "rootDecider changed during proof verification",
+          "code_location": "contracts/src/Verifier.sol:274,489-490",
+          "analysis": "setVerifiers() at lines 475-502 is onlyOwner. If owner changes rootDecider during proof verification transaction, verification uses the rootDecider at time of call. Atomic read at line 274. Owner action is out of scope.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to use proof with wrong public inputs",
+        "preconditions": ["Attacker has valid proof for (oldIndex=10, newIndex=20, newRoot=A)", "Attacker modifies proof to claim newRoot=B"],
+        "attack_steps": ["Submit modified proof", "verifyOpaqueNovaProof checks proof against public inputs including newRoot=B", "ZK verification fails because proof was generated for newRoot=A", "InvalidProof reverts"],
+        "expected_result": "Modified proof rejected",
+        "actual_result": "Rejected due to ZK soundness"
+      },
+      "guards_identified": ["verifyOpaqueNovaProof external verification", "oldRoot cross-check with provedTransferRoots", "newHashChain cross-check with reservedHashChains", "InvalidProof error"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: Lines 274-281 perform both ZK verification and cross-validation against on-chain state. Public inputs are bound to proof by ZK soundness, and additionally validated against storage."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-027-STATE-ROOT-PROVED-01",
+      "property_id": "PROP-NODE-027-STATE-TRANSFER-ROOT-PROVED",
+      "title": "STATE-TRANSFER-ROOT-PROVED only after valid ZKP verification",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Store root without proof verification",
+          "code_location": "contracts/src/Verifier.sol:274,289",
+          "analysis": "provedTransferRoots write at line 289: `$.provedTransferRoots[newIndex] = newRoot`. This is AFTER require at line 274 which calls verifyOpaqueNovaProof. Also after require at line 280 for reservation check. No bypass path exists.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Admin function to set proved roots",
+          "code_location": "contracts/src/Verifier.sol",
+          "analysis": "Searched for all writes to provedTransferRoots. Found: (1) line 237 in initializer sets provedTransferRoots[0] = INITIAL_TRANSFER_ROOT, (2) line 289 in proveTransferRoot. No admin setter exists. Only paths are initialization and proof verification.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Fill provedTransferRoots mapping",
+          "code_location": "contracts/src/Verifier.sol:289",
+          "analysis": "Each root storage requires valid ZK proof which requires computational resources to generate. No free storage. Mapping is keyed by uint64 index. Storage cost paid by caller.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Root stored on verification failure",
+          "code_location": "contracts/src/Verifier.sol:274,289",
+          "analysis": "require at line 274 reverts on verification failure. Line 289 root storage is only reached if require passes. Order is enforced by sequential execution. No error path leads to storage.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Root stored twice with different values",
+          "code_location": "contracts/src/Verifier.sol:282-288",
+          "analysis": "Lines 282-288 handle case where root already exists at index. If existingRoot != 0 && existingRoot != newRoot, emergency is triggered and function returns early. No overwrite with different value. Same value can be written (idempotent).",
+          "finding": "GUARD_PRESENT"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to store root without valid proof",
+        "preconditions": ["Attacker crafts invalid proof bytes", "Reservation exists at target index"],
+        "attack_steps": ["Attacker calls proveTransferRoot(invalidProof)", "verifyOpaqueNovaProof returns false", "require fails with InvalidProof", "provedTransferRoots not modified"],
+        "expected_result": "Invalid proof rejected, no root stored",
+        "actual_result": "Rejected as expected"
+      },
+      "guards_identified": ["require(verifyOpaqueNovaProof) at line 274", "emergency trigger for conflicting roots", "no admin setter for provedTransferRoots"],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "verification_notes": "VERIFIED: provedTransferRoots can only be written via: (1) initializer with constant INITIAL_TRANSFER_ROOT, or (2) proveTransferRoot after successful ZK verification. No bypass exists."
+    }
+  ],
+  "batch_summary": {
+    "total_items": 20,
+    "potential_vulnerabilities": 1,
+    "needs_verification": 19,
+    "code_quality_issues": 0,
+    "out_of_scope": 3,
+    "key_findings": [
+      {
+        "id": "CL-PROP-NODE-016-ACTION-ZERC20-VALIDATE-VALUE-01",
+        "severity": "HIGH",
+        "summary": "BN254 value constraint checks transfer value, not resulting balance",
+        "detail": "Line 154 in zERC20._update checks 'value > type(uint248).max' but does NOT check 'balanceOf(to) + value > type(uint248).max'. This means accumulated balances could theoretically exceed 2^248-1 through multiple transfers, potentially breaking ZK circuit compatibility. Requires verification of whether this is intentional design or a gap.",
+        "recommendation": "Verify if check should be on resulting balance (balanceOf(to) + value for mints/transfers) rather than just transfer value. If gap confirmed, add balance validation."
+      }
+    ],
+    "verified_guards": [
+      "EVM transaction atomicity for wrap/unwrap operations",
+      "IncentiveLib ceiling division for fees, floor division for rewards",
+      "OpenZeppelin ERC20 balance checks inherited by zERC20",
+      "ShaHashChainLib uses SHA-256 (not keccak256) with 248-bit truncation",
+      "Index counter monotonicity via post-increment ($.index++)",
+      "reservedHashChains requirement before proof acceptance",
+      "verifyOpaqueNovaProof + on-chain state cross-validation for root storage"
+    ]
+  }
+}

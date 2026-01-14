@@ -1,0 +1,1071 @@
+{
+  "metadata": {
+    "title": "zERC20 Privacy Token Protocol - Audit Map Batch 2",
+    "version": "1.0.0",
+    "generated_at": "2026-01-13T00:00:00Z",
+    "batch_number": 2,
+    "items_in_batch": 20,
+    "methodology": "5-phase attack vector analysis with counterexample construction"
+  },
+  "audit_results": [
+    {
+      "checklist_id": "CL-PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT-01",
+      "property_id": "PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT",
+      "title": "Verifier authorization on teleport minting",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to call zERC20.teleport() from an address other than the authorized verifier",
+          "code_location": "contracts/src/zERC20.sol:143-149",
+          "analysis": "The teleport() function checks `if (msg.sender != verifier()) revert OnlyVerifier()` at line 144. This explicit check ensures only the registered verifier address can mint via teleport. No bypass path exists since verifier() reads from storage and the check is the first operation.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Attempt to call teleport() when verifier address is not set or is zero",
+          "code_location": "contracts/src/zERC20.sol:168-172",
+          "analysis": "setVerifier() at line 168 requires `if (newVerifier == address(0)) revert ZeroAddress()`. However, the initial state after deployment has verifier as address(0) until setVerifier is called. During this window, teleport() would always revert since msg.sender != address(0) would only pass if someone managed to call from address(0) which is impossible.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "DoS via repeated teleport calls consuming gas",
+          "code_location": "contracts/src/zERC20.sol:143-149",
+          "analysis": "Teleport calls _mint which has O(1) complexity. Each teleport is independent. No unbounded loops exist. The function cannot be used for DoS by unauthorized callers since only verifier can call it.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Attempt teleport with invalid parameters that might fail silently",
+          "code_location": "contracts/src/zERC20.sol:143-149",
+          "analysis": "teleport() will revert with OnlyVerifier() for unauthorized callers. The _mint internal call and totalTeleported update happen atomically. No silent failures possible - either the entire operation succeeds or reverts.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Front-run verifier teleport call with setVerifier to redirect minting authority",
+          "code_location": "contracts/src/zERC20.sol:168-172, 143-149",
+          "analysis": "setVerifier() is onlyOwner. If owner calls setVerifier while a teleport is pending, the teleport would revert with OnlyVerifier() since msg.sender (old verifier) != new verifier. This is safe behavior - no funds at risk. Owner operations are out of scope per trust model.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Malicious actor deploys contract at predetermined address and attempts to call teleport()",
+        "preconditions": ["Attacker knows verifier address", "Attacker cannot impersonate verifier address"],
+        "attack_steps": ["Deploy attacker contract", "Call zERC20.teleport(attacker, 1000000)", "Transaction reverts with OnlyVerifier()"],
+        "expected_result": "Attack fails - only registered verifier can mint via teleport",
+        "actual_behavior": "Correctly prevented by verifier() check at line 144"
+      },
+      "guards_identified": [
+        "OnlyVerifier modifier equivalent (if check) at zERC20.sol:144",
+        "ZeroAddress check in setVerifier at zERC20.sol:169",
+        "Owner-only setVerifier at zERC20.sol:168"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Authorization check is present and correctly implemented. The verifier address must be set via owner-only setVerifier which prevents zero address. No bypass paths identified through static analysis."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT-02",
+      "property_id": "PROP-EDGE-030-VERIFIER-TO-ZERC20-TELEPORT",
+      "title": "Teleport delta calculation correctness",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit proof with totalValue that bypasses delta calculation",
+          "code_location": "contracts/src/Verifier.sol:376-379",
+          "analysis": "The delta is calculated as `uint256 diff = value - currentTotal` at line 378 after verifying `value > currentTotal` at line 377. The value comes from the ZK proof public inputs which are verified. No way to bypass - value is cryptographically bound to proof.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Teleport with value <= currentTotal to mint zero or negative tokens",
+          "code_location": "contracts/src/Verifier.sol:376-378",
+          "analysis": "Line 377 requires `value > currentTotal` (strict inequality). If value <= currentTotal, reverts with NothingToWithdraw. The subtraction at line 378 cannot underflow because value > currentTotal is enforced. Solidity 0.8+ checked arithmetic provides additional safety.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Submit proofs with very small deltas repeatedly",
+          "code_location": "contracts/src/Verifier.sol:376-382",
+          "analysis": "Each teleport requires a valid ZK proof which is computationally expensive to generate. The monotonicity check prevents replay. Small deltas still require full proof verification cost. No economic incentive for DoS since attacker pays gas.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Cause teleport to succeed but mint wrong amount",
+          "code_location": "contracts/src/Verifier.sol:379-381",
+          "analysis": "After computing diff, line 379 updates `$.totalTeleported[recipient] += diff` and line 381 calls `IzERC20($.token).teleport(recipientAddr, diff)`. The same diff value is used for both operations atomically. If zERC20.teleport() reverts, the storage update is also reverted.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Two concurrent teleports for same recipient causing incorrect delta",
+          "code_location": "contracts/src/Verifier.sol:376-381",
+          "analysis": "totalTeleported[recipient] is read at line 376 and written at line 379. In a single transaction context, this is atomic. If two transactions race, both read the same currentTotal, but the second would fail monotonicity check since first would have updated totalTeleported. No double-spend possible.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attempt to mint more tokens than the proof authorizes by manipulating delta calculation",
+        "preconditions": ["Valid proof exists for recipient with totalValue=100", "Current totalTeleported[recipient]=50"],
+        "attack_steps": ["Submit teleport with valid proof", "Delta calculated as 100-50=50", "Attempt to modify delta in transit - impossible due to atomic execution"],
+        "expected_result": "Exactly 50 tokens minted, totalTeleported updated to 100",
+        "actual_behavior": "Correctly mints delta amount only, updates monotonic counter"
+      },
+      "guards_identified": [
+        "Strict monotonicity check (value > currentTotal) at Verifier.sol:377",
+        "Delta computation after monotonicity check at Verifier.sol:378",
+        "Atomic storage update and external call at Verifier.sol:379-381",
+        "Solidity 0.8+ checked arithmetic"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Delta calculation is mathematically correct with proper ordering: monotonicity check before subtraction prevents underflow. Atomic execution prevents race conditions. ZK proof binds value to proof validity."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-031-OWNER-UPGRADE-01",
+      "property_id": "PROP-EDGE-031-OWNER-UPGRADE",
+      "title": "Owner authorization on UUPS upgrade (OUT OF SCOPE)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt UUPS upgrade from non-owner address",
+          "code_location": "contracts/src/zERC20.sol:74",
+          "analysis": "_authorizeUpgrade has `onlyOwner` modifier. Non-owner calls revert. This is OUT OF SCOPE per trust model - owner compromise is not considered a vulnerability.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Upgrade to malicious implementation",
+          "code_location": "contracts/src/zERC20.sol:74",
+          "analysis": "Owner can upgrade to any implementation. No validation of new implementation address. This is by design - owner is trusted. OUT OF SCOPE per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A - upgrade is one-time operation",
+          "code_location": "N/A",
+          "analysis": "Upgrade operations are not susceptible to DoS patterns.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Upgrade to non-contract address",
+          "code_location": "contracts/src/zERC20.sol:74",
+          "analysis": "UUPS pattern from OpenZeppelin validates new implementation is a contract in the base implementation. Owner responsibility.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A - owner operations",
+          "code_location": "N/A",
+          "analysis": "Owner operations are trusted.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Non-owner attempts to upgrade contract implementation",
+        "preconditions": ["Contract deployed", "Attacker is not owner"],
+        "attack_steps": ["Call upgradeToAndCall with malicious implementation", "Revert with OwnableUnauthorizedAccount"],
+        "expected_result": "Upgrade fails",
+        "actual_behavior": "Correctly reverts for non-owner callers"
+      },
+      "guards_identified": [
+        "onlyOwner modifier on _authorizeUpgrade at zERC20.sol:74",
+        "UUPS implementation validation in OpenZeppelin base"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "OUT OF SCOPE per trust model. Owner operations are trusted. onlyOwner modifier correctly restricts upgrade authority."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-032-OWNER-SET-MINTER-01",
+      "property_id": "PROP-EDGE-032-OWNER-SET-MINTER",
+      "title": "Owner authorization on minter change (OUT OF SCOPE)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to set minter from non-owner address",
+          "code_location": "contracts/src/zERC20.sol:177-180",
+          "analysis": "setMinter has `onlyOwner` modifier at line 177. Non-owner calls revert. OUT OF SCOPE per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Set minter to zero address to disable minting",
+          "code_location": "contracts/src/zERC20.sol:177-180",
+          "analysis": "Unlike setVerifier, setMinter ALLOWS setting to address(0) per spec comment at line 175: 'the spec allows disabling the minter by setting address(0) on chains without deposits'. This is intentional design.",
+          "finding": "BY_DESIGN"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Owner operation, not susceptible to DoS.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Simple storage write, no error conditions beyond authorization.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Owner operation, trusted.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Non-owner attempts to grant themselves minting authority",
+        "preconditions": ["Contract deployed", "Attacker is not owner"],
+        "attack_steps": ["Call setMinter(attackerAddress)", "Revert with OwnableUnauthorizedAccount"],
+        "expected_result": "Set minter fails",
+        "actual_behavior": "Correctly reverts for non-owner callers"
+      },
+      "guards_identified": [
+        "onlyOwner modifier on setMinter at zERC20.sol:177"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "OUT OF SCOPE per trust model. Note: minter CAN be set to zero address by design to disable minting on certain chains."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-033-OWNER-REGISTER-TOKEN-01",
+      "property_id": "PROP-EDGE-033-OWNER-REGISTER-TOKEN",
+      "title": "Owner authorization on token registration (OUT OF SCOPE)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to register token from non-owner address",
+          "code_location": "contracts/src/Hub.sol:154-169",
+          "analysis": "registerToken has `onlyOwner` modifier at line 154. Non-owner calls revert. OUT OF SCOPE per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Register token with zero verifier or token address",
+          "code_location": "contracts/src/Hub.sol:155-157",
+          "analysis": "Validates: `if (info.verifier == address(0)) revert ZeroVerifier()` at 155, `if (info.token == address(0)) revert ZeroToken()` at 156, `if (info.chainId == 0) revert InvalidChainId()` at 157. Proper validation present.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Register maximum tokens to fill capacity",
+          "code_location": "contracts/src/Hub.sol:160",
+          "analysis": "MAX_LEAVES check at line 160: `if ($.transferRoots.length >= MAX_LEAVES) revert HubCapacityReached()`. Maximum 64 tokens (height-6 tree). Owner-only so not exploitable by attackers.",
+          "finding": "GUARD_PRESENT"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Register same EID twice",
+          "code_location": "contracts/src/Hub.sol:159",
+          "analysis": "Duplicate check at line 159: `if ($.eidToPosition[info.eid] != 0) revert TokenAlreadyRegistered(info.eid)`. Prevents duplicate registration.",
+          "finding": "GUARD_PRESENT"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Owner operation, trusted.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker tries to register malicious token",
+        "preconditions": ["Hub deployed", "Attacker is not owner"],
+        "attack_steps": ["Call registerToken with attacker-controlled verifier", "Revert with OwnableUnauthorizedAccount"],
+        "expected_result": "Registration fails",
+        "actual_behavior": "Correctly reverts for non-owner"
+      },
+      "guards_identified": [
+        "onlyOwner modifier at Hub.sol:154",
+        "ZeroVerifier check at Hub.sol:155",
+        "ZeroToken check at Hub.sol:156",
+        "InvalidChainId check at Hub.sol:157",
+        "TokenAlreadyRegistered check at Hub.sol:159",
+        "HubCapacityReached check at Hub.sol:160"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "OUT OF SCOPE per trust model. Function has comprehensive input validation despite being owner-only. No vulnerabilities identified."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-034-OWNER-SET-VERIFIERS-01",
+      "property_id": "PROP-EDGE-034-OWNER-SET-VERIFIERS",
+      "title": "Owner authorization on verifier rotation (OUT OF SCOPE)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to set verifiers from non-owner address",
+          "code_location": "contracts/src/Verifier.sol:475-502",
+          "analysis": "setVerifiers has `onlyOwner` modifier at line 481. Non-owner calls revert. OUT OF SCOPE per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Set any verifier to zero address",
+          "code_location": "contracts/src/Verifier.sol:482-488",
+          "analysis": "Comprehensive zero address check at lines 482-488 for all five verifier addresses. Reverts with ZeroAddress() if any is zero. Proper validation.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Owner operation, not susceptible to DoS.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Simple storage writes with event emission.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Owner operation, trusted.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Non-owner attempts to rotate verifiers to accept forged proofs",
+        "preconditions": ["Verifier deployed", "Attacker is not owner"],
+        "attack_steps": ["Call setVerifiers with malicious verifier addresses", "Revert with OwnableUnauthorizedAccount"],
+        "expected_result": "Rotation fails",
+        "actual_behavior": "Correctly reverts for non-owner"
+      },
+      "guards_identified": [
+        "onlyOwner modifier at Verifier.sol:481",
+        "Zero address validation for all 5 verifiers at Verifier.sol:482-488"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "OUT OF SCOPE per trust model. All five verifier addresses validated against zero. Atomic update with event emission."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-035-OWNER-SET-FEE-PARAMS-01",
+      "property_id": "PROP-EDGE-035-OWNER-SET-FEE-PARAMS",
+      "title": "Owner authorization on fee configuration (OUT OF SCOPE)",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Attempt to set fee params from non-fee-manager address",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:184-188",
+          "analysis": "setFeeParams has `onlyRole(FEE_MANAGER_ROLE)` modifier at line 184. Non-role-holder calls revert. OUT OF SCOPE per trust model (FEE_MANAGER_ROLE granted to owner).",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Set invalid fee parameters causing arithmetic issues",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:185",
+          "analysis": "validateFeeParams() called at line 185 before storage update. This validates parameter bounds. See IncentiveLib for validation logic.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Admin operation.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "validateFeeParams reverts on invalid params.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Admin operation, trusted.",
+          "finding": "OUT_OF_SCOPE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Non-admin sets extreme fee parameters",
+        "preconditions": ["LiquidityManager deployed", "Attacker lacks FEE_MANAGER_ROLE"],
+        "attack_steps": ["Call setFeeParams with 100% fee", "Revert with AccessControlUnauthorizedAccount"],
+        "expected_result": "Fee update fails",
+        "actual_behavior": "Correctly reverts for non-role-holder"
+      },
+      "guards_identified": [
+        "onlyRole(FEE_MANAGER_ROLE) at LiquidityManager.sol:184",
+        "validateFeeParams() call at LiquidityManager.sol:185"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "OUT OF SCOPE per trust model. Fee parameter validation present via validateFeeParams()."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-036-PROVER-OUTPUT-TO-USER-01",
+      "property_id": "PROP-EDGE-036-PROVER-OUTPUT-TO-USER",
+      "title": "Proof soundness guarantees validity at on-chain verification",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit proof generated by malicious prover",
+          "code_location": "contracts/src/Verifier.sol:274, 325, 347",
+          "analysis": "All proof submissions go through on-chain verification: IRootDecider.verifyOpaqueNovaProof at line 274/325, IWithdrawVerifier.verifyProof at line 347. Invalid proofs revert with InvalidProof(). Prover is NOT trusted - cryptographic verification ensures soundness.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Submit valid-looking proof with invalid public inputs",
+          "code_location": "contracts/src/Verifier.sol:313-322, 343-344",
+          "analysis": "Public inputs are extracted from proof bytes and verified as part of ZK verification. The verifier contracts check proof against public inputs. Invalid inputs cause proof verification failure.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Submit many invalid proofs to waste gas",
+          "code_location": "contracts/src/Verifier.sol",
+          "analysis": "Proof verification is expensive. Invalid proofs cost attacker gas with no benefit. No state change occurs on invalid proof. Standard blockchain economics apply.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Cause verifier contract to return false instead of reverting",
+          "code_location": "contracts/src/Verifier.sol:274, 325, 347",
+          "analysis": "All three verification calls use require() which reverts on false return. No path allows processing to continue after failed verification.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Proof verification is stateless operation per call.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Malicious prover generates forged proof to mint tokens",
+        "preconditions": ["Prover is compromised/malicious", "Attacker has forged proof bytes"],
+        "attack_steps": ["Submit forged proof to teleport()", "On-chain verifier checks proof", "Proof fails Groth16/Nova verification", "Revert with InvalidProof()"],
+        "expected_result": "Forged proof rejected",
+        "actual_behavior": "Correctly rejected by cryptographic verification"
+      },
+      "guards_identified": [
+        "IRootDecider.verifyOpaqueNovaProof() at Verifier.sol:274",
+        "IWithdrawDecider.verifyOpaqueNovaProof() at Verifier.sol:325",
+        "IWithdrawVerifier.verifyProof() at Verifier.sol:347",
+        "require() wrapper on all verification calls"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Prover is UNTRUSTED by design. Security guaranteed by ZKP soundness, not prover trust. All proofs verified on-chain before any state changes."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-036-PROVER-OUTPUT-TO-USER-02",
+      "property_id": "PROP-EDGE-036-PROVER-OUTPUT-TO-USER",
+      "title": "Groth16 proof structure matches on-chain verifier expectations",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit malformed proof bytes that decode incorrectly",
+          "code_location": "contracts/src/Verifier.sol:313, 343-344",
+          "analysis": "Proof decoding uses abi.decode with expected types. For singleTeleport at line 343-344: (uint256[2], uint256[2][2], uint256[2], uint256[3]). Malformed bytes cause abi.decode to revert.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Submit proof with different structure than expected",
+          "code_location": "contracts/src/Verifier.sol:313, 343-344",
+          "analysis": "Fixed-size array decoding enforces exact structure. Nova proofs decoded as uint256[32] or uint256[34]. Groth16 proofs decoded as specific tuple. Any structure mismatch causes revert.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Decoding is O(1) operation.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Proof bytes with wrong length",
+          "code_location": "contracts/src/Verifier.sol:313, 343-344",
+          "analysis": "abi.decode reverts if calldata is insufficient for expected types. No silent failure.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Decoding is deterministic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Submit proof with wrong curve point encoding",
+        "preconditions": ["Have proof bytes with invalid G1/G2 point encoding"],
+        "attack_steps": ["Call singleTeleport with malformed proof", "abi.decode succeeds but verifier rejects invalid curve points", "Revert with InvalidProof()"],
+        "expected_result": "Proof rejected",
+        "actual_behavior": "Groth16 verifier validates curve points as part of verification"
+      },
+      "guards_identified": [
+        "abi.decode with fixed types at Verifier.sol:313, 343-344",
+        "Groth16 verifier curve point validation"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Proof structure enforced by abi.decode. Curve point validity checked by Groth16 verifier. No format mismatch vulnerability."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-037-INDEXER-OUTPUT-TO-USER-01",
+      "property_id": "PROP-EDGE-037-INDEXER-OUTPUT-TO-USER",
+      "title": "Merkle proof validity guaranteed by ZK circuit verification",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Submit invalid Merkle proof from malicious indexer",
+          "code_location": "ZK circuit (off-chain verification)",
+          "analysis": "Merkle proofs are verified inside the ZK circuit, not on-chain. Invalid Merkle path causes circuit to produce unsatisfiable constraints. No valid ZK proof can be generated for invalid Merkle path. On-chain only verifies the resulting ZK proof.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Merkle proof that passes circuit but doesn't match on-chain root",
+          "code_location": "contracts/src/Verifier.sol:366-368",
+          "analysis": "The transfer root is a public input to the ZK proof and is verified against provedTransferRoots or globalTransferRoots at line 366-368. Root must match or teleport reverts.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Indexer operations are off-chain.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Invalid Merkle proofs cause proof generation failure, not on-chain error.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Merkle proof verification is deterministic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Malicious indexer provides false Merkle path to user",
+        "preconditions": ["User has valid private balance", "Indexer provides wrong Merkle siblings"],
+        "attack_steps": ["User generates ZK proof with wrong Merkle path", "Circuit constraints are unsatisfied", "Proof generation fails", "No on-chain attack possible"],
+        "expected_result": "Cannot generate valid proof with invalid Merkle path",
+        "actual_behavior": "ZK circuit enforces Merkle path validity"
+      },
+      "guards_identified": [
+        "ZK circuit Merkle path verification",
+        "Transfer root public input binding at Verifier.sol:366-368"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Indexer is SEMI_TRUSTED - invalid Merkle proofs cause proof generation failure, not security breach. ZK circuit enforces correctness."
+    },
+    {
+      "checklist_id": "CL-PROP-EDGE-037-INDEXER-OUTPUT-TO-USER-02",
+      "property_id": "PROP-EDGE-037-INDEXER-OUTPUT-TO-USER",
+      "title": "Merkle structure matches on-chain hash chain computation",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Indexer uses different hash function than on-chain",
+          "code_location": "contracts/src/zERC20.sol:157, contracts/src/utils/ShaHashChainLib.sol",
+          "analysis": "Hash chain uses ShaHashChainLib.compute() at zERC20.sol:157 which implements SHA-256 with 248-bit truncation. Indexer must match this exactly or proofs will fail. This is a configuration/implementation detail to verify.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Different leaf encoding between indexer and contract",
+          "code_location": "contracts/src/zERC20.sol:157",
+          "analysis": "ShaHashChainLib.compute takes (hashChain, from, to, value). Indexer must encode leaves identically. Mismatch causes proof failure, not security breach.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Off-chain computation.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Mismatch causes proof failure.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Hash computation is deterministic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Indexer uses keccak256 instead of SHA-256",
+        "preconditions": ["Indexer misconfigured to use wrong hash"],
+        "attack_steps": ["User requests Merkle proof from indexer", "Indexer computes with wrong hash", "ZK proof generated with wrong leaf values", "Proof verification fails on-chain"],
+        "expected_result": "Proof invalid - no tokens minted",
+        "actual_behavior": "Hash mismatch causes proof failure, not incorrect minting"
+      },
+      "guards_identified": [
+        "ShaHashChainLib for on-chain hash computation",
+        "ZK circuit must use matching hash function"
+      ],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "rationale": "Hash function consistency between indexer, on-chain, and ZK circuit is critical but cannot be verified statically. Requires integration testing."
+    },
+    {
+      "checklist_id": "CL-CRITICAL-DUAL-MINTING-PATHWAYS-01",
+      "property_id": "PROP-EDGE-029-LIQUIDITY-MANAGER-TO-ZERC20",
+      "title": "No unauthorized third minting pathway exists",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Find hidden minting function in zERC20",
+          "code_location": "contracts/src/zERC20.sol",
+          "analysis": "zERC20 has exactly two external functions that mint: mint() at line 185 (onlyMinter) and teleport() at line 143 (onlyVerifier). Both have access control. _mint is internal. _credit (LayerZero OFT) at line 123 also mints but is internal callback for cross-chain transfers.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Exploit inheritance to access _mint directly",
+          "code_location": "contracts/src/zERC20.sol:18",
+          "analysis": "zERC20 inherits from OFTCoreUpgradeable, ERC20PermitUpgradeable, UUPSUpgradeable, IzERC20. _mint is inherited from ERC20Upgradeable but is internal. No public/external wrapper except mint() and teleport(). _credit() is internal and called by OFT receive flow.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable to authorization check.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Find third minting pathway in zERC20",
+        "preconditions": ["Review all functions that call _mint"],
+        "attack_steps": ["Search for _mint calls in zERC20", "Found: mint() line 187, teleport() line 146, _credit() line 135", "Verify access controls on each"],
+        "expected_result": "Only authorized pathways exist",
+        "actual_behavior": "mint() requires onlyMinter, teleport() requires onlyVerifier, _credit() is internal OFT callback"
+      },
+      "guards_identified": [
+        "onlyMinter on mint() at zERC20.sol:186",
+        "onlyVerifier on teleport() at zERC20.sol:144",
+        "_credit is internal, called by OFT _lzReceive flow"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "CRITICAL CHECK. Three paths to _mint found: mint (minter-only), teleport (verifier-only), _credit (internal OFT). Need to verify _credit cannot be exploited via LayerZero OFT receive path."
+    },
+    {
+      "checklist_id": "CL-CRITICAL-CROSS-CHAIN-ISOLATION-01",
+      "property_id": "PROP-EDGE-023-LAYERZERO-TO-HUB",
+      "title": "Complete cross-chain message isolation via EID validation",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Send cross-chain message from unregistered EID",
+          "code_location": "contracts/src/Hub.sol:316-318, contracts/src/Verifier.sol:440",
+          "analysis": "Hub._lzReceive checks `if (pos == 0) revert TokenNotRegistered(origin.srcEid)` at line 318. Verifier._lzReceive checks `require(origin.srcEid == $.hubEid, InvalidHubSource(origin.srcEid))` at line 440. Both validate source EID before processing.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Spoof srcEid in Origin struct",
+          "code_location": "LayerZero protocol level",
+          "analysis": "Origin struct is populated by LayerZero endpoint, not by caller. Spoofing requires compromising LayerZero protocol itself. LayerZero is SEMI_TRUSTED per trust model but EID is verified regardless.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "Send many messages from unauthorized EIDs",
+          "code_location": "contracts/src/Hub.sol:318",
+          "analysis": "Messages from unauthorized EIDs revert immediately. Attacker pays cross-chain fees with no state change. Not economically viable DoS.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Message from unknown EID silently ignored",
+          "code_location": "contracts/src/Hub.sol:318, contracts/src/Verifier.sol:440",
+          "analysis": "Both use revert (Hub: TokenNotRegistered, Verifier: InvalidHubSource) not return. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Race between peer registration and message receipt",
+          "code_location": "contracts/src/Hub.sol",
+          "analysis": "If peer unregistered between message send and receive, message reverts with TokenNotRegistered. Safe behavior.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker sends malicious root from unauthorized chain",
+        "preconditions": ["Attacker controls verifier on chain with EID 999", "EID 999 not registered in Hub"],
+        "attack_steps": ["Send LayerZero message to Hub from EID 999", "Hub._lzReceive checks eidToPosition[999]", "Position is 0 (unregistered)", "Revert with TokenNotRegistered(999)"],
+        "expected_result": "Message rejected",
+        "actual_behavior": "Correctly reverts for unregistered source EID"
+      },
+      "guards_identified": [
+        "eidToPosition check in Hub._lzReceive at Hub.sol:317-318",
+        "hubEid check in Verifier._lzReceive at Verifier.sol:440",
+        "LayerZero setPeer configuration"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "CRITICAL CHECK. Both Hub and Verifier validate source EID. Hub checks against registered tokens, Verifier checks against configured hubEid. Complete isolation achieved."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-001-STATE-USER-IDLE-01",
+      "property_id": "PROP-NODE-001-STATE-USER-IDLE",
+      "title": "STATE-USER-IDLE transitions require validation by receiving components",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Call user-facing functions with malicious inputs",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:103-128, contracts/src/zERC20.sol",
+          "analysis": "User entry points: wrap() validates amount>0, receiver!=0, msg.value; unwrap() validates amount>0, receiver!=0; transfer() inherited from OZ ERC20 validates balances. All user inputs validated before state changes.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "User directly modifies contract state",
+          "code_location": "All user-facing functions",
+          "analysis": "No public setters for critical state. All state modifications go through validated function paths.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "User spams transactions",
+          "code_location": "N/A",
+          "analysis": "Standard blockchain economics - user pays gas. ReentrancyGuard on LiquidityManager functions.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Input validation silently accepts bad values",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:250-251, 281-282",
+          "analysis": "wrap: ZeroAmount, ZeroReceiver errors. unwrap: ZeroAmount, ZeroReceiver errors. All use revert, no silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Each user transaction is atomic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "User attempts to wrap without providing underlying tokens",
+        "preconditions": ["User has 0 underlying token balance", "User calls wrap(100, receiver)"],
+        "attack_steps": ["Call wrap(100, receiver) with 0 token balance", "safeTransferFrom reverts", "No state change occurs"],
+        "expected_result": "Transaction reverts",
+        "actual_behavior": "Correctly reverts due to insufficient balance"
+      },
+      "guards_identified": [
+        "ZeroAmount check in _wrap at LiquidityManager.sol:250",
+        "ZeroReceiver check in _wrap at LiquidityManager.sol:251",
+        "SafeERC20.safeTransferFrom for balance validation",
+        "nonReentrant modifier on wrap/unwrap"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "All user entry points have appropriate input validation. UNTRUSTED->IN_SCOPE boundary properly protected."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-002-STATE-USER-HAS-UNDERLYING-01",
+      "property_id": "PROP-NODE-002-STATE-USER-HAS-UNDERLYING",
+      "title": "STATE-USER-HAS-UNDERLYING only reachable via valid unwrap completion",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Obtain underlying tokens without burning zERC20",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:280-302",
+          "analysis": "_unwrap burns zERC20 at line 288 BEFORE transferring underlying at lines 290-297. No path transfers underlying without prior burn. Burn is called on msg.sender's balance.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Reentrancy to withdraw underlying multiple times",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:126-128, 279",
+          "analysis": "unwrap() has nonReentrant modifier. _unwrap is private. Even with callback from malicious token, reentrancy blocked. Additionally, zERC20 burn happens before underlying transfer (CEI pattern partial).",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Underlying transfer fails silently",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:290-297",
+          "analysis": "Native transfer uses call{value} with success check at line 291-293. ERC20 uses safeTransfer which reverts on failure. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "nonReentrant prevents race.",
+          "finding": "GUARD_PRESENT"
+        }
+      },
+      "counterexample": {
+        "scenario": "User attempts to withdraw underlying without burning zERC20",
+        "preconditions": ["User has 0 zERC20", "LiquidityManager has underlying liquidity"],
+        "attack_steps": ["Call unwrap(100, user)", "ZERC20_TOKEN.burn fails due to insufficient balance", "Transaction reverts"],
+        "expected_result": "Cannot withdraw without zERC20",
+        "actual_behavior": "Correctly reverts when user lacks zERC20"
+      },
+      "guards_identified": [
+        "nonReentrant modifier at LiquidityManager.sol:126",
+        "zERC20 burn before underlying transfer at LiquidityManager.sol:288",
+        "SafeERC20 for transfer safety",
+        "Native transfer success check at LiquidityManager.sol:291-293"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "Unwrap flow correctly enforces burn-before-transfer. Reentrancy protected. Only valid unwrap path leads to underlying possession."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-003-STATE-USER-HAS-ZERC20-01",
+      "property_id": "PROP-NODE-003-STATE-USER-HAS-ZERC20",
+      "title": "STATE-USER-HAS-ZERC20 only reachable via wrap or teleport completion",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Mint zERC20 without going through wrap or teleport",
+          "code_location": "contracts/src/zERC20.sol:185-188, 143-149",
+          "analysis": "mint() requires onlyMinter (LiquidityManager). teleport() requires onlyVerifier. _credit() is internal OFT callback. No other external/public minting paths exist.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Transfer creates tokens (violation of conservation)",
+          "code_location": "contracts/src/zERC20.sol (ERC20 inheritance)",
+          "analysis": "ERC20 _transfer decrements sender and increments recipient by same amount. No token creation in transfer. Solidity 0.8+ prevents overflow/underflow.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Mint without proper authorization silently succeeds",
+          "code_location": "contracts/src/zERC20.sol:186, 144",
+          "analysis": "Both use revert on authorization failure (OnlyMinter, OnlyVerifier). No silent bypass.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Each transaction atomic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker finds third path to increase zERC20 balance",
+        "preconditions": ["Search all paths to balance increase"],
+        "attack_steps": ["Review _mint callers: mint(), teleport(), _credit()", "mint requires minter role", "teleport requires verifier role", "_credit requires valid OFT receive flow with peer validation", "No unauthorized path exists"],
+        "expected_result": "Only authorized paths increase balance",
+        "actual_behavior": "zERC20 balance only increases via wrap, teleport, or cross-chain OFT receive"
+      },
+      "guards_identified": [
+        "OnlyMinter check at zERC20.sol:186",
+        "OnlyVerifier check at zERC20.sol:144",
+        "_credit is internal OFT callback with peer validation"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "CRITICAL. Only wrap (via minter mint) and teleport (via verifier) and OFT receive (_credit) can increase user zERC20 balance. All paths properly authorized."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-004-STATE-LM-AWAITING-WRAP-01",
+      "property_id": "PROP-NODE-004-STATE-LM-AWAITING-WRAP",
+      "title": "STATE-LM-AWAITING-WRAP enforces BN254 field constraints",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Wrap amount that exceeds 2^248-1",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "_update hook checks `if (value > type(uint248).max) revert ValueTooLarge()` at line 154. This applies to ALL transfers including mints from wrap. No bypass possible.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Resulting balance exceeds MAX_VALUE after wrap",
+          "code_location": "contracts/src/zERC20.sol:153-159",
+          "analysis": "The check is on `value` (transfer amount), not resulting balance. However, if value <= MAX_VALUE and balance is already at MAX_VALUE, the resulting balance could exceed MAX_VALUE. POTENTIAL ISSUE: Balance check should be on resulting balance, not just value.",
+          "finding": "POTENTIAL_ISSUE"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Uses revert with custom error.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Each wrap is atomic.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Wrap amount that results in balance > 2^248-1",
+        "preconditions": ["User has balance near MAX_VALUE", "Wrap amount such that balance + amount > MAX_VALUE"],
+        "attack_steps": ["Have balance = MAX_VALUE - 1", "Wrap amount = 2", "Resulting balance = MAX_VALUE + 1", "Check is on value (2 <= MAX_VALUE) so passes", "Balance exceeds MAX_VALUE"],
+        "expected_result": "Transaction should revert",
+        "actual_behavior": "NEEDS VERIFICATION - current check is on value not resulting balance"
+      },
+      "guards_identified": [
+        "ValueTooLarge check at zERC20.sol:154"
+      ],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "rationale": "The MAX_VALUE check is on transfer value, not resulting balance. Need to verify if ERC20 balance overflow protection or additional checks prevent resulting balance from exceeding MAX_VALUE. Solidity 0.8+ prevents uint256 overflow but 2^248-1 is smaller than uint256.max."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-005-ACTION-LM-CALCULATE-REWARD-01",
+      "property_id": "PROP-NODE-005-ACTION-LM-CALCULATE-REWARD",
+      "title": "ACTION-LM-CALCULATE-REWARD uses floor rounding for rewards",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Input amounts that cause incorrect reward calculation",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol",
+          "analysis": "quoteWrapReward uses standard division which floors in Solidity. Need to verify IncentiveLib implementation uses floor for rewards (favorable to protocol).",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Reward exceeds available feeSurplus",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:271-273",
+          "analysis": "Reward is calculated then subtracted from feeSurplus at line 273: `if (reward > 0) $.feeSurplus -= reward`. If reward > feeSurplus, this underflows and reverts in Solidity 0.8+. The quoteWrapReward should cap reward at feeSurplus.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Calculation is O(1).",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "Division by zero in reward calculation",
+          "code_location": "contracts/src/libraries/IncentiveLib.sol",
+          "analysis": "Need to verify IncentiveLib handles division by zero cases.",
+          "finding": "NEEDS_VERIFICATION"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Reward calculated fresh in each transaction.",
+          "finding": "NOT_APPLICABLE"
+        }
+      },
+      "counterexample": {
+        "scenario": "Wrap with amount that produces fractional reward",
+        "preconditions": ["feeSurplus = 100", "Incentive curve produces reward of 10.5"],
+        "attack_steps": ["Call wrap", "IncentiveLib calculates reward", "Floor rounding gives 10, not 11", "Protocol keeps extra 0.5"],
+        "expected_result": "Reward rounds down",
+        "actual_behavior": "Need to verify IncentiveLib rounding direction"
+      },
+      "guards_identified": [
+        "Solidity default floor division",
+        "feeSurplus underflow protection via Solidity 0.8+"
+      ],
+      "classification": "needs-verification",
+      "confidence": "medium",
+      "rationale": "Rounding direction needs verification in IncentiveLib. Default Solidity division floors which is correct for rewards."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-006-ACTION-LM-PULL-LIQUIDITY-01",
+      "property_id": "PROP-NODE-006-ACTION-LM-PULL-LIQUIDITY",
+      "title": "ACTION-LM-PULL-LIQUIDITY transfers exact requested amount",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Fee-on-transfer token causes amount mismatch",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:254-265",
+          "analysis": "For ERC20: line 263 does safeTransferFrom, line 264 calculates received = balance_after - balance_before. This DOES handle FoT tokens. However, the reward is calculated on `received` not `amount`, so if FoT token is used, reward is based on actual received.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Transfer succeeds but contract receives less than expected",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:264-266",
+          "analysis": "Line 264 calculates `received = _underlyingBalance() - balanceBefore`. Line 266 checks `if (received == 0) revert UnderlyingPullFailed()`. Actual received amount is used, not requested amount.",
+          "finding": "GUARD_PRESENT"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Single transfer operation.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "transferFrom fails silently",
+          "code_location": "contracts/src/liquidity/LiquidityManager.sol:263",
+          "analysis": "SafeERC20.safeTransferFrom reverts on failure. Additionally, received == 0 check catches edge cases.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "nonReentrant protects against callback attacks.",
+          "finding": "GUARD_PRESENT"
+        }
+      },
+      "counterexample": {
+        "scenario": "Wrap with fee-on-transfer token",
+        "preconditions": ["Underlying is FoT token with 1% fee", "User wraps 100 tokens"],
+        "attack_steps": ["Call wrap(100, receiver)", "safeTransferFrom transfers 100", "LM receives 99 (1% fee taken)", "received = 99", "Reward calculated on 99", "User gets zERC20 for actual 99 received"],
+        "expected_result": "User gets zERC20 proportional to actual received",
+        "actual_behavior": "Code handles FoT tokens correctly via balance delta calculation"
+      },
+      "guards_identified": [
+        "Balance delta calculation at LiquidityManager.sol:264",
+        "UnderlyingPullFailed check at LiquidityManager.sol:266",
+        "SafeERC20 for transfer safety",
+        "nonReentrant modifier"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "FoT tokens ARE handled via balance delta calculation. Received amount is used for all subsequent calculations. Deployment policy may still prohibit FoT for other reasons."
+    },
+    {
+      "checklist_id": "CL-PROP-NODE-007-ACTION-LM-MINT-ZERC20-01",
+      "property_id": "PROP-NODE-007-ACTION-LM-MINT-ZERC20",
+      "title": "ACTION-LM-MINT-ZERC20 requires authorized minter",
+      "static_analysis": {
+        "input_validation_bypass": {
+          "attack_vector": "Call mint() from unauthorized address",
+          "code_location": "contracts/src/zERC20.sol:185-188",
+          "analysis": "mint() checks `if (msg.sender != minter()) revert OnlyMinter()` at line 186. Only configured minter (LiquidityManager) can mint. No bypass via inheritance or delegatecall.",
+          "finding": "GUARD_PRESENT"
+        },
+        "state_transition_violation": {
+          "attack_vector": "Minter set to malicious address",
+          "code_location": "contracts/src/zERC20.sol:177-180",
+          "analysis": "setMinter is onlyOwner. Owner can set any minter. This is OUT OF SCOPE per trust model.",
+          "finding": "OUT_OF_SCOPE"
+        },
+        "resource_exhaustion": {
+          "attack_vector": "N/A",
+          "code_location": "N/A",
+          "analysis": "Not applicable.",
+          "finding": "NOT_APPLICABLE"
+        },
+        "faulty_error_handling": {
+          "attack_vector": "mint() silently fails",
+          "code_location": "contracts/src/zERC20.sol:186-187",
+          "analysis": "Authorization uses revert. _mint from OZ ERC20 reverts on overflow. No silent failures.",
+          "finding": "NO_VULNERABILITY"
+        },
+        "race_conditions": {
+          "attack_vector": "Race between setMinter and mint call",
+          "code_location": "contracts/src/zERC20.sol",
+          "analysis": "If owner changes minter during pending mint, the mint reverts with OnlyMinter. Safe behavior.",
+          "finding": "NO_VULNERABILITY"
+        }
+      },
+      "counterexample": {
+        "scenario": "Attacker deploys malicious contract that calls mint()",
+        "preconditions": ["Attacker contract deployed", "Not configured as minter"],
+        "attack_steps": ["Attacker contract calls zERC20.mint(attacker, 1000000)", "Check: msg.sender != minter()", "Revert with OnlyMinter()"],
+        "expected_result": "Unauthorized mint fails",
+        "actual_behavior": "Correctly reverts for non-minter callers"
+      },
+      "guards_identified": [
+        "OnlyMinter check at zERC20.sol:186",
+        "onlyOwner on setMinter at zERC20.sol:177"
+      ],
+      "classification": "needs-verification",
+      "confidence": "high",
+      "rationale": "CRITICAL. Minting authorization correctly enforced. Only configured minter can call mint(). Owner-controlled minter setting is out of scope."
+    }
+  ],
+  "summary": {
+    "total_items_audited": 20,
+    "classifications": {
+      "potential_vulnerability": 0,
+      "code_quality_issue": 0,
+      "needs_verification": 20,
+      "audit_gap": 0
+    },
+    "critical_findings": [],
+    "high_priority_verifications": [
+      "CL-PROP-NODE-004-STATE-LM-AWAITING-WRAP-01: Verify 248-bit check applies to resulting balance, not just transfer value",
+      "CL-CRITICAL-DUAL-MINTING-PATHWAYS-01: Verify _credit OFT pathway has proper peer validation",
+      "CL-PROP-NODE-005-ACTION-LM-CALCULATE-REWARD-01: Verify IncentiveLib reward calculation rounding direction",
+      "CL-PROP-EDGE-037-INDEXER-OUTPUT-TO-USER-02: Verify hash function consistency across indexer/on-chain/ZK circuit"
+    ],
+    "out_of_scope_items": [
+      "CL-PROP-EDGE-031-OWNER-UPGRADE-01",
+      "CL-PROP-EDGE-032-OWNER-SET-MINTER-01",
+      "CL-PROP-EDGE-033-OWNER-REGISTER-TOKEN-01",
+      "CL-PROP-EDGE-034-OWNER-SET-VERIFIERS-01",
+      "CL-PROP-EDGE-035-OWNER-SET-FEE-PARAMS-01"
+    ]
+  }
+}
