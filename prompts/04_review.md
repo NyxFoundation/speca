@@ -131,7 +131,7 @@ Use this decision tree for every item:
 
 2.  **State-Driven Batch Processing (All Runs):**
     -   Load the `unprocessed_audit_items` queue from `outputs/04_STATE.json`.
-    -   Process a batch of **10 items** (reduced from 20 for deeper analysis).
+    -   Process a batch of **5 items** (reduced from 10 for deeper analysis).
 
 3.  **Strict Output Formatting:**
     -   Generate a list of `reviewed_items`.
@@ -146,8 +146,8 @@ Use this decision tree for every item:
   "metadata": {
     "run_id": 1,
     "timestamp": "2025-12-24T00:00:00Z",
-    "batch_size": 10,
-    "items_reviewed": 10,
+    "batch_size": 5,
+    "items_reviewed": 5,
     "verdicts": {
       "CONFIRMED_VULNERABILITY": 1,
       "LIKELY_VULNERABILITY": 2,
@@ -222,7 +222,7 @@ Use this decision tree for every item:
          "created_at": "TIMESTAMP",
          "stage": "04_review",
          "current_run": 1,
-         "batch_size": 10,
+         "batch_size": 5,
          "total_audit_items": <COUNT>
        },
        "unprocessed_audit_items": [...]
@@ -232,7 +232,7 @@ Use this decision tree for every item:
 3. **If it DOES exist:**
    - Load `outputs/04_STATE.json`
    - Read the `unprocessed_audit_items` array
-4. Extract the first **10 items** as your `current_batch`
+4. Extract the first **5 items** as your `current_batch`
 5. Calculate `run_number` from existing PARTIAL files or state metadata
 
 ### **Step 2: Execute Formal Review**
@@ -353,7 +353,7 @@ For each `item` in your `current_batch`:
 ## Self-Check Before Completion
 
 Before finishing each run, verify:
-- [ ] All 10 items in `current_batch` have been reviewed
+- [ ] All 5 items in `current_batch` have been reviewed
 - [ ] Each item has exactly ONE verdict from the 6 categories
 - [ ] All verdicts are supported by concrete evidence
 - [ ] All `proof_trace` entries reference actual code locations
@@ -365,206 +365,24 @@ Before finishing each run, verify:
 
 ---
 
-## Examples
-
-### Example 1: CONFIRMED_VULNERABILITY
+## Example Output (Condensed)
 
 ```json
 {
-  "original_item": {
-    "check_id": "CHECK-REENTRANCY-001",
-    "file": "contracts/Vault.sol",
-    "line": 45,
-    "classification": "potential-vulnerability",
-    "summary": "External call before state update allows reentrancy",
-    "attack_vector": "State Transition Violation",
-    "severity": "Critical",
-    "confidence": "High",
-    "counterexample": {
-      "preconditions": "Attacker deploys malicious contract",
-      "attack_sequence": ["1. Call withdraw()", "2. Reenter in fallback", "3. Drain funds"],
-      "expected_outcome": "Complete drainage"
-    }
-  },
   "verdict": "CONFIRMED_VULNERABILITY",
   "security_impact": "Critical",
   "exploitability": "High",
-  "reasoning": "The counterexample is realistic and demonstrates a classic reentrancy vulnerability. The external call at line 45 occurs before the balance update at line 48. No reentrancy guard exists. The checks-effects-interactions pattern is violated. An attacker can easily deploy a malicious contract with a fallback function that reenters withdraw().",
-  "counterexample_evaluation": {
-    "plausibility": "High",
-    "assessment": "All preconditions are trivial to achieve. The attack sequence is standard reentrancy. The expected outcome is guaranteed by the code structure."
-  },
-  "guard_analysis": {
-    "guards_found": [],
-    "bypass_possible": true,
-    "bypass_method": "No guard exists. Direct exploitation is possible."
-  },
-  "proof_trace": [
-    "contracts/Vault.sol:42 - withdraw() function entry, no reentrancy guard",
-    "contracts/Vault.sol:43 - require(balance[msg.sender] >= amount) - check passes on first call",
-    "contracts/Vault.sol:45 - msg.sender.call{value: amount}() - external call before state update",
-    "contracts/Vault.sol:48 - balance[msg.sender] -= amount - state update AFTER external call",
-    "Attacker fallback - reenters withdraw(), balance still shows original value, check passes again"
-  ],
-  "recommendation": "Add nonReentrant modifier or move state update before external call"
+  "reasoning": "Counterexample is realistic. External call at line 45 before state update at line 48. No reentrancy guard exists.",
+  "counterexample_evaluation": { "plausibility": "High", "assessment": "Attack sequence is standard reentrancy." },
+  "guard_analysis": { "guards_found": [], "bypass_possible": true },
+  "proof_trace": ["Vault.sol:42 - entry", "Vault.sol:45 - external call", "Vault.sol:48 - state update AFTER call"],
+  "recommendation": "Add nonReentrant modifier"
 }
 ```
 
-### Example 2: VERIFIED_SAFE
-
-```json
-{
-  "original_item": {
-    "check_id": "CHECK-OVERFLOW-001",
-    "file": "contracts/Token.sol",
-    "line": 67,
-    "classification": "potential-vulnerability",
-    "summary": "Addition may overflow",
-    "attack_vector": "Input Validation Bypass",
-    "severity": "High",
-    "confidence": "Medium",
-    "counterexample": {
-      "preconditions": "balance[user] = MAX_UINT - 1",
-      "attack_sequence": ["1. Transfer 2 tokens", "2. Overflow to 1"],
-      "expected_outcome": "Balance wraps around"
-    }
-  },
-  "verdict": "VERIFIED_SAFE",
-  "security_impact": "None",
-  "exploitability": "None",
-  "reasoning": "The counterexample would be valid in Solidity <0.8.0, but this contract uses Solidity 0.8.19 (verified at line 2). Solidity 0.8+ has built-in overflow protection that reverts on overflow. The addition at line 67 will automatically revert if it would overflow. No explicit check is needed.",
-  "counterexample_evaluation": {
-    "plausibility": "Low",
-    "assessment": "The attack sequence assumes overflow is possible, but Solidity 0.8+ prevents this automatically."
-  },
-  "guard_analysis": {
-    "guards_found": [
-      {
-        "location": "contracts/Token.sol:2",
-        "type": "Solidity version",
-        "effectiveness": "Complete",
-        "reason": "pragma solidity ^0.8.19 provides automatic overflow protection"
-      }
-    ],
-    "bypass_possible": false,
-    "bypass_method": "None. Language-level protection cannot be bypassed."
-  },
-  "proof_trace": [
-    "contracts/Token.sol:2 - pragma solidity ^0.8.19",
-    "contracts/Token.sol:67 - balance[to] += amount",
-    "Solidity 0.8+ documentation - automatic overflow/underflow checks",
-    "If overflow occurs, transaction reverts automatically"
-  ],
-  "recommendation": "None. The code is safe."
-}
-```
-
-### Example 3: CODE_QUALITY_ISSUE
-
-```json
-{
-  "original_item": {
-    "check_id": "CHECK-GAS-PATTERN-001",
-    "file": "core/vm/interpreter.go",
-    "line": 200,
-    "classification": "code-quality-issue",
-    "summary": "Inconsistent gas handling patterns",
-    "attack_vector": "Faulty Error Handling",
-    "severity": "Low",
-    "confidence": "High",
-    "counterexample": null
-  },
-  "verdict": "CODE_QUALITY_ISSUE",
-  "security_impact": "None",
-  "exploitability": "None",
-  "reasoning": "The inconsistency between direct gas subtraction (line 200) and UseGas() method (line 179) is a code quality issue, not a security vulnerability. Both patterns are functionally equivalent for single-threaded execution. The direct pattern is used for performance in the hot interpreter loop. However, this inconsistency makes the code harder to audit and maintain.",
-  "counterexample_evaluation": {
-    "plausibility": "N/A",
-    "assessment": "No counterexample provided. This is a code quality concern, not an exploitability concern."
-  },
-  "guard_analysis": {
-    "guards_found": [
-      {
-        "location": "core/vm/interpreter.go:197",
-        "type": "Underflow check",
-        "effectiveness": "Complete",
-        "reason": "if contract.Gas < cost { return ErrOutOfGas }"
-      }
-    ],
-    "bypass_possible": false,
-    "bypass_method": "Both patterns include underflow protection. No bypass possible."
-  },
-  "proof_trace": [
-    "core/vm/interpreter.go:197-201 - Direct pattern with check",
-    "core/vm/contract.go:129-138 - UseGas() method with same check",
-    "core/vm/interpreter.go single-threaded - No race condition possible",
-    "Both patterns are safe, just inconsistent"
-  ],
-  "recommendation": "Standardize on one pattern or add documentation explaining why both are needed. Consider adding a comment at line 200 explaining the performance optimization."
-}
-```
-
-### Example 4: REQUIRES_MANUAL_REVIEW
-
-```json
-{
-  "original_item": {
-    "check_id": "CHECK-CRYPTO-001",
-    "file": "crypto/bls12381/bls12_381.go",
-    "line": 156,
-    "classification": "needs-verification",
-    "summary": "BLS signature verification requires formal verification",
-    "attack_vector": "Input Validation Bypass",
-    "severity": "High",
-    "confidence": "Medium",
-    "counterexample": {
-      "preconditions": "Attacker crafts malformed signature",
-      "attack_sequence": ["1. Submit invalid point encoding", "2. Verification accepts", "3. Invalid block accepted"],
-      "expected_outcome": "Consensus failure"
-    }
-  },
-  "verdict": "REQUIRES_MANUAL_REVIEW",
-  "security_impact": "Potentially High",
-  "exploitability": "Unknown",
-  "reasoning": "Static analysis cannot verify the correctness of cryptographic implementations. The BLS signature verification at line 156 involves complex elliptic curve operations. While the code appears to follow the specification, subtle implementation errors in cryptographic code can lead to signature forgery or invalid signature acceptance. This requires specialized review.",
-  "counterexample_evaluation": {
-    "plausibility": "Unknown",
-    "assessment": "The counterexample is theoretically possible if the implementation has bugs, but static analysis cannot determine if such bugs exist in cryptographic code."
-  },
-  "guard_analysis": {
-    "guards_found": [
-      {
-        "location": "crypto/bls12381/bls12_381.go:145-160",
-        "type": "Point validation",
-        "effectiveness": "Unknown",
-        "reason": "Implementation appears correct but requires expert review"
-      }
-    ],
-    "bypass_possible": "Unknown",
-    "bypass_method": "Cannot be determined through static analysis"
-  },
-  "proof_trace": [
-    "crypto/bls12381/bls12_381.go:156 - Signature verification implementation",
-    "crypto/bls12381/bls12_381.go:145 - Point deserialization",
-    "crypto/bls12381/bls12_381.go:160 - Pairing check",
-    "EIP-2537 specification - BLS12-381 requirements"
-  ],
-  "recommendation": "Requires: (1) Formal verification against EIP-2537 spec, (2) Cryptographic expert review, (3) Fuzzing with invalid inputs, (4) Test vectors from reference implementation",
-  "manual_review_type": "Cryptographic expert review + formal verification"
-}
-```
-
----
-
-## Notes on Improvement
-
-This improved version addresses the key issues identified in the analysis:
-
-1. **Removes False Positive Bias**: Neutral stance, no default assumption
-2. **Expands Verdict Categories**: 6 categories instead of 2, allowing nuanced judgments
-3. **Prioritizes Counterexample Evaluation**: Evaluates the 03 stage's counterexample first
-4. **Clearer Evidence Standards**: Specific requirements for each verdict type
-5. **Reduced Batch Size**: 10 items instead of 20 for deeper analysis
-6. **Fixed Output Bug**: State file updated after output file
-7. **Balanced Guidelines**: Explicitly warns against various biases
-8. **Comprehensive Examples**: 4 detailed examples covering different verdict types
+**Verdict patterns:**
+- **CONFIRMED_VULNERABILITY**: Plausible counterexample + no effective guard + security impact
+- **VERIFIED_SAFE**: Definitive guard found (e.g., Solidity 0.8+ overflow protection)
+- **FALSE_POSITIVE**: Counterexample not plausible (wrong assumptions)
+- **CODE_QUALITY_ISSUE**: Real issue but not exploitable
+- **REQUIRES_MANUAL_REVIEW**: Static analysis insufficient (e.g., crypto code)

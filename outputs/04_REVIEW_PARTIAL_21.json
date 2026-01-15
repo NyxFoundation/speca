@@ -1,0 +1,371 @@
+{
+  "metadata": {
+    "run_id": 21,
+    "timestamp": "2026-01-15T00:00:00Z",
+    "batch_size": 5,
+    "items_reviewed": 5,
+    "verdicts": {
+      "CONFIRMED_VULNERABILITY": 0,
+      "LIKELY_VULNERABILITY": 0,
+      "VERIFIED_SAFE": 4,
+      "FALSE_POSITIVE": 0,
+      "CODE_QUALITY_ISSUE": 0,
+      "REQUIRES_MANUAL_REVIEW": 1
+    }
+  },
+  "reviewed_items": [
+    {
+      "original_item": {
+        "checklist_id": "CL-PROP-EDGE-001-USER-INITIATES-WRAP-02",
+        "classification": "needs-verification",
+        "confidence": 0.80,
+        "static_analysis": {
+          "attack_vectors_applied": [
+            {"vector": "Input Validation Bypass", "finding": "No explicit state machine pattern. Wrap is atomic - validates, transfers, calculates reward, mints in sequence.", "status": "GUARDED"},
+            {"vector": "State Transition Violation", "finding": "Atomic execution within nonReentrant. No intermediate pausable states that could leave wrap incomplete.", "status": "GUARDED"},
+            {"vector": "Resource Exhaustion (DoS)", "finding": "No state machine to corrupt. Single atomic operation.", "status": "NOT_APPLICABLE"},
+            {"vector": "Faulty Error Handling", "finding": "Reverts atomically on any failure - no cleanup needed.", "status": "GUARDED"},
+            {"vector": "Race Conditions & Concurrency", "finding": "ReentrancyGuardTransient prevents re-entry during wrap execution.", "status": "GUARDED"}
+          ],
+          "code_locations": ["contracts/src/liquidity/LiquidityManager.sol:249-277"]
+        },
+        "counterexample": {
+          "scenario": "Attacker attempts to leave wrap in partial state by causing revert after transferFrom but before mint",
+          "preconditions": ["Attacker controls malicious ERC20 with callback in transferFrom"],
+          "attack_steps": [
+            "1. Deploy malicious ERC20 that reverts in callback after balance update",
+            "2. Call wrap with malicious token"
+          ],
+          "expected_outcome": "Entire transaction reverts atomically. No partial state. Note: LiquidityManager uses immutable UNDERLYING_TOKEN set at construction, so malicious token attack is not possible without compromised deployment.",
+          "guard_found": "Immutable UNDERLYING_TOKEN + atomic transaction + ReentrancyGuardTransient"
+        },
+        "guards_identified": [
+          {"location": "LiquidityManager.sol:29", "description": "UNDERLYING_TOKEN is immutable - set at construction", "effectiveness": "HIGH"},
+          {"location": "LiquidityManager.sol:103", "description": "nonReentrant modifier prevents re-entry", "effectiveness": "HIGH"}
+        ],
+        "notes": "No explicit state machine but wrap is atomic. The design choice to use immutable token references prevents token substitution attacks."
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample is not plausible in practice because the UNDERLYING_TOKEN is declared as an immutable variable at line 29 of LiquidityManager.sol. This means the token address is set at contract construction time and cannot be changed afterward. An attacker cannot substitute a malicious ERC20 token unless they compromised the initial deployment. Furthermore, even if the underlying token had a callback (e.g., ERC777), the ReentrancyGuardTransient modifier at line 103 prevents reentrancy attacks. EVM atomic transaction semantics ensure that if any operation within _wrap() reverts, the entire transaction reverts with no partial state changes. The combination of immutable token reference, reentrancy protection, and atomic transaction semantics makes this attack vector non-viable.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The attack requires substituting the underlying token with a malicious contract. This is impossible because UNDERLYING_TOKEN is immutable (set at deployment, cannot be changed). The precondition 'Attacker controls malicious ERC20' cannot be satisfied unless the contract was deployed with a malicious token from the start, which would be a deployment-time issue rather than a runtime vulnerability."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "LiquidityManager.sol:29",
+            "type": "immutable declaration",
+            "effectiveness": "Complete",
+            "reason": "IERC20 private immutable UNDERLYING_TOKEN - cannot be modified after construction"
+          },
+          {
+            "location": "LiquidityManager.sol:103",
+            "type": "ReentrancyGuardTransient modifier",
+            "effectiveness": "Complete",
+            "reason": "Prevents reentrancy even if token has callbacks"
+          },
+          {
+            "location": "EVM semantics",
+            "type": "Atomic transaction",
+            "effectiveness": "Complete",
+            "reason": "All state changes revert if any operation fails"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - guards are definitive"
+      },
+      "proof_trace": [
+        "LiquidityManager.sol:29 - UNDERLYING_TOKEN is immutable, set at construction",
+        "LiquidityManager.sol:103 - wrap() has nonReentrant modifier",
+        "LiquidityManager.sol:266 - safeTransferFrom uses the immutable token",
+        "LiquidityManager.sol:278 - mint occurs after transfer, within same atomic transaction",
+        "EVM - If any operation reverts, all state changes are rolled back"
+      ]
+    },
+    {
+      "original_item": {
+        "checklist_id": "CL-PROP-EDGE-007-USER-INITIATES-UNWRAP-01",
+        "classification": "needs-verification",
+        "confidence": 0.85,
+        "static_analysis": {
+          "attack_vectors_applied": [
+            {"vector": "Input Validation Bypass", "finding": "LiquidityManager._unwrap() validates amount != 0 and receiver != address(0) at lines 281-282. zERC20.burn is called which checks balance via ERC20._burn.", "status": "GUARDED"},
+            {"vector": "State Transition Violation", "finding": "Burn occurs BEFORE underlying transfer. If transfer fails, tokens already burned - potential issue. However, SafeERC20.safeTransfer reverts on failure causing atomic revert.", "status": "GUARDED"},
+            {"vector": "Resource Exhaustion (DoS)", "finding": "InsufficientLiquidity check prevents unwrap when pool is drained. No unbounded loops.", "status": "GUARDED"},
+            {"vector": "Faulty Error Handling", "finding": "Custom errors InsufficientLiquidity, UnderlyingSendFailed. SafeERC20 handles transfer errors.", "status": "GUARDED"},
+            {"vector": "Race Conditions & Concurrency", "finding": "nonReentrant applied. Fee calculation uses storage state that cannot be manipulated mid-execution.", "status": "GUARDED"}
+          ],
+          "code_locations": [
+            "contracts/src/liquidity/LiquidityManager.sol:126-128 (unwrap entry)",
+            "contracts/src/liquidity/LiquidityManager.sol:280-302 (_unwrap implementation)"
+          ]
+        },
+        "counterexample": {
+          "scenario": "Attacker attempts to unwrap more zERC20 than they hold",
+          "preconditions": ["Attacker has some zERC20 balance"],
+          "attack_steps": [
+            "1. Attacker calls unwrap(balance + 1, attackerAddress)",
+            "2. ZERC20_TOKEN.burn(msg.sender, amount) is called",
+            "3. ERC20._burn checks balance and reverts"
+          ],
+          "expected_outcome": "Transaction reverts with ERC20InsufficientBalance error from OpenZeppelin ERC20._burn",
+          "guard_found": "ERC20._burn balance check"
+        },
+        "guards_identified": [
+          {"location": "LiquidityManager.sol:281-282", "description": "ZeroAmount and ZeroReceiver entry validation", "effectiveness": "HIGH"},
+          {"location": "LiquidityManager.sol:288", "description": "zERC20.burn checks caller balance", "effectiveness": "CRITICAL"},
+          {"location": "LiquidityManager.sol:291,295", "description": "InsufficientLiquidity check before transfer", "effectiveness": "HIGH"}
+        ],
+        "notes": "Unwrap boundary is well-protected. The burn-before-transfer pattern is safe due to atomic transaction semantics."
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample is realistic but is definitively guarded by OpenZeppelin's ERC20._burn implementation. When an attacker attempts to unwrap more zERC20 than they hold, the call to ZERC20_TOKEN.burn(msg.sender, amount) at line 291 triggers the internal _burn function in the zERC20 contract which inherits from OpenZeppelin's ERC20Upgradeable. The ERC20._burn function performs a balance check: it reads the current balance and reverts with ERC20InsufficientBalance if the burn amount exceeds the balance. This check happens before any state modification. The guard is part of the battle-tested OpenZeppelin library and cannot be bypassed through the LiquidityManager interface. Additionally, the input validation at lines 283-285 catches zero amounts and zero receivers early.",
+      "counterexample_evaluation": {
+        "plausibility": "High",
+        "assessment": "The attack sequence is realistic - an attacker could attempt to call unwrap with an amount exceeding their balance. However, the attack fails at step 3 because ERC20._burn performs a balance check before modifying state."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "zERC20 inherits ERC20Upgradeable",
+            "type": "Balance check in _burn",
+            "effectiveness": "Complete",
+            "reason": "OpenZeppelin ERC20._burn reverts with ERC20InsufficientBalance if amount > balance"
+          },
+          {
+            "location": "LiquidityManager.sol:283-285",
+            "type": "require statements",
+            "effectiveness": "Complete",
+            "reason": "Validates amount != 0 and receiver != address(0) at function entry"
+          },
+          {
+            "location": "LiquidityManager.sol:294,299",
+            "type": "require statements",
+            "effectiveness": "Complete",
+            "reason": "InsufficientLiquidity check for underlying token balance"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - ERC20._burn balance check is fundamental and cannot be bypassed"
+      },
+      "proof_trace": [
+        "LiquidityManager.sol:126 - unwrap() external entry point with nonReentrant",
+        "LiquidityManager.sol:283-285 - Entry validation: amount != 0, receiver != address(0)",
+        "LiquidityManager.sol:291 - ZERC20_TOKEN.burn(msg.sender, amount) called",
+        "zERC20.sol:193-196 - burn() checks msg.sender == minter() then calls _burn",
+        "ERC20Upgradeable._burn - OpenZeppelin checks balance >= amount, reverts if not"
+      ]
+    },
+    {
+      "original_item": {
+        "checklist_id": "CL-PROP-EDGE-007-USER-INITIATES-UNWRAP-02",
+        "classification": "needs-verification",
+        "confidence": 0.90,
+        "static_analysis": {
+          "attack_vectors_applied": [
+            {"vector": "Input Validation Bypass", "finding": "IncentiveLib.quoteUnwrapFee uses validated FeeParams. validateFeeParams enforces targetLiquidity <= MAX_TARGET_LIQUIDITY and k <= K_BPS_DENOM.", "status": "GUARDED"},
+            {"vector": "State Transition Violation", "finding": "Fee calculation is pure function - no state transition concerns.", "status": "NOT_APPLICABLE"},
+            {"vector": "Resource Exhaustion (DoS)", "finding": "O(1) computation. No loops or recursion.", "status": "GUARDED"},
+            {"vector": "Faulty Error Handling", "finding": "_rawUnwrapFee returns 0 on edge cases (T=0, L=0, amount=0). Safe defaults.", "status": "GUARDED"},
+            {"vector": "Race Conditions & Concurrency", "finding": "Pure function with no storage access in core computation.", "status": "NOT_APPLICABLE"}
+          ],
+          "code_locations": [
+            "contracts/src/libraries/IncentiveLib.sol:162-177 (quoteUnwrapFee)",
+            "contracts/src/libraries/IncentiveLib.sol:235-279 (_rawUnwrapFee)",
+            "contracts/src/libraries/IncentiveLib.sol:281-286 (_ceilDiv)"
+          ]
+        },
+        "counterexample": {
+          "scenario": "Attacker attempts to get zero fee by manipulating rounding",
+          "preconditions": ["Small unwrap amount", "Specific liquidity/target ratio"],
+          "attack_steps": [
+            "1. Calculate amount where floor(fee) = 0 but ceil(fee) > 0",
+            "2. Call unwrap with this amount"
+          ],
+          "expected_outcome": "_ceilDiv at line 281-286 ensures (a % b != 0) ? q + 1 : q, so fee is always rounded UP. Protocol is protected from fee undercollection.",
+          "guard_found": "_ceilDiv ceiling division implementation"
+        },
+        "guards_identified": [
+          {"location": "IncentiveLib.sol:278", "description": "feeRaw = _ceilDiv(numerator, denominator) - ceiling division", "effectiveness": "CRITICAL"},
+          {"location": "IncentiveLib.sol:183-191", "description": "validateFeeParams prevents overflow-inducing parameters", "effectiveness": "HIGH"},
+          {"location": "IncentiveLib.sol:250-253", "description": "maxK overflow guard in _rawUnwrapFee", "effectiveness": "HIGH"}
+        ],
+        "notes": "Fee calculation correctly uses ceiling division. The library is mathematically sound for fee protection."
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample targets rounding manipulation to achieve zero fees. The IncentiveLib correctly addresses this through the _ceilDiv function at lines 281-286. The implementation uses ceiling division which rounds UP: when a % b != 0, it returns q + 1 instead of just q. This ensures that any non-zero fractional fee becomes at least 1 wei. I verified the implementation: _ceilDiv first checks if a == 0 (returns 0), then computes q = a / b and r = a % b, returning r == 0 ? q : q + 1. This is mathematically correct ceiling division. The fee calculation at line 278 explicitly uses _ceilDiv(numerator, denominator), ensuring fees are always rounded up in favor of the protocol. Additionally, validateFeeParams at lines 183-191 prevents overflow-inducing parameters by checking targetLiquidity <= MAX_TARGET_LIQUIDITY and k <= calculated maxK.",
+      "counterexample_evaluation": {
+        "plausibility": "Medium",
+        "assessment": "The attack concept is valid - attempting to find amounts where floor rounding gives zero fee. However, the implementation explicitly uses ceiling division to counter this exact attack vector."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "IncentiveLib.sol:281-286",
+            "type": "_ceilDiv function",
+            "effectiveness": "Complete",
+            "reason": "if (a == 0) return 0; uint256 q = a / b; uint256 r = a % b; return r == 0 ? q : q + 1; - This is mathematically correct ceiling division"
+          },
+          {
+            "location": "IncentiveLib.sol:278",
+            "type": "Fee calculation using ceiling",
+            "effectiveness": "Complete",
+            "reason": "feeRaw = _ceilDiv(numerator, denominator) - fees always round up"
+          },
+          {
+            "location": "IncentiveLib.sol:183-191",
+            "type": "Parameter validation",
+            "effectiveness": "Complete",
+            "reason": "Prevents overflow scenarios by bounding targetLiquidity and k"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - ceiling division is fundamental protection against rounding attacks"
+      },
+      "proof_trace": [
+        "IncentiveLib.sol:162-177 - quoteUnwrapFee calls _rawUnwrapFee",
+        "IncentiveLib.sol:235-279 - _rawUnwrapFee computes fee formula",
+        "IncentiveLib.sol:278 - feeRaw = _ceilDiv(numerator, denominator)",
+        "IncentiveLib.sol:281-286 - _ceilDiv implementation: returns q+1 when remainder exists",
+        "IncentiveLib.sol:183-191 - validateFeeParams enforces safe bounds"
+      ]
+    },
+    {
+      "original_item": {
+        "checklist_id": "CL-PROP-EDGE-014-USER-INITIATES-TRANSFER-01",
+        "classification": "needs-verification",
+        "confidence": 0.95,
+        "static_analysis": {
+          "attack_vectors_applied": [
+            {"vector": "Input Validation Bypass", "finding": "zERC20._update() at line 153-154 enforces: `if (value > type(uint248).max) revert ValueTooLarge()`. This applies to ALL token operations including transfer, mint, burn.", "status": "GUARDED"},
+            {"vector": "State Transition Violation", "finding": "_update is called via super._update which is ERC20._update. Balance updates and hash chain updates occur atomically.", "status": "GUARDED"},
+            {"vector": "Resource Exhaustion (DoS)", "finding": "O(1) hash computation per transfer. No amplification.", "status": "GUARDED"},
+            {"vector": "Faulty Error Handling", "finding": "ValueTooLarge custom error. Clear revert path.", "status": "GUARDED"},
+            {"vector": "Race Conditions & Concurrency", "finding": "ERC20 standard semantics. No reentrancy in _update.", "status": "GUARDED"}
+          ],
+          "code_locations": ["contracts/src/zERC20.sol:153-159 (_update override)"]
+        },
+        "counterexample": {
+          "scenario": "Attacker attempts to transfer value > 2^248-1 to break ZK circuit compatibility",
+          "preconditions": ["Attacker somehow has balance > 2^248-1 (impossible under normal conditions)"],
+          "attack_steps": [
+            "1. Attempt transfer with value = type(uint248).max + 1",
+            "2. _update is called before balance modification"
+          ],
+          "expected_outcome": "Transaction reverts with ValueTooLarge() at line 154. ZK circuit compatibility preserved.",
+          "guard_found": "zERC20._update value constraint check"
+        },
+        "guards_identified": [
+          {"location": "zERC20.sol:154", "description": "if (value > type(uint248).max) revert ValueTooLarge() - BN254 field constraint", "effectiveness": "CRITICAL"}
+        ],
+        "notes": "CRITICAL: The 248-bit constraint is enforced correctly in _update which is called for ALL token movements."
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample involves transferring a value exceeding 2^248-1 to break ZK circuit compatibility. This is definitively guarded by the _update override in zERC20.sol. At line 156, the require statement enforces: require(value <= type(uint248).max, ValueTooLarge()). This check executes BEFORE the call to super._update (line 157) which performs the actual balance modification. Since _update is called for ALL token operations (transfer, mint, burn) due to OpenZeppelin's ERC20 architecture, every token movement must pass this 248-bit constraint. The check is positioned correctly - it happens before state modification, ensuring the constraint is validated before any side effects. The 248-bit limit is essential for BN254 elliptic curve field compatibility in the ZK circuits. The guard is unconditional and cannot be bypassed through any path that modifies token balances.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The precondition 'attacker has balance > 2^248-1' is essentially impossible under normal conditions since all mints go through _update which enforces the constraint. However, the attack vector itself (attempting large transfers) is realistic and correctly guarded."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "zERC20.sol:156",
+            "type": "require statement",
+            "effectiveness": "Complete",
+            "reason": "require(value <= type(uint248).max, ValueTooLarge()) - enforced BEFORE balance modification on ALL token operations"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - _update is called for all ERC20 operations (transfer, mint, burn) due to OpenZeppelin inheritance"
+      },
+      "proof_trace": [
+        "zERC20.sol:155 - _update(address from, address to, uint256 value) internal override",
+        "zERC20.sol:156 - require(value <= type(uint248).max, ValueTooLarge())",
+        "zERC20.sol:157 - super._update(from, to, value) called AFTER constraint check",
+        "ERC20Upgradeable._update - All transfer/mint/burn go through _update hook",
+        "zERC20.sol:148-149 - teleport calls _mint which calls _update",
+        "zERC20.sol:189-190 - mint calls _mint which calls _update"
+      ]
+    },
+    {
+      "original_item": {
+        "checklist_id": "CL-PROP-EDGE-014-USER-INITIATES-TRANSFER-02",
+        "classification": "needs-verification",
+        "confidence": 0.85,
+        "static_analysis": {
+          "attack_vectors_applied": [
+            {"vector": "Input Validation Bypass", "finding": "Hash chain update at line 157 uses ShaHashChainLib.compute(). Need to verify SHA-256 with 248-bit truncation matches ZK circuit.", "status": "REQUIRES_VERIFICATION"},
+            {"vector": "State Transition Violation", "finding": "Hash chain is updated atomically with balance update in _update. Index is incremented after hash chain update.", "status": "GUARDED"},
+            {"vector": "Resource Exhaustion (DoS)", "finding": "Single SHA-256 computation per transfer. O(1).", "status": "GUARDED"},
+            {"vector": "Faulty Error Handling", "finding": "No error conditions in hash computation - pure mathematical operation.", "status": "GUARDED"},
+            {"vector": "Race Conditions & Concurrency", "finding": "Hash chain update is atomic with transfer. No race window.", "status": "GUARDED"}
+          ],
+          "code_locations": [
+            "contracts/src/zERC20.sol:156-158 (hash chain update)",
+            "contracts/src/utils/ShaHashChainLib.sol (library implementation)"
+          ]
+        },
+        "counterexample": {
+          "scenario": "Mismatch between on-chain hash computation and ZK circuit hash computation",
+          "preconditions": ["Different implementations of SHA-256 truncation"],
+          "attack_steps": [
+            "1. Generate valid transfers on-chain",
+            "2. Attempt to prove using ZK circuit",
+            "3. Hash mismatch causes proof failure"
+          ],
+          "expected_outcome": "If implementations match, proofs succeed. If they don't match, proofs fail and protocol is unusable (availability issue, not security issue).",
+          "guard_found": "Requires verification that ShaHashChainLib matches ZK circuit implementation"
+        },
+        "guards_identified": [
+          {"location": "zERC20.sol:157", "description": "ShaHashChainLib.compute($.hashChain, from, to, value)", "effectiveness": "REQUIRES_VERIFICATION"},
+          {"location": "zERC20.sol:158", "description": "emit IndexedTransfer($.index++, from, to, value) - deterministic ordering", "effectiveness": "HIGH"}
+        ],
+        "notes": "Hash chain mechanism appears correct but requires verification against ZK circuit implementation."
+      },
+      "verdict": "REQUIRES_MANUAL_REVIEW",
+      "reasoning": "The counterexample concerns a potential mismatch between the on-chain SHA-256 hash chain computation and the off-chain ZK circuit implementation. I verified the ShaHashChainLib implementation at lines 7-10: it computes sha256(abi.encodePacked(prev, from, to, value)) and masks with 0x00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF to extract the lower 248 bits (dropping the most significant byte). The on-chain implementation appears correct for its stated purpose. However, static analysis cannot verify that this matches the ZK circuit's hash computation. The zkp/ directory contains the circuit implementations but verifying cryptographic consistency between Solidity and circuit implementations requires: (1) examining the circuit source code, (2) understanding the field element encoding, (3) verifying endianness handling, (4) confirming the 248-bit truncation method matches. A mismatch would cause proof verification failures (availability issue) rather than fund loss, but correctness is essential for protocol functionality. This requires expert cryptographic review comparing both implementations.",
+      "counterexample_evaluation": {
+        "plausibility": "Medium",
+        "assessment": "The concern is valid - cryptographic implementation mismatches between on-chain and off-chain components are a known source of bugs. The precondition (different truncation implementations) is possible if the circuit was implemented independently."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "ShaHashChainLib.sol:7-10",
+            "type": "SHA-256 with 248-bit truncation",
+            "effectiveness": "Unknown - requires cross-component verification",
+            "reason": "Implementation appears correct but must match ZK circuit exactly"
+          },
+          {
+            "location": "zERC20.sol:160-161",
+            "type": "IndexedTransfer event + index increment",
+            "effectiveness": "Complete",
+            "reason": "Provides deterministic ordering for off-chain indexers"
+          }
+        ],
+        "bypass_possible": "Unknown",
+        "bypass_method": "Not applicable - this is a correctness verification issue, not a bypass scenario"
+      },
+      "proof_trace": [
+        "zERC20.sol:159 - $.hashChain = ShaHashChainLib.compute($.hashChain, from, to, value)",
+        "ShaHashChainLib.sol:7-10 - compute() implementation",
+        "ShaHashChainLib.sol:8 - sha256(abi.encodePacked(prev, from, to, value))",
+        "ShaHashChainLib.sol:9 - Mask with 0x00FF...FF (248-bit truncation)",
+        "zkp/ directory - Contains circuit implementations (not analyzed)",
+        "REQUIRES: Cross-reference with zkp circuit hash implementation"
+      ],
+      "recommendation": "Perform manual review comparing ShaHashChainLib.sol with the corresponding circuit implementation in the zkp/ directory. Verify: (1) Same hash function (SHA-256), (2) Same input encoding (abi.encodePacked order and padding), (3) Same truncation method (248-bit lower bits), (4) Consistent endianness handling. Consider adding integration tests that verify hash consistency between on-chain and circuit computations.",
+      "manual_review_guidance": {
+        "required_expertise": "Cryptographic engineering, ZK circuit development",
+        "files_to_examine": ["contracts/src/utils/ShaHashChainLib.sol", "zkp/ circuit files"],
+        "verification_steps": [
+          "1. Locate SHA-256 hash chain circuit in zkp/ directory",
+          "2. Compare input encoding: prev (32 bytes) || from (20 bytes) || to (20 bytes) || value (32 bytes)",
+          "3. Verify 248-bit truncation matches (most significant byte dropped)",
+          "4. Test with known inputs to confirm identical outputs"
+        ]
+      }
+    }
+  ]
+}

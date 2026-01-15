@@ -1,0 +1,330 @@
+{
+  "metadata": {
+    "run_id": 14,
+    "timestamp": "2026-01-15T00:00:00Z",
+    "batch_size": 5,
+    "items_reviewed": 5,
+    "verdicts": {
+      "CONFIRMED_VULNERABILITY": 0,
+      "LIKELY_VULNERABILITY": 0,
+      "VERIFIED_SAFE": 5,
+      "FALSE_POSITIVE": 0,
+      "CODE_QUALITY_ISSUE": 0,
+      "REQUIRES_MANUAL_REVIEW": 0
+    }
+  },
+  "reviewed_items": [
+    {
+      "original_item": {
+        "check_id": "CL-PROP-NODE-013-STATE-UNWRAP-COMPLETE-01",
+        "property_id": "PROP-NODE-013-STATE-UNWRAP-COMPLETE",
+        "title": "Unwrap atomicity of burn+transfer operations",
+        "file": "contracts/src/liquidity/LiquidityManager.sol",
+        "line": 283,
+        "classification": "needs-verification",
+        "summary": "Verify that unwrap operations (burn zERC20 + transfer underlying) are atomic and cannot result in partial state",
+        "attack_vector": "Trigger partial unwrap state (burn without transfer) or reentrancy during unwrap to manipulate state",
+        "severity": "High",
+        "confidence": "High",
+        "counterexample": {
+          "description": "Attacker deploys malicious receiver contract to break atomicity",
+          "preconditions": ["Attacker has zERC20", "Attacker deploys contract that reverts on receive"],
+          "attack_steps": ["Attacker calls unwrap with malicious contract as receiver", "burn succeeds", "transfer to malicious contract fails", "Transaction reverts entirely", "Burn is rolled back"],
+          "expected_result": "Atomicity maintained - all or nothing",
+          "actual_result": "Atomicity maintained as expected"
+        }
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample from stage 03 is correctly analyzed. The _unwrap function at lines 283-306 executes burn (line 291) before transfer (lines 296/300). If the transfer fails (receiver reverts or InsufficientLiquidity), the entire EVM transaction reverts, including the burn. EVM transaction semantics guarantee atomicity - all state changes in a transaction either commit together or revert together. The nonReentrant modifier from ReentrancyGuardTransient prevents any callback exploitation during the transfer. The guard analysis correctly identifies that no partial state is possible due to EVM transaction atomicity.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The counterexample attempts to break atomicity by having a receiver revert. However, this cannot actually cause partial state because EVM transaction semantics ensure all state changes revert together. The counterexample correctly concludes that atomicity is maintained. The attack sequence does not lead to any exploitable condition."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "contracts/src/liquidity/LiquidityManager.sol:126",
+            "type": "nonReentrant modifier",
+            "effectiveness": "Complete",
+            "reason": "ReentrancyGuardTransient uses transient storage to prevent any reentry during unwrap execution"
+          },
+          {
+            "location": "contracts/src/liquidity/LiquidityManager.sol:297,300",
+            "type": "require statements on transfer success",
+            "effectiveness": "Complete",
+            "reason": "UnderlyingSendFailed() reverts if native transfer fails; safeTransfer reverts if ERC20 transfer fails"
+          },
+          {
+            "location": "EVM transaction semantics",
+            "type": "Atomic transaction execution",
+            "effectiveness": "Complete",
+            "reason": "All state changes in a transaction either commit together or revert together"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - EVM transaction atomicity cannot be bypassed"
+      },
+      "proof_trace": [
+        "LiquidityManager.sol:126 - unwrap() entry with nonReentrant modifier active",
+        "LiquidityManager.sol:283-285 - _unwrap validates amount != 0, receiver != address(0)",
+        "LiquidityManager.sol:288-289 - Fee calculated, amountOut computed",
+        "LiquidityManager.sol:291 - ZERC20_TOKEN.burn(msg.sender, amount) - burn occurs",
+        "LiquidityManager.sol:292-301 - Conditional transfer with InsufficientLiquidity and UnderlyingSendFailed guards",
+        "LiquidityManager.sol:303 - feeSurplus update",
+        "LiquidityManager.sol:305 - Unwrapped event emitted only after all operations succeed",
+        "If any step fails, EVM reverts entire transaction including burn at line 291"
+      ]
+    },
+    {
+      "original_item": {
+        "check_id": "CL-PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY-01",
+        "property_id": "PROP-NODE-014-STATE-UNWRAP-FAILED-INSUFFICIENT-LIQUIDITY",
+        "title": "Low liquidity triggers high fee via incentive curve",
+        "file": "contracts/src/libraries/IncentiveLib.sol",
+        "line": 235,
+        "classification": "needs-verification",
+        "summary": "Verify that insufficient liquidity triggers high fees via incentive curve rather than reverting",
+        "attack_vector": "Bypass fee increase when liquidity is low, or exploit edge cases in fee calculation at boundaries",
+        "severity": "Medium",
+        "confidence": "High",
+        "counterexample": {
+          "description": "Pool has low liquidity, user unwraps",
+          "preconditions": ["Pool has liquidity 10", "Target liquidity 1000", "User unwraps 50"],
+          "attack_steps": ["User calls quoteUnwrapFee(50) - returns high fee due to low liquidity", "User decides to proceed with unwrap", "Fee is deducted, amountOut is small", "Unwrap succeeds but with reduced output"],
+          "expected_result": "High fee charged, user receives reduced output",
+          "actual_result": "Works as designed - incentive curve protects liquidity"
+        }
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample correctly identifies intended behavior. The _rawUnwrapFee function at lines 235-279 implements a quadratic fee curve that increases as liquidity decreases below target. When amount > L (line 258: endRaw = amount >= L ? 0 : L - amount), the fee curve charges up to 100% of the amount. This is by design to disincentivize withdrawals that would drain liquidity. The edge case at L==0 returning 0 fee (line 247-248) is actually safe because if L==0, the pool is already empty and the InsufficientLiquidity check at LiquidityManager.sol:294/299 would revert anyway. Users have protection via unwrapWithMinOut() for slippage.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The counterexample describes expected system behavior, not an attack. The fee curve intentionally charges high fees at low liquidity to protect the protocol. Users can always check quoteUnwrapFee() before executing and use unwrapWithMinOut() for slippage protection. This is a feature, not a vulnerability."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "contracts/src/libraries/IncentiveLib.sol:162-177",
+            "type": "Quadratic fee curve calculation",
+            "effectiveness": "Complete",
+            "reason": "Fee increases as liquidity decreases, mathematically bounded and uses ceiling division"
+          },
+          {
+            "location": "contracts/src/liquidity/LiquidityManager.sol:135-141",
+            "type": "unwrapWithMinOut function",
+            "effectiveness": "Complete",
+            "reason": "Users can specify minOut to protect against unexpected fee increases"
+          },
+          {
+            "location": "contracts/src/libraries/IncentiveLib.sol:278",
+            "type": "_ceilDiv for fee rounding",
+            "effectiveness": "Complete",
+            "reason": "Ceiling division ensures protocol never undercollects fees"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - Fee curve is mathematically enforced"
+      },
+      "proof_trace": [
+        "IncentiveLib.sol:235-279 - _rawUnwrapFee implements quadratic fee curve",
+        "IncentiveLib.sol:247-248 - L==0 returns 0 (safe: empty pool fails at transfer anyway)",
+        "IncentiveLib.sol:256-259 - Clamps start/end to handle insufficient liquidity case",
+        "IncentiveLib.sol:274-278 - Fee calculation with ceiling division",
+        "LiquidityManager.sol:288 - feeAmount = _quoteUnwrapFee(amount, $) uses same curve",
+        "LiquidityManager.sol:289 - amountOut = amount - feeAmount (can be very small or 0)",
+        "LiquidityManager.sol:294,299 - InsufficientLiquidity check on actual balance"
+      ]
+    },
+    {
+      "original_item": {
+        "check_id": "CL-PROP-NODE-015-STATE-ZERC20-AWAITING-TRANSFER-01",
+        "property_id": "PROP-NODE-015-STATE-ZERC20-AWAITING-TRANSFER",
+        "title": "Transfer requires sufficient sender balance",
+        "file": "contracts/src/zERC20.sol",
+        "line": 155,
+        "classification": "needs-verification",
+        "summary": "Verify that transfers are rejected when sender has insufficient balance",
+        "attack_vector": "Transfer more tokens than sender holds, or modify balance without going through _update",
+        "severity": "Critical",
+        "confidence": "High",
+        "counterexample": {
+          "description": "User attempts transfer with insufficient balance",
+          "preconditions": ["User has 50 zERC20", "User calls transfer(recipient, 100)"],
+          "attack_steps": ["transfer(recipient, 100) called", "_update checks balanceOf(user) >= 100", "Balance is 50 < 100", "Revert with ERC20InsufficientBalance(user, 50, 100)"],
+          "expected_result": "Transfer fails with clear error",
+          "actual_result": "Transfer fails as expected"
+        }
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample is correctly refuted. The zERC20 contract inherits from ERC20Upgradeable via OFTCoreUpgradeable. The _update override at line 155-162 calls super._update(from, to, value) at line 157, which invokes OpenZeppelin's ERC20Upgradeable._update(). OpenZeppelin's implementation contains the canonical balance check that reverts with ERC20InsufficientBalance(from, fromBalance, value) when fromBalance < value for transfers (when from != address(0)). There is no alternative path to modify balances - all balance changes (transfer, mint, burn) go through the _update function. The 248-bit value check at line 156 is an additional constraint but does not bypass the balance check.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The attack sequence is correctly analyzed. Any attempt to transfer more than the sender's balance will revert in OpenZeppelin's ERC20._update() function. The zERC20 override does not bypass this check - it adds the 248-bit constraint and hash chain update, but still calls super._update() which enforces the balance requirement."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol:_update",
+            "type": "Balance check in ERC20._update",
+            "effectiveness": "Complete",
+            "reason": "OpenZeppelin's well-audited implementation checks fromBalance >= value for transfers"
+          },
+          {
+            "location": "contracts/src/zERC20.sol:157",
+            "type": "super._update() call",
+            "effectiveness": "Complete",
+            "reason": "zERC20 always calls parent implementation which enforces balance checks"
+          },
+          {
+            "location": "contracts/src/zERC20.sol:155-162",
+            "type": "_update override pattern",
+            "effectiveness": "Complete",
+            "reason": "All balance modifications go through single _update function"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - OpenZeppelin ERC20 balance check is canonical and cannot be bypassed"
+      },
+      "proof_trace": [
+        "zERC20.sol:155-162 - _update override",
+        "zERC20.sol:156 - value <= type(uint248).max check (additional constraint)",
+        "zERC20.sol:157 - super._update(from, to, value) delegates to OpenZeppelin",
+        "ERC20Upgradeable._update - checks fromBalance >= value, reverts with ERC20InsufficientBalance if not",
+        "zERC20.sol:158-161 - hash chain update and event (only reached if balance check passes)",
+        "No alternative path exists to modify balances without going through _update"
+      ]
+    },
+    {
+      "original_item": {
+        "check_id": "CL-PROP-NODE-017-ACTION-ZERC20-UPDATE-BALANCES-01",
+        "property_id": "PROP-NODE-017-ACTION-ZERC20-UPDATE-BALANCES",
+        "title": "Balance update maintains conservation of value",
+        "file": "contracts/src/zERC20.sol",
+        "line": 157,
+        "classification": "needs-verification",
+        "summary": "Verify that balance updates conserve total value (sum of balances equals totalSupply)",
+        "attack_vector": "Manipulate balance update to create tokens from nothing, or create tokens without increasing totalSupply",
+        "severity": "Critical",
+        "confidence": "High",
+        "counterexample": {
+          "description": "Verify conservation: sum(balances) == totalSupply",
+          "preconditions": ["Initial state: totalSupply = 1000, sum(balances) = 1000"],
+          "attack_steps": ["User A transfers 100 to User B", "A.balance -= 100, B.balance += 100", "totalSupply unchanged", "sum(balances) still = 1000 = totalSupply"],
+          "expected_result": "Conservation maintained",
+          "actual_result": "Conservation maintained - OpenZeppelin ERC20 is well-audited"
+        }
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The counterexample correctly demonstrates that conservation is maintained. The zERC20._update at line 157 calls super._update() which delegates to OpenZeppelin's ERC20Upgradeable._update(). OpenZeppelin's implementation enforces conservation: (1) for transfers: from_balance -= value, to_balance += value, totalSupply unchanged; (2) for mint (from=address(0)): to_balance += value, totalSupply += value; (3) for burn (to=address(0)): from_balance -= value, totalSupply -= value. All arithmetic uses Solidity 0.8+ with checked operations (underflow/overflow protection). The only paths to mint are via minter role (mint function line 188-191) or verifier role (teleport function line 145-151), both gated by access control. Conservation invariant is mathematically guaranteed by OpenZeppelin's battle-tested implementation.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The counterexample is demonstrating correct behavior, not an attack. OpenZeppelin ERC20 has been extensively audited and the conservation invariant (totalSupply = sum of all balances) is a core property that is mathematically enforced by the _update implementation."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol:_update",
+            "type": "Conservation-preserving balance arithmetic",
+            "effectiveness": "Complete",
+            "reason": "OpenZeppelin's _update correctly adjusts balances and totalSupply to maintain conservation"
+          },
+          {
+            "location": "contracts/src/zERC20.sol:188-191",
+            "type": "OnlyMinter guard on mint",
+            "effectiveness": "Complete",
+            "reason": "Unauthorized mint attempts revert with OnlyMinter()"
+          },
+          {
+            "location": "contracts/src/zERC20.sol:145-151",
+            "type": "OnlyVerifier guard on teleport",
+            "effectiveness": "Complete",
+            "reason": "Unauthorized teleport attempts revert with OnlyVerifier()"
+          },
+          {
+            "location": "Solidity 0.8.33",
+            "type": "Overflow/underflow protection",
+            "effectiveness": "Complete",
+            "reason": "Built-in checked arithmetic prevents manipulation via overflow"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - OpenZeppelin ERC20 conservation is mathematically guaranteed"
+      },
+      "proof_trace": [
+        "zERC20.sol:157 - super._update(from, to, value) delegates to OpenZeppelin",
+        "ERC20Upgradeable._update - handles transfer/mint/burn with conservation",
+        "zERC20.sol:188-191 - mint() requires msg.sender == minter()",
+        "zERC20.sol:145-151 - teleport() requires msg.sender == verifier()",
+        "zERC20.sol:196-199 - burn() requires msg.sender == minter()",
+        "No path exists to create tokens without corresponding totalSupply increase",
+        "Solidity 0.8.33 pragma ensures checked arithmetic"
+      ]
+    },
+    {
+      "original_item": {
+        "check_id": "CL-PROP-NODE-018-ACTION-ZERC20-UPDATE-HASH-CHAIN-01",
+        "property_id": "PROP-NODE-018-ACTION-ZERC20-UPDATE-HASH-CHAIN",
+        "title": "Hash chain uses SHA-256 with 248-bit truncation",
+        "file": "contracts/src/utils/ShaHashChainLib.sol",
+        "line": 7,
+        "classification": "needs-verification",
+        "summary": "Verify that hash chain uses SHA-256 (not keccak256) and truncates to 248 bits correctly",
+        "attack_vector": "Bypass hash chain update during transfer, or use wrong hash function/truncation",
+        "severity": "High",
+        "confidence": "High",
+        "counterexample": {
+          "description": "Verify hash chain computation matches specification",
+          "preconditions": ["prevHash = 0x123...", "from = Alice", "to = Bob", "value = 100"],
+          "attack_steps": ["Compute sha256(prevHash || from || to || value)", "Mask result with 0x00FFFFFFFFFF... (248 bits)", "Verify result matches circuit expectation"],
+          "expected_result": "On-chain hash matches ZK circuit hash",
+          "actual_result": "Requires off-chain verification against circuit"
+        }
+      },
+      "verdict": "VERIFIED_SAFE",
+      "reasoning": "The implementation correctly uses SHA-256 with 248-bit truncation. ShaHashChainLib.compute at lines 7-10 explicitly uses sha256() (not keccak256). The 248-bit truncation is achieved via bitwise AND with 0x00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF (line 9), which masks off the most significant byte (8 bits), leaving 248 bits. The encoding uses abi.encodePacked(prev, from, to, value) which produces a deterministic byte sequence: 32 bytes (prev) + 20 bytes (from) + 20 bytes (to) + 32 bytes (value) = 104 bytes total. The hash chain update in zERC20._update (line 159) is unconditional - every call to _update updates the hash chain after super._update() succeeds. There is no path to modify balances without updating the hash chain.",
+      "counterexample_evaluation": {
+        "plausibility": "Low",
+        "assessment": "The counterexample is not an attack but rather a verification request. The code clearly shows sha256() is used, not keccak256(). The 248-bit mask is correctly implemented as 0x00FF... (dropping the high byte). Cross-verification with the ZK circuit is a valid operational concern but not a vulnerability in the Solidity implementation."
+      },
+      "guard_analysis": {
+        "guards_found": [
+          {
+            "location": "contracts/src/utils/ShaHashChainLib.sol:8",
+            "type": "sha256() precompile usage",
+            "effectiveness": "Complete",
+            "reason": "Explicitly uses sha256() which is the SHA-256 precompile at address 0x02"
+          },
+          {
+            "location": "contracts/src/utils/ShaHashChainLib.sol:9",
+            "type": "248-bit truncation mask",
+            "effectiveness": "Complete",
+            "reason": "& 0x00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF correctly drops high byte"
+          },
+          {
+            "location": "contracts/src/zERC20.sol:159",
+            "type": "Unconditional hash chain update in _update",
+            "effectiveness": "Complete",
+            "reason": "Every balance modification updates hash chain - no bypass path exists"
+          },
+          {
+            "location": "contracts/src/utils/ShaHashChainLib.sol:8",
+            "type": "abi.encodePacked for deterministic encoding",
+            "effectiveness": "Complete",
+            "reason": "Produces consistent 104-byte input for all transfers"
+          }
+        ],
+        "bypass_possible": false,
+        "bypass_method": "N/A - Hash chain update is unconditional in _update which handles all balance changes"
+      },
+      "proof_trace": [
+        "ShaHashChainLib.sol:7-10 - compute function definition",
+        "ShaHashChainLib.sol:8 - sha256(abi.encodePacked(prev, from, to, value)) explicitly uses SHA-256",
+        "ShaHashChainLib.sol:9 - & 0x00FF...FF masks to 248 bits (drops MSB)",
+        "zERC20.sol:159 - $.hashChain = ShaHashChainLib.compute($.hashChain, from, to, value)",
+        "zERC20.sol:155-162 - _update is the only path to modify balances",
+        "zERC20.sol:157 - super._update() must succeed before hash chain update",
+        "No path exists to modify balances without updating hash chain"
+      ]
+    }
+  ]
+}
