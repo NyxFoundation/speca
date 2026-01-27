@@ -44,13 +44,13 @@ Process subgraph files from your assigned worker queue. For each subgraph, gener
 
 ### **Task 2.2: Load Trust Model Data**
 
-1. Read all `outputs/01d_TRUSTMODEL_PARTIAL_*.json` files
+1. Read only `outputs/01d_TRUSTMODEL_PARTIAL_*.json` files whose `metadata.source_files` include any of the batch `source_files`
 2. Collect all `boundary_edges` into a lookup map by `edge_id`
 3. Collect all `trusted_external_entities` by ID
 
 ### **Task 2.3: Process a Batch of Subgraph Files**
 
-Take the **first 3 unprocessed files** from your queue (or fewer if less remain).
+Take the **first 10 unprocessed files** from your queue (or fewer if less remain).
 
 **For EACH subgraph file in the batch:**
 
@@ -109,6 +109,7 @@ Report coverage in metadata.
 
 1. **Generate Partial Properties:**
    - Create `outputs/01e_PROP_PARTIAL_W{WORKER_ID}_{BATCH}.json`
+   - Ensure `metadata.source_files` lists **all files in this 10-item batch**
 
 2. **Update Worker Queue:**
    - Add processed files to `processed` array

@@ -6,6 +6,7 @@ Example: `/01c_verify_worker WORKER_ID=0 QUEUE_FILE=outputs/01c_QUEUE_0.json`
 Language: English only.
 Execution hint: This is a worker prompt for parallel execution. Called by run_worker.py.
 ---
+**Always use /serena for development tasks to keep the workflow efficient.**
 
 # **Subgraph Verification (Parallel Worker)**
 
