@@ -1,0 +1,107 @@
+{
+  "metadata": {
+    "worker_id": 0,
+    "batch": 6,
+    "generated_at": "2026-01-31T14:33:53Z",
+    "source_files": [
+      "outputs/01b_SUBGRAPHS/spec_4fe3e15cf7be88ceb138364be2a2a626539b5771.json",
+      "outputs/01b_SUBGRAPHS/spec_52a668caedcaa1602b71894e954450f59f043e00.json",
+      "outputs/01b_SUBGRAPHS/spec_54c4ed0df1f8.json",
+      "outputs/01b_SUBGRAPHS/spec_569d8166c1446a5931e3e0f3ff3ed82c3c0719ff.json",
+      "outputs/01b_SUBGRAPHS/spec_596a43a47caeb55a96bc1facb4af56cdbd5dd45d.json"
+    ]
+  },
+  "audit_scope": {
+    "target_components": ["Execution Layer (EL)", "Consensus Layer (CL)"],
+    "description": "Batch 6 covers KZG point evaluation precompile (EIP-4844), PREVRANDAO opcode (EIP-4399), network upgrade meta-EIP (EIP-7773), EL withdrawal requests (EIP-7002), and difficulty bomb delay (EIP-5133). Key boundary is EL-CL interaction via Engine API for RANDAO and withdrawal requests.",
+    "components": [
+      {
+        "component": "Execution Layer (EL)",
+        "in_scope": [
+          "KZG proof verification (point_evaluation precompile)",
+          "PREVRANDAO opcode execution (reading CL-provided randomness)",
+          "Withdrawal request predeploy contract (EIP-7002)",
+          "PoW difficulty calculation (pre-merge)"
+        ],
+        "out_of_scope": [
+          "Consensus layer blob availability sampling",
+          "Consensus layer RANDAO mix generation",
+          "Consensus layer withdrawal processing"
+        ]
+      },
+      {
+        "component": "Consensus Layer (CL)",
+        "in_scope": [
+          "RANDAO mix provision to EL via block header mixHash",
+          "Withdrawal request processing from EL execution payload"
+        ],
+        "out_of_scope": [
+          "Validator set management",
+          "Attestation processing",
+          "Fork choice"
+        ]
+      }
+    ]
+  },
+  "misclassified_entities": [
+    {
+      "id": "EXT-CALLING-CONTRACT",
+      "reason": "Calling Contract in point_evaluation.py is internal EL entity (smart contract), not external to the system. The actual external entity is the user submitting the transaction that triggers the precompile call."
+    }
+  ],
+  "trusted_external_entities": [
+    {
+      "id": "EXT-CL-VIA-ENGINE-API-001",
+      "name": "Consensus Layer via Engine API (RANDAO)",
+      "trust_level": "SEMI_TRUSTED",
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "Engine API (ExecutionPayload.prevRandao field in block header)",
+      "rationale": "Authenticated channel with JWT-based Engine API authentication. However, RANDAO content must still be validated: value > 2^64 indicates PoS (vs PoW difficulty), but proposer can bias by 1 bit per slot by choosing to skip. Not suitable for applications requiring unpredictable randomness without additional commit-reveal scheme with multi-epoch delay."
+    },
+    {
+      "id": "EXT-USER-VIA-JSONRPC-WITHDRAWAL-001",
+      "name": "User via JSON-RPC (Withdrawal Requests)",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "JSON-RPC API (transaction to withdrawal request predeploy 0x00A961Ef480Eb55e80D19ad83579A64c007002)",
+      "rationale": "Unauthenticated RPC endpoint. Withdrawal request must be validated: (1) Input exactly 56 bytes (48-byte validator pubkey + 8-byte amount), (2) msg.value ≥ current dynamic fee (EIP-1559-style exponential pricing, minimum 1 wei), (3) Request queued in predeploy state. Final authorization check performed by CL: msg.sender must match validator's 0x01 withdrawal credentials."
+    },
+    {
+      "id": "EXT-BLOB-TX-SUBMITTER-VIA-JSONRPC-001",
+      "name": "User via JSON-RPC (Blob Transaction with KZG Proof)",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "JSON-RPC API (blob transaction with versioned_hashes requiring KZG verification)",
+      "rationale": "Unauthenticated RPC endpoint. When contract calls point_evaluation precompile (0x0A) to verify blob commitment, precompile validates: (1) Input exactly 192 bytes (32 versioned_hash + 32 z + 32 y + 48 commitment + 48 proof), (2) Versioned hash matches kzg_commitment_to_versioned_hash(commitment) with version 0x01, (3) KZG proof verifies: polynomial(z) = y using BLS12-381 pairing check. Rejects with KZGProofError if invalid. Security relies on trusted setup (powers of tau ceremony)."
+    }
+  ],
+  "boundary_edges": [
+    {
+      "edge_id": "EDGE-BOUNDARY-001",
+      "source_entity_id": "EXT-CL-VIA-ENGINE-API-001",
+      "target_component": "Execution Layer (EL)",
+      "target_component_interface": "Engine API (engine_newPayloadV3 with ExecutionPayload.prevRandao)",
+      "security_assumption": "Engine API authentication: JWT token in Authorization header, shared secret established at client startup. RANDAO value validation: (1) Post-merge blocks: prevRandao > 2^64 (heuristic check), (2) Value sourced from CL beacon state's randao_mixes, (3) EVM PREVRANDAO (0x44) opcode returns this value. Smart contracts using PREVRANDAO must understand biasability: proposer has 1-bit influence per slot (can skip slot to bias outcome), approximately 4 epochs of lookahead. Not suitable for immediate unpredictable randomness."
+    },
+    {
+      "edge_id": "EDGE-BOUNDARY-002",
+      "source_entity_id": "EXT-USER-VIA-JSONRPC-WITHDRAWAL-001",
+      "target_component": "Execution Layer (EL)",
+      "target_component_interface": "Withdrawal request predeploy contract (0x00A961Ef480Eb55e80D19ad83579A64c007002)",
+      "security_assumption": "EL validation: (1) Empty calldata returns current fee (no-op query), (2) 56-byte calldata triggers withdrawal request: validate length, charge dynamic fee (exponential based on excess requests vs TARGET_WITHDRAWAL_REQUESTS_PER_BLOCK=2), enqueue with msg.sender as source_address. (3) Post-block system call dequeues up to MAX_WITHDRAWAL_REQUESTS_PER_BLOCK=16 into ExecutionPayload. CL validation: source_address must match validator's withdrawal credentials (0x01 prefix + address). CL processes as voluntary exit or partial withdrawal."
+    },
+    {
+      "edge_id": "EDGE-BOUNDARY-003",
+      "source_entity_id": "EXT-BLOB-TX-SUBMITTER-VIA-JSONRPC-001",
+      "target_component": "Execution Layer (EL)",
+      "target_component_interface": "Point evaluation precompile (0x0A) via contract CALL/STATICCALL",
+      "security_assumption": "Input validation: exactly 192 bytes, parse as (versioned_hash[32], z[32], y[32], commitment[48], proof[48]). Versioned hash check: compute kzg_commitment_to_versioned_hash(commitment) = SHA256(0x01 || commitment)[0:32], verify equals input versioned_hash. KZG proof verification: verify_kzg_proof(commitment, z, y, proof) using BLS12-381 pairing check, confirms polynomial(z)=y for committed polynomial. Gas cost: fixed 50,000 gas (GAS_POINT_EVALUATION). Security: assumes KZG trusted setup ceremony completed correctly and toxic waste destroyed. Failure returns KZGProofError, call reverts."
+    }
+  ],
+  "coverage_analysis": {
+    "total_external_entities": 3,
+    "entities_with_boundary_edges": 3,
+    "coverage_gaps": [],
+    "verification_status": "COMPLETE"
+  }
+}
