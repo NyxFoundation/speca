@@ -112,42 +112,21 @@ Results will be saved to the `outputs/` directory.
 
 You can automate the audit using GitHub Actions.
 
+Preparation workflow sequence (split Trust Model + Properties):
+1. `1-discovery.yml`
+2. `2-extraction.yml`
+3. `3a-trustmodel-01d.yml`
+4. `3b-properties-01e.yml`
+5. `4-checklist-boundaries.yml`
+6. `5-checklist-generation.yml`
+7. `6-prep-review.yml`
+
 #### Step 1: Configure Workflows
-Edit `.github/workflows/audit.yml` (and `preparation.yml` if needed) to configure your target repository.
-
-```yaml
-name: Security Audit - Execution (GitOps)
-
-permissions:
-  contents: write
-  pull-requests: write
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'
-  push:
-    branches: 
-      - 'audit/*'
-
-jobs:
-  audit_gitops:
-    runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, 'Merge')"
-    env:
-      # --- CONFIGURATION (Override these in your branch) ---
-      TARGET_REPO: "ethereum/go-ethereum" # Default (to be overridden)
-      TARGET_REF: "master"                          # Default (HEAD of default branch)
-      # -----------------------------------------------------
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CLAUDE_CODE_PERMISSIONS: "bypassPermissions"
-
-...
-```
+Use the workflow files under `.github/workflows/` and configure inputs via **workflow_dispatch**.  
+Defaults live in the YAML files (e.g., `1-discovery.yml` for `KEYWORDS` and `SPEC_URLS`).
 
 #### Step 2: Push Changes
-Push your changes to your `audit/*` branch to trigger the pipeline.
+Trigger workflows manually via GitHub Actions (workflow_dispatch). If you use an `audit/*` branch, you can still run workflows from that branch, but pushes are no longer required to start the pipeline.
 ```bash
 git push origin audit/geth
 ```

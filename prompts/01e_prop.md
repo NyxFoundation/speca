@@ -20,6 +20,8 @@ Generate a comprehensive catalog of formal security properties with **100% cover
 
 1.  **System Specification (Authoritative):** `outputs/01_SPEC.json`
 2.  **Trust Model (Authoritative):** `outputs/01d_TRUSTMODEL.json`
+    - Use `audit_scope` to understand which components are in scope.
+    - Use `boundary_edges[].target_component` and `boundary_edges[].target_component_interface` to anchor boundary properties to a specific component and entry point.
 
 ---
 
@@ -33,14 +35,14 @@ Think like an attacker. For every state, action, and data flow, ask: "How could 
 
 #### **Priority 1: Boundary Edge Properties (Input Validation)**
 
-For each `boundary_edge` in `01d_TRUSTMODEL.json`, generate multiple, high-priority properties. These are the most critical properties.
+For each `boundary_edge` in `01d_TRUSTMODEL.json`, generate multiple, high-priority properties. These are the most critical properties. Use the edge's `target_component` and `target_component_interface` to make the properties specific to the entry point and component boundary.
 
 *   **Property Type:** `Pre-condition`
-*   **Focus:** Validate every field of the incoming `data_flows_across`.
+*   **Focus:** Validate every field of the incoming `data_flows_across` (or equivalent inputs for the interface). Tie the property to the exact entry point.
 *   **Example:** For a `boundary_edge` where a transaction is received:
-    *   **Good Property 1 (Format):** "The `gas_limit` field must be a valid unsigned 64-bit integer."
-    *   **Good Property 2 (Range):** "The `gas_limit` must be greater than the intrinsic gas cost of the transaction."
-    *   **Good Property 3 (Cryptographic):** "The transaction's ECDSA signature (v, r, s) must be valid and correspond to the `sender` address."
+    *   **Good Property 1 (Format):** "At `eth_sendRawTransaction` on the EL, the `gas_limit` field must be a valid unsigned 64-bit integer."
+    *   **Good Property 2 (Range):** "At `eth_sendRawTransaction` on the EL, the `gas_limit` must be greater than the intrinsic gas cost of the transaction."
+    *   **Good Property 3 (Cryptographic):** "At `eth_sendRawTransaction` on the EL, the transaction's ECDSA signature (v, r, s) must be valid and correspond to the `sender` address."
 
 #### **Priority 2: Ambiguity & Assumption Properties**
 

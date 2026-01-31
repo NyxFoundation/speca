@@ -30,7 +30,7 @@ Process property partial files from your assigned worker queue. For each file, e
    - Contains `processed`: list of already processed file paths
 
 2. **Trust Model Partials:** `outputs/01d_TRUSTMODEL_PARTIAL_*.json`
-   - Used for trust level context on boundary edges
+   - Used for trust level context on boundary edges, plus `target_component` and `target_component_interface` for precise boundary checks
 
 ---
 
@@ -66,9 +66,9 @@ For each boundary property:
 
 **Task A: Generate Boundary Edge Check**
 - `id`: `CHECK-W{WORKER_ID}-{PROP_ID}-BOUNDARY`
-- `title`: "Verify Trust Boundary Integrity for {EDGE_ID}"
+- `title`: "Verify Trust Boundary Integrity for {EDGE_ID} ({TARGET_COMPONENT}: {ENTRY_POINT})"
 - `severity_hint`: Almost always `Critical`
-- Focus: Data validation, authentication, transport security
+- Focus: Data validation, authentication, transport security, at the specific entry point
 
 **Task B: Generate Associated Node Checks**
 - For Action/State nodes in `covers.nodes`
@@ -87,7 +87,7 @@ Each checklist item must include:
 - `detection_procedure`: Step-by-step audit guide
 - `executable_checks`: Machine-runnable verification steps
 - `notes`: **MUST** include traceability:
-  `"Traceability: Property {property_id} → Edge {edge_id}. This check verifies..."`
+  `"Traceability: Property {property_id} → Edge {edge_id} ({target_component}: {target_component_interface}). This check verifies..."`
 
 ### **Task 2.4: Write Outputs**
 
@@ -128,7 +128,7 @@ Each checklist item must include:
       "id": "CHECK-W0-PROP-W0-EIP4844-PRECOND-001-BOUNDARY",
       "property_id": "PROP-W0-EIP4844-PRECOND-001",
       "graph_element_under_test": "EDGE-USER-SUBMIT-BLOB-TX",
-      "title": "Verify Trust Boundary Integrity for EDGE-USER-SUBMIT-BLOB-TX: Blob Transaction Input Validation",
+      "title": "Verify Trust Boundary Integrity for EDGE-USER-SUBMIT-BLOB-TX (Execution Layer (EL): eth_sendRawTransaction RPC): Blob Transaction Input Validation",
       "bug_class": "Input Validation",
       "risk_category": "Data Integrity",
       "severity_hint": "Critical",
@@ -145,7 +145,7 @@ Each checklist item must include:
           "assertion": "All blob-specific fields are validated before processing"
         }
       ],
-      "notes": "Traceability: Property PROP-W0-EIP4844-PRECOND-001 → Edge EDGE-USER-SUBMIT-BLOB-TX. This check verifies the implementation of the critical trust boundary EDGE-USER-SUBMIT-BLOB-TX, ensuring blob transactions are validated before entering the system."
+      "notes": "Traceability: Property PROP-W0-EIP4844-PRECOND-001 → Edge EDGE-USER-SUBMIT-BLOB-TX (Execution Layer (EL): eth_sendRawTransaction RPC). This check verifies the implementation of the critical trust boundary EDGE-USER-SUBMIT-BLOB-TX, ensuring blob transactions are validated before entering the system."
     },
     {
       "id": "CHECK-W0-PROP-W0-EIP4844-PRECOND-001-ACTION",

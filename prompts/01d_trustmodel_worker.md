@@ -12,6 +12,32 @@ Execution hint: This is a worker prompt for parallel execution. Called by run_wo
 **Goal**
 Process subgraph files from your assigned worker queue. For each subgraph, identify external entities, assign trust levels, and identify trust boundary edges.
 
+## 0) Define Audit Scope (NEW)
+
+**First, determine which primary components are being audited in this context.** Analyze the provided subgraph files. If they predominantly describe Execution Layer logic (transactions, EVM, state), include "EL". If they describe Consensus Layer logic (fork choice, attestations, beacon chain), include "CL". If both are materially present, include both.
+
+**Based on this, define the `audit_scope` object.** This is the most critical step to contextualize the entire trust model. If both EL and CL are in scope, list both in `target_components` and provide per-component scope detail.
+
+**Example `audit_scope` (if target is EL+CL):**
+```json
+"audit_scope": {
+  "target_components": ["Execution Layer (EL)", "Consensus Layer (CL)"],
+  "description": "This audit covers both EL and CL logic and their interfaces.",
+  "components": [
+    {
+      "component": "Execution Layer (EL)",
+      "in_scope": ["Transaction Pool", "State Transition", "Engine API handlers"],
+      "out_of_scope": ["P2P networking stack"]
+    },
+    {
+      "component": "Consensus Layer (CL)",
+      "in_scope": ["Fork Choice", "Attestations", "Beacon Chain state transitions"],
+      "out_of_scope": ["Execution Layer internals"]
+    }
+  ]
+}
+```
+
 ## Worker Configuration
 
 - **`WORKER_ID`**: The numeric ID of this worker (0, 1, 2, ...)
@@ -60,15 +86,19 @@ Take the **first 5 unprocessed files** from your queue (or fewer if less than 5 
 
 **If misclassified (internal components), note in `misclassified_entities`.**
 
-#### **2.2.3: Assign Trust Levels**
+#### **2.2.3: Classify External Entities and Entry Points**
 
-For each valid external entity:
+For each external source of data that interacts with an in-scope `target_component`, define an entity. **Do not model the `target_component` itself as an external entity.** Instead, model its interlocutors.
+
+- **Name**: Be specific. Instead of "Consensus Layer", use "CL via Engine API". Instead of "User", use "User via JSON-RPC".
+- **Trust Level**: Assign a trust level based on the entry point's characteristics.
+- **Entry Point**: Describe the specific interface (e.g., "Engine API newPayloadV3", "eth_sendRawTransaction RPC").
+- **Target Component**: Explicitly state which in-scope component this entity is interacting with (EL or CL).
 
 | Trust Level | When to Use |
 |-------------|-------------|
-| `TRUSTED` | Cryptographic attestation AND same admin control. **Almost never.** |
-| `SEMI_TRUSTED` | Authenticated (JWT, TLS) but inputs MUST be validated. |
-| `UNTRUSTED` | Default. Network peers, user input, any unauthenticated source. |
+| `SEMI_TRUSTED` | Authenticated channel (e.g., Engine API with JWT), but data content requires validation. **The CL is the primary example.** |
+| `UNTRUSTED` | Unauthenticated channel (e.g., P2P network, public JSON-RPC). All data is potentially malicious. **This is the default.** |
 
 **Guidelines:**
 - Default to `UNTRUSTED`
@@ -77,17 +107,14 @@ For each valid external entity:
 
 #### **2.2.4: Identify Trust Boundary Edges**
 
-For each edge in the subgraph:
-1. Check if `source` matches an external entity ID
-2. If yes, this is a trust boundary crossing
+For each external entity you defined, identify the specific edge in the graph where its data crosses into the target component it interacts with.
 
 Create boundary edge entry:
 - `edge_id`: The edge ID
-- `source_entity_id`: External entity ID
-- `source_trust_level`: Trust level assigned
-- `target_node_id`: First internal node receiving data
-- `data_flows_across`: Data involved
-- `security_assumption`: What must hold for this to be secure
+- `source_entity_id`: The ID of the refined external entity (e.g., `EXT-CL-ENGINE-API`)
+- `target_component`: The in-scope component receiving the data ("Execution Layer (EL)" or "Consensus Layer (CL)")
+- `target_component_interface`: The specific entry point on the `target_component` (e.g., "Engine API newPayloadV3")
+- `security_assumption`: State what MUST be validated at this boundary. For `SEMI_TRUSTED` entities, this focuses on content validation. For `UNTRUSTED` entities, this includes authentication, authorization, and content validation.
 
 #### **2.2.5: Coverage Verification**
 
@@ -121,6 +148,22 @@ Report any coverage gaps.
       "outputs/01b_SUBGRAPHS/spec_def456.json"
     ]
   },
+  "audit_scope": {
+    "target_components": ["Execution Layer (EL)", "Consensus Layer (CL)"],
+    "description": "Auditing both EL and CL and their interfaces.",
+    "components": [
+      {
+        "component": "Execution Layer (EL)",
+        "in_scope": ["Transaction Pool", "State Transition", "Engine API"],
+        "out_of_scope": ["P2P networking stack"]
+      },
+      {
+        "component": "Consensus Layer (CL)",
+        "in_scope": ["Fork Choice", "Attestations", "Beacon Chain state transitions"],
+        "out_of_scope": ["Execution Layer internals"]
+      }
+    ]
+  },
   "misclassified_entities": [
     {
       "id": "EXT-INTERNAL-SCHEDULER",
@@ -129,25 +172,28 @@ Report any coverage gaps.
   ],
   "trusted_external_entities": [
     {
-      "id": "EXT-USER",
-      "name": "Transaction Submitter",
+      "id": "EXT-USER-JSON-RPC",
+      "name": "User via JSON-RPC",
       "trust_level": "UNTRUSTED",
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "eth_sendRawTransaction RPC",
       "rationale": "User input via RPC, no authentication required."
     },
     {
-      "id": "EXT-CL",
-      "name": "Consensus Layer",
+      "id": "EXT-CL-ENGINE-API",
+      "name": "Consensus Layer via Engine API",
       "trust_level": "SEMI_TRUSTED",
-      "rationale": "JWT authenticated but data must be validated."
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "Engine API (newPayload, forkchoiceUpdated)",
+      "rationale": "Authenticated via JWT, but payload content must be validated."
     }
   ],
   "boundary_edges": [
     {
       "edge_id": "EDGE-USER-SUBMIT-TX",
-      "source_entity_id": "EXT-USER",
-      "source_trust_level": "UNTRUSTED",
-      "target_node_id": "STATE-TX-RECEIVED",
-      "data_flows_across": ["DATA-SIGNED-TX"],
+      "source_entity_id": "EXT-USER-JSON-RPC",
+      "target_component": "Execution Layer (EL)",
+      "target_component_interface": "eth_sendRawTransaction RPC",
       "security_assumption": "Full transaction validation required."
     }
   ],
