@@ -119,18 +119,29 @@ clean:
 # Step 01a: Discovery & Queuing
 01a:
 	@mkdir -p $(LOG_DIR) $(OUTPUT_DIR)
-	@if [ -f "$(OUTPUT_DIR)/01a_STATE.json" ]; then \
-		echo "⏭️  Skipping 01a: $(OUTPUT_DIR)/01a_STATE.json already exists"; \
+	@if [ "$(APPEND_MODE)" = "true" ] && [ ! -f "$(OUTPUT_DIR)/01a_STATE.json" ]; then \
+		echo "❌ Error: APPEND_MODE=true but $(OUTPUT_DIR)/01a_STATE.json does not exist"; \
+		exit 1; \
+	fi; \
+	if [ "$(APPEND_MODE)" != "true" ] && [ -f "$(OUTPUT_DIR)/01a_STATE.json" ]; then \
+		echo "⏭️  Skipping 01a: $(OUTPUT_DIR)/01a_STATE.json already exists (use APPEND_MODE=true to add URLs)"; \
 	else \
 		echo "⭐ Running 01a_crawl.md (Discovery & Queuing)..."; \
+		if [ "$(APPEND_MODE)" = "true" ]; then \
+			echo "   Mode: APPEND (merging with existing STATE)"; \
+		fi; \
 		START_TIME=$$(date +%s); \
-		claude $(CLAUDE_FLAGS) -p "$$(cat prompts/01a_crawl.md) KEYWORDS=$(KEYWORDS) SPEC_URLS=$(SPEC_URLS)" > $(LOG_DIR)/01a_crawl.json; \
+		claude $(CLAUDE_FLAGS) -p "$$(cat prompts/01a_crawl.md) KEYWORDS=$(KEYWORDS) SPEC_URLS=$(SPEC_URLS) APPEND_MODE=$(APPEND_MODE)" > $(LOG_DIR)/01a_crawl.json; \
 		END_TIME=$$(date +%s); \
 		DURATION=$$((END_TIME - START_TIME)); \
 		if [ -f "$(OUTPUT_DIR)/01a_STATE.json" ]; then \
 			COST=$$(grep -o '"total_cost_usd":[0-9.]*' $(LOG_DIR)/01a_crawl.json | head -1 | cut -d: -f2); \
 			QUEUE_SIZE=$$(grep -o '"work_queue":\[[^]]*\]' $(OUTPUT_DIR)/01a_STATE.json | tr ',' '\n' | wc -l); \
-			echo "✅ Finished 01a_crawl.md (Time: $${DURATION}s | URLs queued: ~$$QUEUE_SIZE | Cost: \$$$$COST)"; \
+			if [ "$(APPEND_MODE)" = "true" ]; then \
+				echo "✅ Finished 01a_crawl.md - APPEND mode (Time: $${DURATION}s | Total URLs in queue: ~$$QUEUE_SIZE | Cost: \$$$$COST)"; \
+			else \
+				echo "✅ Finished 01a_crawl.md (Time: $${DURATION}s | URLs queued: ~$$QUEUE_SIZE | Cost: \$$$$COST)"; \
+			fi; \
 		else \
 			echo "❌ Error: 01a_STATE.json not generated"; exit 1; \
 		fi; \
