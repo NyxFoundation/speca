@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "worker_id": 2,
+    "batch": 11,
+    "generated_at": "2026-02-01T00:00:00Z",
+    "source_files": [
+      "outputs/01b_SUBGRAPHS/spec_f5b66f27ca4407c82aafd507e8013a0b9244342b.json",
+      "outputs/01b_SUBGRAPHS/spec_f8133d7d91b4.json",
+      "outputs/01b_SUBGRAPHS/spec_fc2885d60da2.json"
+    ]
+  },
+  "audit_scope": {
+    "target_components": ["Execution Layer (EL)", "Consensus Layer (CL)"],
+    "description": "This batch covers EXP opcode gas repricing for DoS mitigation (EIP-160), Deneb polynomial commitments for KZG blob verification, and calldata gas floor pricing (EIP-7623).",
+    "components": [
+      {
+        "component": "Execution Layer (EL)",
+        "in_scope": ["EXP Opcode Gas Economics (EIP-160)", "Calldata Gas Floor (EIP-7623)", "Transaction Gas Calculation"],
+        "out_of_scope": ["P2P networking stack internals"]
+      },
+      {
+        "component": "Consensus Layer (CL)",
+        "in_scope": ["KZG Polynomial Commitments (Deneb)", "Blob Verification", "Batch Proof Verification"],
+        "out_of_scope": ["Execution Layer internals (from CL perspective)"]
+      }
+    ]
+  },
+  "archetypal_attack_vectors": {
+    "el_attack_vectors": [
+      {
+        "source": "Malicious User / DApp",
+        "entry_point": "JSON-RPC API (eth_sendRawTransaction)",
+        "threat": "Submit transactions with large exponents to exploit EXP underpricing (pre-EIP-160), submit calldata-heavy transactions to abuse block space"
+      },
+      {
+        "source": "Malicious Peer Node",
+        "entry_point": "P2P Network (devp2p)",
+        "threat": "Propagate blocks containing EXP-heavy transactions designed for DoS"
+      }
+    ],
+    "cl_attack_vectors": [
+      {
+        "source": "Malicious Validator / Block Proposer",
+        "entry_point": "P2P Network (Beacon gossip)",
+        "threat": "Include blocks with invalid blob commitments or forged KZG proofs"
+      },
+      {
+        "source": "Malicious Blob Data Source",
+        "entry_point": "P2P Network (blob sidecar distribution)",
+        "threat": "Provide blob data that doesn't match commitments, attempt to bypass verification with crafted proofs"
+      }
+    ]
+  },
+  "misclassified_entities": [
+    {
+      "id": "EXT-ATTACKER",
+      "reason": "EIP-160 models a DoS attacker as an external entity. This is a threat actor, not a distinct system interface. The attacker interacts through standard transaction submission channels already covered by User via JSON-RPC."
+    },
+    {
+      "id": "EXT-CONTRACT-CALLER",
+      "reason": "EIP-160 models the contract caller as external. Contract callers interact through standard transaction submission, already covered by User via JSON-RPC for the EL boundary."
+    }
+  ],
+  "trusted_external_entities": [
+    {
+      "id": "EXT-TX-SUBMITTER-CALLDATA",
+      "name": "Transaction Submitter via JSON-RPC",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Execution Layer (EL)",
+      "entry_point": "JSON-RPC API (eth_sendRawTransaction) with calldata",
+      "rationale": "Users submit transactions with arbitrary calldata amounts. EIP-7623 introduces a gas floor for data-heavy transactions (10 gas per token vs standard 4). All transactions must have gas limit >= max(standard_gas, floor_gas). Transaction submitters are untrusted and may attempt to exploit calldata pricing."
+    },
+    {
+      "id": "EXT-BLOB-SUBMITTER",
+      "name": "Blob Data Submitter",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Consensus Layer (CL)",
+      "entry_point": "Blob submission for KZG commitment generation",
+      "rationale": "External entities provide raw blob data (131,072 bytes = 4096 field elements) for commitment. Each field element must be < BLS_MODULUS. The commitment is a G1 point computed via linear combination of Lagrange basis points. Blob submitters are untrusted; all field element validation is required."
+    },
+    {
+      "id": "EXT-PROOF-PROVIDER",
+      "name": "KZG Proof Provider via P2P or Block",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Consensus Layer (CL)",
+      "entry_point": "KZG proof verification (verify_kzg_proof, verify_blob_kzg_proof)",
+      "rationale": "Block proposers or peers provide KZG proofs for verification. Proofs consist of G1 curve points that must pass KeyValidate checks (identity point 0xc0... is permitted). Verification uses bilinear pairing on BLS12-381. Batch verification uses Fiat-Shamir random challenges with RCKZGBATCH___V1_ domain separation."
+    },
+    {
+      "id": "EXT-BLOB-DATA-SOURCE-DENEB",
+      "name": "Blob Data Source for Verification",
+      "trust_level": "UNTRUSTED",
+      "target_component": "Consensus Layer (CL)",
+      "entry_point": "Blob-specific KZG verification (verify_blob_kzg_proof with Fiat-Shamir challenge)",
+      "rationale": "Network peers or local storage provide blob data alongside commitments and proofs. Blob verification derives evaluation challenges deterministically via Fiat-Shamir (FSBLOBVERIFY_V1_ domain). Polynomial evaluated at challenge using barycentric interpolation over roots of unity. Data source is untrusted."
+    }
+  ],
+  "boundary_edges": [
+    {
+      "edge_id": "EDGE-TX-CALLDATA-GAS-FLOOR",
+      "source_entity_id": "EXT-TX-SUBMITTER-CALLDATA",
+      "target_component": "Execution Layer (EL)",
+      "target_component_interface": "Transaction gas calculation (EIP-7623 floor pricing)",
+      "security_assumption": "Transaction gas limit must be >= max(standard_gas_cost, floor_gas_cost). Floor gas = 21000 + (10 × tokens_in_calldata). Tokens = zero_bytes + (nonzero_bytes × 4). Data-heavy transactions (floor > standard) pay 2.5x more per calldata byte. Gas estimation APIs must account for floor."
+    },
+    {
+      "edge_id": "EDGE-BLOB-COMMITMENT-GENERATION",
+      "source_entity_id": "EXT-BLOB-SUBMITTER",
+      "target_component": "Consensus Layer (CL)",
+      "target_component_interface": "Blob-to-KZG commitment pipeline (blob_to_kzg_commitment)",
+      "security_assumption": "All 4096 field elements in the blob must be strictly < BLS_MODULUS. Field elements are parsed as 32-byte big-endian values. Commitment is computed as linear combination of trusted setup G1 points. Invalid field elements must cause rejection."
+    },
+    {
+      "edge_id": "EDGE-KZG-PROOF-VERIFICATION",
+      "source_entity_id": "EXT-PROOF-PROVIDER",
+      "target_component": "Consensus Layer (CL)",
+      "target_component_interface": "KZG proof verification (verify_kzg_proof, verify_kzg_proof_batch)",
+      "security_assumption": "Commitment and proof must be valid G1 points (KeyValidate with identity permitted). Pairing check: e(P - y·G1, G2) == e(Q, X - z·G2). Batch verification uses Fiat-Shamir challenges with RCKZGBATCH___V1_ domain. All verification relies on trusted setup security and BLS12-381 hardness."
+    },
+    {
+      "edge_id": "EDGE-BLOB-DATA-VERIFICATION",
+      "source_entity_id": "EXT-BLOB-DATA-SOURCE-DENEB",
+      "target_component": "Consensus Layer (CL)",
+      "target_component_interface": "Blob-specific verification (verify_blob_kzg_proof)",
+      "security_assumption": "Evaluation challenge z derived deterministically from blob and commitment via Fiat-Shamir (FSBLOBVERIFY_V1_ domain). Polynomial evaluated at z using barycentric interpolation. Result verified against KZG proof via pairing check. Bit-reversal permutation applied to 4096-element domain."
+    }
+  ],
+  "coverage_analysis": {
+    "total_external_entities": 4,
+    "entities_with_boundary_edges": 4,
+    "coverage_gaps": [],
+    "notes": [
+      "EIP-160 external entities (EXT-ATTACKER, EXT-CONTRACT-CALLER) are threat actors/generic callers subsumed by EXT-TX-SUBMITTER-CALLDATA.",
+      "EIP-7623 validation and classification subgraphs have no additional external entities beyond the transaction submitter.",
+      "Deneb KZG batch verification subgraph has no external entities (internal optimization of single verification)."
+    ],
+    "verification_status": "COMPLETE"
+  }
+}
