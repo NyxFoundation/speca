@@ -1,8 +1,8 @@
 
 ---
 Description: [PARALLEL WORKER] Generate security properties for subgraph files. Create formal properties covering nodes, edges, and trust boundaries.
-Usage: `/01e_prop_worker WORKER_ID=... QUEUE_FILE=...`
-Example: `/01e_prop_worker WORKER_ID=0 QUEUE_FILE=outputs/01e_QUEUE_0.json`
+Usage: `/01e_prop_worker WORKER_ID=... QUEUE_FILE=... [BATCH_SIZE=...]`
+Example: `/01e_prop_worker WORKER_ID=0 QUEUE_FILE=outputs/01e_QUEUE_0.json BATCH_SIZE=5`
 Language: English only.
 Execution hint: This is a worker prompt for parallel execution. Called by run_worker.py.
 ---
@@ -16,6 +16,7 @@ Process subgraph files from your assigned worker queue. For each subgraph, gener
 
 - **`WORKER_ID`**: The numeric ID of this worker (0, 1, 2, ...)
 - **`QUEUE_FILE`**: Path to this worker's queue file (e.g., `outputs/01e_QUEUE_0.json`)
+- **`BATCH_SIZE` (optional)**: Max number of files to process this iteration (set dynamically by `run_worker.py`)
 
 **Additional Input:** Trust model partials from `outputs/01d_TRUSTMODEL_PARTIAL_*.json`
 
@@ -48,9 +49,24 @@ Process subgraph files from your assigned worker queue. For each subgraph, gener
 2. Collect all `boundary_edges` into a lookup map by `edge_id`
 3. Collect all `trusted_external_entities` by ID
 
-### **Task 2.3: Process a Batch of Subgraph Files**
+### **Task 2.3: Process a Batch of Subgraph Files (Dynamic Batching)**
 
-Take the **first 10 unprocessed files** from your queue (or fewer if less remain).
+Take unprocessed files from your queue **until the cumulative size reaches ~160KB** (approximately 40,000 tokens), or fewer if less remain.
+
+**Token Estimation**:
+- Estimate each subgraph file's token count as: `file_size_bytes / 4`
+- Keep a running total as you add files to the batch
+- Stop adding files when: `cumulative_tokens + next_file_tokens > 40,000`
+
+**Batching Logic**:
+1. Start with an empty batch
+2. For each unprocessed file in the queue (in order):
+   - Check the file size
+   - If `cumulative_size + file_size <= 160KB`, add to batch
+   - Otherwise, stop and process the current batch
+3. If the batch is empty (first file > 160KB), process that single file alone
+
+**If `BATCH_SIZE` is provided**: Use it as the max number of files to process this iteration, and still ensure you only take files from the front of the remaining queue.
 
 **For EACH subgraph file in the batch:**
 
@@ -134,7 +150,7 @@ Report coverage in metadata.
 
 1. **Generate Partial Properties:**
    - Create `outputs/01e_PROP_PARTIAL_W{WORKER_ID}_{BATCH}.json`
-   - Ensure `metadata.source_files` lists **all files in this 10-item batch**
+   - Ensure `metadata.source_files` lists **all files in this batch**
 
 2. **Update Worker Queue:**
    - Add processed files to `processed` array

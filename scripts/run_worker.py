@@ -45,6 +45,7 @@ PHASE_CONFIG = {
         "prompt_file": "prompts/01e_prop_worker.md",
         "log_prefix": "outputs/logs/01e_prop_w{worker_id}",
         "workdir": None,
+        "max_batch_bytes": 160 * 1024,
     },
     "02a": {
         "queue_file": "outputs/02a_QUEUE_{worker_id}.json",
@@ -94,6 +95,41 @@ def get_remaining_count(queue_file: str) -> int:
         return len(items) - len(processed)
     except FileNotFoundError:
         return 0
+
+
+def get_dynamic_batch_size(queue_file: str, max_bytes: int) -> int:
+    """Compute a dynamic batch size based on cumulative file size."""
+    data = load_json(queue_file)
+    items = data.get("items", [])
+    processed = set(data.get("processed", []))
+    remaining = [item for item in items if item not in processed]
+
+    if not remaining:
+        return 0
+
+    batch_count = 0
+    cumulative_size = 0
+
+    for item in remaining:
+        if not os.path.exists(item):
+            continue
+
+        file_size = os.path.getsize(item)
+
+        if batch_count == 0:
+            batch_count = 1
+            if file_size > max_bytes:
+                break
+            cumulative_size = file_size
+            continue
+
+        if cumulative_size + file_size > max_bytes:
+            break
+
+        batch_count += 1
+        cumulative_size += file_size
+
+    return batch_count
 
 
 def run_claude(
@@ -277,6 +313,15 @@ def main():
             continue
 
         log_file = f"{log_prefix}_{iteration}.json"
+        batch_size = args.batch_size
+        if batch_size is None and args.phase == "01e":
+            max_bytes = config.get("max_batch_bytes", 160 * 1024)
+            batch_size = get_dynamic_batch_size(queue_file, max_bytes)
+            if batch_size > 0:
+                print(f"  Dynamic batch size: {batch_size} (max {max_bytes} bytes)")
+            else:
+                print("  Dynamic batch size: 0 (no readable items; falling back to 1)")
+                batch_size = 1
         success, duration, cost = run_claude(
             prompt_file,
             log_file,
@@ -284,7 +329,7 @@ def main():
             env_vars,
             args.worker_id,
             queue_file,
-            args.batch_size,
+            batch_size,
         )
 
         if cost not in ("timeout", "error"):
