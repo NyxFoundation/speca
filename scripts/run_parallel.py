@@ -41,65 +41,62 @@ def run_split(phase: str, workers: int) -> bool:
     return True
 
 
-def run_worker(phase: str, worker_id: int, max_iterations: int) -> tuple[int, bool, str]:
-    """Run a single worker and return (worker_id, success, output)."""
-    print(f"Starting worker {worker_id}...")
-
-    result = subprocess.run(
-        [
-            "python3", "scripts/run_worker.py",
-            "--phase", phase,
-            "--worker-id", str(worker_id),
-            "--max-iterations", str(max_iterations),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    output = result.stdout + result.stderr
-    return worker_id, result.returncode == 0, output
-
-
-def run_workers_parallel(phase: str, workers: int, max_iterations: int) -> bool:
+def run_workers_parallel(phase: str, workers: int, max_iterations: int, batch_size: int | None) -> bool:
     """Run all workers in parallel."""
     print(f"\n{'='*60}")
     print(f"Phase 2: Running {workers} workers in parallel")
     print(f"{'='*60}")
 
     start_time = time.time()
+    processes: dict[int, subprocess.Popen[str]] = {}
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(run_worker, phase, i, max_iterations): i
-            for i in range(workers)
-        }
+    for worker_id in range(workers):
+        cmd = [
+            "python3", "scripts/run_worker.py",
+            "--phase", phase,
+            "--worker-id", str(worker_id),
+            "--max-iterations", str(max_iterations),
+        ]
+        if batch_size is not None:
+            cmd += ["--batch-size", str(batch_size)]
+        print(f"Starting worker {worker_id}...")
+        processes[worker_id] = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
 
-        results = {}
-        for future in concurrent.futures.as_completed(futures):
-            worker_id = futures[future]
-            try:
-                wid, success, output = future.result()
-                results[wid] = (success, output)
-                status = "OK" if success else "FAILED"
-                print(f"Worker {wid}: {status}")
-            except Exception as e:
-                results[worker_id] = (False, str(e))
-                print(f"Worker {worker_id}: EXCEPTION - {e}")
+    # Stream outputs in real time with a simple prefix
+    import threading
+
+    def stream_worker_output(wid: int, proc: subprocess.Popen[str]) -> None:
+        if proc.stdout is None:
+            return
+        for line in proc.stdout:
+            print(f"[W{wid}] {line}", end="")
+
+    threads = []
+    for wid, proc in processes.items():
+        t = threading.Thread(target=stream_worker_output, args=(wid, proc), daemon=True)
+        t.start()
+        threads.append(t)
+
+    results: dict[int, bool] = {}
+    for wid, proc in processes.items():
+        code = proc.wait()
+        results[wid] = code == 0
+        status = "OK" if code == 0 else "FAILED"
+        print(f"Worker {wid}: {status}")
+
+    for t in threads:
+        t.join(timeout=1)
 
     duration = time.time() - start_time
     print(f"\nAll workers completed in {duration:.1f}s")
 
-    # Print worker outputs
-    for wid in sorted(results.keys()):
-        success, output = results[wid]
-        print(f"\n--- Worker {wid} output ---")
-        print(output[:2000])  # Truncate long outputs
-        if len(output) > 2000:
-            print("... (truncated)")
-
-    # Check if all succeeded
-    all_success = all(success for success, _ in results.values())
-    return all_success
+    return all(results.values())
 
 
 def run_merge(phase: str, output_file: str) -> bool:
@@ -168,6 +165,12 @@ def main():
         help="Skip result merging",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Max items to process per iteration (default: prompt-defined)",
+    )
+    parser.add_argument(
         "--output",
         help="Override output file for merge",
     )
@@ -176,6 +179,8 @@ def main():
     print(f"Parallel execution for phase {args.phase}")
     print(f"  Workers: {args.workers}")
     print(f"  Max iterations per worker: {args.max_iterations}")
+    if args.batch_size is not None:
+        print(f"  Batch size: {args.batch_size}")
 
     start_time = time.time()
 
@@ -188,7 +193,7 @@ def main():
         print("\nSkipping queue split (--skip-split)")
 
     # Step 2: Run workers in parallel
-    if not run_workers_parallel(args.phase, args.workers, args.max_iterations):
+    if not run_workers_parallel(args.phase, args.workers, args.max_iterations, args.batch_size):
         print("WARNING: Some workers failed", file=sys.stderr)
         # Continue to merge anyway
 

@@ -19,6 +19,7 @@ MAX_ITERATIONS ?= 100
 
 # Parallel execution configuration
 WORKERS ?= 4
+BATCH_SIZE ?= 10
 SKIP_SPLIT ?=
 FORCE_EXECUTE ?=
 
@@ -76,6 +77,7 @@ help:
 	@echo "Configuration:"
 	@echo "  WORKERS        - Parallel workers (default: 4)"
 	@echo "  MAX_ITERATIONS - Safety limit (default: 100)"
+	@echo "  BATCH_SIZE     - Items per iteration (default: 10)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make 01b-parallel WORKERS=8"
@@ -158,7 +160,7 @@ clean:
 		echo "⏭️  Skipping 01c-parallel: trust model partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 01c verification in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 01c --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
+		python3 scripts/run_parallel.py --phase 01c --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		echo "✅ Parallel verification complete"; \
 	fi
 
@@ -171,7 +173,7 @@ clean:
 		echo "⏭️  Skipping 01d-parallel: property partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 01d trust model in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 01d --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
+		python3 scripts/run_parallel.py --phase 01d --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/01d_TRUSTMODEL_PARTIAL_*.json 2>/dev/null | wc -l); \
 		echo "✅ Parallel trust model complete. Partials: $$PARTIAL_COUNT"; \
 	fi
@@ -185,7 +187,7 @@ clean:
 		echo "⏭️  Skipping 01e-parallel: checklist partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 01e properties in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 01e --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
+		python3 scripts/run_parallel.py --phase 01e --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json 2>/dev/null | wc -l); \
 		echo "✅ Parallel property generation complete. Partials: $$PARTIAL_COUNT"; \
 	fi
@@ -227,7 +229,7 @@ clean:
 		echo "⏭️  Skipping 02a-parallel: 02b checklist partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 02a checklist boundaries in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 02a --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
+		python3 scripts/run_parallel.py --phase 02a --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02a_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
 		echo "✅ Parallel boundary checklist complete. Partials: $$PARTIAL_COUNT"; \
 	fi
@@ -241,7 +243,7 @@ clean:
 		echo "⏭️  Skipping 02b-parallel: 03_AUDITMAP_PARTIAL_*.json exists (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 02b checklist remaining in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 02b --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
+		python3 scripts/run_parallel.py --phase 02b --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02b_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
 		echo "✅ Parallel checklist generation complete. Partials: $$PARTIAL_COUNT"; \
 	fi

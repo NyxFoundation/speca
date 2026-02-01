@@ -38,6 +38,32 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 }
 ```
 
+## 1) Define Archetypal Attack Vectors (NEW)
+
+**Before analyzing the specific EIPs, first define the archetypal attack vectors for both EL and CL from a top-down perspective.** This ensures comprehensive threat modeling even if the EIPs are EL-focused.
+
+### Task 1.1: Define EL Attack Vectors
+
+- **Source**: Malicious User / DApp
+- **Entry Point**: JSON-RPC API (e.g., `eth_sendRawTransaction`)
+- **Threat**: Submit malformed transactions, resource exhaustion attacks.
+
+- **Source**: Malicious Peer Node
+- **Entry Point**: P2P Network (devp2p)
+- **Threat**: Eclipse attacks, send invalid blocks/transactions.
+
+### Task 1.2: Define CL Attack Vectors
+
+- **Source**: Malicious Validator
+- **Entry Point**: P2P Network (Beacon API / gossip)
+- **Threat**: Propose invalid blocks, submit conflicting attestations (slashing condition), censorship.
+
+- **Source**: Malicious External Service
+- **Entry Point**: External APIs (e.g., MEV-Boost relay, checkpoint sync endpoint)
+- **Threat**: Provide incorrect data, censorship, denial of service.
+
+**Now, proceed to analyze the EIPs. When defining `trusted_external_entities`, you MUST consider both the bottom-up threats from the EIPs AND these top-down archetypal threats.**
+
 ## Worker Configuration
 
 - **`WORKER_ID`**: The numeric ID of this worker (0, 1, 2, ...)
@@ -47,7 +73,7 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 
 ---
 
-## 1) Inputs
+## 2) Inputs
 
 1. **Worker Queue File:** The file specified by `QUEUE_FILE`
    - Contains `items`: list of subgraph file paths assigned to this worker
@@ -55,9 +81,9 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 
 ---
 
-## 2) Worker Execution Logic
+## 3) Worker Execution Logic
 
-### **Task 2.1: Read Worker Queue**
+### **Task 3.1: Read Worker Queue**
 
 1. Read the worker queue file `QUEUE_FILE`
 2. Get the list of `items` (all assigned file paths)
@@ -65,9 +91,9 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 4. Calculate remaining: file paths in `items` but not in `processed`
 5. If no remaining files, terminate successfully
 
-### **Task 2.2: Process a Batch of Subgraph Files**
+### **Task 3.2: Process a Batch of Subgraph Files**
 
-Take the **first 5 unprocessed files** from your queue (or fewer if less than 5 remain).
+Take the **first `BATCH_SIZE` unprocessed files** from your queue (or fewer if less remain). If `BATCH_SIZE` is not provided, default to **5**.
 
 **For EACH subgraph file in the batch:**
 
@@ -121,7 +147,7 @@ Create boundary edge entry:
 For each external entity, verify at least one boundary edge exists.
 Report any coverage gaps.
 
-### **Task 2.3: Write Outputs**
+### **Task 3.3: Write Outputs**
 
 1. **Generate Partial Trust Model:**
    - Determine batch number: count existing `01d_TRUSTMODEL_PARTIAL_W{WORKER_ID}_*.json` files + 1
@@ -133,7 +159,7 @@ Report any coverage gaps.
 
 ---
 
-## 3) Required Output Format (JSON)
+## 4) Required Output Format (JSON)
 
 **Partial Trust Model:** `outputs/01d_TRUSTMODEL_PARTIAL_W{WORKER_ID}_{BATCH}.json`
 
@@ -219,7 +245,7 @@ Report any coverage gaps.
 
 ---
 
-## 4) Quality Checklist
+## 5) Quality Checklist
 
 - [ ] All external entities are validated (truly external)
 - [ ] Each entity has appropriate trust level with rationale

@@ -96,14 +96,25 @@ def get_remaining_count(queue_file: str) -> int:
         return 0
 
 
-def run_claude(prompt_file: str, log_file: str, workdir: str | None, env_vars: dict, worker_id: int, queue_file: str) -> tuple[bool, float, str]:
+def run_claude(
+    prompt_file: str,
+    log_file: str,
+    workdir: str | None,
+    env_vars: dict,
+    worker_id: int,
+    queue_file: str,
+    batch_size: int | None,
+) -> tuple[bool, float, str]:
     """Run Claude with the given prompt and return success, duration, cost."""
     # Read prompt and append arguments (like 01a_crawl.md style)
     with open(prompt_file) as f:
         prompt_content = f.read()
 
     # Append arguments to prompt (matching Usage: format in metadata)
-    prompt_content = f"{prompt_content}\n\nWORKER_ID={worker_id} QUEUE_FILE={queue_file}"
+    extra_args = f"WORKER_ID={worker_id} QUEUE_FILE={queue_file}"
+    if batch_size is not None:
+        extra_args += f" BATCH_SIZE={batch_size}"
+    prompt_content = f"{prompt_content}\n\n{extra_args}"
 
     # Build the command
     cmd = [
@@ -117,6 +128,8 @@ def run_claude(prompt_file: str, log_file: str, workdir: str | None, env_vars: d
     # Set environment
     env = os.environ.copy()
     env.update(env_vars)
+    if batch_size is not None:
+        env["BATCH_SIZE"] = str(batch_size)
     env["CLAUDE_CODE_PERMISSIONS"] = "bypassPermissions"
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "100000"
 
@@ -125,25 +138,50 @@ def run_claude(prompt_file: str, log_file: str, workdir: str | None, env_vars: d
     try:
         # Run Claude
         cwd = workdir if workdir else None
-        result = subprocess.run(
-            cmd,
-            cwd=cwd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=3600,  # 1 hour timeout per iteration
-        )
-
-        # Write log
         with open(log_file, "w") as f:
-            f.write(result.stdout)
+            result = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            def _stream_output() -> None:
+                if result.stdout is None:
+                    return
+                for line in result.stdout:
+                    f.write(line)
+                    f.flush()
+                    print(line, end="")
+
+            import threading
+
+            stream_thread = threading.Thread(target=_stream_output, daemon=True)
+            stream_thread.start()
+
+            try:
+                result.wait(timeout=3600)  # 1 hour timeout per iteration
+            except subprocess.TimeoutExpired:
+                result.terminate()
+                try:
+                    result.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    result.kill()
+                return False, time.time() - start_time, "timeout"
+
+            stream_thread.join(timeout=1)
 
         duration = time.time() - start_time
 
         # Extract cost from output
         cost = "0"
         try:
-            for line in result.stdout.split("\n"):
+            with open(log_file) as logf:
+                log_lines = logf.read().split("\n")
+            for line in log_lines:
                 if '"total_cost_usd"' in line:
                     import re
                     match = re.search(r'"total_cost_usd":\s*([\d.]+)', line)
@@ -154,9 +192,6 @@ def run_claude(prompt_file: str, log_file: str, workdir: str | None, env_vars: d
             pass
 
         return result.returncode == 0, duration, cost
-
-    except subprocess.TimeoutExpired:
-        return False, time.time() - start_time, "timeout"
     except Exception as e:
         print(f"Error running Claude: {e}", file=sys.stderr)
         return False, time.time() - start_time, "error"
@@ -183,6 +218,12 @@ def main():
         type=int,
         default=100,
         help="Maximum iterations per worker (default: 100)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Max items to process per iteration (default: prompt-defined)",
     )
     parser.add_argument(
         "--dry-run",
@@ -236,7 +277,15 @@ def main():
             continue
 
         log_file = f"{log_prefix}_{iteration}.json"
-        success, duration, cost = run_claude(prompt_file, log_file, workdir, env_vars, args.worker_id, queue_file)
+        success, duration, cost = run_claude(
+            prompt_file,
+            log_file,
+            workdir,
+            env_vars,
+            args.worker_id,
+            queue_file,
+            args.batch_size,
+        )
 
         if cost not in ("timeout", "error"):
             try:
