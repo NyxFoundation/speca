@@ -54,7 +54,32 @@ Take the **first 10 unprocessed files** from your queue (or fewer if less remain
 
 **For EACH subgraph file in the batch:**
 
-#### **2.3.1: Generate Properties by Priority**
+#### **2.3.1: Provide Scaffolding for Your Thought Process**
+
+**DO NOT read the subgraph file yet.** First, answer the following scaffolding questions to establish a robust thinking framework. Your answers should be abstract and based on general systems knowledge.
+
+**Question 1 (Verification Condition Mindset):**
+"Consider a generic blockchain protocol. If this system is to be considered secure and correct, what are 3-5 fundamental conditions that MUST ALWAYS be true, regardless of the specific operations? (e.g., total supply of a token should not change, a slashed validator can never be un-slashed)."
+
+**Question 2 (Forward Reasoning - Strongest Postcondition):**
+"Imagine a function that processes a new block. Given a valid block as input, what is the STRONGEST, most specific guarantee you can make about the system's state immediately after the function completes successfully?"
+
+**Question 3 (Backward Reasoning - Weakest Precondition):**
+"To guarantee that a transaction is successfully included in a block, what is the WEAKEST, most minimal set of conditions the transaction must have satisfied before it was processed?"
+
+**Question 4 (Invariant Discovery):**
+"Consider a complex, multi-step consensus process (like voting or state synchronization). What is a plausible property that remains TRUE after each and every step of the process?"
+
+#### **2.3.2: Generate Properties by Priority**
+
+**NOW, you may read the subgraph file.** Use your answers from 2.3.1 as a guide.
+
+- **Map your answers**: For each abstract condition you identified in 2.3.1, find the specific functions, state variables, and logic in the subgraph that correspond to it.
+- **Generate concrete properties** using this mapping:
+  - Answer to **Q1** should inspire **Invariant** properties.
+  - Answer to **Q2** should inspire **Post-condition** properties.
+  - Answer to **Q3** should inspire **Pre-condition** properties.
+  - Answer to **Q4** should inspire **Loop Invariant** or **Protocol Invariant** properties.
 
 **Priority 1: Boundary Edge Properties (Input Validation)**
 
@@ -86,7 +111,7 @@ For important states:
 - Property Type: `Invariant`
 - Focus: System-wide safety rules
 
-#### **2.3.2: Property Format**
+#### **2.3.3: Property Format**
 
 Each property must include:
 - `id`: Unique ID (e.g., `PROP-W{WORKER_ID}-{SUBGRAPH}-{TYPE}-{N}`)
@@ -100,7 +125,7 @@ Each property must include:
 - `related_ambiguity_id`: If derived from an ambiguity
 - `related_assumption_id`: If derived from an assumption
 
-#### **2.3.3: Coverage Tracking**
+#### **2.3.4: Coverage Tracking**
 
 Track which nodes and edges are covered by properties.
 Report coverage in metadata.

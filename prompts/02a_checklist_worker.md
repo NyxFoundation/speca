@@ -9,6 +9,8 @@ Execution hint: This is a worker prompt for parallel execution. Called by run_wo
 
 # **Checklist Generation - Trust Boundaries (Parallel Worker)**
 
+**Mindset: You are a seasoned security engineer, a "Boundary Guard", responsible for securing the perimeter of a critical system. Your primary goal is to validate every piece of data crossing the trust boundary.**
+
 **Goal**
 Process property partial files from your assigned worker queue. For each file, extract boundary properties (where `is_boundary_edge == true`) and generate high-priority audit checklist items.
 
@@ -42,11 +44,12 @@ Process property partial files from your assigned worker queue. For each file, e
 2. Get remaining files to process
 3. If no remaining files, terminate successfully
 
-### **Task 2.2: Load Trust Model Data**
+### **Task 2.2: Load Contextual Data**
 
 1. Read all `outputs/01d_TRUSTMODEL_PARTIAL_*.json` files
 2. Collect all `boundary_edges` into a lookup map
 3. Collect all `trusted_external_entities` by ID
+4. For each property being processed, extract the associated trust model `audit_scope` (e.g., `CL`, `EL`) and `archetypal_attack_vectors`
 
 ### **Task 2.3: Process a Batch of Property Files**
 
@@ -64,13 +67,22 @@ Take the **first 5 unprocessed files** from your queue (or fewer if less remain)
 
 For each boundary property:
 
-**Task A: Generate Boundary Edge Check**
+**Task A: Adopt the Right Mindset**
+- If `audit_scope` is `Consensus Layer (CL)`: prioritize protocol stability and consensus integrity. Think about malicious validators, network partitions, and invalid attestations. Use `archetypal_attack_vectors` to guide what to check.
+- If `audit_scope` is `Execution Layer (EL)`: prioritize state integrity and user asset safety. Think about malformed transactions, re-entrancy, and gas-related attacks.
+
+**Task B: Generate Context-Aware Checklist Items**
+- `title`: Must reflect the audit scope (e.g., "[CL AUDIT] Verify Attestation Validation at Gossip Boundary")
+- `detection_procedure`: Tailor to scope (CL: fork choice, attestation validity; EL: transaction pool logic, gas accounting)
+- `risk_category`: Use scope-specific risks (CL: "Consensus Failure"; EL: "Loss of Funds")
+
+**Task C: Generate Boundary Edge Check**
 - `id`: `CHECK-W{WORKER_ID}-{PROP_ID}-BOUNDARY`
 - `title`: "Verify Trust Boundary Integrity for {EDGE_ID} ({TARGET_COMPONENT}: {ENTRY_POINT})"
 - `severity_hint`: Almost always `Critical`
 - Focus: Data validation, authentication, transport security, at the specific entry point
 
-**Task B: Generate Associated Node Checks**
+**Task D: Generate Associated Node Checks**
 - For Action/State nodes in `covers.nodes`
 - Focus: How they support boundary security
 

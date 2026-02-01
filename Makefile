@@ -25,7 +25,7 @@ FORCE_EXECUTE ?=
 
 .PHONY: all preparation audit init init-prep \
         01a 01b-parallel 01c-parallel 01d-parallel 01e-parallel \
-        02a-parallel 02b-parallel 02c 02s \
+        02a-parallel 02b-parallel 02s \
         03-parallel 04-parallel \
         clean help
 
@@ -64,7 +64,6 @@ help:
 	@echo "  02a-parallel - Checklist Boundaries (partials)"
 	@echo "  02b-parallel - Checklist Remaining (partials)"
 	@echo "  02s          - Review & Validate"
-	@echo "  02c          - Checklist Merge [OPTIONAL]"
 	@echo ""
 	@echo "Audit Steps - All Parallel:"
 	@echo "  init         - Setup target workspace"
@@ -257,27 +256,6 @@ clean:
 		python3 scripts/run_parallel.py --phase 02b --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
 		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02b_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
 		echo "✅ Parallel checklist generation complete. Partials: $$PARTIAL_COUNT"; \
-	fi
-
-# Step 02c: Checklist Merge (Optional)
-02c:
-	@if [ -f "$(OUTPUT_DIR)/02_CHECKLIST.json" ]; then \
-		echo "⏭️  Skipping 02c: $(OUTPUT_DIR)/02_CHECKLIST.json already exists"; \
-	else \
-		if [ ! -f "$(OUTPUT_DIR)/02a_CHECKLIST_BOUNDARIES.json" ]; then \
-			echo "❌ Error: $(OUTPUT_DIR)/02a_CHECKLIST_BOUNDARIES.json not found. Run 02a first."; exit 1; \
-		fi; \
-		echo "⭐ Running 02c_checklistmerge.md (Checklist Merge)..."; \
-		START_TIME=$$(date +%s); \
-		claude $(CLAUDE_FLAGS) -p "$$(cat prompts/02c_checklistmerge.md)" > $(LOG_DIR)/02c_checklistmerge.json; \
-		END_TIME=$$(date +%s); \
-		DURATION=$$((END_TIME - START_TIME)); \
-		if [ -f "$(OUTPUT_DIR)/02_CHECKLIST.json" ]; then \
-			COST=$$(grep -o '"total_cost_usd":[0-9.]*' $(LOG_DIR)/02c_checklistmerge.json | head -1 | cut -d: -f2); \
-			echo "✅ Finished 02c_checklistmerge.md (Time: $${DURATION}s | Cost: \$$$$COST)"; \
-		else \
-			echo "❌ Error: 02_CHECKLIST.json not generated"; exit 1; \
-		fi; \
 	fi
 
 # ------------------------------------------------------

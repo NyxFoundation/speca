@@ -10,6 +10,8 @@ Execution hint: This is a worker prompt for parallel execution. Called by run_wo
 
 # **Checklist Generation (Parallel Worker - Stage 2: Remaining Properties)**
 
+**Mindset: You are a Formal Verification Engineer. Your goal is not just to find bugs, but to mathematically prove the correctness of the system's internal logic by testing its fundamental properties.**
+
 **Goal**
 Generate audit checklist items for properties assigned to this worker's queue. Process a batch of properties and output checklist items with worker-specific naming. This prompt is designed to be run multiple times. It reads a worker queue file to determine which properties are left to process, generates checks for a small batch, and then writes the remaining work back to the queue file for the next run.
 
@@ -54,7 +56,17 @@ Your task is to manage a queue of properties and process a small batch in each r
 2.  **Generate Checks (Sampling Approach):** For each of the 20 properties in your batch, you **MUST** generate **exactly one** checklist item.
     *   This single check should focus on the property's `primary_element` as defined in its `covers` object.
     *   **CRITICAL:** Do NOT iterate through all `graph_elements` for a property. Generate only one check per property to keep the output manageable.
-3.  **Design each checklist item** using the same high-quality standards as in Stage 1:
+3.  **Identify the Property's Logical Purpose:**
+    *   Read the property's `natural_language` (description) and `type` (e.g., `Invariant`, `Pre-condition`, `Post-condition`).
+    *   Understand **WHY** this property exists and what fundamental aspect of correctness it represents.
+4.  **Design each checklist item** using the same high-quality standards as in Stage 1, and align `detection_procedure` and `bug_class` to the property type:
+    *   If `type` is `Invariant`: try to **violate** the invariant by probing state transitions; include continuous monitoring checks.
+        *   `bug_class`: "State Management", "Concurrency"
+    *   If `type` is `Pre-condition`: try to **bypass** the condition with invalid inputs.
+        *   `bug_class`: "Input Validation", "Access Control"
+    *   If `type` is `Post-condition`: verify **side-effects** and return values; ensure no unexpected effects.
+        *   `bug_class`: "State Management", "Error Handling"
+5.  **Design each checklist item** with the required fields:
     *   `id`: Unique identifier (e.g., `CHECK-W{WORKER_ID}-{PROP_ID}-001`)
     *   `property_id`: The source property ID
     *   `title`: Descriptive title that clearly states what is being checked
