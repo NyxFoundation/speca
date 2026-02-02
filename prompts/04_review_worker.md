@@ -169,6 +169,13 @@ For each `item` in your `current_batch`:
    - `audit_trail.phase1_abstract_interpretation`
    - `audit_trail.phase2_symbolic_execution`
    - `audit_trail.phase3_invariant_proving`
+3. If you need to validate or reconstruct the code scope and the item provides `subgraph_file`:
+   - When `subgraph_id` is **null**, scan the **entire file** for the target element ID across:
+     - `sub_graphs[*].nodes`
+     - `sub_graphs[*].edges`
+     - top-level `ambiguities`
+     - top-level `implicit_assumptions`
+   - Use the `graph_element_under_test` or `checklist_item.covers.primary_element` (if present) as the target ID.
 
 **Phase B: Method-by-Method Assessment**
 1. Abstract Interpretation: Is this an over-approximation? Any anomalies that are not feasible?

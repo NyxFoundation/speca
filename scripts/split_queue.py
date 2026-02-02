@@ -165,7 +165,7 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
     include_file_field = init_config.get("include_file_field")
     augment_property_subgraph = init_config.get("augment_property_subgraph")
 
-    property_to_subgraph: dict[str, tuple[str, str]] = {}
+    property_to_subgraph: dict[str, tuple[str | None, str]] = {}
     if augment_property_subgraph:
         prop_pattern = augment_property_subgraph["pattern"]
         property_to_subgraph = build_property_to_subgraph_map_via_elements(prop_pattern)
@@ -205,7 +205,7 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_property_to_subgraph_map_via_elements(
     property_files_pattern: str,
-) -> dict[str, tuple[str, str]]:
+) -> dict[str, tuple[str | None, str]]:
     """
     Build a map from property_id to (subgraph_id, subgraph_file).
 
@@ -217,7 +217,7 @@ def build_property_to_subgraph_map_via_elements(
     """
     import glob
 
-    property_to_subgraph: dict[str, tuple[str, str]] = {}
+    property_to_subgraph: dict[str, tuple[str | None, str]] = {}
 
     for prop_file in sorted(glob.glob(property_files_pattern)):
         prop_data = load_json(prop_file)
@@ -259,6 +259,22 @@ def build_property_to_subgraph_map_via_elements(
                             property_to_subgraph[prop_id] = (subgraph_id, sg_file)
                             found = True
                             break
+                if found:
+                    break
+
+                for ambiguity in sg_data.get("ambiguities", []):
+                    if ambiguity.get("id") == primary_element:
+                        property_to_subgraph[prop_id] = (None, sg_file)
+                        found = True
+                        break
+                if found:
+                    break
+
+                for assumption in sg_data.get("implicit_assumptions", []):
+                    if assumption.get("id") == primary_element:
+                        property_to_subgraph[prop_id] = (None, sg_file)
+                        found = True
+                        break
                 if found:
                     break
 
