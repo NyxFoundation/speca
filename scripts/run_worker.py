@@ -60,6 +60,7 @@ PHASE_CONFIG = {
         "log_prefix": "outputs/logs/03_auditmap_w{worker_id}",
         "workdir": "target_workspace",
         "max_batch_bytes": 120 * 1024,
+        "dynamic_batch_size_keys": ["checklist_file", "subgraph_file"],
     },
     "04": {
         "queue_file": "outputs/04_QUEUE_{worker_id}.json",
@@ -100,7 +101,7 @@ def get_remaining_count(queue_file: str) -> int:
         return 0
 
 
-def get_dynamic_batch_size(queue_file: str, max_bytes: int) -> int:
+def get_dynamic_batch_size(queue_file: str, max_bytes: int, config: dict[str, Any]) -> int:
     """Compute a dynamic batch size based on cumulative file size."""
     data = load_json(queue_file)
     items = data.get("items", [])
@@ -118,25 +119,37 @@ def get_dynamic_batch_size(queue_file: str, max_bytes: int) -> int:
     batch_count = 0
     cumulative_size = 0
     seen_files: set[str] = set()
+    size_keys = config.get("dynamic_batch_size_keys", ["source_file"])
 
     for item in remaining:
+        paths: list[str] = []
         if isinstance(item, dict):
-            path = item.get("source_file")
+            for key in size_keys:
+                path = item.get(key)
+                if path:
+                    paths.append(path)
         else:
-            path = item
+            paths = [item]
 
-        if not path or not os.path.exists(path):
+        if not paths:
             continue
 
-        file_size = os.path.getsize(path)
-        size_add = 0 if path in seen_files else file_size
+        size_add = 0
+        item_paths: set[str] = set()
+        for path in paths:
+            if not path or path in item_paths or not os.path.exists(path):
+                continue
+            item_paths.add(path)
+            if path in seen_files:
+                continue
+            size_add += os.path.getsize(path)
 
         if batch_count == 0:
             batch_count = 1
             if size_add > max_bytes:
                 break
             cumulative_size = size_add
-            seen_files.add(path)
+            seen_files.update(item_paths)
             continue
 
         if cumulative_size + size_add > max_bytes:
@@ -144,7 +157,7 @@ def get_dynamic_batch_size(queue_file: str, max_bytes: int) -> int:
 
         batch_count += 1
         cumulative_size += size_add
-        seen_files.add(path)
+        seen_files.update(item_paths)
 
     return batch_count
 
@@ -352,7 +365,7 @@ def main():
         batch_size = args.batch_size
         if batch_size is None and args.phase in ("01e", "02", "03"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)
-            batch_size = get_dynamic_batch_size(queue_file, max_bytes)
+            batch_size = get_dynamic_batch_size(queue_file, max_bytes, config)
             if batch_size > 0:
                 print(f"  Dynamic batch size: {batch_size} (max {max_bytes} bytes)")
             else:
