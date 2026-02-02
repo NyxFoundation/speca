@@ -7,16 +7,6 @@ on:
         description: 'Branch from 03'
         required: true
         type: string
-      target_repo:
-        description: 'Target repository'
-        required: true
-        type: string
-        default: 'ethereum/go-ethereum'
-      target_ref:
-        description: 'Target ref (branch/tag/commit)'
-        required: true
-        type: string
-        default: 'master'
       workers:
         description: 'Number of parallel workers'
         required: false
@@ -36,8 +26,6 @@ jobs:
     runs-on: self-hosted
 
     env:
-      TARGET_REPO: ${{ inputs.target_repo }}
-      TARGET_REF: ${{ inputs.target_ref }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CLAUDE_CODE_PERMISSIONS: bypassPermissions
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
@@ -55,19 +43,49 @@ jobs:
             echo "Missing: outputs/03_AUDITMAP_PARTIAL_*.json - Run 03 first"
             exit 1
           fi
+          if [ ! -f "outputs/03_TARGET_INFO.json" ]; then
+            echo "Missing: outputs/03_TARGET_INFO.json - Run 03 first"
+            exit 1
+          fi
+
+      - name: Load Target Info from 03
+        id: target_info_from_03
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("outputs/03_TARGET_INFO.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"TARGET_REPO={data['target_repo']}\n")
+              env.write(f"TARGET_REF={data['target_commit']}\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"target_ref_label={data.get('target_ref_label','')}\n")
+              out.write(f"target_commit_short={data.get('target_commit_short','')}\n")
+          PY
 
       - name: Checkout Target Repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.target_repo }}
-          ref: ${{ inputs.target_ref }}
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
           path: target_workspace
 
       - name: Get Target Info
         id: target_info
         working-directory: ./target_workspace
         run: |
+          set -euo pipefail
+          actual_full="$(git rev-parse HEAD)"
+          if [ "${actual_full}" != "${TARGET_REF}" ]; then
+            echo "Target commit mismatch: ${actual_full} != ${TARGET_REF}"
+            exit 1
+          fi
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "full_sha=${actual_full}" >> $GITHUB_OUTPUT
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -104,7 +122,7 @@ jobs:
           git add outputs/ ':!outputs/logs/'
           if ! git diff --staged --quiet; then
             git add outputs/logs/
-            git commit -m "04: audit review for ${{ inputs.target_repo }}@${{ steps.target_info.outputs.short_sha }}"
+            git commit -m "04: audit review for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push origin "${{ inputs.branch }}" --force-with-lease
           fi
@@ -113,7 +131,10 @@ jobs:
         run: |
           echo "## Audit Complete" >> $GITHUB_STEP_SUMMARY
           echo "Branch: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Target: \`${{ inputs.target_repo }}@${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target ref: \`${{ steps.target_info_from_03.outputs.target_ref_label }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Run **Create PR** to create a pull request." >> $GITHUB_STEP_SUMMARY
 
