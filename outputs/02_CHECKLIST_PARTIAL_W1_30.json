@@ -1,0 +1,101 @@
+{
+  "metadata": {
+    "worker_id": 1,
+    "batch": 30,
+    "stage": "02_unified",
+    "source_files": [
+      "outputs/01e_PROP_PARTIAL_W0_5.json",
+      "outputs/01e_PROP_PARTIAL_W0_8.json",
+      "outputs/01e_PROP_PARTIAL_W0_4.json",
+      "outputs/01e_PROP_PARTIAL_W0_6.json"
+    ],
+    "properties_processed": 4,
+    "total_checks": 5
+  },
+  "checklist": [
+    {
+      "id": "CHECK-W1-PROP-W0-DENEB-LC-PRECOND-001-BOUNDARY",
+      "property_id": "PROP-W0-DENEB-LC-PRECOND-001",
+      "graph_element_under_test": "EDGE-LC-DATA-TO-HEADER-VALIDATION",
+      "title": "Verify Trust Boundary Integrity for EDGE-LC-DATA-TO-HEADER-VALIDATION: Reject light client headers with non-zero blob gas fields in pre-Deneb epochs",
+      "bug_class": "Input Validation Bypass",
+      "risk_category": "Consensus Integrity",
+      "severity_hint": "HIGH",
+      "detection_procedure": "1. Identify the `is_valid_light_client_header` function that serves as the entry point for external light client header data from EXT-LC-DATA-SOURCE. 2. Verify that the function checks the epoch of the header against the Deneb fork boundary. 3. For headers with epochs prior to Deneb, confirm that both `blob_gas_used` and `excess_blob_gas` fields are explicitly validated to be exactly zero. 4. Craft a test header with a pre-Deneb epoch but non-zero `blob_gas_used` (e.g., 1) and confirm the header is rejected. 5. Craft a test header with a pre-Deneb epoch but non-zero `excess_blob_gas` (e.g., 1) and confirm rejection. 6. Verify that valid pre-Deneb headers with both fields as zero are accepted. 7. Verify that post-Deneb headers with non-zero blob gas fields are NOT rejected by this check (to confirm the check is epoch-gated).",
+      "executable_checks": [
+        "Provide a LightClientHeader with `slot` mapping to a pre-Deneb epoch and `execution.blob_gas_used = 1` — assert validation returns False/error.",
+        "Provide a LightClientHeader with `slot` mapping to a pre-Deneb epoch and `execution.excess_blob_gas = 1` — assert validation returns False/error.",
+        "Provide a LightClientHeader with `slot` mapping to a pre-Deneb epoch and both blob gas fields = 0 — assert validation does NOT fail on this check.",
+        "Provide a LightClientHeader with a post-Deneb epoch and non-zero blob gas — assert this specific check does not reject it."
+      ],
+      "notes": "Boundary Guard mindset. Source property: PROP-W0-DENEB-LC-PRECOND-001. This is a critical boundary check at EDGE-LC-DATA-TO-HEADER-VALIDATION where untrusted external light client data enters the Consensus Layer via is_valid_light_client_header. Archetypal attack vector: Malicious Light Client Data Provider crafting headers with invalid blob gas fields for pre-Deneb epochs. Related assumption: ASSUM-DENEB-LC-SYNC-02."
+    },
+    {
+      "id": "CHECK-W1-PROP-W0-DENEB-LC-PRECOND-001-NODE-1",
+      "property_id": "PROP-W0-DENEB-LC-PRECOND-001",
+      "graph_element_under_test": "ACTION-CHECK-BLOB-GAS-PRE-DENEB",
+      "title": "Verify blob gas validation action correctly classifies epoch and enforces zero-value constraint",
+      "bug_class": "Logic Error",
+      "risk_category": "Consensus Integrity",
+      "severity_hint": "HIGH",
+      "detection_procedure": "1. Locate the code block responsible for ACTION-CHECK-BLOB-GAS-PRE-DENEB within the header validation path. 2. Verify the epoch derivation logic: confirm that `compute_epoch_at_slot(header.beacon.slot)` is used and correctly compared against `DENEB_FORK_EPOCH`. 3. Check for off-by-one errors in the epoch comparison (should be strictly less than DENEB_FORK_EPOCH, not less-than-or-equal). 4. Verify that both fields (blob_gas_used AND excess_blob_gas) are independently checked — a missing check on either field is a vulnerability. 5. Confirm the validation transitions to STATE-HEADER-INVALID-BLOB-GAS on failure, not to a soft warning or log-only path.",
+      "executable_checks": [
+        "At the exact Deneb fork epoch boundary slot, verify that the check is NOT applied (post-Deneb behavior).",
+        "At the slot immediately before the Deneb fork epoch, verify the check IS applied.",
+        "Trace the rejection path to confirm it terminates processing (no fallthrough)."
+      ],
+      "notes": "Boundary Guard mindset — supporting node check. Source property: PROP-W0-DENEB-LC-PRECOND-001. Covers node ACTION-CHECK-BLOB-GAS-PRE-DENEB and state STATE-HEADER-INVALID-BLOB-GAS. Verifies internal logic supporting the boundary validation at EDGE-LC-DATA-TO-HEADER-VALIDATION."
+    },
+    {
+      "id": "CHECK-W1-PROP-W0-EIP627-POSTCOND-002-INTERNAL",
+      "property_id": "PROP-W0-EIP627-POSTCOND-002",
+      "graph_element_under_test": "ACTION-PAD-MESSAGE",
+      "title": "Falsify post-condition: Attempt to send encrypted message without 256-byte alignment padding",
+      "bug_class": "Information Leakage",
+      "risk_category": "Privacy / Metadata Protection",
+      "severity_hint": "MEDIUM",
+      "detection_procedure": "1. Locate the ACTION-PAD-MESSAGE implementation in the devp2p messaging code path. 2. Verify that after encryption and signing, a padding step is applied that rounds the message size up to the nearest 256-byte boundary. 3. Attempt to falsify the post-condition: (a) Craft messages of varying sizes (e.g., 1 byte, 100 bytes, 255 bytes, 256 bytes, 257 bytes, 512 bytes) and trace them through encryption + signing + padding. (b) For each, verify the final envelope size modulo 256 equals 0. 4. Check for edge cases: empty message payload, maximum-size message near protocol limits. 5. Verify that the padding is applied AFTER encryption and signing (not before), as stated in the property. Padding before encryption would not prevent size-based leakage. 6. Confirm that STATE-ENCRYPTED-ENVELOPE always has size % 256 == 0 before transmission via EDGE-READY-TO-SEND.",
+      "executable_checks": [
+        "Create a message of size 100 bytes, process through encrypt → sign → pad pipeline, assert final size % 256 == 0.",
+        "Create a message of size 256 bytes (exact boundary), assert final size % 256 == 0.",
+        "Create a message of size 257 bytes, assert final size % 256 == 0 and size >= 512.",
+        "Verify padding occurs after signing by checking byte layout of the final envelope."
+      ],
+      "notes": "Formal Verification Engineer mindset — Post-condition falsification. Source property: PROP-W0-EIP627-POSTCOND-002. Primary element: ACTION-PAD-MESSAGE. Attempting to prove that 256-byte alignment padding can be violated or bypassed, which would enable size-based metadata leakage in the encrypted P2P messaging protocol (EIP-627)."
+    },
+    {
+      "id": "CHECK-W1-PROP-W0-EIP7587-PRECOND-002-INTERNAL",
+      "property_id": "PROP-W0-EIP7587-PRECOND-002",
+      "graph_element_under_test": "STATE-ADDRESS-IN-RIP-RANGE",
+      "title": "Falsify pre-condition: Attempt to invoke RIP reserved range (0x100-0x1ff) on L1 and observe non-empty-account behavior",
+      "bug_class": "Incorrect Dispatch / Unexpected Execution",
+      "risk_category": "EVM Correctness",
+      "severity_hint": "HIGH",
+      "detection_procedure": "1. Locate the EVM address dispatch logic that handles CALL/STATICCALL/DELEGATECALL to addresses in the range 0x0000...0100 through 0x0000...01ff. 2. Verify that on L1 (non-L2 context), these addresses are treated identically to empty accounts: (a) CALL should succeed with no code execution, consuming only base call gas. (b) EXTCODESIZE should return 0. (c) EXTCODEHASH should return the empty keccak (keccak256 of empty bytes) or the account-does-not-exist sentinel. 3. Attempt to bypass the pre-condition: (a) Deploy code at an address in the 0x100-0x1ff range using CREATE2 with a salt that maps to one of these addresses (if possible). Verify the dispatch still treats it correctly. (b) CALL address 0x100 with calldata that would match a known precompile signature — verify no precompile logic executes. (c) Verify across CALL, STATICCALL, and DELEGATECALL variants. 4. Check that the check in EDGE-CHECK-ADDRESS-TYPE correctly classifies the address before dispatch.",
+      "executable_checks": [
+        "Execute CALL to address 0x100 on L1 with arbitrary calldata — assert returndatasize == 0 and call succeeds.",
+        "Execute EXTCODESIZE(0x100) on L1 — assert returns 0.",
+        "Execute CALL to address 0x1ff on L1 — assert same empty-account behavior.",
+        "Verify gas consumption matches empty account CALL cost, not precompile cost."
+      ],
+      "notes": "Formal Verification Engineer mindset — Pre-condition falsification. Source property: PROP-W0-EIP7587-PRECOND-002. Primary element: STATE-ADDRESS-IN-RIP-RANGE. Related ambiguity: AMB-EIP7587-01. Attempting to prove that calls to the RIP reserved address range on L1 could trigger precompile-like execution rather than empty-account behavior."
+    },
+    {
+      "id": "CHECK-W1-PROP-W0-PRECOMP-INV-005-INTERNAL",
+      "property_id": "PROP-W0-PRECOMP-INV-005",
+      "graph_element_under_test": "STATE-DISPATCH-TABLE",
+      "title": "Falsify invariant: Attempt to trigger incorrect precompile execution via dispatch table mismatch",
+      "bug_class": "Incorrect Dispatch / Configuration Error",
+      "risk_category": "EVM Correctness",
+      "severity_hint": "CRITICAL",
+      "detection_procedure": "1. Locate the precompile dispatch table (STATE-DISPATCH-TABLE) in the codebase — typically a map from address to function pointer or handler. 2. Extract the complete mapping of address → precompile function. 3. Compare each entry against the canonical EIP specifications: (a) 0x01 = ecRecover (EIP-2), (b) 0x02 = SHA-256 (EIP-2), (c) 0x03 = RIPEMD-160 (EIP-2), (d) 0x04 = identity (EIP-2), (e) 0x05 = modexp (EIP-198), (f) 0x06 = ecAdd (EIP-196), (g) 0x07 = ecMul (EIP-196), (h) 0x08 = ecPairing (EIP-197), (i) 0x09 = blake2f (EIP-152), (j) 0x0a = point evaluation (EIP-4844), (k) 0x0b = BLS12-381 map (EIP-2537, if activated). 4. Verify that no address maps to the wrong function. 5. Verify that the dispatch table is not mutated at runtime (invariant — must be static or set once during initialization). 6. Verify no duplicate addresses exist in the table. 7. Check fork-gated entries: precompiles added in later forks should only be present when the fork is active. 8. CALL each precompile address with known test vectors and verify outputs match the canonical expected results from the EIP specification.",
+      "executable_checks": [
+        "CALL 0x01 with a known ecRecover test vector — assert correct public key recovery.",
+        "CALL 0x02 with known SHA-256 input — assert correct hash output.",
+        "CALL 0x0a with a known point evaluation test vector — assert correct result.",
+        "Verify dispatch table length matches expected number of active precompiles for current fork."
+      ],
+      "notes": "Formal Verification Engineer mindset — Invariant falsification. Source property: PROP-W0-PRECOMP-INV-005. Primary element: STATE-DISPATCH-TABLE. Related assumption: ASSUM-MAPPING-03. Attempting to violate the invariant that the precompile address-to-function dispatch mapping is correct and matches the canonical specification. A mismatch could cause wrong precompile execution, leading to consensus failures or exploitable behavior."
+    }
+  ]
+}
