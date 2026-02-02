@@ -165,25 +165,10 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
     include_file_field = init_config.get("include_file_field")
     augment_property_subgraph = init_config.get("augment_property_subgraph")
 
-    property_to_subgraph: dict[str, str] = {}
-    subgraph_file_prefix = None
+    property_to_subgraph: dict[str, tuple[str, str]] = {}
     if augment_property_subgraph:
         prop_pattern = augment_property_subgraph["pattern"]
-        prop_item_key = augment_property_subgraph.get("item_key", "properties")
-        prop_id_key = augment_property_subgraph.get("property_id_key", "id")
-        prop_subgraph_key = augment_property_subgraph.get("subgraph_id_key", "subgraph_id")
-        subgraph_file_prefix = augment_property_subgraph.get(
-            "subgraph_file_prefix", "outputs/01b_SUBGRAPHS"
-        )
-        for prop_path in sorted(glob.glob(prop_pattern)):
-            prop_data = load_json(prop_path)
-            for prop in prop_data.get(prop_item_key, []):
-                if not isinstance(prop, dict):
-                    continue
-                prop_id = prop.get(prop_id_key)
-                subgraph_id = prop.get(prop_subgraph_key)
-                if prop_id and subgraph_id:
-                    property_to_subgraph[prop_id] = subgraph_id
+        property_to_subgraph = build_property_to_subgraph_map_via_elements(prop_pattern)
 
     items: list[dict[str, Any]] = []
     for filepath in sorted(glob.glob(pattern)):
@@ -208,16 +193,76 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
                     item[item_field] = entry
                     if augment_property_subgraph:
                         prop_id = entry.get("property_id")
-                        subgraph_id = property_to_subgraph.get(prop_id)
-                        if subgraph_id:
+                        subgraph_info = property_to_subgraph.get(prop_id)
+                        if subgraph_info:
+                            subgraph_id, subgraph_file = subgraph_info
                             item["subgraph_id"] = subgraph_id
-                            if subgraph_file_prefix:
-                                item["subgraph_file"] = (
-                                    f"{subgraph_file_prefix}/{subgraph_id}.json"
-                                )
+                            item["subgraph_file"] = subgraph_file
                 items.append(item)
 
     return items
+
+
+def build_property_to_subgraph_map_via_elements(
+    property_files_pattern: str,
+) -> dict[str, tuple[str, str]]:
+    """
+    Build a map from property_id to (subgraph_id, subgraph_file).
+
+    For each property file:
+    1. Load metadata.source_files (subgraph files used in this batch)
+    2. Load all those subgraph files into memory
+    3. For each property, find which subgraph contains its primary element
+    4. Record the mapping
+    """
+    import glob
+
+    property_to_subgraph: dict[str, tuple[str, str]] = {}
+
+    for prop_file in sorted(glob.glob(property_files_pattern)):
+        prop_data = load_json(prop_file)
+        source_files = prop_data.get("metadata", {}).get("source_files", [])
+
+        subgraph_cache: dict[str, dict[str, Any]] = {}
+        for sg_file in source_files:
+            if os.path.exists(sg_file):
+                subgraph_cache[sg_file] = load_json(sg_file)
+
+        for prop in prop_data.get("properties", []):
+            if not isinstance(prop, dict):
+                continue
+            prop_id = prop.get("id")
+            if not prop_id:
+                continue
+
+            covers = prop.get("covers", {})
+            primary_element = covers.get("primary_element")
+            if not primary_element:
+                edges = covers.get("edges", [])
+                nodes = covers.get("nodes", [])
+                if edges:
+                    primary_element = edges[0]
+                elif nodes:
+                    primary_element = nodes[0]
+
+            if not primary_element:
+                continue
+
+            found = False
+            for sg_file, sg_data in subgraph_cache.items():
+                for subgraph in sg_data.get("sub_graphs", []):
+                    edge_ids = [e.get("id") for e in subgraph.get("edges", [])]
+                    node_ids = [n.get("id") for n in subgraph.get("nodes", [])]
+                    if primary_element in edge_ids or primary_element in node_ids:
+                        subgraph_id = subgraph.get("id")
+                        if subgraph_id:
+                            property_to_subgraph[prop_id] = (subgraph_id, sg_file)
+                            found = True
+                            break
+                if found:
+                    break
+
+    return property_to_subgraph
 
 
 def init_from_glob(init_config: dict[str, Any]) -> list[str]:
