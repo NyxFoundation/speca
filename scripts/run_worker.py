@@ -21,6 +21,17 @@ from typing import Any
 
 
 # Phase configuration
+ROOT_DIR = Path(__file__).resolve().parents[1]
+
+
+def resolve_root_path(path: str) -> str:
+    """Resolve a path relative to the repo root."""
+    path_obj = Path(path)
+    if path_obj.is_absolute():
+        return str(path_obj)
+    return str(ROOT_DIR / path_obj)
+
+
 PHASE_CONFIG = {
     "01b": {
         "queue_file": "outputs/01b_QUEUE_{worker_id}.json",
@@ -137,12 +148,15 @@ def get_dynamic_batch_size(queue_file: str, max_bytes: int, config: dict[str, An
         size_add = 0
         item_paths: set[str] = set()
         for path in paths:
-            if not path or path in item_paths or not os.path.exists(path):
+            if not path:
                 continue
-            item_paths.add(path)
-            if path in seen_files:
+            resolved_path = resolve_root_path(path)
+            if resolved_path in item_paths or not os.path.exists(resolved_path):
                 continue
-            size_add += os.path.getsize(path)
+            item_paths.add(resolved_path)
+            if resolved_path in seen_files:
+                continue
+            size_add += os.path.getsize(resolved_path)
 
         if batch_count == 0:
             batch_count = 1
@@ -305,10 +319,12 @@ def main():
     args = parser.parse_args()
 
     config = PHASE_CONFIG[args.phase]
-    queue_file = config["queue_file"].format(worker_id=args.worker_id)
-    prompt_file = config["prompt_file"]
-    log_prefix = config["log_prefix"].format(worker_id=args.worker_id)
+    queue_file = resolve_root_path(config["queue_file"].format(worker_id=args.worker_id))
+    prompt_file = resolve_root_path(config["prompt_file"])
+    log_prefix = resolve_root_path(config["log_prefix"].format(worker_id=args.worker_id))
     workdir = config["workdir"]
+    if workdir:
+        workdir = resolve_root_path(workdir)
 
     print(f"Worker {args.worker_id} starting for phase {args.phase}")
     print(f"  Queue file: {queue_file}")
@@ -356,12 +372,12 @@ def main():
             output_file = (
                 f"outputs/02_CHECKLIST_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
             )
-            env_vars["OUTPUT_FILE"] = output_file
+            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
         if args.phase == "03":
             output_file = (
                 f"outputs/03_AUDITMAP_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
             )
-            env_vars["OUTPUT_FILE"] = output_file
+            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
         batch_size = args.batch_size
         if batch_size is None and args.phase in ("01e", "02", "03"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)
