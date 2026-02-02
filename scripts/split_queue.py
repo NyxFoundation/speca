@@ -62,7 +62,7 @@ PHASE_CONFIG = {
         # For 03, we need to initialize from 02 checklist partials
         "init_from_glob_items": {
             "pattern": "outputs/02_CHECKLIST_PARTIAL_*.json",
-            "item_key": "checklist_items",
+            "item_keys": ["checklist_items", "checklist"],
             "id_key": "id",
             "id_field": "check_id",
         },
@@ -146,14 +146,23 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, str]]:
     import glob
 
     pattern = init_config["pattern"]
-    item_key = init_config["item_key"]
+    item_key = init_config.get("item_key")
+    item_keys = init_config.get("item_keys")
     id_key = init_config["id_key"]
     id_field = init_config.get("id_field", "property_id")
 
     items: list[dict[str, str]] = []
     for filepath in sorted(glob.glob(pattern)):
         data = load_json(filepath)
-        for entry in data.get(item_key, []):
+        if item_keys:
+            entries = []
+            for key in item_keys:
+                entries = data.get(key, [])
+                if entries:
+                    break
+        else:
+            entries = data.get(item_key, []) if item_key else []
+        for entry in entries:
             entry_id = entry.get(id_key) if isinstance(entry, dict) else None
             if entry_id:
                 item: dict[str, str] = {id_field: entry_id}
