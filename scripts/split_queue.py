@@ -68,6 +68,13 @@ PHASE_CONFIG = {
             "include_item": True,
             "item_field": "checklist_item",
             "include_file_field": "checklist_file",
+            "augment_property_subgraph": {
+                "pattern": "outputs/01e_PROP_PARTIAL_*.json",
+                "item_key": "properties",
+                "property_id_key": "id",
+                "subgraph_id_key": "subgraph_id",
+                "subgraph_file_prefix": "outputs/01b_SUBGRAPHS",
+            },
         },
     },
     "04": {
@@ -156,6 +163,27 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
     include_item = init_config.get("include_item", False)
     item_field = init_config.get("item_field", "item")
     include_file_field = init_config.get("include_file_field")
+    augment_property_subgraph = init_config.get("augment_property_subgraph")
+
+    property_to_subgraph: dict[str, str] = {}
+    subgraph_file_prefix = None
+    if augment_property_subgraph:
+        prop_pattern = augment_property_subgraph["pattern"]
+        prop_item_key = augment_property_subgraph.get("item_key", "properties")
+        prop_id_key = augment_property_subgraph.get("property_id_key", "id")
+        prop_subgraph_key = augment_property_subgraph.get("subgraph_id_key", "subgraph_id")
+        subgraph_file_prefix = augment_property_subgraph.get(
+            "subgraph_file_prefix", "outputs/01b_SUBGRAPHS"
+        )
+        for prop_path in sorted(glob.glob(prop_pattern)):
+            prop_data = load_json(prop_path)
+            for prop in prop_data.get(prop_item_key, []):
+                if not isinstance(prop, dict):
+                    continue
+                prop_id = prop.get(prop_id_key)
+                subgraph_id = prop.get(prop_subgraph_key)
+                if prop_id and subgraph_id:
+                    property_to_subgraph[prop_id] = subgraph_id
 
     items: list[dict[str, Any]] = []
     for filepath in sorted(glob.glob(pattern)):
@@ -178,6 +206,15 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
                     item[include_file_field] = filepath
                 if include_item and isinstance(entry, dict):
                     item[item_field] = entry
+                    if augment_property_subgraph:
+                        prop_id = entry.get("property_id")
+                        subgraph_id = property_to_subgraph.get(prop_id)
+                        if subgraph_id:
+                            item["subgraph_id"] = subgraph_id
+                            if subgraph_file_prefix:
+                                item["subgraph_file"] = (
+                                    f"{subgraph_file_prefix}/{subgraph_id}.json"
+                                )
                 items.append(item)
 
     return items

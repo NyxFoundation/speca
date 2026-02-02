@@ -16,7 +16,7 @@ For each checklist item in the current batch, perform a rigorous, three-phase fo
 
 ## 1. Inputs
 
-1.  **Worker Queue File**: `QUEUE_FILE` containing items with `check_id`, `checklist_file`, and pre-resolved `checklist_item`.
+1.  **Worker Queue File**: `QUEUE_FILE` containing items with `check_id`, `checklist_file`, pre-resolved `checklist_item`, and optionally `subgraph_id`/`subgraph_file`.
 2.  **Checklist Partial Files**: `outputs/02_CHECKLIST_PARTIAL_*.json` (only needed if a queue item lacks `checklist_item`).
 3.  **Property File**: The `source_file` referenced in the checklist item (e.g., `outputs/01e_PROP_PARTIAL_*.json`). Loaded to get the original property assertion.
 4.  **Subgraph File**: The subgraph file corresponding to the property (e.g., `outputs/01b_SUBGRAPHS/*.json`). Loaded to map the abstract graph element to concrete code.
@@ -52,7 +52,7 @@ For each checklist item in the batch:
 
 1.  **Parse Checklist Item**: Extract `property_id` and `graph_element_under_test`.
 2.  **Load Property**: Read the property file to understand the original assertion (`property.description`).
-3.  **Load Subgraph**: Read the corresponding subgraph file.
+3.  **Load Subgraph**: If `subgraph_file` is present on the queue item, load it directly. Otherwise, resolve the subgraph via the property file and load it.
 4.  **Map to Code**: Find the `graph_element_under_test` within the subgraph's nodes or edges. Extract its associated code metadata: `file`, `function`, `line_range`, and any other relevant details. This is your **Code Scope**.
 
 ### **Task 3.3: Three-Phase Formal Audit**
