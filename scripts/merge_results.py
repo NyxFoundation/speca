@@ -4,7 +4,6 @@ Merge partial results from parallel workers into a single output file.
 
 Usage:
     python3 scripts/merge_results.py --phase 01b --output outputs/01_SPEC.json
-    python3 scripts/merge_results.py --phase 02b --output outputs/02b_CHECKLIST_MERGED.json
     python3 scripts/merge_results.py --phase 03 --output outputs/03_AUDITMAP_MERGED.json
     python3 scripts/merge_results.py --phase 04 --output outputs/04_REVIEW_MERGED.json
 """
@@ -27,11 +26,6 @@ MERGE_CONFIG = {
             "nodes_key": "sub_graph.nodes",
             "edges_key": "sub_graph.edges",
         },
-    },
-    "02b": {
-        "partial_pattern": "outputs/02b_CHECKLIST_PARTIAL_*.json",
-        "merge_key": "checklist",
-        "output_key": "checklist",
     },
     "03": {
         "partial_pattern": "outputs/03_AUDITMAP_PARTIAL_*.json",
@@ -168,7 +162,7 @@ def merge_01b(pattern: str, output_path: str) -> None:
 
 
 def merge_simple(pattern: str, merge_key: str, output_path: str) -> None:
-    """Merge files with a simple array key (02b)."""
+    """Merge files with a simple array key."""
     files = sorted(glob.glob(pattern))
 
     if not files:
@@ -254,7 +248,7 @@ def main():
         "--phase",
         required=True,
         choices=list(MERGE_CONFIG.keys()),
-        help="Phase to merge (01b, 02b, 03, 04)",
+        help="Phase to merge (01b, 03, 04)",
     )
     parser.add_argument(
         "--output",

@@ -4,7 +4,7 @@ Split a work queue into multiple worker-specific queues for parallel processing.
 
 Usage:
     python3 scripts/split_queue.py --phase 01b --workers 4
-    python3 scripts/split_queue.py --phase 02b --workers 4
+    python3 scripts/split_queue.py --phase 02 --workers 4
     python3 scripts/split_queue.py --phase 03 --workers 4
     python3 scripts/split_queue.py --phase 04 --workers 4
 """
@@ -45,34 +45,20 @@ PHASE_CONFIG = {
             "pattern": "outputs/01b_SUBGRAPHS/spec_*.json",
         },
     },
-    "02a": {
-        # Queue is list of 01e property partial files
-        "output_prefix": "outputs/02a_QUEUE",
-        "init_from_glob_files": {
-            "pattern": "outputs/01e_PROP_PARTIAL_*.json",
-        },
-    },
-    "02b": {
-        "state_file": "outputs/02b_STATE.json",
-        "queue_key": "unprocessed_property_ids",
-        "output_prefix": "outputs/02b_QUEUE",
-        # For 02b, we need to initialize from 01e partials and 02a on first run
-        "init_from_glob": {
+    "02": {
+        # Queue is list of property descriptors (property_id + source_file)
+        "output_prefix": "outputs/02_QUEUE",
+        "init_from_glob_items": {
             "pattern": "outputs/01e_PROP_PARTIAL_*.json",
             "item_key": "properties",
             "id_key": "id",
-        },
-        "exclude_from": {
-            "pattern": "outputs/02a_CHECKLIST_PARTIAL_*.json",
-            "item_key": "checklist",
-            "id_key": "property_id",
         },
     },
     "03": {
         "state_file": "outputs/03_STATE.json",
         "queue_key": "unprocessed_checklist_ids",
         "output_prefix": "outputs/03_QUEUE",
-        # For 03, we need to initialize from 02a and 02b files
+        # For 03, we need to initialize from 02 checklist partials
         "init_from_glob": {
             "pattern": "outputs/02*_CHECKLIST_PARTIAL_*.json",
             "item_key": "checklist",
@@ -112,11 +98,14 @@ def save_json(path: str, data: dict[str, Any]) -> None:
     print(f"  Written: {path}")
 
 
-def get_items_from_state(config: dict[str, Any]) -> list[str]:
+def get_items_from_state(config: dict[str, Any]) -> list[Any]:
     """Get the list of items to process from state file."""
-    # For file-based queues (01c, 01d, 01e, 02a), just get file list
+    # For file-based queues (01c, 01d, 01e), just get file list
     if "init_from_glob_files" in config:
         items = init_from_glob_files(config["init_from_glob_files"])
+        return items
+    if "init_from_glob_items" in config:
+        items = init_from_glob_items(config["init_from_glob_items"])
         return items
 
     state_file = config.get("state_file")
@@ -142,7 +131,7 @@ def get_items_from_state(config: dict[str, Any]) -> list[str]:
 
 
 def init_from_glob_files(init_config: dict[str, Any]) -> list[str]:
-    """Initialize queue from glob pattern returning file paths (for 01c, 01d, 01e, 02a)."""
+    """Initialize queue from glob pattern returning file paths (for 01c, 01d, 01e)."""
     import glob
 
     pattern = init_config["pattern"]
@@ -150,20 +139,23 @@ def init_from_glob_files(init_config: dict[str, Any]) -> list[str]:
     return files
 
 
-def init_from_files(init_config: dict[str, Any]) -> list[str]:
-    """Initialize queue from source files (for 02b)."""
-    # Get all items
-    all_data = load_json(init_config["all_items"])
-    all_items = all_data.get(init_config["all_items_key"], [])
-    all_ids = [item[init_config["all_items_id_key"]] for item in all_items]
+def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, str]]:
+    """Initialize queue from glob pattern returning property descriptors (for 02)."""
+    import glob
 
-    # Get items to exclude
-    exclude_data = load_json(init_config["exclude"])
-    exclude_items = exclude_data.get(init_config["exclude_key"], [])
-    exclude_ids = set(item[init_config["exclude_id_key"]] for item in exclude_items)
+    pattern = init_config["pattern"]
+    item_key = init_config["item_key"]
+    id_key = init_config["id_key"]
 
-    # Return difference
-    return [id for id in all_ids if id not in exclude_ids]
+    items: list[dict[str, str]] = []
+    for filepath in sorted(glob.glob(pattern)):
+        data = load_json(filepath)
+        for prop in data.get(item_key, []):
+            prop_id = prop.get(id_key)
+            if prop_id:
+                items.append({"property_id": prop_id, "source_file": filepath})
+
+    return items
 
 
 def init_from_glob(init_config: dict[str, Any]) -> list[str]:
@@ -197,9 +189,9 @@ def init_from_glob(init_config: dict[str, Any]) -> list[str]:
     return all_ids
 
 
-def split_queue(items: list[str], workers: int) -> list[list[str]]:
+def split_queue(items: list[Any], workers: int) -> list[list[Any]]:
     """Split items into worker queues using round-robin distribution."""
-    queues: list[list[str]] = [[] for _ in range(workers)]
+    queues: list[list[Any]] = [[] for _ in range(workers)]
 
     for i, item in enumerate(items):
         queues[i % workers].append(item)
@@ -215,7 +207,7 @@ def main():
         "--phase",
         required=True,
         choices=list(PHASE_CONFIG.keys()),
-        help="Phase to split (01b, 01c, 01d, 01e, 02a, 02b, 03, 04)",
+        help="Phase to split (01b, 01c, 01d, 01e, 02, 03, 04)",
     )
     parser.add_argument(
         "--workers",

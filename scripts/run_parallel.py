@@ -6,7 +6,7 @@ This script splits the queue, runs workers in parallel, and merges results.
 
 Usage:
     python3 scripts/run_parallel.py --phase 01b --workers 4
-    python3 scripts/run_parallel.py --phase 02b --workers 4 --max-iterations 50
+    python3 scripts/run_parallel.py --phase 02 --workers 4 --max-iterations 50
 """
 
 import argparse
@@ -125,8 +125,7 @@ OUTPUT_FILES = {
     "01c": None,  # No merge - verified subgraphs
     "01d": None,  # No merge - trust model partials
     "01e": None,  # No merge - property partials
-    "02a": None,  # No merge - checklist partials
-    "02b": None,  # No merge - checklist partials
+    "02": None,   # No merge - checklist partials
     "03": None,   # No merge - audit map partials
     "04": None,   # No merge - review partials
 }
@@ -139,7 +138,7 @@ def main():
     parser.add_argument(
         "--phase",
         required=True,
-        choices=["01b", "01c", "01d", "01e", "02a", "02b", "03", "04"],
+        choices=["01b", "01c", "01d", "01e", "02", "03", "04"],
         help="Phase to run",
     )
     parser.add_argument(

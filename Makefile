@@ -25,7 +25,7 @@ FORCE_EXECUTE ?=
 
 .PHONY: all preparation audit init init-prep \
         01a 01b-parallel 01c-parallel 01d-parallel 01e-parallel \
-        02a-parallel 02b-parallel 02s \
+        02-parallel 02s \
         03-parallel 04-parallel \
         clean help
 
@@ -33,8 +33,8 @@ FORCE_EXECUTE ?=
 all: preparation audit
 
 # Phase targets
-# preparation: 01a → 01b-parallel → 01c → 01d → 01e → 02s → 02a → 02b-parallel
-preparation: 02b-parallel
+# preparation: 01a → 01b-parallel → 01c → 01d → 01e → 02-parallel → 02s
+preparation: 02s
 	@echo "🎉 Preparation phase completed! Check $(OUTPUT_DIR)/"
 
 audit: 04-parallel
@@ -60,9 +60,8 @@ help:
 	@echo "  01d-parallel - Trust Model (partials)"
 	@echo "  01e-parallel - Properties (partials)"
 	@echo ""
-	@echo "Checklist Steps (02a-02s) - All Parallel:"
-	@echo "  02a-parallel - Checklist Boundaries (partials)"
-	@echo "  02b-parallel - Checklist Remaining (partials)"
+	@echo "Checklist Steps (02-02s) - All Parallel:"
+	@echo "  02-parallel  - Unified Checklist Generation (partials)"
 	@echo "  02s          - Review & Validate"
 	@echo ""
 	@echo "Audit Steps - All Parallel:"
@@ -193,7 +192,7 @@ clean:
 	@if ! ls $(OUTPUT_DIR)/01d_TRUSTMODEL_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "❌ Error: No trust model partials found. Run 01d-parallel first."; exit 1; \
 	fi; \
-	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/02a_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
+	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/02_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 01e-parallel: checklist partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 01e properties in parallel with $(WORKERS) workers..."; \
@@ -203,16 +202,30 @@ clean:
 	fi
 
 # ------------------------------------------------------
-# Checklist Steps (02a - 02s)
+# Checklist Steps (02 - 02s)
 # ------------------------------------------------------
 
+# Step 02-parallel: Unified checklist generation
+02-parallel:
+	@if ! ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json >/dev/null 2>&1; then \
+		echo "❌ Error: No property partials found. Run 01e-parallel first."; exit 1; \
+	fi; \
+	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/03_AUDITMAP_PARTIAL_*.json >/dev/null 2>&1; then \
+		echo "⏭️  Skipping 02-parallel: 03_AUDITMAP_PARTIAL_*.json exists (use FORCE_EXECUTE=1 to override)"; \
+	else \
+		echo "🚀 Running unified checklist generation in parallel with $(WORKERS) workers..."; \
+		python3 scripts/run_parallel.py --phase 02 --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
+		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
+		echo "✅ Parallel checklist generation complete. Partials: $$PARTIAL_COUNT"; \
+	fi
+
 # Step 02s: Review & Validate Preparation Outputs
-02s:
+02s: 02-parallel
 	@if [ -f "$(OUTPUT_DIR)/02s_REVIEW_REPORT.json" ]; then \
 		echo "⏭️  Skipping 02s: $(OUTPUT_DIR)/02s_REVIEW_REPORT.json already exists"; \
 	else \
-		if ! ls $(OUTPUT_DIR)/02b_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
-			echo "❌ Error: No 02b_CHECKLIST_PARTIAL_*.json files found. Run 02b first."; exit 1; \
+		if ! ls $(OUTPUT_DIR)/02_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
+			echo "❌ Error: No 02_CHECKLIST_PARTIAL_*.json files found. Run 02-parallel first."; exit 1; \
 		fi; \
 		echo "⭐ Running 02s_review.md (Preparation Review)..."; \
 		START_TIME=$$(date +%s); \
@@ -230,33 +243,6 @@ clean:
 		fi; \
 	fi
 
-# Step 02a-parallel: Parallel checklist boundary generation
-02a-parallel:
-	@if ! ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json >/dev/null 2>&1; then \
-		echo "❌ Error: No property partials found. Run 01e-parallel first."; exit 1; \
-	fi; \
-	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/02b_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
-		echo "⏭️  Skipping 02a-parallel: 02b checklist partials exist (use FORCE_EXECUTE=1 to override)"; \
-	else \
-		echo "🚀 Running 02a checklist boundaries in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 02a --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
-		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02a_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
-		echo "✅ Parallel boundary checklist complete. Partials: $$PARTIAL_COUNT"; \
-	fi
-
-# Step 02b-parallel: Parallel checklist generation for remaining properties
-02b-parallel:
-	@if ! ls $(OUTPUT_DIR)/02a_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
-		echo "❌ Error: No 02a checklist partials found. Run 02a-parallel first."; exit 1; \
-	fi; \
-	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/03_AUDITMAP_PARTIAL_*.json >/dev/null 2>&1; then \
-		echo "⏭️  Skipping 02b-parallel: 03_AUDITMAP_PARTIAL_*.json exists (use FORCE_EXECUTE=1 to override)"; \
-	else \
-		echo "🚀 Running 02b checklist remaining in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 02b --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(BATCH_SIZE),--batch-size $(BATCH_SIZE),) $(if $(SKIP_SPLIT),--skip-split,); \
-		PARTIAL_COUNT=$$(ls $(OUTPUT_DIR)/02b_CHECKLIST_PARTIAL_*.json 2>/dev/null | wc -l); \
-		echo "✅ Parallel checklist generation complete. Partials: $$PARTIAL_COUNT"; \
-	fi
 
 # ------------------------------------------------------
 # Audit Steps
@@ -265,7 +251,7 @@ clean:
 # Step 03-parallel: Parallel audit map using multiple workers
 03-parallel:
 	@if ! ls $(OUTPUT_DIR)/02*_CHECKLIST_PARTIAL_*.json >/dev/null 2>&1; then \
-		echo "❌ Error: No checklist partials found. Run 02a-parallel and 02b-parallel first."; exit 1; \
+		echo "❌ Error: No checklist partials found. Run 02-parallel first."; exit 1; \
 	fi; \
 	if [ ! -d "$(WORKDIR)/.git" ]; then \
 		echo "❌ Error: $(WORKDIR) is not a git repo. Please clone target repo first."; exit 1; \

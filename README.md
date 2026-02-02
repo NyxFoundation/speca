@@ -95,9 +95,7 @@ You can also run individual steps:
 make 01     # Specification Extraction
 make 01b    # Trust Model Generation
 make 01c    # Property Extraction
-make 02a    # Checklist Boundaries
-make 02b    # Checklist Remaining (run iteratively)
-make 02c    # Checklist Merge
+make 02-parallel    # Unified Checklist Generation (run iteratively)
 make 03     # Static Audit Map
 make 04     # Audit Review
 ```
@@ -113,17 +111,17 @@ Results will be saved to the `outputs/` directory.
 You can automate the audit using GitHub Actions.
 
 Preparation workflow sequence (split Trust Model + Properties):
-1. `1-discovery.yml`
-2. `2-extraction.yml`
-3. `3a-trustmodel-01d.yml`
-4. `3b-properties-01e.yml`
-5. `4-checklist-boundaries.yml`
-6. `5-checklist-generation.yml`
-7. `6-prep-review.yml`
+1. `01a-discovery.yml`
+2. `01b-subgraph.yml`
+3. `01c-verify.yml`
+4. `01d-trustmodel.yml`
+5. `01e-properties.yml`
+6. `02-checklist.yml`
+7. `02s-prep-review.yml`
 
 #### Step 1: Configure Workflows
 Use the workflow files under `.github/workflows/` and configure inputs via **workflow_dispatch**.  
-Defaults live in the YAML files (e.g., `1-discovery.yml` for `KEYWORDS` and `SPEC_URLS`).
+Defaults live in the YAML files (e.g., `01a-discovery.yml` for `KEYWORDS` and `SPEC_URLS`).
 
 #### Step 2: Push Changes
 Trigger workflows manually via GitHub Actions (workflow_dispatch). If you use an `audit/*` branch, you can still run workflows from that branch, but pushes are no longer required to start the pipeline.
@@ -161,7 +159,7 @@ The Security Agent reconstructs the thought processes and procedures of professi
 **Features / Approach**
 - **Program Graph-Based:** Models the system as a formal Program Graph (nodes = states/actions, edges = transitions), enabling rigorous formal analysis and verification.
 - **Property-Centric:** Generates security properties with 100% coverage of all graph nodes and edges, performing formal reachability analysis for each property.
-- **Automated Checklist:** Generates audit checklists in three stages: trust boundary checks (Stage 1), remaining property checks (Stage 2), and final merge (Stage 3).
+- **Automated Checklist:** Generates audit checklists in a unified stage with boundary-aware and internal-logic branches.
 - **Five Attack Vector Analysis:** Every checklist item is analyzed through Input Validation Bypass, State Transition Violation, Resource Exhaustion, Faulty Error Handling, and Race Conditions.
 - **Formal Review:** Six-category verdict system (CONFIRMED_VULNERABILITY, LIKELY_VULNERABILITY, VERIFIED_SAFE, FALSE_POSITIVE, CODE_QUALITY_ISSUE, REQUIRES_MANUAL_REVIEW) with mandatory counterexample evaluation and proof traces.
 
@@ -173,13 +171,11 @@ flowchart TB
     A[Spec Generation<br/>01_spec] --> A2[Spec Retry<br/>01a_specretry]
     A2 --> B[Trust Model<br/>01b_trustmodel]
     B --> C[Property Extraction<br/>01c_prop]
-    C --> D1[Checklist Stage 1<br/>02a_checklist]
-    D1 --> D2[Checklist Stage 2<br/>02b_checklistrem]
-    D2 --> D3[Checklist Merge<br/>02c_checklistmerge]
+    C --> D[Checklist Generation (Unified)<br/>02_checklist]
     end
 
     subgraph Execution
-    D3 --> E[Static Audit<br/>03_auditmap]
+    D --> E[Static Audit<br/>03_auditmap]
     E --> G[Review<br/>04_review]
     end
 
@@ -301,50 +297,38 @@ flowchart TB
 2. Performs formal reachability analysis: BFS from untrusted nodes to check anti-property reachability.
 3. Prioritizes boundary edges with additional high-priority properties.
 
-##### 1-d. Checklist Generation (Three Stages)
+##### 1-d. Checklist Generation (Unified)
 
-###### Stage 1: Trust Boundaries (`/02a_checklist`)
-**Goal:** Generate high-fidelity audit checklist for properties covering trust boundary edges.
-**Input:** `outputs/01c_PROP.json`, `outputs/01_SPEC.json`, `outputs/01b_TRUSTMODEL.json`.
-**Output:** `outputs/02a_CHECKLIST_BOUNDARIES.json`
+###### Unified Checklist (`/02_checklist_worker`)
+**Goal:** Generate audit checklist items for all properties with conditional branching for boundary vs. internal logic.
+**Input:** `outputs/01e_PROP_PARTIAL_*.json`, `outputs/01d_TRUSTMODEL_PARTIAL_*.json` (on-demand), `outputs/02_QUEUE_*.json`.
+**Output:** `outputs/02_CHECKLIST_PARTIAL_W<WORKER_ID>_<N>.json`, updated worker queue files.
 ```json
 {
   "metadata": {
-    "boundary_properties_processed": ["PROP-..."],
-    "boundary_edges_covered": ["EDGE-..."],
-    "total_checks": 38
+    "worker_id": 0,
+    "batch": 1,
+    "stage": "02_unified",
+    "source_files": ["outputs/01e_PROP_PARTIAL_W0_1.json"],
+    "properties_processed": 15,
+    "total_checks": 25
   },
   "checklist": [ ... ]
 }
 ```
-
-###### Stage 2: Remaining Properties (`/02b_checklistrem`)
-**Goal:** Iteratively generate checklist items for all non-boundary properties.
-**Input:** `outputs/01c_PROP.json`, `outputs/02a_CHECKLIST_BOUNDARIES.json`, `outputs/02b_STATE.json`.
-**Output:** `outputs/02b_CHECKLIST_PARTIAL_<N>.json`, `outputs/02b_STATE.json`
 **Algorithm:**
-1. Maintains a work queue in `02b_STATE.json`.
-2. Processes 20 properties per run, generating one check per property.
-3. Repeat until `unprocessed_property_ids` is empty.
+1. Maintain a per-worker queue of `{ property_id, source_file }`.
+2. Build a dynamic batch based on cumulative unique `source_file` size (token budget).
+3. If `covers.is_boundary_edge == true`: load trust model edge context and generate a critical boundary check plus supporting node checks.
+4. If `covers.is_boundary_edge == false`: generate exactly one falsification check for the property's `primary_element`.
 
-###### Stage 3: Merge (`/02c_checklistmerge`)
-**Goal:** Merge all partial checklists into a single comprehensive checklist.
-**Input:** `outputs/02a_CHECKLIST_BOUNDARIES.json`, `outputs/02b_CHECKLIST_PARTIAL_*.json`.
-**Output:** `outputs/02_CHECKLIST.json`
-```json
-{
-  "metadata": { "title": "...", "version": "1.0.0", "generated": "YYYY-MM-DD" },
-  "checklist_summary": { "total_checks": 195, "boundary_checks": 15, "remaining_checks": 180 },
-  "checklist": [ ... ]
-}
-```
 
 #### 2. Execution Stage
 **Goal:** Detect vulnerabilities through static analysis with formal verification methods.
 
 ##### 2-a. Static Audit (`/03_auditmap`)
 **Goal:** Perform comprehensive static audit using formal predicates and five attack vector analysis.
-**Input:** `outputs/02_CHECKLIST.json` (or merged from `02*.json`), Target Codebase.
+**Input:** `outputs/02_CHECKLIST_PARTIAL_*.json`, Target Codebase.
 **Output:** `outputs/03_AUDITMAP_PARTIAL_<N>.json`, `outputs/03_STATE.json`
 ```json
 {

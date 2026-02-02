@@ -47,17 +47,12 @@ PHASE_CONFIG = {
         "workdir": None,
         "max_batch_bytes": 160 * 1024,
     },
-    "02a": {
-        "queue_file": "outputs/02a_QUEUE_{worker_id}.json",
-        "prompt_file": "prompts/02a_checklist_worker.md",
-        "log_prefix": "outputs/logs/02a_checklist_w{worker_id}",
+    "02": {
+        "queue_file": "outputs/02_QUEUE_{worker_id}.json",
+        "prompt_file": "prompts/02_checklist_worker.md",
+        "log_prefix": "outputs/logs/02_checklist_w{worker_id}",
         "workdir": None,
-    },
-    "02b": {
-        "queue_file": "outputs/02b_QUEUE_{worker_id}.json",
-        "prompt_file": "prompts/02b_checklistrem_worker.md",
-        "log_prefix": "outputs/logs/02b_checklistrem_w{worker_id}",
-        "workdir": None,
+        "max_batch_bytes": 120 * 1024,
     },
     "03": {
         "queue_file": "outputs/03_QUEUE_{worker_id}.json",
@@ -91,7 +86,10 @@ def get_remaining_count(queue_file: str) -> int:
     try:
         data = load_json(queue_file)
         items = data.get("items", [])
-        processed = data.get("processed", [])
+        processed = set(data.get("processed", []))
+        if items and isinstance(items[0], dict) and "property_id" in items[0]:
+            remaining = [item for item in items if item.get("property_id") not in processed]
+            return len(remaining)
         return len(items) - len(processed)
     except FileNotFoundError:
         return 0
@@ -102,32 +100,44 @@ def get_dynamic_batch_size(queue_file: str, max_bytes: int) -> int:
     data = load_json(queue_file)
     items = data.get("items", [])
     processed = set(data.get("processed", []))
-    remaining = [item for item in items if item not in processed]
+    if items and isinstance(items[0], dict) and "property_id" in items[0]:
+        remaining = [item for item in items if item.get("property_id") not in processed]
+    else:
+        remaining = [item for item in items if item not in processed]
 
     if not remaining:
         return 0
 
     batch_count = 0
     cumulative_size = 0
+    seen_files: set[str] = set()
 
     for item in remaining:
-        if not os.path.exists(item):
+        if isinstance(item, dict):
+            path = item.get("source_file")
+        else:
+            path = item
+
+        if not path or not os.path.exists(path):
             continue
 
-        file_size = os.path.getsize(item)
+        file_size = os.path.getsize(path)
+        size_add = 0 if path in seen_files else file_size
 
         if batch_count == 0:
             batch_count = 1
-            if file_size > max_bytes:
+            if size_add > max_bytes:
                 break
-            cumulative_size = file_size
+            cumulative_size = size_add
+            seen_files.add(path)
             continue
 
-        if cumulative_size + file_size > max_bytes:
+        if cumulative_size + size_add > max_bytes:
             break
 
         batch_count += 1
-        cumulative_size += file_size
+        cumulative_size += size_add
+        seen_files.add(path)
 
     return batch_count
 
@@ -241,7 +251,7 @@ def main():
         "--phase",
         required=True,
         choices=list(PHASE_CONFIG.keys()),
-        help="Phase to run (01b, 01c, 01d, 01e, 02a, 02b, 03, 04)",
+        help="Phase to run (01b, 01c, 01d, 01e, 02, 03, 04)",
     )
     parser.add_argument(
         "--worker-id",
@@ -314,7 +324,7 @@ def main():
 
         log_file = f"{log_prefix}_{iteration}.json"
         batch_size = args.batch_size
-        if batch_size is None and args.phase == "01e":
+        if batch_size is None and args.phase in ("01e", "02"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)
             batch_size = get_dynamic_batch_size(queue_file, max_bytes)
             if batch_size > 0:
