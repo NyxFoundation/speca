@@ -16,8 +16,8 @@ For each checklist item in the current batch, perform a rigorous, three-phase fo
 
 ## 1. Inputs
 
-1.  **Worker Queue File**: `QUEUE_FILE` containing items with `check_id` and optional `source_file`.
-2.  **Checklist Partial Files**: `outputs/02_CHECKLIST_PARTIAL_*.json` used to resolve each `check_id` to its full checklist JSON object.
+1.  **Worker Queue File**: `QUEUE_FILE` containing items with `check_id`, `checklist_file`, and pre-resolved `checklist_item`.
+2.  **Checklist Partial Files**: `outputs/02_CHECKLIST_PARTIAL_*.json` (only needed if a queue item lacks `checklist_item`).
 3.  **Property File**: The `source_file` referenced in the checklist item (e.g., `outputs/01e_PROP_PARTIAL_*.json`). Loaded to get the original property assertion.
 4.  **Subgraph File**: The subgraph file corresponding to the property (e.g., `outputs/01b_SUBGRAPHS/*.json`). Loaded to map the abstract graph element to concrete code.
 
@@ -43,7 +43,8 @@ For each checklist item in the current batch, perform a rigorous, three-phase fo
 2.  Identify unprocessed items (items whose `check_id` is not in `processed`).
 3.  If no items remain, terminate successfully.
 4.  Take the first `BATCH_SIZE` items as `current_batch`.
-5.  For each `check_id` in `current_batch`, load the corresponding checklist JSON object from `outputs/02_CHECKLIST_PARTIAL_*.json`.
+5.  For each item in `current_batch`, use `item["checklist_item"]` as the full checklist JSON object.
+6.  **Fallback (only if `checklist_item` is missing)**: load `item["checklist_file"]`, then search the file's `checklist` array for the object where `id == check_id`.
 
 ### **Task 3.2: Code Scope Identification**
 

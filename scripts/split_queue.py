@@ -65,6 +65,9 @@ PHASE_CONFIG = {
             "item_keys": ["checklist_items", "checklist"],
             "id_key": "id",
             "id_field": "check_id",
+            "include_item": True,
+            "item_field": "checklist_item",
+            "include_file_field": "checklist_file",
         },
     },
     "04": {
@@ -141,7 +144,7 @@ def init_from_glob_files(init_config: dict[str, Any]) -> list[str]:
     return files
 
 
-def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, str]]:
+def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
     """Initialize queue from glob pattern returning item descriptors (for 02, 03)."""
     import glob
 
@@ -150,8 +153,11 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, str]]:
     item_keys = init_config.get("item_keys")
     id_key = init_config["id_key"]
     id_field = init_config.get("id_field", "property_id")
+    include_item = init_config.get("include_item", False)
+    item_field = init_config.get("item_field", "item")
+    include_file_field = init_config.get("include_file_field")
 
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     for filepath in sorted(glob.glob(pattern)):
         data = load_json(filepath)
         if item_keys:
@@ -168,6 +174,10 @@ def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, str]]:
                 item: dict[str, str] = {id_field: entry_id}
                 if isinstance(entry, dict) and "source_file" in entry:
                     item["source_file"] = entry["source_file"]
+                if include_file_field:
+                    item[include_file_field] = filepath
+                if include_item and isinstance(entry, dict):
+                    item[item_field] = entry
                 items.append(item)
 
     return items
