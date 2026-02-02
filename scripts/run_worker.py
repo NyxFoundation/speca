@@ -322,7 +322,14 @@ def main():
             print(f"  [DRY RUN] Would run Claude with {prompt_file}")
             continue
 
-        log_file = f"{log_prefix}_{iteration}.json"
+        timestamp = int(time.time())
+        log_file = f"{log_prefix}_{timestamp}_{iteration}.json"
+        if args.phase == "02":
+            output_file = (
+                f"outputs/02_CHECKLIST_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
+            )
+            env_vars["OUTPUT_FILE"] = output_file
+            env_vars["ITERATION"] = str(iteration)
         batch_size = args.batch_size
         if batch_size is None and args.phase in ("01e", "02"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)

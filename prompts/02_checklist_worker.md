@@ -17,8 +17,10 @@ Generate audit checklist items for properties assigned to this worker's queue. P
 
 - **`WORKER_ID`**: The numeric ID of this worker (0, 1, 2, ...)
 - **`QUEUE_FILE`**: Path to this worker's queue file (e.g., `outputs/02_QUEUE_0.json`)
+- **`ITERATION`**: The current iteration number for this worker
+- **`OUTPUT_FILE`**: Full output path for this iteration (unique per run)
 
-**Output:** `outputs/02_CHECKLIST_PARTIAL_W{WORKER_ID}_{N}.json`
+**Output:** `{OUTPUT_FILE}`
 
 ---
 
@@ -86,14 +88,14 @@ Generate audit checklist items for properties assigned to this worker's queue. P
 
 ### **Task 2.3: Write Outputs**
 
-1.  **Generate Partial Checklist:** Create `outputs/02_CHECKLIST_PARTIAL_W{WORKER_ID}_{BATCH}.json` containing all checks generated for the batch.
+1.  **Generate Partial Checklist:** Create `{OUTPUT_FILE}` containing all checks generated for the batch.
 2.  **Update Worker Queue:** Add all processed `property_id`s from the batch to the `processed` array and overwrite `QUEUE_FILE`.
 
 ---
 
 ## 3) Required Output Format (JSON)
 
-**Partial Checklist:** `outputs/02_CHECKLIST_PARTIAL_W{WORKER_ID}_{BATCH}.json`
+**Partial Checklist:** `{OUTPUT_FILE}` (set `metadata.batch` to `ITERATION`)
 
 ```json
 {
