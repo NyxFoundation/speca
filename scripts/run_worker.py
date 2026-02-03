@@ -22,6 +22,7 @@ from typing import Any
 
 # Phase configuration
 ROOT_DIR = Path(__file__).resolve().parents[1]
+BUG_BOUNTY_SCOPE_PATH = ROOT_DIR / "outputs" / "BUG_BOUNTY_SCOPE.json"
 
 
 def resolve_root_path(path: str) -> str:
@@ -93,6 +94,18 @@ def save_json(path: str, data: dict[str, Any]) -> None:
     """Save data to JSON file."""
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def load_bug_bounty_scope() -> dict[str, Any] | None:
+    """Load Bug Bounty Scope from outputs/BUG_BOUNTY_SCOPE.json if present."""
+    if not BUG_BOUNTY_SCOPE_PATH.exists():
+        return None
+    try:
+        with open(BUG_BOUNTY_SCOPE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        print(f"Warning: Failed to parse {BUG_BOUNTY_SCOPE_PATH}: {exc}", file=sys.stderr)
+        return None
 
 
 def get_remaining_count(queue_file: str) -> int:
@@ -184,11 +197,25 @@ def run_claude(
     worker_id: int,
     queue_file: str,
     batch_size: int | None,
+    bug_bounty_scope: dict[str, Any] | None,
 ) -> tuple[bool, float, str]:
     """Run Claude with the given prompt and return success, duration, cost."""
     # Read prompt and append arguments (like 01a_crawl.md style)
     with open(prompt_file) as f:
         prompt_content = f.read()
+
+    if bug_bounty_scope:
+        scope_json = json.dumps(bug_bounty_scope, indent=2, ensure_ascii=True)
+        scope_block = (
+            "# Bug Bounty Scope\n\n"
+            "The following Bug Bounty Scope has been provided for this audit:\n\n"
+            "```json\n"
+            f"{scope_json}\n"
+            "```\n\n"
+            "Use this scope definition to determine which components are in-scope and out-of-scope.\n\n"
+            "---\n\n"
+        )
+        prompt_content = f"{scope_block}{prompt_content}"
 
     # Append arguments to prompt (matching Usage: format in metadata)
     extra_args = f"WORKER_ID={worker_id} QUEUE_FILE={queue_file}"
@@ -346,6 +373,9 @@ def main():
         "WORKER_ID": str(args.worker_id),
         "QUEUE_FILE": queue_file,
     }
+    bug_bounty_scope = None
+    if args.phase in ("01d", "01e", "02", "03"):
+        bug_bounty_scope = load_bug_bounty_scope()
 
     iteration = 0
     total_cost = 0.0
@@ -395,6 +425,7 @@ def main():
             args.worker_id,
             queue_file,
             batch_size,
+            bug_bounty_scope,
         )
 
         if cost not in ("timeout", "error"):

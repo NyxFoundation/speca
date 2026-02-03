@@ -38,6 +38,46 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 }
 ```
 
+## 0.5) Define Bug Bounty Scope (NEW)
+
+**Before analyzing the EIPs, define which components are in-scope and out-of-scope for the active Bug Bounty program.** This scope must be reflected in downstream phases, so be explicit and conservative.
+
+**If a Bug Bounty Scope block is provided at the top of this prompt, treat it as the source of truth.**
+If not, check for `outputs/BUG_BOUNTY_SCOPE.json`. If neither exists, use the default Ethereum scope below.
+
+**In-Scope (default):**
+- P2P network protocols (devp2p, Beacon P2P)
+- Transaction processing and validation
+- Block processing and validation
+- State transition logic
+- Engine API (EL-CL interface)
+- Consensus logic (fork choice, attestations)
+
+**Out-of-Scope (default):**
+- JSON-RPC API (public-facing HTTP API)
+- Beacon API (public-facing HTTP API)
+- Configuration errors (node operator mistakes)
+- CL-only attacks (requires malicious CL node)
+- Tests and infrastructure
+- High-effort DoS (requires sustained attack)
+
+**Define and include a `bug_bounty_scope` object in your output.** If the current EIP or subgraph indicates a different scope, override with explicit rationale in `out_of_scope_reasons`.
+
+**Example `bug_bounty_scope`:**
+```json
+"bug_bounty_scope": {
+  "program_name": "Ethereum Bug Bounty",
+  "program_url": "https://ethereum.org/en/bug-bounty/",
+  "in_scope_components": ["P2P", "Transaction Pool", "Block Validation", "Engine API"],
+  "out_of_scope_components": ["JSON-RPC API", "Beacon API", "Configuration"],
+  "out_of_scope_reasons": {
+    "JSON-RPC API": "Explicitly out-of-scope per Ethereum Bug Bounty",
+    "Beacon API": "Explicitly out-of-scope per Ethereum Bug Bounty",
+    "Configuration": "Requires node operator error, not external attack"
+  }
+}
+```
+
 ## 1) Define Archetypal Attack Vectors (NEW)
 
 **Before analyzing the specific EIPs, first define the archetypal attack vectors for both EL and CL from a top-down perspective.** This ensures comprehensive threat modeling even if the EIPs are EL-focused.
@@ -191,6 +231,17 @@ Report any coverage gaps.
         "out_of_scope": ["Execution Layer internals"]
       }
     ]
+  },
+  "bug_bounty_scope": {
+    "program_name": "Ethereum Bug Bounty",
+    "program_url": "https://ethereum.org/en/bug-bounty/",
+    "in_scope_components": ["P2P", "Transaction Pool", "Block Validation", "Engine API"],
+    "out_of_scope_components": ["JSON-RPC API", "Beacon API", "Configuration"],
+    "out_of_scope_reasons": {
+      "JSON-RPC API": "Explicitly out-of-scope per Ethereum Bug Bounty",
+      "Beacon API": "Explicitly out-of-scope per Ethereum Bug Bounty",
+      "Configuration": "Requires node operator error, not external attack"
+    }
   },
   "misclassified_entities": [
     {

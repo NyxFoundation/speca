@@ -91,6 +91,25 @@ For the identified **Code Scope**, perform the following three phases sequential
 
 *   **Output (Phase 2)**: A list of attempted paths. If a counterexample is found, provide the path conditions, symbolic variable assignments, and the concrete input values.
 
+#### **Phase 2.5: Reachability Analysis (NEW)**
+
+*   **Mindset**: You are an **Attack Surface Analyst**. Your goal is to determine whether an attacker can control the inputs that trigger the counterexample found in Phase 2.
+
+*   **Procedure**:
+    1.  **Load Bug Bounty Scope**: Use any Bug Bounty Scope block provided at the top of this prompt. If absent, check `outputs/BUG_BOUNTY_SCOPE.json`. If neither exists, use default Ethereum scope assumptions.
+    2.  **Load Reachability Metadata**: Read the `reachability` field from the checklist item.
+    3.  **Identify Entry Points**: Determine where external input enters the system (e.g., P2P messages, transactions, RPC calls).
+    4.  **Trace Data Flow**: Trace the data flow from the entry point to the Code Scope. Use the subgraph to identify intermediate functions.
+    5.  **Check Attacker Control**: Determine whether the symbolic variables in the counterexample can be influenced by attacker-controlled input.
+    6.  **Identify Validation Layers**: Identify any validation layers (e.g., transaction validation, gas limits, size limits) that might prevent the attack.
+    7.  **Classify Exploitability**:
+        - **exploitable**: Counterexample is reachable from an attacker-controlled entry point, and no validation layer prevents it.
+        - **defense-in-depth**: Counterexample exists, but validation layers make exploitation difficult.
+        - **internal-only**: Counterexample requires internal bug (e.g., caller passes wrong value).
+        - **unreachable**: Counterexample is not reachable from any entry point.
+
+*   **Output (Phase 2.5)**: A reachability analysis report, including entry points, data flow path, validation layers, and final classification.
+
 #### **Phase 3: Invariant Proving**
 
 *   **Mindset**: You are a **Theorem Proving Specialist**. Your goal is to mathematically prove that the property's assertion holds true for ALL possible execution paths, assuming the analysis from the previous phases found no counterexample.
@@ -104,6 +123,31 @@ For the identified **Code Scope**, perform the following three phases sequential
 
 *   **Output (Phase 3)**: A summary of the proof attempt. State whether the invariant was proven, and identify the specific guard conditions that enforce it.
 
+#### **Phase 3.5: Bug Bounty Scope Filtering (NEW)**
+
+*   **Mindset**: You are a **Bug Bounty Triager**. Your goal is to determine whether this finding is eligible for the Ethereum Bug Bounty program.
+
+*   **Procedure**:
+    1.  **Load Bug Bounty Scope**: Use any Bug Bounty Scope block provided at the top of this prompt. If absent, check `outputs/BUG_BOUNTY_SCOPE.json`. If neither exists, use default Ethereum scope assumptions.
+    2.  **Load Reachability Metadata**: Read the `reachability` field from the checklist item.
+    3.  **Check Bug Bounty Scope**: If `reachability.bug_bounty_scope == "out-of-scope"`, classify as **out-of-scope**.
+    4.  **Check Exploitability**: Based on Phase 2.5 classification:
+        - **exploitable** → **bug-bounty-eligible**
+        - **defense-in-depth** → **bug-bounty-ineligible** (but report to Geth developers)
+        - **internal-only** → **bug-bounty-ineligible** (but report to Geth developers)
+        - **unreachable** → **bug-bounty-ineligible**
+    5.  **Check API Scope**: If the Code Scope is in `internal/ethapi/` or `beacon/light/api/`, classify as **out-of-scope-api**.
+    6.  **Check Configuration**: If the vulnerability requires node operator misconfiguration, classify as **configuration-issue**.
+    7.  **Check CL Dependency**: If the vulnerability requires a malicious CL node, classify as **cl-dependency**.
+
+*   **Output (Phase 3.5)**: A scope filtering report, including eligibility, reason, and recommendation.
+
+**Final Classification Guidance**:
+- Use `exploitable` when Phase 2.5 is exploitable and scope filtering says eligible.
+- Use `defense-in-depth` when Phase 2.5 is defense-in-depth.
+- Use `out-of-scope` when Phase 3.5 indicates out-of-scope (API/config/CL dependency).
+- Use `inconclusive` when analysis cannot establish reachability or proof.
+
 ### **Task 3.4: Write Outputs**
 
 **THIS STEP MUST HAPPEN BEFORE UPDATING THE QUEUE FILE**
@@ -111,6 +155,7 @@ For the identified **Code Scope**, perform the following three phases sequential
 1.  **Generate Partial Audit Map:**
     * Create `outputs/03_AUDITMAP_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json`.
     * Ensure all items in the batch are included.
+    * **NEW**: Include `phase2_5_reachability_analysis` and `phase3_5_scope_filtering` in the output.
 
 2.  **Update Worker Queue File:**
     * Add all processed `check_id`s to the `processed` array.
@@ -132,7 +177,8 @@ Produce a JSON object per checklist item (array in the output file) with the fol
     "function": "...",
     "line_range": "..."
   },
-  "final_classification": "potential-vulnerability | pass | inconclusive",
+  "final_classification": "exploitable | defense-in-depth | out-of-scope | inconclusive",
+  "bug_bounty_eligible": true,
   "summary": "A one-sentence summary of the final finding.",
   "audit_trail": {
     "phase1_abstract_interpretation": {
@@ -148,10 +194,31 @@ Produce a JSON object per checklist item (array in the output file) with the fol
         "expected_outcome": "..."
       }
     },
+    "phase2_5_reachability_analysis": {
+      "summary": "...",
+      "entry_points": ["..."],
+      "data_flow_path": "...",
+      "validation_layers": [
+        {
+          "layer": "...",
+          "location": "...",
+          "effectiveness": "..."
+        }
+      ],
+      "attacker_controlled": false,
+      "classification": "defense-in-depth",
+      "notes": "..."
+    },
     "phase3_invariant_proving": {
       "summary": "Not performed due to counterexample in Phase 2.",
       "proof_successful": false,
       "guard_identified": null
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "defense-in-depth",
+      "recommendation": "Report to Geth developers as a robustness improvement",
+      "notes": "..."
     }
   }
 }

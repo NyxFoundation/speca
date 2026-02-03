@@ -129,6 +129,34 @@ For important states:
 - Property Type: `Invariant`
 - Focus: System-wide safety rules
 
+#### **2.3.2.5: Add Reachability Metadata (NEW)**
+
+For each property, add a `reachability` field that describes how an attacker can reach the code.
+
+If a Bug Bounty Scope block is provided at the top of this prompt, use it to classify `bug_bounty_scope`.
+Otherwise, if `outputs/BUG_BOUNTY_SCOPE.json` exists, use it. If neither exists, use the default Ethereum scope.
+
+**Guidelines**:
+- **`entry_points`**: Where external input enters (P2P, Transaction, RPC, Engine API, Internal API)
+- **`attacker_controlled`**: Can an external attacker control this input?
+- **`validation_layers`**: What validation exists before reaching this code?
+- **`bug_bounty_scope`**: Is this in-scope for Bug Bounty? (`in-scope` / `out-of-scope` / `conditional`)
+- **`notes`**: Explain the attack scenario
+
+**Scope Classification**:
+- **in-scope**: P2P, Transaction, Engine API (EL-CL interface)
+- **out-of-scope**: JSON-RPC API, Beacon API, Configuration
+- **conditional**: Depends on upstream validation (e.g., SSZ deserialization)
+
+#### **2.3.2.6: Classify Property by Exploitability (NEW)**
+
+For each property, add an `exploitability` classification:
+- **`external-attack`**: Attacker can exploit from outside the system (P2P, Transaction)
+- **`internal-bug`**: Requires internal bug (caller passes wrong value)
+- **`configuration-error`**: Requires node operator misconfiguration
+- **`cl-dependency`**: Requires malicious CL node
+- **`api-only`**: Only exploitable via JSON-RPC/Beacon API (out-of-scope)
+
 #### **2.3.3: Property Format**
 
 Each property must include:
@@ -142,6 +170,8 @@ Each property must include:
   - `primary_element`: The main element this property addresses
 - `related_ambiguity_id`: If derived from an ambiguity
 - `related_assumption_id`: If derived from an assumption
+- `exploitability`: One of `external-attack`, `internal-bug`, `configuration-error`, `cl-dependency`, `api-only`
+- `reachability`: Object with `entry_points`, `attacker_controlled`, `validation_layers`, `bug_bounty_scope`, `notes`
 
 #### **2.3.4: Coverage Tracking**
 
@@ -188,7 +218,15 @@ Report coverage in metadata.
         "primary_element": "EDGE-USER-SUBMIT-BLOB-TX"
       },
       "related_ambiguity_id": null,
-      "related_assumption_id": null
+      "related_assumption_id": null,
+      "exploitability": "external-attack",
+      "reachability": {
+        "entry_points": ["P2P", "Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Gas limit checks"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker can submit malformed blob transactions via the P2P network."
+      }
     },
     {
       "id": "PROP-W0-EIP4844-POSTCOND-001",
@@ -201,7 +239,15 @@ Report coverage in metadata.
         "primary_element": "ACTION-VALIDATE-KZG-COMMITMENT"
       },
       "related_ambiguity_id": null,
-      "related_assumption_id": "ASSUM-EIP4844-01"
+      "related_assumption_id": "ASSUM-EIP4844-01",
+      "exploitability": "internal-bug",
+      "reachability": {
+        "entry_points": ["Internal API"],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "out-of-scope",
+        "notes": "Requires an internal caller to violate post-condition; no direct external entry point."
+      }
     }
   ],
   "coverage_summary": {

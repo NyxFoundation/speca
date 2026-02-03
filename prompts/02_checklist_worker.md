@@ -54,7 +54,15 @@ Generate audit checklist items for properties assigned to this worker's queue. P
 
 2.  **For EACH property in the batch:**
 
-    #### **A. Determine Property Type & Mindset**
+    #### **A. Filter Out-of-Scope Properties (NEW)**
+
+    -   Read the property's data from the loaded partial file.
+    -   If `reachability.bug_bounty_scope == "out-of-scope"`, **skip** this property.
+    -   If `exploitability == "api-only"` or `exploitability == "configuration-error"`, **skip** this property.
+    -   **Exception**: If `reachability.bug_bounty_scope == "conditional"`, include it but add a note that it requires further investigation.
+    -   If `reachability` is missing, consult any Bug Bounty Scope block provided at the top of this prompt (or `outputs/BUG_BOUNTY_SCOPE.json`) to infer scope, and note the inference.
+
+    #### **B. Determine Property Type & Mindset**
 
     -   Read the property's data from the loaded partial file.
     -   Check if `covers.is_boundary_edge == true`.
@@ -64,7 +72,7 @@ Generate audit checklist items for properties assigned to this worker's queue. P
     -   **If FALSE (Internal Property):**
         -   **Adopt Mindset: "Formal Verification Engineer"**. You are proving the correctness of the system's internal logic.
 
-    #### **B. Generate Checklist Items**
+    #### **C. Generate Checklist Items**
 
     -   **If a Boundary Property:**
         1.  **Generate a CRITICAL Boundary Check**: Create one checklist item specifically for the `boundary_edge` itself. The title must be `"Verify Trust Boundary Integrity for {EDGE_ID}..."`. The `detection_procedure` should focus on input validation, authentication, and data sanitization at the specific entry point.
@@ -77,12 +85,13 @@ Generate audit checklist items for properties assigned to this worker's queue. P
             -   `Pre-condition`: Design a test to bypass the condition with invalid inputs.
             -   `Post-condition`: Design a test to verify side-effects and check for unexpected state changes.
 
-    #### **C. Checklist Item Format (Unified)**
+    #### **D. Checklist Item Format (Unified)**
 
     -   `id`: `CHECK-W{WORKER_ID}-{PROP_ID}-{TYPE}` (e.g., BOUNDARY, NODE, INTERNAL)
     -   `property_id`: Source property ID.
     -   `graph_element_under_test`: Node or edge ID being audited.
     -   `title`: Clear, actionable title reflecting the mindset.
+    -   `reachability`: Copy from the property (include `entry_points`, `attacker_controlled`, `bug_bounty_scope`).
     -   `bug_class`, `risk_category`, `severity_hint`, `detection_procedure`, `executable_checks`: All required.
     -   `notes`: **MUST** include traceability back to the source property and graph elements.
 
@@ -113,6 +122,8 @@ Generate audit checklist items for properties assigned to this worker's queue. P
 }
 ```
 
+**Each checklist item MUST include a `reachability` object copied from the property.**
+
 ---
 
 ## 4) Quality Requirements
@@ -121,3 +132,4 @@ Generate audit checklist items for properties assigned to this worker's queue. P
 -   **On-Demand Data**: The process must not rely on loading entire catalogs. All external data (properties, trust models) is loaded as needed.
 -   **Traceability**: Every check must be traceable to a source property.
 -   **Actionable**: Procedures must be specific and verifiable.
+-   **Scope-Aware**: Out-of-scope properties are filtered out; conditional scope is noted.
