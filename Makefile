@@ -178,11 +178,6 @@ clean:
 	@if [ ! -d "$(OUTPUT_DIR)/01b_SUBGRAPHS" ] || [ -z "$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/*.json 2>/dev/null)" ]; then \
 		echo "❌ Error: No subgraphs found. Run 01b-parallel first."; exit 1; \
 	fi; \
-	if [ -n "$(BUG_BOUNTY_SCOPE)" ]; then \
-		mkdir -p $(OUTPUT_DIR); \
-		echo "$$BUG_BOUNTY_SCOPE" > $(OUTPUT_DIR)/BUG_BOUNTY_SCOPE.json; \
-		echo "✅ Wrote BUG_BOUNTY_SCOPE.json"; \
-	fi; \
 	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 01d-parallel: property partials exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
