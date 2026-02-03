@@ -1,0 +1,977 @@
+{
+  "source_url": "https://ethereum.github.io/consensus-specs/specs/fulu/p2p-interface/",
+  "worker_id": 5,
+  "sub_graphs": [
+    {
+      "id": "SUBGRAPH-FULU-P2P-DATA-COLUMN-GOSSIP-VALIDATION",
+      "aspect": "validation",
+      "title": "Fulu P2P: Data Column Sidecar Gossip Validation Pipeline",
+      "description": "Models the sequential validation pipeline that data column sidecars must pass through when received via gossip, including structural checks, cryptographic verification, and fork-choice consistency checks.",
+      "nodes": [
+        {
+          "id": "STATE-DATA-COLUMN-SIDECAR-RECEIVED-GOSSIP",
+          "label": "Data Column Sidecar Received via Gossip",
+          "type": "State",
+          "description": "A data_column_sidecar message has been received on subnet data_column_sidecar_{subnet_id} but not yet validated"
+        },
+        {
+          "id": "ACTION-VERIFY-STRUCTURAL-VALIDITY",
+          "label": "Verify Structural Validity",
+          "type": "Action",
+          "description": "Run verify_data_column_sidecar(sidecar): check sidecar.index < NUMBER_OF_COLUMNS, len(kzg_commitments) > 0, len(kzg_commitments) <= max_blobs_per_block, and column/commitments/proofs length consistency"
+        },
+        {
+          "id": "ACTION-VERIFY-CORRECT-SUBNET",
+          "label": "Verify Correct Subnet Routing",
+          "type": "Action",
+          "description": "Check compute_subnet_for_data_column_sidecar(sidecar.index) == subnet_id to ensure the sidecar is on the correct gossip subnet"
+        },
+        {
+          "id": "ACTION-CHECK-SLOT-TIMELINESS",
+          "label": "Check Slot Timeliness",
+          "type": "Action",
+          "description": "Verify block_header.slot <= current_slot (with MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance) to ignore future sidecars"
+        },
+        {
+          "id": "ACTION-CHECK-SLOT-FINALIZED",
+          "label": "Check Slot Above Finalization",
+          "type": "Action",
+          "description": "Verify block_header.slot > compute_start_slot_at_epoch(state.finalized_checkpoint.epoch) to ignore already-finalized slots"
+        },
+        {
+          "id": "ACTION-VERIFY-PROPOSER-SIGNATURE",
+          "label": "Verify Proposer Signature",
+          "type": "Action",
+          "description": "Validate the proposer signature on sidecar.signed_block_header"
+        },
+        {
+          "id": "ACTION-CHECK-PARENT-SEEN",
+          "label": "Check Parent Block Seen",
+          "type": "Action",
+          "description": "Verify parent block has been seen via gossip or non-gossip sources; ignore if not"
+        },
+        {
+          "id": "ACTION-VERIFY-PARENT-VALID",
+          "label": "Verify Parent Passes Validation",
+          "type": "Action",
+          "description": "Reject if parent block does not pass validation"
+        },
+        {
+          "id": "ACTION-CHECK-SLOT-HIGHER-THAN-PARENT",
+          "label": "Check Slot Higher Than Parent",
+          "type": "Action",
+          "description": "Reject if sidecar slot is not strictly greater than parent slot"
+        },
+        {
+          "id": "ACTION-CHECK-FINALIZED-ANCESTOR",
+          "label": "Check Finalized Checkpoint Ancestry",
+          "type": "Action",
+          "description": "Verify get_checkpoint_block(store, parent_root, finalized_epoch) == finalized_root to ensure fork-choice consistency"
+        },
+        {
+          "id": "ACTION-VERIFY-INCLUSION-PROOF",
+          "label": "Verify KZG Commitments Inclusion Proof",
+          "type": "Action",
+          "description": "Run verify_data_column_sidecar_inclusion_proof: Merkle branch verification that kzg_commitments are included in block body_root at depth 4"
+        },
+        {
+          "id": "ACTION-VERIFY-KZG-PROOFS",
+          "label": "Verify KZG Column Proofs",
+          "type": "Action",
+          "description": "Run verify_data_column_sidecar_kzg_proofs: batch cell KZG proof verification of column data against commitments"
+        },
+        {
+          "id": "ACTION-CHECK-FIRST-VALID-SIDECAR",
+          "label": "Check Anti-Equivocation Uniqueness",
+          "type": "Action",
+          "description": "Ignore if not the first valid sidecar for tuple (slot, proposer_index, column_index) with valid signature, inclusion proof, and KZG proof"
+        },
+        {
+          "id": "ACTION-VERIFY-PROPOSER-INDEX",
+          "label": "Verify Expected Proposer Index",
+          "type": "Action",
+          "description": "Reject if proposer_index does not match expected proposer for block slot in shuffling context defined by parent_root/slot. May queue if not immediately verifiable."
+        },
+        {
+          "id": "STATE-DATA-COLUMN-SIDECAR-ACCEPTED",
+          "label": "Data Column Sidecar Accepted",
+          "type": "State",
+          "description": "Sidecar has passed all gossip validation rules and is accepted for processing"
+        },
+        {
+          "id": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Data Column Sidecar Rejected",
+          "type": "State",
+          "description": "Sidecar failed a REJECT validation rule and is discarded with potential peer penalty"
+        },
+        {
+          "id": "STATE-DATA-COLUMN-SIDECAR-IGNORED",
+          "label": "Data Column Sidecar Ignored",
+          "type": "State",
+          "description": "Sidecar failed an IGNORE validation rule and is silently dropped without peer penalty"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-GOSSIP-RECEIVE",
+          "source": "EXT-GOSSIP-PEER",
+          "target": "STATE-DATA-COLUMN-SIDECAR-RECEIVED-GOSSIP",
+          "label": "Peer publishes data_column_sidecar on subnet topic",
+          "data_involved": ["DATA-COLUMN-SIDECAR"]
+        },
+        {
+          "id": "EDGE-START-STRUCTURAL",
+          "source": "STATE-DATA-COLUMN-SIDECAR-RECEIVED-GOSSIP",
+          "target": "ACTION-VERIFY-STRUCTURAL-VALIDITY",
+          "label": "Begin validation pipeline (rule 1)"
+        },
+        {
+          "id": "EDGE-STRUCTURAL-REJECT",
+          "source": "ACTION-VERIFY-STRUCTURAL-VALIDITY",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Structural check fails → REJECT"
+        },
+        {
+          "id": "EDGE-STRUCTURAL-PASS",
+          "source": "ACTION-VERIFY-STRUCTURAL-VALIDITY",
+          "target": "ACTION-VERIFY-CORRECT-SUBNET",
+          "label": "Structural check passes → check subnet (rule 2)"
+        },
+        {
+          "id": "EDGE-SUBNET-REJECT",
+          "source": "ACTION-VERIFY-CORRECT-SUBNET",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Wrong subnet → REJECT"
+        },
+        {
+          "id": "EDGE-SUBNET-PASS",
+          "source": "ACTION-VERIFY-CORRECT-SUBNET",
+          "target": "ACTION-CHECK-SLOT-TIMELINESS",
+          "label": "Correct subnet → check timeliness (rule 3)"
+        },
+        {
+          "id": "EDGE-FUTURE-IGNORE",
+          "source": "ACTION-CHECK-SLOT-TIMELINESS",
+          "target": "STATE-DATA-COLUMN-SIDECAR-IGNORED",
+          "label": "Future slot → IGNORE"
+        },
+        {
+          "id": "EDGE-TIMELY-PASS",
+          "source": "ACTION-CHECK-SLOT-TIMELINESS",
+          "target": "ACTION-CHECK-SLOT-FINALIZED",
+          "label": "Slot is current or past → check finalization (rule 4)"
+        },
+        {
+          "id": "EDGE-FINALIZED-IGNORE",
+          "source": "ACTION-CHECK-SLOT-FINALIZED",
+          "target": "STATE-DATA-COLUMN-SIDECAR-IGNORED",
+          "label": "Slot at or below finalized → IGNORE"
+        },
+        {
+          "id": "EDGE-ABOVE-FINALIZED",
+          "source": "ACTION-CHECK-SLOT-FINALIZED",
+          "target": "ACTION-VERIFY-PROPOSER-SIGNATURE",
+          "label": "Slot above finalized → verify signature (rule 5)"
+        },
+        {
+          "id": "EDGE-SIG-REJECT",
+          "source": "ACTION-VERIFY-PROPOSER-SIGNATURE",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Invalid signature → REJECT"
+        },
+        {
+          "id": "EDGE-SIG-PASS",
+          "source": "ACTION-VERIFY-PROPOSER-SIGNATURE",
+          "target": "ACTION-CHECK-PARENT-SEEN",
+          "label": "Valid signature → check parent (rule 6)"
+        },
+        {
+          "id": "EDGE-PARENT-UNSEEN-IGNORE",
+          "source": "ACTION-CHECK-PARENT-SEEN",
+          "target": "STATE-DATA-COLUMN-SIDECAR-IGNORED",
+          "label": "Parent not seen → IGNORE"
+        },
+        {
+          "id": "EDGE-PARENT-SEEN",
+          "source": "ACTION-CHECK-PARENT-SEEN",
+          "target": "ACTION-VERIFY-PARENT-VALID",
+          "label": "Parent seen → verify parent validity (rule 7)"
+        },
+        {
+          "id": "EDGE-PARENT-INVALID-REJECT",
+          "source": "ACTION-VERIFY-PARENT-VALID",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Parent invalid → REJECT"
+        },
+        {
+          "id": "EDGE-PARENT-VALID",
+          "source": "ACTION-VERIFY-PARENT-VALID",
+          "target": "ACTION-CHECK-SLOT-HIGHER-THAN-PARENT",
+          "label": "Parent valid → check slot ordering (rule 8)"
+        },
+        {
+          "id": "EDGE-SLOT-NOT-HIGHER-REJECT",
+          "source": "ACTION-CHECK-SLOT-HIGHER-THAN-PARENT",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Slot not higher than parent → REJECT"
+        },
+        {
+          "id": "EDGE-SLOT-HIGHER",
+          "source": "ACTION-CHECK-SLOT-HIGHER-THAN-PARENT",
+          "target": "ACTION-CHECK-FINALIZED-ANCESTOR",
+          "label": "Slot higher → check finalized ancestry (rule 9)"
+        },
+        {
+          "id": "EDGE-NO-FINALIZED-ANCESTOR-REJECT",
+          "source": "ACTION-CHECK-FINALIZED-ANCESTOR",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Finalized checkpoint not ancestor → REJECT"
+        },
+        {
+          "id": "EDGE-FINALIZED-ANCESTOR-OK",
+          "source": "ACTION-CHECK-FINALIZED-ANCESTOR",
+          "target": "ACTION-VERIFY-INCLUSION-PROOF",
+          "label": "Ancestry valid → verify inclusion proof (rule 10)"
+        },
+        {
+          "id": "EDGE-INCLUSION-REJECT",
+          "source": "ACTION-VERIFY-INCLUSION-PROOF",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Invalid inclusion proof → REJECT"
+        },
+        {
+          "id": "EDGE-INCLUSION-PASS",
+          "source": "ACTION-VERIFY-INCLUSION-PROOF",
+          "target": "ACTION-VERIFY-KZG-PROOFS",
+          "label": "Inclusion valid → verify KZG proofs (rule 11)"
+        },
+        {
+          "id": "EDGE-KZG-REJECT",
+          "source": "ACTION-VERIFY-KZG-PROOFS",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "KZG proof invalid → REJECT"
+        },
+        {
+          "id": "EDGE-KZG-PASS",
+          "source": "ACTION-VERIFY-KZG-PROOFS",
+          "target": "ACTION-CHECK-FIRST-VALID-SIDECAR",
+          "label": "KZG valid → check equivocation (rule 12)"
+        },
+        {
+          "id": "EDGE-DUPLICATE-IGNORE",
+          "source": "ACTION-CHECK-FIRST-VALID-SIDECAR",
+          "target": "STATE-DATA-COLUMN-SIDECAR-IGNORED",
+          "label": "Duplicate valid sidecar for same tuple → IGNORE"
+        },
+        {
+          "id": "EDGE-FIRST-VALID",
+          "source": "ACTION-CHECK-FIRST-VALID-SIDECAR",
+          "target": "ACTION-VERIFY-PROPOSER-INDEX",
+          "label": "First valid sidecar → verify proposer (rule 13)"
+        },
+        {
+          "id": "EDGE-PROPOSER-REJECT",
+          "source": "ACTION-VERIFY-PROPOSER-INDEX",
+          "target": "STATE-DATA-COLUMN-SIDECAR-REJECTED",
+          "label": "Wrong proposer → REJECT"
+        },
+        {
+          "id": "EDGE-ALL-VALID",
+          "source": "ACTION-VERIFY-PROPOSER-INDEX",
+          "target": "STATE-DATA-COLUMN-SIDECAR-ACCEPTED",
+          "label": "All validation rules pass → accept sidecar"
+        }
+      ],
+      "external_entities": [
+        {
+          "id": "EXT-GOSSIP-PEER",
+          "name": "Gossip Network Peer",
+          "description": "A peer node on the gossipsub network publishing data column sidecars on subnet topics"
+        }
+      ]
+    },
+    {
+      "id": "SUBGRAPH-FULU-P2P-REQRESP-DATA-COLUMNS",
+      "aspect": "networking",
+      "title": "Fulu P2P: Data Column Sidecar Request/Response Protocol",
+      "description": "Models the request/response networking protocols for retrieving data column sidecars (by range and by root), including serve range calculation, response ordering, and error handling.",
+      "nodes": [
+        {
+          "id": "STATE-REQRESP-DATA-COL-BY-RANGE-RECEIVED",
+          "label": "DataColumnSidecarsByRange Request Received",
+          "type": "State",
+          "description": "Node receives a DataColumnSidecarsByRange request with (start_slot, count, columns) parameters"
+        },
+        {
+          "id": "ACTION-COMPUTE-SERVE-RANGE",
+          "label": "Compute Data Column Serve Range",
+          "type": "Action",
+          "description": "Calculate data_column_serve_range = [max(current_epoch - MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS, FULU_FORK_EPOCH), current_epoch]"
+        },
+        {
+          "id": "ACTION-CHECK-RANGE-IN-SERVE-WINDOW",
+          "label": "Check Request Within Serve Range",
+          "type": "Action",
+          "description": "Verify the requested slot range overlaps with the data_column_serve_range"
+        },
+        {
+          "id": "ACTION-RETRIEVE-DATA-COLUMNS-RANGE",
+          "label": "Retrieve Data Columns for Range",
+          "type": "Action",
+          "description": "Fetch data column sidecars from local storage for requested (slot, column_index) combinations within the serve range"
+        },
+        {
+          "id": "ACTION-ORDER-RESPONSE-RANGE",
+          "label": "Order Response by (slot, column_index)",
+          "type": "Action",
+          "description": "Sort response sidecars in ascending (slot, column_index) order as required by protocol"
+        },
+        {
+          "id": "STATE-RANGE-RESPONSE-SENT",
+          "label": "Range Response Streamed",
+          "type": "State",
+          "description": "Response chunks have been streamed back to requesting peer in correct order"
+        },
+        {
+          "id": "STATE-REQRESP-DATA-COL-BY-ROOT-RECEIVED",
+          "label": "DataColumnSidecarsByRoot Request Received",
+          "type": "State",
+          "description": "Node receives a DataColumnSidecarsByRoot request with list of (block_root, columns) identifiers"
+        },
+        {
+          "id": "ACTION-COMPUTE-MINIMUM-REQUEST-EPOCH",
+          "label": "Compute Minimum Request Epoch",
+          "type": "Action",
+          "description": "Calculate minimum_request_epoch = max(current_epoch - MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS, FULU_FORK_EPOCH)"
+        },
+        {
+          "id": "ACTION-CHECK-BLOCK-EPOCH-ELIGIBLE",
+          "label": "Check Block Epoch Eligibility",
+          "type": "Action",
+          "description": "For each block_root, verify the block epoch >= minimum_request_epoch"
+        },
+        {
+          "id": "STATE-RESOURCE-UNAVAILABLE-ERROR",
+          "label": "ResourceUnavailable Error Sent",
+          "type": "State",
+          "description": "Error code 3 (ResourceUnavailable) returned for blocks earlier than minimum_request_epoch"
+        },
+        {
+          "id": "ACTION-RETRIEVE-DATA-COLUMNS-ROOT",
+          "label": "Retrieve Data Columns by Root",
+          "type": "Action",
+          "description": "Fetch data column sidecars from local storage for the requested block roots and column indices"
+        },
+        {
+          "id": "ACTION-VERIFY-GOSSIP-VALIDITY-RESPONSE",
+          "label": "Ensure Response Passes Gossip Validation",
+          "type": "Action",
+          "description": "Only respond with sidecars that pass gossip validation rules; never send sidecars from blocks failing gossip or state transition validation"
+        },
+        {
+          "id": "STATE-ROOT-RESPONSE-SENT",
+          "label": "Root Response Streamed",
+          "type": "State",
+          "description": "Valid data column sidecars streamed back to requesting peer"
+        },
+        {
+          "id": "ACTION-ENFORCE-MAX-REQUEST-LIMIT",
+          "label": "Enforce MAX_REQUEST_DATA_COLUMN_SIDECARS",
+          "type": "Action",
+          "description": "Ensure no more than MAX_REQUEST_DATA_COLUMN_SIDECARS items are returned in a single response"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-PEER-REQUEST-RANGE",
+          "source": "EXT-REQUESTING-PEER",
+          "target": "STATE-REQRESP-DATA-COL-BY-RANGE-RECEIVED",
+          "label": "Peer sends DataColumnSidecarsByRange request",
+          "data_involved": ["DATA-START-SLOT", "DATA-COUNT", "DATA-COLUMNS-LIST"]
+        },
+        {
+          "id": "EDGE-COMPUTE-SERVE",
+          "source": "STATE-REQRESP-DATA-COL-BY-RANGE-RECEIVED",
+          "target": "ACTION-COMPUTE-SERVE-RANGE",
+          "label": "Determine what range this node can serve"
+        },
+        {
+          "id": "EDGE-CHECK-RANGE",
+          "source": "ACTION-COMPUTE-SERVE-RANGE",
+          "target": "ACTION-CHECK-RANGE-IN-SERVE-WINDOW",
+          "label": "Compare requested range against serve range"
+        },
+        {
+          "id": "EDGE-RANGE-OUT-OF-WINDOW",
+          "source": "ACTION-CHECK-RANGE-IN-SERVE-WINDOW",
+          "target": "STATE-RESOURCE-UNAVAILABLE-ERROR",
+          "label": "Request entirely outside serve range → error"
+        },
+        {
+          "id": "EDGE-RANGE-IN-WINDOW",
+          "source": "ACTION-CHECK-RANGE-IN-SERVE-WINDOW",
+          "target": "ACTION-RETRIEVE-DATA-COLUMNS-RANGE",
+          "label": "Request within serve range → retrieve columns"
+        },
+        {
+          "id": "EDGE-RANGE-ENFORCE-LIMIT",
+          "source": "ACTION-RETRIEVE-DATA-COLUMNS-RANGE",
+          "target": "ACTION-ENFORCE-MAX-REQUEST-LIMIT",
+          "label": "Check response size against MAX_REQUEST_DATA_COLUMN_SIDECARS"
+        },
+        {
+          "id": "EDGE-RANGE-ORDER",
+          "source": "ACTION-ENFORCE-MAX-REQUEST-LIMIT",
+          "target": "ACTION-ORDER-RESPONSE-RANGE",
+          "label": "Order sidecars by (slot, column_index)"
+        },
+        {
+          "id": "EDGE-RANGE-SEND",
+          "source": "ACTION-ORDER-RESPONSE-RANGE",
+          "target": "STATE-RANGE-RESPONSE-SENT",
+          "label": "Stream ordered response chunks"
+        },
+        {
+          "id": "EDGE-PEER-REQUEST-ROOT",
+          "source": "EXT-REQUESTING-PEER",
+          "target": "STATE-REQRESP-DATA-COL-BY-ROOT-RECEIVED",
+          "label": "Peer sends DataColumnSidecarsByRoot request",
+          "data_involved": ["DATA-BLOCK-ROOTS", "DATA-COLUMNS-LIST"]
+        },
+        {
+          "id": "EDGE-COMPUTE-MIN-EPOCH",
+          "source": "STATE-REQRESP-DATA-COL-BY-ROOT-RECEIVED",
+          "target": "ACTION-COMPUTE-MINIMUM-REQUEST-EPOCH",
+          "label": "Determine minimum eligible epoch"
+        },
+        {
+          "id": "EDGE-CHECK-EPOCH",
+          "source": "ACTION-COMPUTE-MINIMUM-REQUEST-EPOCH",
+          "target": "ACTION-CHECK-BLOCK-EPOCH-ELIGIBLE",
+          "label": "Check each block root against minimum epoch"
+        },
+        {
+          "id": "EDGE-EPOCH-TOO-OLD",
+          "source": "ACTION-CHECK-BLOCK-EPOCH-ELIGIBLE",
+          "target": "STATE-RESOURCE-UNAVAILABLE-ERROR",
+          "label": "Block too old → ResourceUnavailable error code 3"
+        },
+        {
+          "id": "EDGE-EPOCH-OK",
+          "source": "ACTION-CHECK-BLOCK-EPOCH-ELIGIBLE",
+          "target": "ACTION-RETRIEVE-DATA-COLUMNS-ROOT",
+          "label": "Block eligible → retrieve sidecars"
+        },
+        {
+          "id": "EDGE-ROOT-GOSSIP-CHECK",
+          "source": "ACTION-RETRIEVE-DATA-COLUMNS-ROOT",
+          "target": "ACTION-VERIFY-GOSSIP-VALIDITY-RESPONSE",
+          "label": "Verify retrieved sidecars pass gossip validation"
+        },
+        {
+          "id": "EDGE-ROOT-ENFORCE-LIMIT",
+          "source": "ACTION-VERIFY-GOSSIP-VALIDITY-RESPONSE",
+          "target": "ACTION-ENFORCE-MAX-REQUEST-LIMIT",
+          "label": "Enforce response size limit"
+        },
+        {
+          "id": "EDGE-ROOT-SEND",
+          "source": "ACTION-ENFORCE-MAX-REQUEST-LIMIT",
+          "target": "STATE-ROOT-RESPONSE-SENT",
+          "label": "Stream valid sidecars to peer"
+        }
+      ],
+      "external_entities": [
+        {
+          "id": "EXT-REQUESTING-PEER",
+          "name": "Requesting Peer Node",
+          "description": "A peer node sending DataColumnSidecarsByRange or DataColumnSidecarsByRoot requests via the Req/Resp protocol"
+        }
+      ]
+    },
+    {
+      "id": "SUBGRAPH-FULU-P2P-DISTRIBUTED-BLOB-PUBLISHING",
+      "aspect": "security_boundary",
+      "title": "Fulu P2P: Distributed Blob Publishing and Local EL Retrieval",
+      "description": "Models the trust boundary between the consensus layer and execution layer for blob retrieval, and the distributed publishing flow where locally-retrieved blobs are converted to data columns and propagated.",
+      "nodes": [
+        {
+          "id": "STATE-VALID-BEACON-BLOCK-RECEIVED",
+          "label": "Valid Beacon Block or Data Column Sidecar Received via Gossip",
+          "type": "State",
+          "description": "A valid beacon_block or data_column_sidecar has been received from gossip, triggering local EL blob query"
+        },
+        {
+          "id": "ACTION-QUERY-ENGINE-GET-BLOBS-V2",
+          "label": "Query engine_getBlobsV2",
+          "type": "Action",
+          "description": "Send engine_getBlobsV2 request to local execution layer to retrieve blobs matching kzg_commitments from the block"
+        },
+        {
+          "id": "STATE-ALL-BLOBS-RETRIEVED-LOCALLY",
+          "label": "All Blobs Retrieved from Local EL",
+          "type": "State",
+          "description": "All blobs matching kzg_commitments have been successfully retrieved from the local execution layer"
+        },
+        {
+          "id": "STATE-PARTIAL-OR-NO-BLOBS",
+          "label": "Partial or No Blobs Available Locally",
+          "type": "State",
+          "description": "Not all blobs were available from the local execution layer"
+        },
+        {
+          "id": "ACTION-CONVERT-BLOBS-TO-DATA-COLUMNS",
+          "label": "Convert Blobs to Data Columns",
+          "type": "Action",
+          "description": "Transform locally-retrieved blobs into data column sidecars using erasure coding"
+        },
+        {
+          "id": "ACTION-IMPORT-DATA-COLUMNS-AS-GOSSIP",
+          "label": "Import Data Columns as if from Gossip",
+          "type": "Action",
+          "description": "Import the locally-produced data columns with full gossip-equivalent behavior: update anti-equivocation cache and conditionally publish"
+        },
+        {
+          "id": "ACTION-UPDATE-ANTI-EQUIVOCATION-CACHE",
+          "label": "Update Anti-Equivocation Cache",
+          "type": "Action",
+          "description": "Record the (slot, proposer_index, column_index) tuple to prevent accepting duplicate/equivocating sidecars"
+        },
+        {
+          "id": "ACTION-PUBLISH-IF-SUBSCRIBED",
+          "label": "Publish Data Column Sidecar if Subscribed",
+          "type": "Action",
+          "description": "Publish data_column_sidecar on gossip subnet if and only if the node is subscribed to that subnet (via custody or sampling)"
+        },
+        {
+          "id": "STATE-DATA-COLUMNS-PROPAGATED",
+          "label": "Data Columns Propagated to Network",
+          "type": "State",
+          "description": "Locally-produced data columns have been published to the appropriate gossip subnets"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-GOSSIP-TRIGGER",
+          "source": "EXT-GOSSIP-NETWORK",
+          "target": "STATE-VALID-BEACON-BLOCK-RECEIVED",
+          "label": "Valid beacon_block or data_column_sidecar arrives via gossip",
+          "data_involved": ["DATA-KZG-COMMITMENTS"]
+        },
+        {
+          "id": "EDGE-QUERY-EL",
+          "source": "STATE-VALID-BEACON-BLOCK-RECEIVED",
+          "target": "ACTION-QUERY-ENGINE-GET-BLOBS-V2",
+          "label": "Query local execution layer for blobs"
+        },
+        {
+          "id": "EDGE-EL-RESPONSE-ALL",
+          "source": "ACTION-QUERY-ENGINE-GET-BLOBS-V2",
+          "target": "STATE-ALL-BLOBS-RETRIEVED-LOCALLY",
+          "label": "All blobs retrieved from EL",
+          "data_involved": ["DATA-BLOBS"]
+        },
+        {
+          "id": "EDGE-EL-RESPONSE-PARTIAL",
+          "source": "ACTION-QUERY-ENGINE-GET-BLOBS-V2",
+          "target": "STATE-PARTIAL-OR-NO-BLOBS",
+          "label": "Not all blobs available locally"
+        },
+        {
+          "id": "EDGE-CONVERT",
+          "source": "STATE-ALL-BLOBS-RETRIEVED-LOCALLY",
+          "target": "ACTION-CONVERT-BLOBS-TO-DATA-COLUMNS",
+          "label": "Convert all blobs to data columns (skip verification for local blobs)"
+        },
+        {
+          "id": "EDGE-IMPORT",
+          "source": "ACTION-CONVERT-BLOBS-TO-DATA-COLUMNS",
+          "target": "ACTION-IMPORT-DATA-COLUMNS-AS-GOSSIP",
+          "label": "Import locally-produced columns as gossip-equivalent"
+        },
+        {
+          "id": "EDGE-UPDATE-CACHE",
+          "source": "ACTION-IMPORT-DATA-COLUMNS-AS-GOSSIP",
+          "target": "ACTION-UPDATE-ANTI-EQUIVOCATION-CACHE",
+          "label": "Update anti-equivocation tracking"
+        },
+        {
+          "id": "EDGE-CONDITIONAL-PUBLISH",
+          "source": "ACTION-IMPORT-DATA-COLUMNS-AS-GOSSIP",
+          "target": "ACTION-PUBLISH-IF-SUBSCRIBED",
+          "label": "Publish only if node is subscribed to subnet"
+        },
+        {
+          "id": "EDGE-PROPAGATED",
+          "source": "ACTION-PUBLISH-IF-SUBSCRIBED",
+          "target": "STATE-DATA-COLUMNS-PROPAGATED",
+          "label": "Data columns published on gossip subnets"
+        },
+        {
+          "id": "EDGE-EL-TRUST",
+          "source": "EXT-LOCAL-EXECUTION-LAYER",
+          "target": "ACTION-QUERY-ENGINE-GET-BLOBS-V2",
+          "label": "Trusted local EL provides blobs (verification skipped)",
+          "data_involved": ["DATA-BLOBS"]
+        }
+      ],
+      "external_entities": [
+        {
+          "id": "EXT-GOSSIP-NETWORK",
+          "name": "Gossip Network",
+          "description": "The gossipsub network delivering beacon blocks and data column sidecars"
+        },
+        {
+          "id": "EXT-LOCAL-EXECUTION-LAYER",
+          "name": "Local Execution Layer Client",
+          "description": "Co-located execution layer client providing blob data via engine_getBlobsV2 API; treated as trusted source"
+        }
+      ]
+    },
+    {
+      "id": "SUBGRAPH-FULU-P2P-PEER-DISCOVERY-CUSTODY",
+      "aspect": "networking",
+      "title": "Fulu P2P: Peer Discovery, Custody Groups, and Supernode Requirements",
+      "description": "Models peer discovery via ENR fields, custody group advertisement, supernode thresholds, and peer scoring based on custody obligations.",
+      "nodes": [
+        {
+          "id": "STATE-NODE-ENR-ADVERTISED",
+          "label": "Node ENR Published with Fulu Fields",
+          "type": "State",
+          "description": "Node has published its ENR containing eth2 fork digest, cgc (custody_group_count), and nfd (next_fork_digest) fields"
+        },
+        {
+          "id": "ACTION-EVALUATE-PEER-ENR",
+          "label": "Evaluate Peer ENR Fields",
+          "type": "Action",
+          "description": "Parse peer ENR: check eth2 fork digest, nfd field for fork compatibility, and cgc field for custody group count"
+        },
+        {
+          "id": "ACTION-CHECK-CUSTODY-REQUIREMENT",
+          "label": "Check Peer Custody Requirement",
+          "type": "Action",
+          "description": "Verify peer's custody_group_count >= CUSTODY_REQUIREMENT; MAY reject peers with insufficient custody"
+        },
+        {
+          "id": "ACTION-CHECK-SUPERNODE-THRESHOLD",
+          "label": "Check Supernode Threshold",
+          "type": "Action",
+          "description": "Determine if node must be supernode: combined validator balance >= 4096 ETH requires supernode status"
+        },
+        {
+          "id": "STATE-SUPERNODE-ACTIVE",
+          "label": "Supernode Active",
+          "type": "State",
+          "description": "Node operates as supernode: subscribed to ALL data column sidecar subnets, custodies all columns, performs reconstruction and cross-seeding"
+        },
+        {
+          "id": "STATE-REGULAR-NODE-ACTIVE",
+          "label": "Regular Node Active with Custody Subset",
+          "type": "State",
+          "description": "Node operates with standard custody obligations, subscribed to assigned subnet subset"
+        },
+        {
+          "id": "ACTION-EVALUATE-FORK-COMPATIBILITY",
+          "label": "Evaluate Fork Compatibility via nfd",
+          "type": "Action",
+          "description": "Compare peer's nfd (next fork digest) with local expectations; MUST NOT disconnect before fork boundary, MAY disconnect at/after"
+        },
+        {
+          "id": "ACTION-SCORE-PEER-CUSTODY-COMPLIANCE",
+          "label": "Score Peer on Custody Compliance",
+          "type": "Action",
+          "description": "Monitor whether peer responds to requests for its custodied columns; downscore or disconnect non-compliant peers"
+        },
+        {
+          "id": "STATE-PEER-CONNECTED",
+          "label": "Peer Connected and Validated",
+          "type": "State",
+          "description": "Peer has been validated for fork compatibility and custody adequacy; connection maintained"
+        },
+        {
+          "id": "STATE-PEER-REJECTED",
+          "label": "Peer Rejected or Disconnected",
+          "type": "State",
+          "description": "Peer rejected due to insufficient custody, fork incompatibility, or non-compliance"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-DISCOVER-PEER",
+          "source": "EXT-DISCOVERY-NETWORK",
+          "target": "STATE-NODE-ENR-ADVERTISED",
+          "label": "Peer discovered via discv5 with ENR",
+          "data_involved": ["DATA-ENR"]
+        },
+        {
+          "id": "EDGE-PARSE-ENR",
+          "source": "STATE-NODE-ENR-ADVERTISED",
+          "target": "ACTION-EVALUATE-PEER-ENR",
+          "label": "Parse ENR fields for fork and custody info"
+        },
+        {
+          "id": "EDGE-CHECK-FORK",
+          "source": "ACTION-EVALUATE-PEER-ENR",
+          "target": "ACTION-EVALUATE-FORK-COMPATIBILITY",
+          "label": "Check fork digest and nfd compatibility"
+        },
+        {
+          "id": "EDGE-FORK-INCOMPATIBLE",
+          "source": "ACTION-EVALUATE-FORK-COMPATIBILITY",
+          "target": "STATE-PEER-REJECTED",
+          "label": "Fork incompatible at/after boundary → disconnect"
+        },
+        {
+          "id": "EDGE-FORK-COMPATIBLE",
+          "source": "ACTION-EVALUATE-FORK-COMPATIBILITY",
+          "target": "ACTION-CHECK-CUSTODY-REQUIREMENT",
+          "label": "Fork compatible → check custody group count"
+        },
+        {
+          "id": "EDGE-CUSTODY-INSUFFICIENT",
+          "source": "ACTION-CHECK-CUSTODY-REQUIREMENT",
+          "target": "STATE-PEER-REJECTED",
+          "label": "custody_group_count < CUSTODY_REQUIREMENT → MAY reject"
+        },
+        {
+          "id": "EDGE-CUSTODY-OK",
+          "source": "ACTION-CHECK-CUSTODY-REQUIREMENT",
+          "target": "STATE-PEER-CONNECTED",
+          "label": "Adequate custody → accept peer"
+        },
+        {
+          "id": "EDGE-LOCAL-SUPERNODE-CHECK",
+          "source": "EXT-LOCAL-VALIDATORS",
+          "target": "ACTION-CHECK-SUPERNODE-THRESHOLD",
+          "label": "Check combined validator balance",
+          "data_involved": ["DATA-VALIDATOR-BALANCES"]
+        },
+        {
+          "id": "EDGE-SUPERNODE-REQUIRED",
+          "source": "ACTION-CHECK-SUPERNODE-THRESHOLD",
+          "target": "STATE-SUPERNODE-ACTIVE",
+          "label": "Balance >= 4096 ETH → supernode mode"
+        },
+        {
+          "id": "EDGE-REGULAR-NODE",
+          "source": "ACTION-CHECK-SUPERNODE-THRESHOLD",
+          "target": "STATE-REGULAR-NODE-ACTIVE",
+          "label": "Balance < 4096 ETH → regular custody"
+        },
+        {
+          "id": "EDGE-ONGOING-SCORING",
+          "source": "STATE-PEER-CONNECTED",
+          "target": "ACTION-SCORE-PEER-CUSTODY-COMPLIANCE",
+          "label": "Continuously monitor peer custody responses"
+        },
+        {
+          "id": "EDGE-SCORE-DISCONNECT",
+          "source": "ACTION-SCORE-PEER-CUSTODY-COMPLIANCE",
+          "target": "STATE-PEER-REJECTED",
+          "label": "Non-compliant peer → downscore/disconnect"
+        }
+      ],
+      "external_entities": [
+        {
+          "id": "EXT-DISCOVERY-NETWORK",
+          "name": "discv5 Discovery Network",
+          "description": "The discovery v5 protocol used to find peers and exchange ENR records"
+        },
+        {
+          "id": "EXT-LOCAL-VALIDATORS",
+          "name": "Local Validator Set",
+          "description": "The set of validators managed by this node, whose combined balance determines supernode requirement"
+        }
+      ]
+    },
+    {
+      "id": "SUBGRAPH-FULU-P2P-FORK-TRANSITION",
+      "aspect": "state_transition",
+      "title": "Fulu P2P: Fork Transition and Protocol Deprecation",
+      "description": "Models the state transitions during the Fulu fork activation, including blob sidecar deprecation, data column activation, and backward-compatible serving during the transition period.",
+      "nodes": [
+        {
+          "id": "STATE-PRE-FULU-EPOCH",
+          "label": "Pre-Fulu: Blob Sidecars Active",
+          "type": "State",
+          "description": "System is before FULU_FORK_EPOCH; BlobSidecarsByRange and BlobSidecarsByRoot are active protocols"
+        },
+        {
+          "id": "STATE-FULU-EPOCH-REACHED",
+          "label": "Fulu Fork Epoch Reached",
+          "type": "State",
+          "description": "Current epoch >= FULU_FORK_EPOCH; data column protocols activate, blob sidecar topics deprecated"
+        },
+        {
+          "id": "ACTION-ACTIVATE-DATA-COLUMN-PROTOCOLS",
+          "label": "Activate Data Column Req/Resp Protocols",
+          "type": "Action",
+          "description": "Enable DataColumnSidecarsByRange and DataColumnSidecarsByRoot req/resp protocols"
+        },
+        {
+          "id": "ACTION-SUBSCRIBE-DATA-COLUMN-SUBNETS",
+          "label": "Subscribe to Data Column Gossip Subnets",
+          "type": "Action",
+          "description": "Subscribe to data_column_sidecar_{subnet_id} topics based on custody assignments; unsubscribe from blob_sidecar_{subnet_id}"
+        },
+        {
+          "id": "STATE-TRANSITION-PERIOD",
+          "label": "Transition Period: Blob Backward Compat Active",
+          "type": "State",
+          "description": "Period [FULU_FORK_EPOCH, FULU_FORK_EPOCH + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS) where blob sidecar req/resp is still served for pre-Fulu range"
+        },
+        {
+          "id": "ACTION-SERVE-BLOB-SIDECARS-TRANSITION",
+          "label": "Serve Blob Sidecars for Pre-Fulu Range",
+          "type": "Action",
+          "description": "Respond to BlobSidecarsByRange/Root with sidecars from [min(current_epoch - MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS, FULU_FORK_EPOCH), FULU_FORK_EPOCH)"
+        },
+        {
+          "id": "STATE-BLOB-PROTOCOLS-DEPRECATED",
+          "label": "Blob Sidecar Protocols Fully Deprecated",
+          "type": "State",
+          "description": "Epoch >= FULU_FORK_EPOCH + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS; BlobSidecarsByRange and BlobSidecarsByRoot no longer served"
+        },
+        {
+          "id": "ACTION-BACKFILL-DATA-COLUMNS",
+          "label": "Backfill Data Column Database",
+          "type": "Action",
+          "description": "Clients bootstrapping from weak subjectivity checkpoint must backfill data columns to at least data_column_serve_range for compliance"
+        },
+        {
+          "id": "STATE-DATA-COLUMNS-FULLY-OPERATIONAL",
+          "label": "Data Column Protocols Fully Operational",
+          "type": "State",
+          "description": "Node is fully serving data column sidecars across the complete data_column_serve_range"
+        }
+      ],
+      "edges": [
+        {
+          "id": "EDGE-FORK-TRIGGER",
+          "source": "STATE-PRE-FULU-EPOCH",
+          "target": "STATE-FULU-EPOCH-REACHED",
+          "label": "Current epoch reaches FULU_FORK_EPOCH"
+        },
+        {
+          "id": "EDGE-ACTIVATE-DC",
+          "source": "STATE-FULU-EPOCH-REACHED",
+          "target": "ACTION-ACTIVATE-DATA-COLUMN-PROTOCOLS",
+          "label": "Activate new req/resp protocols"
+        },
+        {
+          "id": "EDGE-SUBSCRIBE-DC",
+          "source": "STATE-FULU-EPOCH-REACHED",
+          "target": "ACTION-SUBSCRIBE-DATA-COLUMN-SUBNETS",
+          "label": "Switch gossip subscriptions"
+        },
+        {
+          "id": "EDGE-ENTER-TRANSITION",
+          "source": "ACTION-ACTIVATE-DATA-COLUMN-PROTOCOLS",
+          "target": "STATE-TRANSITION-PERIOD",
+          "label": "Enter backward-compat transition period"
+        },
+        {
+          "id": "EDGE-SERVE-BLOBS-COMPAT",
+          "source": "STATE-TRANSITION-PERIOD",
+          "target": "ACTION-SERVE-BLOB-SIDECARS-TRANSITION",
+          "label": "Continue serving blob sidecars for pre-Fulu range on request"
+        },
+        {
+          "id": "EDGE-TRANSITION-END",
+          "source": "STATE-TRANSITION-PERIOD",
+          "target": "STATE-BLOB-PROTOCOLS-DEPRECATED",
+          "label": "MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS epochs pass since FULU_FORK_EPOCH"
+        },
+        {
+          "id": "EDGE-BACKFILL",
+          "source": "STATE-FULU-EPOCH-REACHED",
+          "target": "ACTION-BACKFILL-DATA-COLUMNS",
+          "label": "Nodes bootstrapping must backfill data columns"
+        },
+        {
+          "id": "EDGE-BACKFILL-COMPLETE",
+          "source": "ACTION-BACKFILL-DATA-COLUMNS",
+          "target": "STATE-DATA-COLUMNS-FULLY-OPERATIONAL",
+          "label": "Backfill complete → full compliance"
+        },
+        {
+          "id": "EDGE-SUBSCRIBE-COMPLETE",
+          "source": "ACTION-SUBSCRIBE-DATA-COLUMN-SUBNETS",
+          "target": "STATE-DATA-COLUMNS-FULLY-OPERATIONAL",
+          "label": "Subscriptions active → operational"
+        }
+      ],
+      "external_entities": []
+    }
+  ],
+  "ambiguities": [
+    {
+      "id": "AMB-FULU-P2P-01",
+      "type": "Vagueness",
+      "text": "Clients MAY limit the number of data column sidecars in the response but MUST respond with at least the first blob-carrying block's sidecars if they have them.",
+      "resolution_strategy": "Assume that 'first blob-carrying block' means the block with the lowest slot in the requested range that contains non-zero blobs. The MAY limit implies implementations can return fewer than requested as long as they include at least one complete block's worth of sidecars."
+    },
+    {
+      "id": "AMB-FULU-P2P-02",
+      "type": "Omission",
+      "text": "The specification states clients MAY reject peers with custody_group_count less than CUSTODY_REQUIREMENT but does not specify the value of CUSTODY_REQUIREMENT itself in this document.",
+      "resolution_strategy": "Assume CUSTODY_REQUIREMENT is defined in the Fulu beacon chain spec (not the P2P spec). The MAY language means implementations are not strictly required to reject, which could lead to inconsistent enforcement across clients."
+    },
+    {
+      "id": "AMB-FULU-P2P-03",
+      "type": "Semantic",
+      "text": "For rule 13, if the proposer cannot be immediately verified, the sidecar MAY be queued for later processing instead of being REJECTed.",
+      "resolution_strategy": "Assume that 'queued for later processing' means the sidecar is held in a temporary buffer until the shuffling context becomes available (e.g., after parent block processing). This creates a potential resource exhaustion vector if an attacker sends many sidecars with unverifiable proposer indices."
+    },
+    {
+      "id": "AMB-FULU-P2P-04",
+      "type": "Vagueness",
+      "text": "Honest nodes SHOULD query engine_getBlobsV2 - the SHOULD language leaves it ambiguous whether this is functionally required for network health or merely a performance optimization.",
+      "resolution_strategy": "Assume this is critical for distributed blob publishing and data availability. Nodes that skip this step may reduce network-wide column availability. Treat as functionally required for security analysis."
+    },
+    {
+      "id": "AMB-FULU-P2P-05",
+      "type": "Omission",
+      "text": "The specification says to skip verification of locally-retrieved blobs from engine_getBlobsV2 but does not specify what happens if the EL returns corrupted or malicious blob data.",
+      "resolution_strategy": "Assume the local EL is fully trusted. If the EL is compromised, corrupted data columns would be produced and propagated to the network. This is a critical trust boundary assumption."
+    }
+  ],
+  "implicit_assumptions": [
+    {
+      "id": "ASSUM-FULU-P2P-01",
+      "type": "Trust",
+      "description": "The local execution layer client (engine_getBlobsV2) is trusted to return correct blob data. Verification is explicitly skipped for locally-retrieved blobs.",
+      "impact_if_false": "A compromised or buggy execution layer client could cause the consensus layer to produce and propagate invalid data columns to the network, potentially causing data availability failures or consensus splits."
+    },
+    {
+      "id": "ASSUM-FULU-P2P-02",
+      "type": "Environmental",
+      "description": "The network will have enough supernodes (hundreds) to ensure data column reconstruction is viable. At minimum one supernode must be available for reconstruction.",
+      "impact_if_false": "If insufficient supernodes exist, data columns may become unavailable for reconstruction, leading to data availability failures and potential finality stalls."
+    },
+    {
+      "id": "ASSUM-FULU-P2P-03",
+      "type": "Attacker Capability",
+      "description": "An attacker cannot create valid KZG proofs for arbitrary column data without possessing the original blob data, due to the binding property of KZG commitments.",
+      "impact_if_false": "Attackers could forge data column sidecars that pass all validation checks but contain incorrect data, breaking the data availability guarantee."
+    },
+    {
+      "id": "ASSUM-FULU-P2P-04",
+      "type": "Operational",
+      "description": "Clients bootstrapping from a weak subjectivity checkpoint will backfill their data column database to at least data_column_serve_range before being expected to serve requests.",
+      "impact_if_false": "Incompletely synced nodes would be unable to serve DataColumnSidecarsByRange requests, potentially being banned by peers and reducing network data availability capacity."
+    },
+    {
+      "id": "ASSUM-FULU-P2P-05",
+      "type": "Trust",
+      "description": "The anti-equivocation cache is correctly maintained for locally-imported data columns (not just gossip-received ones), preventing equivocation attacks via the local EL path.",
+      "impact_if_false": "Equivocating proposers could bypass detection by having their conflicting sidecars imported via the local EL path on different nodes, leading to different nodes accepting different versions of the same column."
+    },
+    {
+      "id": "ASSUM-FULU-P2P-06",
+      "type": "Attacker Capability",
+      "description": "An attacker cannot send enough unverifiable-proposer sidecars to exhaust the queue buffer implied by rule 13's MAY-queue provision.",
+      "impact_if_false": "Resource exhaustion attack: attacker floods sidecars referencing unknown parents, causing unbounded memory growth in the queue buffer across all validating nodes."
+    }
+  ]
+}
