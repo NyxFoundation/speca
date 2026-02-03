@@ -45,6 +45,12 @@ Process subgraph files from your assigned worker queue. For each subgraph, ident
 **If a Bug Bounty Scope block is provided at the top of this prompt, treat it as the source of truth.**
 If not, check for `outputs/BUG_BOUNTY_SCOPE.json`. If neither exists, use the default Ethereum scope below.
 
+**When a Bug Bounty Scope block is provided, you MUST copy it into your output as `bug_bounty_scope` with all fields and values intact.**
+Do not summarize, drop keys, rename fields, or replace nested structures. Preserve everything, including
+`trust_assumptions`, `conditional_scope`, `severity_classification`, and any additional fields that appear.
+If you need to add scope-specific rationale, add it under `bug_bounty_scope.out_of_scope_reasons` while preserving all
+existing keys and values.
+
 **In-Scope (default):**
 - P2P network protocols (devp2p, Beacon P2P)
 - Transaction processing and validation
@@ -61,15 +67,30 @@ If not, check for `outputs/BUG_BOUNTY_SCOPE.json`. If neither exists, use the de
 - Tests and infrastructure
 - High-effort DoS (requires sustained attack)
 
-**Define and include a `bug_bounty_scope` object in your output.** If the current EIP or subgraph indicates a different scope, override with explicit rationale in `out_of_scope_reasons`.
+**Define and include a `bug_bounty_scope` object in your output.** If the current EIP or subgraph indicates a different scope, add explicit rationale in `out_of_scope_reasons` without dropping any existing fields.
 
-**Example `bug_bounty_scope`:**
+**Example `bug_bounty_scope` (illustrative only; if a scope block is provided, copy it verbatim and include all fields):**
 ```json
 "bug_bounty_scope": {
   "program_name": "Ethereum Bug Bounty",
   "program_url": "https://ethereum.org/en/bug-bounty/",
   "in_scope_components": ["P2P", "Transaction Pool", "Block Validation", "Engine API"],
   "out_of_scope_components": ["JSON-RPC API", "Beacon API", "Configuration"],
+  "trust_assumptions": {
+    "engine_api": "SEMI_TRUSTED",
+    "local_validator": "SEMI_TRUSTED",
+    "p2p_peers": "UNTRUSTED"
+  },
+  "conditional_scope": [
+    "High-effort DoS may be out-of-scope unless a clear safety impact is shown."
+  ],
+  "severity_classification": {
+    "critical": "Remote consensus failure or chain split",
+    "high": "Funds loss or consensus safety violation",
+    "medium": "Significant degradation or safety risk",
+    "low": "Minor impact or misbehavior",
+    "informational": "No direct security impact"
+  },
   "out_of_scope_reasons": {
     "JSON-RPC API": "Explicitly out-of-scope per Ethereum Bug Bounty",
     "Beacon API": "Explicitly out-of-scope per Ethereum Bug Bounty",
@@ -205,6 +226,9 @@ Report any coverage gaps.
 
 **Partial Trust Model:** `outputs/01d_TRUSTMODEL_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json`
 
+If a Bug Bounty Scope block was provided at the top of this prompt, you MUST copy it verbatim as `bug_bounty_scope` and include all fields.
+Do not drop or rename keys.
+
 ```json
 {
   "metadata": {
@@ -237,6 +261,21 @@ Report any coverage gaps.
     "program_url": "https://ethereum.org/en/bug-bounty/",
     "in_scope_components": ["P2P", "Transaction Pool", "Block Validation", "Engine API"],
     "out_of_scope_components": ["JSON-RPC API", "Beacon API", "Configuration"],
+    "trust_assumptions": {
+      "engine_api": "SEMI_TRUSTED",
+      "local_validator": "SEMI_TRUSTED",
+      "p2p_peers": "UNTRUSTED"
+    },
+    "conditional_scope": [
+      "High-effort DoS may be out-of-scope unless a clear safety impact is shown."
+    ],
+    "severity_classification": {
+      "critical": "Remote consensus failure or chain split",
+      "high": "Funds loss or consensus safety violation",
+      "medium": "Significant degradation or safety risk",
+      "low": "Minor impact or misbehavior",
+      "informational": "No direct security impact"
+    },
     "out_of_scope_reasons": {
       "JSON-RPC API": "Explicitly out-of-scope per Ethereum Bug Bounty",
       "Beacon API": "Explicitly out-of-scope per Ethereum Bug Bounty",

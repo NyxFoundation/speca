@@ -27,6 +27,7 @@ FORCE_EXECUTE ?=
         01a 01b-parallel 01c-parallel 01d-parallel 01e-parallel \
         02-parallel 02s \
         03-parallel 04-parallel \
+        benchmark-all benchmark-setup benchmark-run benchmark-evaluate benchmark-report \
         clean help
 
 # Default target: run full pipeline
@@ -80,6 +81,13 @@ help:
 	@echo "Examples:"
 	@echo "  make 01b-parallel WORKERS=8"
 	@echo "  make preparation WORKERS=4"
+	@echo ""
+	@echo "Benchmark Targets:"
+	@echo "  benchmark-all      - Run setup, tools, and evaluation"
+	@echo "  benchmark-setup    - Download benchmark datasets"
+	@echo "  benchmark-run      - Run benchmark tools in Docker"
+	@echo "  benchmark-evaluate - Compute metrics from results"
+	@echo "  benchmark-report   - Generate Markdown report (if available)"
 
 # Init for audit phase (requires git repo)
 init:
@@ -177,11 +185,6 @@ clean:
 01d-parallel:
 	@if [ ! -d "$(OUTPUT_DIR)/01b_SUBGRAPHS" ] || [ -z "$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/*.json 2>/dev/null)" ]; then \
 		echo "❌ Error: No subgraphs found. Run 01b-parallel first."; exit 1; \
-	fi; \
-	if [ -n "$(BUG_BOUNTY_SCOPE)" ]; then \
-		mkdir -p $(OUTPUT_DIR); \
-		echo "$$BUG_BOUNTY_SCOPE" > $(OUTPUT_DIR)/BUG_BOUNTY_SCOPE.json; \
-		echo "✅ Wrote BUG_BOUNTY_SCOPE.json"; \
 	fi; \
 	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 01d-parallel: property partials exist (use FORCE_EXECUTE=1 to override)"; \
@@ -291,4 +294,26 @@ clean:
 		python3 scripts/run_parallel.py --phase 04 --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
 		echo "✅ Parallel audit review complete"; \
 	fi
+
+# ------------------------------------------------------
+# Benchmark Infrastructure
+# ------------------------------------------------------
+
+benchmark-all: benchmark-setup benchmark-run benchmark-evaluate
+	@echo "Benchmark pipeline completed."
+
+benchmark-setup:
+	python3 scripts/setup_benchmark.py
+
+benchmark-run:
+	docker build -t security-agent-benchmark -f benchmarks/Dockerfile .
+	docker run --rm -v $(shell pwd):/app security-agent-benchmark \
+	    python3 /app/benchmarks/runners/run_semgrep.py
+
+benchmark-evaluate:
+	docker run --rm -v $(shell pwd):/app security-agent-benchmark \
+	    python3 /app/benchmarks/evaluate.py
+
+benchmark-report:
+	@echo "Benchmark report generation is not configured yet."
 

@@ -137,6 +137,11 @@ If a Bug Bounty Scope block is provided at the top of this prompt, use it to cla
 Otherwise, if `outputs/BUG_BOUNTY_SCOPE.json` exists, use it. If neither exists, use the default Ethereum scope.
 
 **Guidelines**:
+- **`classification`**:
+  - `external-reachable`: Attacker can reach this code path from external input (P2P, Transaction, Engine API)
+  - `internal-only`: Only reachable through internal bugs (e.g., integer overflow, type confusion)
+  - `configuration-dependent`: Reachable only if node operator misconfigures the system
+  - `unreachable`: Not reachable from any attacker-controlled input (e.g., protected by limits)
 - **`entry_points`**: Where external input enters (P2P, Transaction, RPC, Engine API, Internal API)
 - **`attacker_controlled`**: Can an external attacker control this input?
 - **`validation_layers`**: What validation exists before reaching this code?
@@ -157,12 +162,33 @@ For each property, add an `exploitability` classification:
 - **`cl-dependency`**: Requires malicious CL node
 - **`api-only`**: Only exploitable via JSON-RPC/Beacon API (out-of-scope)
 
+#### **2.3.2.7: Boundary, Severity, and Bug Bounty Eligibility (NEW)**
+
+For each property, add:
+- **`is_boundary_property`**: true if the property crosses a trust boundary (UNTRUSTED or SEMI_TRUSTED to TRUSTED), else false
+- **`severity`**: One of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFORMATIONAL` based on Bug Bounty Scope severity classification:
+  - `CRITICAL`: Single input can crash >50% of network nodes or cause consensus split
+  - `HIGH`: Single input can crash >33% of network nodes
+  - `MEDIUM`: Single input can crash >5% of network nodes or cause >1% validator slashing
+  - `LOW`: Single input can crash >0.01% of network nodes
+  - `INFORMATIONAL`: Code quality, maintainability, or architectural observations
+- **`severity_justification`**: Brief explanation of the assigned severity
+- **`bug_bounty_eligible`**: true if:
+  - `reachability.bug_bounty_scope` == `in-scope`
+  - `exploitability` in [`external-attack`, `internal-bug`]
+  - `reachability.classification` in [`external-reachable`, `internal-only`]
+- **`bug_bounty_notes`** (optional): extra notes for submission
+
 #### **2.3.3: Property Format**
 
 Each property must include:
+- `property_id`: Unique ID matching the `id` field (must not be null/empty)
 - `id`: Unique ID (e.g., `PROP-W{WORKER_ID}-{SUBGRAPH}-{TYPE}-{N}`)
 - `type`: One of `Pre-condition`, `Post-condition`, `Invariant`
 - `natural_language`: Human-readable statement
+- `source_subgraph_file`: Filename of the subgraph specification this property was derived from (from `metadata.source_files`)
+- `source_subgraph_id`: Unique identifier of the subgraph within the specification file (from the subgraph's `subgraph_id`)
+- `source_spec_hash`: Optional hash extracted from the filename if available
 - `covers`: Object with:
   - `nodes`: List of covered node IDs
   - `edges`: List of covered edge IDs
@@ -171,7 +197,12 @@ Each property must include:
 - `related_ambiguity_id`: If derived from an ambiguity
 - `related_assumption_id`: If derived from an assumption
 - `exploitability`: One of `external-attack`, `internal-bug`, `configuration-error`, `cl-dependency`, `api-only`
-- `reachability`: Object with `entry_points`, `attacker_controlled`, `validation_layers`, `bug_bounty_scope`, `notes`
+- `reachability`: Object with `classification`, `entry_points`, `attacker_controlled`, `validation_layers`, `bug_bounty_scope`, `notes`
+- `is_boundary_property`: true if this property crosses a trust boundary
+- `severity`: One of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFORMATIONAL`
+- `severity_justification`: Brief explanation of the assigned severity
+- `bug_bounty_eligible`: true/false per eligibility rules
+- `bug_bounty_notes`: Optional notes for submission
 
 #### **2.3.4: Coverage Tracking**
 
@@ -208,9 +239,13 @@ Report coverage in metadata.
   },
   "properties": [
     {
+      "property_id": "PROP-W0-EIP4844-PRECOND-001",
       "id": "PROP-W0-EIP4844-PRECOND-001",
       "type": "Pre-condition",
       "natural_language": "The blob transaction gas limit must be greater than the intrinsic gas cost.",
+      "source_subgraph_file": "spec_abc123.json",
+      "source_subgraph_id": "SUBGRAPH-EIP4844-BLOB-TX-VALIDATION",
+      "source_spec_hash": "abc123",
       "covers": {
         "nodes": ["STATE-BLOB-TX-RECEIVED"],
         "edges": ["EDGE-USER-SUBMIT-BLOB-TX"],
@@ -221,17 +256,27 @@ Report coverage in metadata.
       "related_assumption_id": null,
       "exploitability": "external-attack",
       "reachability": {
+        "classification": "external-reachable",
         "entry_points": ["P2P", "Transaction"],
         "attacker_controlled": true,
         "validation_layers": ["Transaction validation", "Gas limit checks"],
         "bug_bounty_scope": "in-scope",
         "notes": "Attacker can submit malformed blob transactions via the P2P network."
-      }
+      },
+      "is_boundary_property": true,
+      "severity": "HIGH",
+      "severity_justification": "A single malformed transaction can crash a large subset of nodes.",
+      "bug_bounty_eligible": true,
+      "bug_bounty_notes": "Requires PoC showing single-transaction crash."
     },
     {
+      "property_id": "PROP-W0-EIP4844-POSTCOND-001",
       "id": "PROP-W0-EIP4844-POSTCOND-001",
       "type": "Post-condition",
       "natural_language": "After blob validation completes, the blob commitment must be stored in the beacon state.",
+      "source_subgraph_file": "spec_abc123.json",
+      "source_subgraph_id": "SUBGRAPH-EIP4844-BLOB-TX-VALIDATION",
+      "source_spec_hash": "abc123",
       "covers": {
         "nodes": ["STATE-BLOB-COMMITMENT-VALID", "ACTION-VALIDATE-KZG-COMMITMENT"],
         "edges": ["EDGE-KZG-VALID"],
@@ -242,12 +287,18 @@ Report coverage in metadata.
       "related_assumption_id": "ASSUM-EIP4844-01",
       "exploitability": "internal-bug",
       "reachability": {
+        "classification": "internal-only",
         "entry_points": ["Internal API"],
         "attacker_controlled": false,
         "validation_layers": [],
         "bug_bounty_scope": "out-of-scope",
         "notes": "Requires an internal caller to violate post-condition; no direct external entry point."
-      }
+      },
+      "is_boundary_property": false,
+      "severity": "LOW",
+      "severity_justification": "Impacts correctness but requires an internal caller.",
+      "bug_bounty_eligible": false,
+      "bug_bounty_notes": null
     }
   ],
   "coverage_summary": {
@@ -281,3 +332,6 @@ Report coverage in metadata.
 - [ ] Internal state transitions have post-conditions
 - [ ] Coverage tracking is accurate
 - [ ] Property IDs are unique
+- [ ] Each property includes property_id, source_subgraph_file, source_subgraph_id
+- [ ] reachability.classification is set and not null
+- [ ] is_boundary_property, severity, and bug_bounty_eligible are set
