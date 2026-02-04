@@ -36,6 +36,10 @@ on:
         required: false
         type: number
         default: 100
+      branch:
+        description: 'Existing audit branch to resume (optional)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -56,6 +60,7 @@ jobs:
         env:
           TARGET_REPO_INPUT: ${{ inputs.target_repo }}
           TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
+          BRANCH_INPUT: ${{ inputs.branch }}
         run: |
           set -euo pipefail
           TARGET_REPO="${TARGET_REPO_INPUT}"
@@ -67,6 +72,7 @@ jobs:
 
           echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
           echo "TARGET_MODE=${TARGET_MODE}" >> "$GITHUB_ENV"
+          echo "BRANCH_INPUT=${BRANCH_INPUT}" >> "$GITHUB_ENV"
           echo "checkout_ref=" >> "$GITHUB_OUTPUT"
       - name: Checkout Branch
         uses: actions/checkout@v4
@@ -145,22 +151,31 @@ jobs:
           repo_name="${{ steps.target_info.outputs.repo_name }}"
           ref_type="${{ inputs.target_ref_type }}"
           commit_version="${{ steps.target_info.outputs.short_sha }}"
-          branch_name="audit_${repo_name}_${ref_type}_${commit_version}"
-          branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
-          echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+          input_branch="${{ inputs.branch }}"
 
           BASE_BRANCH="${{ github.ref_name }}"
-
           git fetch --prune origin
-          git checkout "$BASE_BRANCH"
-          git reset --hard "origin/$BASE_BRANCH"
 
-          if git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
-            echo "Audit branch '${branch_name}' exists. Merging latest changes from '${BASE_BRANCH}'..."
-            git checkout "$branch_name"
-            git pull origin "$branch_name"
-            git merge --no-ff -m "Merge branch '${BASE_BRANCH}'" "$BASE_BRANCH"
+          if [ -n "${input_branch}" ]; then
+            branch_name="${input_branch}"
+            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+            if git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
+              echo "Resuming audit branch '${branch_name}'..."
+              git checkout -b "$branch_name" "origin/$branch_name"
+              git pull origin "$branch_name"
+            else
+              echo "Audit branch '${branch_name}' not found on origin."
+              exit 1
+            fi
           else
+            timestamp="$(date -u +%Y%m%d%H%M%S)"
+            branch_name="audit_${repo_name}_${ref_type}_${commit_version}_${timestamp}"
+            branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
+            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+
+            git checkout "$BASE_BRANCH"
+            git reset --hard "origin/$BASE_BRANCH"
+
             echo "Creating new audit branch '${branch_name}' from '${BASE_BRANCH}'..."
             git checkout -b "$branch_name" "origin/$BASE_BRANCH"
           fi
@@ -189,7 +204,12 @@ jobs:
           git config --global user.email "bot@nyxfoundation.org"
 
       - name: "Step 03: Audit Map (Parallel)"
-        run: make 03-parallel WORKERS=${{ inputs.workers }} MAX_ITERATIONS=${{ inputs.max_iterations }}
+        run: |
+          if [ -n "${{ inputs.branch }}" ]; then
+            make 03-parallel WORKERS=${{ inputs.workers }} MAX_ITERATIONS=${{ inputs.max_iterations }} SKIP_SPLIT=1
+          else
+            make 03-parallel WORKERS=${{ inputs.workers }} MAX_ITERATIONS=${{ inputs.max_iterations }}
+          fi
 
       - name: Save Target Info
         if: always()

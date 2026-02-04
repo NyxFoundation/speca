@@ -1,0 +1,87 @@
+name: "RQ1 Benchmark: Sherlock Audit Map Evaluation"
+
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Comma-separated list of audit branches"
+        required: true
+        type: string
+      use_llm:
+        description: "Use LLM for stage3 matching"
+        required: false
+        type: boolean
+        default: true
+      llm_max:
+        description: "Max LLM calls per branch"
+        required: false
+        type: number
+        default: 200
+
+permissions:
+  contents: write
+
+jobs:
+  sherlock-eval:
+    runs-on: self-hosted
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Fetch Remote Branches
+        run: git fetch --prune origin
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node.js
+        if: ${{ inputs.use_llm }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code
+        if: ${{ inputs.use_llm }}
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Reset Previous Results
+        run: |
+          rm -rf benchmarks/results/sherlock_ethereum_audit_contest
+          mkdir -p benchmarks/results/sherlock_ethereum_audit_contest
+
+      - name: Collect Audit Outputs
+        run: |
+          python3 scripts/collect_branch_outputs.py \
+            --branches "${{ inputs.branches }}" \
+            --output-root "benchmarks/results/sherlock_ethereum_audit_contest"
+
+      - name: Evaluate Matches
+        run: |
+          LLM_FLAG=""
+          if [ "${{ inputs.use_llm }}" = "true" ]; then
+            LLM_FLAG="--use-llm"
+          fi
+          python3 benchmarks/sherlock_compare.py \
+            --branches "${{ inputs.branches }}" \
+            --results-dir "benchmarks/results/sherlock_ethereum_audit_contest" \
+            --llm-max "${{ inputs.llm_max }}" \
+            $LLM_FLAG
+
+      - name: Push Evaluation Results
+        if: always()
+        run: |
+          git add benchmarks/results/sherlock_ethereum_audit_contest/
+          if ! git diff --staged --quiet; then
+            git commit -m "benchmark: sherlock audit evaluation"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git push origin "${{ github.ref_name }}" --force-with-lease
+          fi
