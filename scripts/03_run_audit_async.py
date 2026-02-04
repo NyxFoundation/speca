@@ -335,6 +335,7 @@ class AuditOrchestratorAsync:
             cmd = [
                 "claude",
                 "--dangerously-skip-permissions",
+                "--verbose",
                 "--output-format",
                 "stream-json",
                 "-p",
@@ -354,7 +355,6 @@ class AuditOrchestratorAsync:
                     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
                 }
             )
-            env["HOME"] = str(Path.cwd())
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -367,10 +367,10 @@ class AuditOrchestratorAsync:
                 async with aiofiles.open(log_file, mode="wb") as f:
                     if proc.stdout:
                         while True:
-                            line = await proc.stdout.readline()
-                            if not line:
+                            chunk = await proc.stdout.read(65536)
+                            if not chunk:
                                 break
-                            await f.write(line)
+                            await f.write(chunk)
                 await asyncio.wait_for(proc.wait(), timeout=3600)
             except asyncio.TimeoutError:
                 proc.kill()
