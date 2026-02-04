@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import aiofiles
-from tqdm.asyncio import tqdm_asyncio
+from tqdm import tqdm
 
 OUTPUT_DIR = Path("outputs")
 LOG_DIR = OUTPUT_DIR / "logs"
@@ -312,10 +312,10 @@ class AuditOrchestratorAsync:
             batch_size = len(batch)
             LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-            queue_path = OUTPUT_DIR / f"03_ASYNC_QUEUE_W{worker_id}_{timestamp}_{batch_index}.json"
-            output_path = OUTPUT_DIR / f"03_AUDITMAP_PARTIAL_W{worker_id}_{timestamp}_{batch_index}.json"
+            queue_path = OUTPUT_DIR / f"03_ASYNC_QUEUE_W{worker_id}B{batch_index}_{timestamp}.json"
+            output_path = OUTPUT_DIR / f"03_AUDITMAP_PARTIAL_W{worker_id}B{batch_index}_{timestamp}.json"
             log_file = (
-                LOG_DIR / f"03_auditmap_w{worker_id}_{timestamp}_{batch_index}.log.jsonl"
+                LOG_DIR / f"03_auditmap_w{worker_id}b{batch_index}_{timestamp}.log.jsonl"
             )
 
             save_json(queue_path, build_queue_payload(batch, worker_id, self.num_workers))
@@ -377,7 +377,7 @@ class AuditOrchestratorAsync:
             if stderr:
                 error_log_file = (
                     LOG_DIR
-                    / f"03_auditmap_w{worker_id}_{timestamp}_{batch_index}.error.log"
+                    / f"03_auditmap_w{worker_id}b{batch_index}_{timestamp}.error.log"
                 )
                 try:
                     error_log_file.write_bytes(stderr)
@@ -417,17 +417,23 @@ class AuditOrchestratorAsync:
         batches = self._create_token_based_batches(full_audit_queue)
 
         tasks = []
+        task_sizes: Dict[asyncio.Task[List[Dict[str, Any]]], int] = {}
         for batch in batches:
             worker_id = self._batch_counter % self.num_workers
             self._batch_counter += 1
-            tasks.append(self._run_claude_cli(batch, worker_id, self._batch_counter))
+            task = asyncio.create_task(
+                self._run_claude_cli(batch, worker_id, self._batch_counter)
+            )
+            tasks.append(task)
+            task_sizes[task] = len(batch)
 
         if tasks:
-            batch_results = await tqdm_asyncio.gather(
-                *tasks, desc="Auditing Batches", unit="batch"
-            )
-            for result in batch_results:
-                self.results.extend(result)
+            total_items = len(full_audit_queue)
+            with tqdm(total=total_items, desc="Auditing Items", unit="item") as pbar:
+                for task in asyncio.as_completed(tasks):
+                    result = await task
+                    self.results.extend(result)
+                    pbar.update(task_sizes.get(task, 0))
 
         final_results = early_exit_results + self.results
         timestamp = int(time.time())
