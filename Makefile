@@ -30,7 +30,7 @@ FORCE_EXECUTE ?=
         02-parallel 02s \
         03-parallel 04-parallel \
         benchmark-all benchmark-setup benchmark-run benchmark-evaluate benchmark-report \
-        clean help
+        clean help mcp-setup
 
 # Default target: run full pipeline
 all: preparation audit
@@ -74,6 +74,7 @@ help:
 	@echo ""
 	@echo "Utilities:"
 	@echo "  clean  - Remove generated outputs"
+	@echo "  mcp-setup - Register MCP servers for Claude"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  WORKERS        - Parallel workers (default: 4)"
@@ -119,6 +120,9 @@ clean:
 	rm -rf $(LOG_DIR)/*.json
 	rm -rf $(WORKDIR)/outputs/*.json
 	@echo "✅ Clean completed"
+
+mcp-setup:
+	@bash scripts/setup_mcp.sh
 
 # ------------------------------------------------------
 # Specification Steps (01a - 01e)
@@ -318,4 +322,3 @@ benchmark-evaluate:
 
 benchmark-report:
 	@echo "Benchmark report generation is not configured yet."
-

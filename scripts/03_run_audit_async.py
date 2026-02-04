@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import aiofiles
 from tqdm.asyncio import tqdm_asyncio
 
 OUTPUT_DIR = Path("outputs")
@@ -313,7 +314,9 @@ class AuditOrchestratorAsync:
 
             queue_path = OUTPUT_DIR / f"03_ASYNC_QUEUE_W{worker_id}_{timestamp}_{batch_index}.json"
             output_path = OUTPUT_DIR / f"03_AUDITMAP_PARTIAL_W{worker_id}_{timestamp}_{batch_index}.json"
-            log_file = LOG_DIR / f"03_auditmap_w{worker_id}_{timestamp}_{batch_index}.json"
+            log_file = (
+                LOG_DIR / f"03_auditmap_w{worker_id}_{timestamp}_{batch_index}.log.jsonl"
+            )
 
             save_json(queue_path, build_queue_payload(batch, worker_id, self.num_workers))
 
@@ -331,7 +334,7 @@ class AuditOrchestratorAsync:
                 "claude",
                 "--dangerously-skip-permissions",
                 "--output-format",
-                "json",
+                "stream-json",
                 "-p",
                 prompt_content,
             ]
@@ -353,20 +356,33 @@ class AuditOrchestratorAsync:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=str(Path.cwd()),
             )
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+                async with aiofiles.open(log_file, mode="wb") as f:
+                    if proc.stdout:
+                        while True:
+                            line = await proc.stdout.readline()
+                            if not line:
+                                break
+                            await f.write(line)
+                await asyncio.wait_for(proc.wait(), timeout=3600)
             except asyncio.TimeoutError:
                 proc.kill()
                 return []
 
-            try:
-                log_file.write_bytes(stdout or b"")
-            except Exception:
-                pass
+            stderr = await proc.stderr.read() if proc.stderr else b""
+            if stderr:
+                error_log_file = (
+                    LOG_DIR
+                    / f"03_auditmap_w{worker_id}_{timestamp}_{batch_index}.error.log"
+                )
+                try:
+                    error_log_file.write_bytes(stderr)
+                except Exception:
+                    pass
 
             if proc.returncode != 0:
                 print(
