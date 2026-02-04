@@ -312,6 +312,7 @@ class AuditOrchestratorAsync:
             timestamp = int(time.time())
             batch_size = len(batch)
             LOG_DIR.mkdir(parents=True, exist_ok=True)
+            Path(".claude/debug").mkdir(parents=True, exist_ok=True)
 
             queue_path = OUTPUT_DIR / f"03_ASYNC_QUEUE_W{worker_id}B{batch_index}_{timestamp}.json"
             output_path = OUTPUT_DIR / f"03_AUDITMAP_PARTIAL_W{worker_id}B{batch_index}_{timestamp}.json"
@@ -353,6 +354,7 @@ class AuditOrchestratorAsync:
                     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
                 }
             )
+            env["HOME"] = str(Path.cwd())
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,

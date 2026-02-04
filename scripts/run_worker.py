@@ -406,6 +406,8 @@ def run_claude(
         env["BATCH_SIZE"] = str(batch_size)
     env["CLAUDE_CODE_PERMISSIONS"] = "bypassPermissions"
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "100000"
+    Path(".claude/debug").mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(Path.cwd())
 
     start_time = time.time()
 
