@@ -67,14 +67,6 @@ PHASE_CONFIG = {
         "workdir": None,
         "max_batch_bytes": 120 * 1024,
     },
-    "03": {
-        "queue_file": "outputs/03_QUEUE_{worker_id}.json",
-        "prompt_file": "prompts/03_auditmap_worker.md",
-        "log_prefix": "outputs/logs/03_auditmap_w{worker_id}",
-        "workdir": "target_workspace",
-        "max_batch_bytes": 120 * 1024,
-        "dynamic_batch_size_keys": ["checklist_file", "subgraph_file"],
-    },
     "04": {
         "queue_file": "outputs/04_QUEUE_{worker_id}.json",
         "prompt_file": "prompts/04_review_worker.md",
@@ -150,12 +142,6 @@ def extract_output_ids(output_data: Any, phase: str) -> list[str]:
             for item in checklist
             if isinstance(item, dict) and item.get("property_id")
         ]
-    if phase == "03":
-        if isinstance(output_data, dict):
-            audit_items = output_data.get("audit_items", [])
-        else:
-            audit_items = output_data
-        return [item.get("check_id") for item in audit_items if isinstance(item, dict) and item.get("check_id")]
     if phase == "04":
         if isinstance(output_data, dict):
             reviewed_items = output_data.get("reviewed_items", [])
@@ -493,7 +479,7 @@ def main():
         "--phase",
         required=True,
         choices=list(PHASE_CONFIG.keys()),
-        help="Phase to run (01b, 01c, 01d, 01e, 02, 03, 04)",
+        help="Phase to run (01b, 01c, 01d, 01e, 02, 04)",
     )
     parser.add_argument(
         "--worker-id",
@@ -552,7 +538,7 @@ def main():
     if audit_scope and audit_scope != "auto":
         env_vars["AUDIT_SCOPE"] = audit_scope
     bug_bounty_scope = None
-    if args.phase in ("01d", "01e", "02", "03"):
+    if args.phase in ("01d", "01e", "02"):
         bug_bounty_scope = load_bug_bounty_scope()
 
     iteration = 0
@@ -581,11 +567,6 @@ def main():
                 f"outputs/02_CHECKLIST_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
             )
             env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
-        if args.phase == "03":
-            output_file = (
-                f"outputs/03_AUDITMAP_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
-            )
-            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
         if args.phase == "01d":
             output_file = (
                 f"outputs/01d_TRUSTMODEL_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
@@ -602,7 +583,7 @@ def main():
             )
             env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
         batch_size = args.batch_size
-        if batch_size is None and args.phase in ("01e", "02", "03"):
+        if batch_size is None and args.phase in ("01e", "02"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)
             batch_size = get_dynamic_batch_size(queue_file, max_bytes, config)
             if batch_size > 0:
@@ -636,7 +617,7 @@ def main():
         status = "OK" if success else "FAILED"
         print(f"  Iteration {iteration}: {status} ({duration:.1f}s, ${cost})")
 
-        if success and args.phase in ("01b", "01c", "01d", "01e", "02", "03", "04"):
+        if success and args.phase in ("01b", "01c", "01d", "01e", "02", "04"):
             output_ids: list[str] = []
             if args.phase == "01b":
                 output_ids = collect_01b_output_ids(args.worker_id, timestamp, iteration)

@@ -5,7 +5,6 @@ Split a work queue into multiple worker-specific queues for parallel processing.
 Usage:
     python3 scripts/split_queue.py --phase 01b --workers 4
     python3 scripts/split_queue.py --phase 02 --workers 4
-    python3 scripts/split_queue.py --phase 03 --workers 4
     python3 scripts/split_queue.py --phase 04 --workers 4
 """
 
@@ -54,28 +53,6 @@ PHASE_CONFIG = {
             "item_key": "properties",
             "id_key": "id",
             "id_field": "property_id",
-        },
-    },
-    "03": {
-        "state_file": "outputs/03_STATE.json",
-        "queue_key": "unprocessed_checklist_ids",
-        "output_prefix": "outputs/03_QUEUE",
-        # For 03, we need to initialize from 02 checklist partials
-        "init_from_glob_items": {
-            "pattern": "outputs/02_CHECKLIST_PARTIAL_*.json",
-            "item_keys": ["checklist_items", "checklist"],
-            "id_key": "id",
-            "id_field": "check_id",
-            "include_item": True,
-            "item_field": "checklist_item",
-            "include_file_field": "checklist_file",
-            "augment_property_subgraph": {
-                "pattern": "outputs/01e_PROP_PARTIAL_*.json",
-                "item_key": "properties",
-                "property_id_key": "id",
-                "subgraph_id_key": "subgraph_id",
-                "subgraph_file_prefix": "outputs/01b_SUBGRAPHS",
-            },
         },
     },
     "04": {
@@ -163,7 +140,7 @@ def init_from_glob_files(init_config: dict[str, Any]) -> list[str]:
 
 
 def init_from_glob_items(init_config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Initialize queue from glob pattern returning item descriptors (for 02, 03)."""
+    """Initialize queue from glob pattern returning item descriptors (for 02)."""
     import glob
 
     pattern = init_config["pattern"]
@@ -293,7 +270,7 @@ def build_property_to_subgraph_map_via_elements(
 
 
 def init_from_glob(init_config: dict[str, Any]) -> list[str]:
-    """Initialize queue from glob pattern (for 03, 04)."""
+    """Initialize queue from glob pattern (for 04)."""
     import glob
 
     pattern = init_config["pattern"]
@@ -341,7 +318,7 @@ def main():
         "--phase",
         required=True,
         choices=list(PHASE_CONFIG.keys()),
-        help="Phase to split (01b, 01c, 01d, 01e, 02, 03, 04)",
+        help="Phase to split (01b, 01c, 01d, 01e, 02, 04)",
     )
     parser.add_argument(
         "--workers",

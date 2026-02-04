@@ -13,6 +13,7 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS := 100000
 
 # Claude configuration
 CLAUDE_FLAGS ?= --dangerously-skip-permissions --agent serena --output-format json
+PYTHON_RUNNER ?= uv run python3
 
 # Max iteration counts (safety limit)
 MAX_ITERATIONS ?= 100
@@ -20,6 +21,7 @@ MAX_ITERATIONS ?= 100
 # Parallel execution configuration
 WORKERS ?= 4
 BATCH_SIZE ?= 10
+MAX_CONCURRENT ?= 4
 SKIP_SPLIT ?=
 FORCE_EXECUTE ?=
 
@@ -75,13 +77,13 @@ help:
 	@echo ""
 	@echo "Configuration:"
 	@echo "  WORKERS        - Parallel workers (default: 4)"
+	@echo "  MAX_CONCURRENT - Max concurrent Claude calls (default: 4)"
 	@echo "  MAX_ITERATIONS - Safety limit (default: 100)"
 	@echo "  BATCH_SIZE     - Items per iteration (default: 10)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make 01b-parallel WORKERS=8"
 	@echo "  make preparation WORKERS=4"
-	@echo ""
 	@echo "Benchmark Targets:"
 	@echo "  benchmark-all      - Run setup, tools, and evaluation"
 	@echo "  benchmark-setup    - Download benchmark datasets"
@@ -267,9 +269,9 @@ clean:
 	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/04_REVIEW_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 03-parallel: 04_REVIEW_PARTIAL_*.json exists (use FORCE_EXECUTE=1 to override)"; \
 	else \
-		echo "🚀 Running 03_auditmap.md in parallel with $(WORKERS) workers..."; \
-		python3 scripts/run_parallel.py --phase 03 --workers $(WORKERS) --max-iterations $(MAX_ITERATIONS) $(if $(SKIP_SPLIT),--skip-split,); \
-		echo "✅ Parallel audit map generation complete"; \
+		echo "🚀 Running 03 Audit Map Async Orchestrator..."; \
+		$(PYTHON_RUNNER) scripts/03_run_audit_async.py --workers $(WORKERS) --max-concurrent $(MAX_CONCURRENT); \
+		echo "✅ Audit map generation complete."; \
 	fi
 
 # Step 04-parallel: Parallel audit review using multiple workers

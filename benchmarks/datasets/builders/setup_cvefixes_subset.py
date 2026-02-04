@@ -77,8 +77,18 @@ ID_COLS = ["id", "function_id", "func_id", "method_id"]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build CVEfixes subset dataset.")
-    parser.add_argument("--db", type=Path, required=True, help="Path to CVEfixes SQLite DB")
-    parser.add_argument("--output", type=Path, required=True, help="Output JSONL path")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path("benchmarks/data/cvefixes/CVEfixes.db"),
+        help="Path to CVEfixes SQLite DB",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("benchmarks/data/cvefixes/cvefixes_subset_paired.jsonl"),
+        help="Output JSONL path",
+    )
     parser.add_argument("--repos", type=str, default=",".join(DEFAULT_REPOS))
     parser.add_argument("--max-per-repo", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)

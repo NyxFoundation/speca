@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
 
 @dataclass(frozen=True)
 class CommandSpec:
@@ -29,9 +31,9 @@ class CommandSpec:
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=False, default=None)
     parser.add_argument("--tmp-dir", type=Path, required=True)
-    parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument("--metadata", type=Path, required=False, default=None)
     parser.add_argument("--tool-name", type=str, default="")
     parser.add_argument(
         "--command",
@@ -57,6 +59,16 @@ def command_spec_from_args(args: argparse.Namespace) -> CommandSpec:
         tool_name=args.tool_name,
         metadata=args.metadata,
     )
+
+
+def default_results_path(tool_name: str, dataset_path: Path) -> Path:
+    dataset_name = dataset_path.parent.name
+    return ROOT_DIR / "benchmarks" / "results" / "rq2" / dataset_name / f"{tool_name}_results.jsonl"
+
+
+def default_metadata_path(tool_name: str, dataset_path: Path) -> Path:
+    dataset_name = dataset_path.parent.name
+    return ROOT_DIR / "benchmarks" / "results" / "rq2" / dataset_name / f"{tool_name}_metadata.json"
 
 
 def run_command(

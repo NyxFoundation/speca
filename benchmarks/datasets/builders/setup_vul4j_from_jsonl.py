@@ -19,8 +19,18 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare Vul4J dataset from JSONL.")
-    parser.add_argument("--input", type=Path, required=True, help="Input JSONL export")
-    parser.add_argument("--output", type=Path, required=True, help="Output JSONL path")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=Path("benchmarks/data/vul4j/vul4j_export.jsonl"),
+        help="Input JSONL export",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("benchmarks/data/vul4j/vul4j_paired.jsonl"),
+        help="Output JSONL path",
+    )
     parser.add_argument("--limit", type=int, default=0)
     return parser.parse_args()
 

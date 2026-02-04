@@ -2,11 +2,13 @@
 """Downloads and prepares benchmark datasets."""
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "benchmarks" / "data"
+CACHE_DIR = Path.home() / ".cache" / "security-agent" / "benchmarks"
 
 # Dataset configurations
 DATASETS = {
@@ -25,9 +27,15 @@ def setup_dataset(name: str, config: dict) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     target_file = output_dir / os.path.basename(config["url"])
+    cache_file = CACHE_DIR / name / target_file.name
 
     if target_file.exists():
         print(f"    Dataset already exists at {target_file}. Skipping download.")
+        return
+    if cache_file.exists():
+        print(f"    Using cached dataset at {cache_file}.")
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cache_file, target_file)
         return
 
     print(f"    Downloading from {config['url']}...")
@@ -36,6 +44,8 @@ def setup_dataset(name: str, config: dict) -> None:
         check=True,
         capture_output=True,
     )
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target_file, cache_file)
     print(f"    Successfully downloaded to {target_file}")
 
 

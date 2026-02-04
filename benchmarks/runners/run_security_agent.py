@@ -18,14 +18,15 @@ from benchmarks.bench_utils import (
 from benchmarks.runners.base_runner import (
     add_common_args,
     command_spec_from_args,
+    default_metadata_path,
     default_prediction_loader,
+    default_results_path,
     run_command,
     write_metadata,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = ROOT_DIR / "benchmarks" / "data" / "primevul" / "primevul_test_paired.jsonl"
-DEFAULT_RESULTS = ROOT_DIR / "benchmarks" / "results" / "security_agent.jsonl"
 DEFAULT_TMP = ROOT_DIR / "benchmarks" / "tmp" / "security_agent"
 DEFAULT_METADATA = None
 
@@ -35,7 +36,6 @@ def parse_args() -> argparse.Namespace:
     add_common_args(parser)
     parser.set_defaults(
         dataset=DEFAULT_DATASET,
-        output=DEFAULT_RESULTS,
         tmp_dir=DEFAULT_TMP,
         tool_name="security_agent",
     )
@@ -48,9 +48,10 @@ def main() -> int:
         print(f"Dataset not found: {args.dataset}", file=sys.stderr)
         return 1
 
+    if args.output is None:
+        args.output = default_results_path("security_agent", args.dataset)
     if args.metadata is None:
-        dataset_name = args.dataset.parent.name
-        args.metadata = ROOT_DIR / "benchmarks" / "results" / "rq2" / dataset_name / "security_agent_metadata.json"
+        args.metadata = default_metadata_path("security_agent", args.dataset)
     spec = command_spec_from_args(args)
     spec.tmp_dir.mkdir(parents=True, exist_ok=True)
     results = []
