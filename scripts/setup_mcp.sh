@@ -16,9 +16,22 @@ for i in "${!SERVERS[@]}"; do
 
   if claude mcp list | grep -q "${SERVER_NAME}"; then
     echo "MCP server '${SERVER_NAME}' already registered."
-  else
-    echo "Registering MCP server '${SERVER_NAME}'..."
-    claude mcp add --scope project --transport stdio "${SERVER_NAME}" -- ${SERVER_COMMAND}
+    continue
+  fi
+
+  if [ -f ".mcp.json" ] && grep -q "\"${SERVER_NAME}\"" ".mcp.json"; then
+    echo "MCP server '${SERVER_NAME}' already registered in .mcp.json."
+    continue
+  fi
+
+  echo "Registering MCP server '${SERVER_NAME}'..."
+  if ! ADD_OUTPUT=$(claude mcp add --scope project --transport stdio "${SERVER_NAME}" -- ${SERVER_COMMAND} 2>&1); then
+    if echo "${ADD_OUTPUT}" | grep -qi "already exists"; then
+      echo "MCP server '${SERVER_NAME}' already exists; skipping."
+    else
+      echo "${ADD_OUTPUT}"
+      exit 1
+    fi
   fi
 done
 
