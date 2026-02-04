@@ -377,17 +377,33 @@ class AuditOrchestratorAsync:
                 return []
 
             stderr = await proc.stderr.read() if proc.stderr else b""
-            if stderr:
+            stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+
+            if proc.returncode != 0:
                 error_log_file = (
                     LOG_DIR
                     / f"03_auditmap_w{worker_id}b{batch_index}_{timestamp}.error.log"
                 )
+                debug_text = ""
+                if not stderr_text:
+                    debug_latest = Path(".claude/debug/latest")
+                    try:
+                        if debug_latest.exists():
+                            debug_text = debug_latest.read_text(errors="replace")
+                    except Exception:
+                        debug_text = ""
                 try:
-                    error_log_file.write_bytes(stderr)
+                    with open(error_log_file, "w") as ef:
+                        ef.write(f"exit_code={proc.returncode}\n")
+                        if stderr_text:
+                            ef.write("\n[stderr]\n")
+                            ef.write(stderr_text)
+                        if debug_text:
+                            ef.write("\n[claude_debug_latest]\n")
+                            ef.write(debug_text)
                 except Exception:
                     pass
 
-            if proc.returncode != 0:
                 print(
                     f"[W{worker_id}] Claude failed for batch {batch_index} (exit {proc.returncode})",
                     file=sys.stderr,

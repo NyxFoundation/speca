@@ -274,7 +274,7 @@ mcp-setup:
 		echo "⏭️  Skipping 03-parallel: 04_REVIEW_PARTIAL_*.json exists (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 03 Audit Map Async Orchestrator..."; \
-		$(PYTHON_RUNNER) scripts/03_run_audit_async.py --workers $(WORKERS) --max-concurrent $(MAX_CONCURRENT); \
+		$(PYTHON_RUNNER) scripts/03_run_audit_async.py --workers $(WORKERS) --max-concurrent $(MAX_CONCURRENT) && \
 		echo "✅ Audit map generation complete."; \
 	fi
 
