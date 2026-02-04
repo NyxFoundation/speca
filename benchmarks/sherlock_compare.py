@@ -78,6 +78,21 @@ def load_csv_issues(path: Path) -> list[Issue]:
     return issues
 
 
+def build_audit_text(raw: dict) -> tuple[str, str, str, str, str]:
+    item_id = str(raw.get("id") or raw.get("check_id") or "")
+    description = str(raw.get("description") or raw.get("summary") or "")
+    snippet = str(raw.get("snippet") or "")
+    file = str(raw.get("file") or "")
+    line = str(raw.get("line") or "")
+
+    code_scope = raw.get("code_scope") if isinstance(raw.get("code_scope"), dict) else {}
+    scope_desc = str(code_scope.get("description") or "")
+
+    text_parts = [description, scope_desc, snippet, file, line]
+    text = "\n".join(part for part in text_parts if part).strip()
+    return item_id, description, snippet, file, line if line else "", text
+
+
 def extract_audit_items(files: Iterable[Path]) -> list[AuditItem]:
     items: list[AuditItem] = []
     for path in files:
@@ -85,20 +100,18 @@ def extract_audit_items(files: Iterable[Path]) -> list[AuditItem]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        if not isinstance(payload, dict):
+
+        raw_items: list[dict] = []
+        if isinstance(payload, dict) and isinstance(payload.get("audit_items"), list):
+            raw_items = [item for item in payload.get("audit_items") if isinstance(item, dict)]
+        elif isinstance(payload, list):
+            raw_items = [item for item in payload if isinstance(item, dict)]
+
+        if not raw_items:
             continue
-        raw_items = payload.get("audit_items")
-        if not isinstance(raw_items, list):
-            continue
+
         for raw in raw_items:
-            if not isinstance(raw, dict):
-                continue
-            item_id = str(raw.get("id") or "")
-            description = str(raw.get("description") or "")
-            snippet = str(raw.get("snippet") or "")
-            file = str(raw.get("file") or "")
-            line = str(raw.get("line") or "")
-            text = "\n".join(part for part in [description, snippet, file, line] if part).strip()
+            item_id, description, snippet, file, line, text = build_audit_text(raw)
             normalized = normalize_text(text)
             tokens = tokenize(text)
             items.append(AuditItem(item_id, description, snippet, file, line, text, normalized, tokens))
