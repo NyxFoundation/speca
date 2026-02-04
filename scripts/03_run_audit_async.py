@@ -45,8 +45,6 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-
-
 def build_property_to_subgraph_map_via_elements(
     property_files_pattern: str,
 ) -> dict[str, tuple[str | None, str]]:
@@ -357,7 +355,7 @@ class AuditOrchestratorAsync:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
-                cwd=None,
+                cwd=str(Path.cwd()),
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)

@@ -21,7 +21,7 @@ MAX_ITERATIONS ?= 100
 # Parallel execution configuration
 WORKERS ?= 4
 BATCH_SIZE ?= 10
-MAX_CONCURRENT ?= 4
+MAX_CONCURRENT ?= 64
 SKIP_SPLIT ?=
 FORCE_EXECUTE ?=
 
