@@ -70,6 +70,7 @@ If **any** of the following is true:
 - `code_scope.file` is `N/A`, `SPECIFICATION-ONLY`, or missing
 - No concrete implementation location can be mapped
 - The code scope component is outside the declared audit target (EL vs CL mismatch)
+- The code scope resolves to an **external dependency** (e.g., `vendor/`, `nim-kzg4844`, `c-kzg`, `submodule`, or any library not in this repo)
 
 Then:
 - **Skip Phases 1–3 entirely**
@@ -241,4 +242,25 @@ Produce a JSON object per checklist item (array in the output file) with the fol
     }
   }
 }
+```
+
+---
+
+## 5. Result Output (STDOUT) — **KEEP SHORT**
+
+The `result` text written to stdout **must be brief** to reduce runtime.
+
+**Rules:**
+- Maximum **8 lines** total.
+- **No** long prose, no phase-by-phase narratives.
+- Include only: Check ID, classification, bug bounty eligibility, and a one-line reason.
+- If Early Exit applies, say so in one line.
+
+**Example (max 6 lines):**
+```
+Check: CHECK-...
+Classification: out-of-scope
+Bug bounty: false
+Reason: codebase mismatch (EL vs CL), early exit
+Output: outputs/03_AUDITMAP_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json
 ```
