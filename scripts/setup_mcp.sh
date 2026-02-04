@@ -19,10 +19,10 @@ for i in "${!SERVERS[@]}"; do
     continue
   fi
 
-  if [ -f ".mcp.json" ] && grep -q "\"${SERVER_NAME}\"" ".mcp.json"; then
-    echo "MCP server '${SERVER_NAME}' already registered in .mcp.json."
-    continue
-  fi
+  # if [ -f ".mcp.json" ] && grep -q "\"${SERVER_NAME}\"" ".mcp.json"; then
+  #   echo "MCP server '${SERVER_NAME}' already registered in .mcp.json."
+  #   continue
+  # fi
 
   echo "Registering MCP server '${SERVER_NAME}'..."
   if ! ADD_OUTPUT=$(claude mcp add --scope project --transport stdio "${SERVER_NAME}" -- ${SERVER_COMMAND} 2>&1); then
