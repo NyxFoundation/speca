@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 """Runner for Semgrep against benchmark datasets."""
 
+import argparse
 import json
 import subprocess
 from pathlib import Path
+
+from benchmarks.runners.base_runner import CommandSpec, write_metadata
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "benchmarks" / "data"
 RESULTS_DIR = ROOT_DIR / "benchmarks" / "results"
 
-def run_semgrep_on_primevul():
-    """Run Semgrep on the PrimeVul dataset."""
-    print("--> Running Semgrep on PrimeVul...")
-    dataset_path = DATA_DIR / "primevul" / "primevul_test_paired.jsonl"
-    output_path = RESULTS_DIR / "primevul" / "semgrep_results.json"
+
+def default_output_path(dataset_path: Path) -> Path:
+    dataset_name = dataset_path.parent.name
+    return RESULTS_DIR / "rq2" / dataset_name / "semgrep_results.json"
+
+
+def default_metadata_path(dataset_path: Path) -> Path:
+    dataset_name = dataset_path.parent.name
+    return RESULTS_DIR / "rq2" / dataset_name / "semgrep_metadata.json"
+
+def run_semgrep_on_primevul(dataset_path: Path, output_path: Path, config: str, timeout: int = 0):
+    """Run Semgrep on the dataset."""
+    print(f"--> Running Semgrep on {dataset_path}...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -28,14 +39,23 @@ def run_semgrep_on_primevul():
             temp_file.write_text(code)
 
             # Run Semgrep
-            # Using a generic ruleset for broad coverage. This can be customized.
-            process = subprocess.run(
-                ["semgrep", "--config", "p/c-audit", "--json", str(temp_file)],
-                capture_output=True,
-                text=True,
-            )
+            try:
+                process = subprocess.run(
+                    ["semgrep", "--config", config, "--json", str(temp_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout or None,
+                )
+            except subprocess.TimeoutExpired:
+                results.append({
+                    "func_id": func_id,
+                    "semgrep_findings": [],
+                    "error": "timeout",
+                })
+                temp_file.unlink()
+                continue
             
-            semgrep_output = json.loads(process.stdout)
+            semgrep_output = json.loads(process.stdout) if process.stdout else {}
             results.append({
                 "func_id": func_id,
                 "semgrep_findings": semgrep_output.get("results", []),
@@ -46,11 +66,38 @@ def run_semgrep_on_primevul():
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
     
+    metadata_path = default_metadata_path(dataset_path)
+    write_metadata(
+        CommandSpec(
+            dataset=dataset_path,
+            output=output_path,
+            tmp_dir=Path("/tmp"),
+            command=f"semgrep --config {config}",
+            version_command="semgrep --version",
+            timeout=timeout,
+            use_shell=False,
+            limit=0,
+            tool_name="semgrep",
+            metadata=metadata_path,
+        ),
+        extra={"config": config},
+    )
     print(f"    Semgrep results saved to {output_path}")
 
 def main():
     """Main function to run all benchmarks."""
-    run_semgrep_on_primevul()
+    parser = argparse.ArgumentParser(description="Run Semgrep benchmark runner.")
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DATA_DIR / "primevul" / "primevul_test_paired.jsonl",
+    )
+    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--config", type=str, default="p/c-audit")
+    parser.add_argument("--timeout", type=int, default=0, help="Per-sample timeout in seconds (0 = no timeout)")
+    args = parser.parse_args()
+    output_path = args.output or default_output_path(args.dataset)
+    run_semgrep_on_primevul(args.dataset, output_path, args.config, timeout=args.timeout)
     # Add other dataset runners here
 
 if __name__ == "__main__":

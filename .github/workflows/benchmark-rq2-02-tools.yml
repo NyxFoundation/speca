@@ -17,6 +17,46 @@ on:
         required: true
         type: string
         default: "all"
+      security_agent_command:
+        description: "Command template for Security Agent runner (use {code_path} {output_path} {case_id})"
+        required: false
+        type: string
+        default: ""
+      security_agent_version_command:
+        description: "Version command for Security Agent (optional)"
+        required: false
+        type: string
+        default: ""
+      llm_command:
+        description: "Command template for LLM baseline runner (use {code_path} {output_path} {case_id})"
+        required: false
+        type: string
+        default: ""
+      llm_version_command:
+        description: "Version command for LLM baseline (optional)"
+        required: false
+        type: string
+        default: ""
+      static_command:
+        description: "Command template for static baseline runner (use {code_path} {output_path} {case_id})"
+        required: false
+        type: string
+        default: ""
+      static_tool_name:
+        description: "Name for static baseline tool (e.g., infer/cppcheck)"
+        required: false
+        type: string
+        default: "static_baseline"
+      static_version_command:
+        description: "Version command for static baseline (optional)"
+        required: false
+        type: string
+        default: ""
+      tool_timeout:
+        description: "Per-sample timeout seconds for tool runners"
+        required: false
+        type: number
+        default: 0
       codeql_command:
         description: "Command template for CodeQL runner (use {code_path} {output_path} {case_id})"
         required: false
@@ -47,15 +87,36 @@ jobs:
 
       - name: Validate Dataset Selection
         run: |
-          if [ "${{ inputs.dataset }}" != "primevul" ]; then
-            echo "Only primevul is supported right now."
-            exit 1
-          fi
+          case "${{ inputs.dataset }}" in
+            primevul|cvefixes|vul4j)
+              echo "Dataset=${{ inputs.dataset }}"
+              ;;
+            *)
+              echo "Unsupported dataset: ${{ inputs.dataset }}"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve Dataset Paths
+        run: |
+          case "${{ inputs.dataset }}" in
+            primevul)
+              DATASET_PATH="benchmarks/data/primevul/primevul_test_paired.jsonl"
+              ;;
+            cvefixes)
+              DATASET_PATH="benchmarks/data/cvefixes/cvefixes_subset_paired.jsonl"
+              ;;
+            vul4j)
+              DATASET_PATH="benchmarks/data/vul4j/vul4j_paired.jsonl"
+              ;;
+          esac
+          echo "DATASET_PATH=${DATASET_PATH}" >> $GITHUB_ENV
+          echo "RESULTS_DIR=benchmarks/results/rq2/${{ inputs.dataset }}" >> $GITHUB_ENV
 
       - name: Verify Dataset
         run: |
-          if [ ! -f "benchmarks/data/primevul/primevul_test_paired.jsonl" ]; then
-            echo "Dataset missing. Run benchmark-01-setup first."
+          if [ ! -f "${DATASET_PATH}" ]; then
+            echo "Dataset missing at ${DATASET_PATH}. Run benchmark-01-setup first."
             exit 1
           fi
 
@@ -73,6 +134,9 @@ jobs:
           if [ "$TOOLS" = "all" ]; then
             echo "run_semgrep=true" >> $GITHUB_OUTPUT
             echo "run_codeql=true" >> $GITHUB_OUTPUT
+            echo "run_security_agent=true" >> $GITHUB_OUTPUT
+            echo "run_llm=true" >> $GITHUB_OUTPUT
+            echo "run_static=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           if echo "$TOOLS" | grep -q "semgrep"; then
@@ -85,6 +149,21 @@ jobs:
           else
             echo "run_codeql=false" >> $GITHUB_OUTPUT
           fi
+          if echo "$TOOLS" | grep -Eq "security_agent|agent"; then
+            echo "run_security_agent=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_security_agent=false" >> $GITHUB_OUTPUT
+          fi
+          if echo "$TOOLS" | grep -q "llm"; then
+            echo "run_llm=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_llm=false" >> $GITHUB_OUTPUT
+          fi
+          if echo "$TOOLS" | grep -q "static"; then
+            echo "run_static=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_static=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build Benchmark Image (Semgrep)
         if: steps.tool_select.outputs.run_semgrep == 'true'
@@ -93,12 +172,15 @@ jobs:
       - name: Run Semgrep
         if: steps.tool_select.outputs.run_semgrep == 'true'
         run: |
-          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "benchmarks/results/primevul/semgrep_results.json" ]; then
+          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "${RESULTS_DIR}/semgrep_results.json" ]; then
             echo "Semgrep results already exist. Use force_execute to re-run."
             exit 0
           fi
           docker run --rm -v "$PWD":/app security-agent-benchmark \
-            python3 /app/benchmarks/runners/run_semgrep.py
+            python3 /app/benchmarks/runners/run_semgrep.py \
+              --dataset "/app/${DATASET_PATH}" \
+              --output "/app/${RESULTS_DIR}/semgrep_results.json" \
+              --timeout "${{ inputs.tool_timeout }}"
 
       - name: Run CodeQL
         if: steps.tool_select.outputs.run_codeql == 'true'
@@ -107,14 +189,73 @@ jobs:
             echo "codeql_command is required when codeql is selected."
             exit 1
           fi
-          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "benchmarks/results/primevul/codeql_results.jsonl" ]; then
+          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "${RESULTS_DIR}/codeql_results.jsonl" ]; then
             echo "CodeQL results already exist. Use force_execute to re-run."
             exit 0
           fi
           uv run python benchmarks/runners/run_codeql.py \
-            --dataset "benchmarks/data/primevul/primevul_test_paired.jsonl" \
-            --output "benchmarks/results/primevul/codeql_results.jsonl" \
+            --dataset "${DATASET_PATH}" \
+            --output "${RESULTS_DIR}/codeql_results.jsonl" \
             --command "${{ inputs.codeql_command }}" \
+            --timeout "${{ inputs.tool_timeout }}" \
+            --shell
+
+      - name: Run Security Agent
+        if: steps.tool_select.outputs.run_security_agent == 'true'
+        run: |
+          if [ -z "${{ inputs.security_agent_command }}" ]; then
+            echo "security_agent_command is required when security agent is selected."
+            exit 1
+          fi
+          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "${RESULTS_DIR}/security_agent_results.jsonl" ]; then
+            echo "Security agent results already exist. Use force_execute to re-run."
+            exit 0
+          fi
+          uv run python benchmarks/runners/run_security_agent.py \
+            --dataset "${DATASET_PATH}" \
+            --output "${RESULTS_DIR}/security_agent_results.jsonl" \
+            --command "${{ inputs.security_agent_command }}" \
+            --version-command "${{ inputs.security_agent_version_command }}" \
+            --timeout "${{ inputs.tool_timeout }}" \
+            --shell
+
+      - name: Run LLM Baseline
+        if: steps.tool_select.outputs.run_llm == 'true'
+        run: |
+          if [ -z "${{ inputs.llm_command }}" ]; then
+            echo "llm_command is required when llm baseline is selected."
+            exit 1
+          fi
+          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "${RESULTS_DIR}/llm_baseline_results.jsonl" ]; then
+            echo "LLM baseline results already exist. Use force_execute to re-run."
+            exit 0
+          fi
+          uv run python benchmarks/runners/run_llm_baseline.py \
+            --dataset "${DATASET_PATH}" \
+            --output "${RESULTS_DIR}/llm_baseline_results.jsonl" \
+            --command "${{ inputs.llm_command }}" \
+            --version-command "${{ inputs.llm_version_command }}" \
+            --timeout "${{ inputs.tool_timeout }}" \
+            --shell
+
+      - name: Run Static Baseline
+        if: steps.tool_select.outputs.run_static == 'true'
+        run: |
+          if [ -z "${{ inputs.static_command }}" ]; then
+            echo "static_command is required when static baseline is selected."
+            exit 1
+          fi
+          if [ "${{ inputs.force_execute }}" != "true" ] && [ -f "${RESULTS_DIR}/static_baseline_results.jsonl" ]; then
+            echo "Static baseline results already exist. Use force_execute to re-run."
+            exit 0
+          fi
+          uv run python benchmarks/runners/run_static_baseline.py \
+            --dataset "${DATASET_PATH}" \
+            --output "${RESULTS_DIR}/static_baseline_results.jsonl" \
+            --tool-name "${{ inputs.static_tool_name }}" \
+            --command "${{ inputs.static_command }}" \
+            --version-command "${{ inputs.static_version_command }}" \
+            --timeout "${{ inputs.tool_timeout }}" \
             --shell
 
       - name: Push Results

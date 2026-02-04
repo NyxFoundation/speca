@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""Compare audit map findings against Sherlock CSV dataset with 3-stage matching."""
+"""RQ1 matching logic (stage1/2/3)."""
+
 from __future__ import annotations
 
-import argparse
-import csv
 import difflib
 import json
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 @dataclass
@@ -64,6 +60,8 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 
 def load_csv_issues(path: Path) -> list[Issue]:
+    import csv
+
     issues: list[Issue] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -151,7 +149,6 @@ def extract_json_from_text(text: str) -> dict | None:
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON from Claude wrapper
     try:
         wrapper = json.loads(text)
         if isinstance(wrapper, dict) and "content" in wrapper:
@@ -187,7 +184,7 @@ def llm_match(audit_item: AuditItem, candidates: list[Issue]) -> tuple[bool, str
 
     prompt = (
         "You are matching security findings. Decide if the audit finding matches any candidate issue."
-        " Respond with JSON only: {\"match\": true|false, \"candidate_index\": number|null, \"confidence\": 0-1}.\n\n"
+        ' Respond with JSON only: {"match": true|false, "candidate_index": number|null, "confidence": 0-1}.\n\n'
         "Audit finding:\n"
         f"{audit_item.text}\n\n"
         "Candidates:\n"
@@ -209,29 +206,14 @@ def llm_match(audit_item: AuditItem, candidates: list[Issue]) -> tuple[bool, str
     return False, None, confidence
 
 
-def parse_branches(value: str) -> list[str]:
-    parts = [item.strip() for item in value.split(",")]
-    return [p for p in parts if p]
-
-
-def sanitize_branch(branch: str) -> str:
-    return branch.replace("/", "__")
-
-
-def match_branch(
-    branch: str,
+def match_items(
+    audit_items: list[AuditItem],
     issues: list[Issue],
-    results_dir: Path,
     use_llm: bool,
     llm_max: int,
     stage1_threshold: float,
     stage2_threshold: float,
-) -> dict:
-    sanitized = sanitize_branch(branch)
-    branch_dir = results_dir / sanitized
-    files = sorted(branch_dir.glob("03_*.json"))
-    audit_items = extract_audit_items(files)
-
+) -> tuple[dict[str, dict], dict, int]:
     matches: dict[str, dict] = {}
     stage_counts = {"stage1": 0, "stage2": 0, "stage3": 0}
     llm_calls = 0
@@ -290,92 +272,4 @@ def match_branch(
                 }
                 stage_counts["stage3"] += 1
 
-    total = len(audit_items)
-    matched_total = len(matches)
-    new_total = total - matched_total
-    overlap_rate = matched_total / total if total else 0.0
-    new_rate = new_total / total if total else 0.0
-
-    detail = {
-        "branch": branch,
-        "sanitized_branch": sanitized,
-        "items_total": total,
-        "matched_total": matched_total,
-        "new_total": new_total,
-        "overlap_rate": overlap_rate,
-        "new_rate": new_rate,
-        "stage_counts": stage_counts,
-        "llm_used": use_llm,
-        "llm_calls": llm_calls,
-        "matches": matches,
-    }
-
-    detail_path = results_dir / f"evaluation_{sanitized}.json"
-    detail_path.write_text(json.dumps(detail, indent=2), encoding="utf-8")
-    return detail
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare Sherlock dataset vs audit map outputs")
-    parser.add_argument("--branches", required=True, help="Comma-separated branch names")
-    parser.add_argument(
-        "--csv",
-        default=str(
-            ROOT_DIR
-            / "benchmarks"
-            / "dataset"
-            / "sherlock_ethereum_audit_contest"
-            / "sherlock_contest_1140_issues_1766639267091.csv"
-        ),
-    )
-    parser.add_argument(
-        "--results-dir",
-        default=str(ROOT_DIR / "benchmarks" / "results" / "sherlock_ethereum_audit_contest"),
-    )
-    parser.add_argument("--use-llm", action="store_true")
-    parser.add_argument("--llm-max", type=int, default=200)
-    parser.add_argument("--stage1-threshold", type=float, default=0.88)
-    parser.add_argument("--stage2-threshold", type=float, default=0.25)
-    args = parser.parse_args()
-
-    results_dir = Path(args.results_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    issues = load_csv_issues(Path(args.csv))
-
-    summary = {
-        "dataset": {
-            "path": str(args.csv),
-            "issues": len(issues),
-        },
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "branches": {},
-    }
-
-    for branch in parse_branches(args.branches):
-        detail = match_branch(
-            branch,
-            issues,
-            results_dir,
-            args.use_llm,
-            args.llm_max,
-            args.stage1_threshold,
-            args.stage2_threshold,
-        )
-        summary["branches"][branch] = {
-            "items_total": detail["items_total"],
-            "matched_total": detail["matched_total"],
-            "new_total": detail["new_total"],
-            "overlap_rate": detail["overlap_rate"],
-            "new_rate": detail["new_rate"],
-            "stage_counts": detail["stage_counts"],
-            "llm_used": detail["llm_used"],
-            "llm_calls": detail["llm_calls"],
-        }
-
-    summary_path = results_dir / "evaluation_summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()
+    return matches, stage_counts, llm_calls

@@ -303,7 +303,7 @@ benchmark-all: benchmark-setup benchmark-run benchmark-evaluate
 	@echo "Benchmark pipeline completed."
 
 benchmark-setup:
-	python3 scripts/setup_benchmark.py
+	python3 benchmarks/datasets/builders/setup_benchmark.py
 
 benchmark-run:
 	docker build -t security-agent-benchmark -f benchmarks/Dockerfile .
@@ -312,7 +312,7 @@ benchmark-run:
 
 benchmark-evaluate:
 	docker run --rm -v $(shell pwd):/app security-agent-benchmark \
-	    python3 /app/benchmarks/evaluate.py
+	    python3 /app/benchmarks/rq2/evaluate.py
 
 benchmark-report:
 	@echo "Benchmark report generation is not configured yet."

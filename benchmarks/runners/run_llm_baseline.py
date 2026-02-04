@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run CodeQL benchmark runner (command-template driven)."""
+"""Run an LLM baseline benchmark runner (command-template driven)."""
 
 from __future__ import annotations
 
@@ -18,18 +18,19 @@ from benchmarks.runners.base_runner import (
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET = ROOT_DIR / "benchmarks" / "data" / "primevul" / "primevul_test_paired.jsonl"
-DEFAULT_RESULTS = ROOT_DIR / "benchmarks" / "results" / "codeql.jsonl"
-DEFAULT_TMP = ROOT_DIR / "benchmarks" / "tmp" / "codeql"
+DEFAULT_RESULTS = ROOT_DIR / "benchmarks" / "results" / "llm_baseline.jsonl"
+DEFAULT_TMP = ROOT_DIR / "benchmarks" / "tmp" / "llm_baseline"
+DEFAULT_METADATA = None
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run CodeQL benchmark runner.")
+    parser = argparse.ArgumentParser(description="Run LLM baseline benchmark runner.")
     add_common_args(parser)
     parser.set_defaults(
         dataset=DEFAULT_DATASET,
         output=DEFAULT_RESULTS,
         tmp_dir=DEFAULT_TMP,
-        tool_name="codeql",
+        tool_name="llm_baseline",
     )
     return parser.parse_args()
 
@@ -42,8 +43,7 @@ def main() -> int:
 
     if args.metadata is None:
         dataset_name = args.dataset.parent.name
-        args.metadata = ROOT_DIR / "benchmarks" / "results" / "rq2" / dataset_name / "codeql_metadata.json"
-
+        args.metadata = ROOT_DIR / "benchmarks" / "results" / "rq2" / dataset_name / "llm_baseline_metadata.json"
     spec = command_spec_from_args(args)
     spec.tmp_dir.mkdir(parents=True, exist_ok=True)
     results = []
@@ -55,7 +55,13 @@ def main() -> int:
         case_id = extract_id(record, idx)
         code = extract_code(record)
         if not code:
-            results.append({"id": case_id, "predicted_vulnerable": None, "error": "missing_code"})
+            results.append(
+                {
+                    "id": case_id,
+                    "predicted_vulnerable": None,
+                    "error": "missing_code",
+                }
+            )
             continue
 
         ext = guess_extension(record)
@@ -86,11 +92,17 @@ def main() -> int:
                     row.update(extras)
                 results.append(row)
         else:
-            results.append({"id": case_id, "predicted_vulnerable": None, "error": "runner_not_configured"})
+            results.append(
+                {
+                    "id": case_id,
+                    "predicted_vulnerable": None,
+                    "error": "runner_not_configured",
+                }
+            )
 
     write_jsonl(spec.output, results)
     write_metadata(spec)
-    print(f"Wrote {len(results)} CodeQL results to {spec.output}")
+    print(f"Wrote {len(results)} LLM baseline results to {spec.output}")
     return 0
 
 

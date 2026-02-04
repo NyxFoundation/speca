@@ -82,7 +82,7 @@ def main() -> None:
     parser.add_argument("--branches", required=True, help="Comma-separated branch names")
     parser.add_argument(
         "--output-root",
-        default=str(ROOT_DIR / "benchmarks" / "results" / "sherlock_ethereum_audit_contest"),
+        default=str(ROOT_DIR / "benchmarks" / "results" / "rq1" / "sherlock_ethereum_audit_contest"),
         help="Output root directory",
     )
     args = parser.parse_args()
