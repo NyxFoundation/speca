@@ -210,15 +210,16 @@ Create boundary edge entry:
 For each external entity, verify at least one boundary edge exists.
 Report any coverage gaps.
 
-### **Task 3.3: Write Outputs**
+### **Task 3.3: Write Outputs (Atomic & Strict)**
+
+**Output MUST be valid JSON. Do NOT use expressions, concatenation, comments, or trailing commas.**
 
 1. **Generate Partial Trust Model:**
    - Create `outputs/01d_TRUSTMODEL_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json`
    - Set `metadata.batch` to `ITERATION`
 
-2. **Update Worker Queue:**
-   - Add processed file paths to `processed` array
-   - Overwrite `QUEUE_FILE`
+2. **Update Worker Queue:** **DO NOT UPDATE THE QUEUE FILE.**
+   - The runner script (`run_worker.py`) will update `processed` atomically after validating your output.
 
 ---
 

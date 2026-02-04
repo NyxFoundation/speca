@@ -95,10 +95,13 @@ Generate audit checklist items for properties assigned to this worker's queue. P
     -   `bug_class`, `risk_category`, `severity_hint`, `detection_procedure`, `executable_checks`: All required.
     -   `notes`: **MUST** include traceability back to the source property and graph elements.
 
-### **Task 2.3: Write Outputs**
+### **Task 2.3: Write Outputs (Atomic & Strict)**
 
-1.  **Generate Partial Checklist:** Create `outputs/02_CHECKLIST_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json` containing all checks generated for the batch.
-2.  **Update Worker Queue:** Add all processed `property_id`s from the batch to the `processed` array and overwrite `QUEUE_FILE`.
+**Output MUST be valid JSON. Do NOT use expressions, concatenation, comments, or trailing commas.**
+
+1.  **Generate Partial Checklist (atomic write):** Create `outputs/02_CHECKLIST_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json` containing all checks generated for the batch. Write to a temporary file first, then atomically rename to the final path.
+2.  **Update Worker Queue:** **DO NOT UPDATE THE QUEUE FILE.**
+    * The runner script (`run_worker.py`) will update `processed` atomically after validating your output.
 
 ---
 

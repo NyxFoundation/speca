@@ -97,8 +97,7 @@ For each sub-graph in `sub_graphs`:
 
 ### **Task 2.3: Update Worker Queue**
 
-1. Add ALL processed file paths from this batch to the `processed` array
-2. Overwrite `QUEUE_FILE`
+**DO NOT UPDATE THE QUEUE FILE.** The runner script (`run_worker.py`) will update `processed` atomically after validating your output.
 
 ---
 

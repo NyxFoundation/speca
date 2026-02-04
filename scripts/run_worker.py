@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,9 +92,181 @@ def load_json(path: str) -> dict[str, Any]:
 
 
 def save_json(path: str, data: dict[str, Any]) -> None:
-    """Save data to JSON file."""
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Save data to JSON file atomically."""
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=path_obj.name, dir=str(path_obj.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path_obj)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def save_text(path: str, content: str) -> None:
+    """Save text to file atomically."""
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=path_obj.name, dir=str(path_obj.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path_obj)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def extract_item_ids(items: list[Any]) -> list[str]:
+    """Extract item IDs from a queue item list."""
+    ids: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            if "check_id" in item:
+                ids.append(item["check_id"])
+            elif "property_id" in item:
+                ids.append(item["property_id"])
+        elif isinstance(item, str):
+            ids.append(item)
+    return [i for i in ids if i]
+
+
+def extract_output_ids(output_data: Any, phase: str) -> list[str]:
+    """Extract processed IDs from a phase output file."""
+    if phase == "02":
+        if isinstance(output_data, dict):
+            checklist = output_data.get("checklist") or output_data.get("checklist_items") or []
+        else:
+            checklist = []
+        # Phase 02 queue tracks property_id, not check_id
+        return [
+            item.get("property_id")
+            for item in checklist
+            if isinstance(item, dict) and item.get("property_id")
+        ]
+    if phase == "03":
+        if isinstance(output_data, dict):
+            audit_items = output_data.get("audit_items", [])
+        else:
+            audit_items = output_data
+        return [item.get("check_id") for item in audit_items if isinstance(item, dict) and item.get("check_id")]
+    if phase == "04":
+        if isinstance(output_data, dict):
+            reviewed_items = output_data.get("reviewed_items", [])
+        else:
+            reviewed_items = []
+        ids: list[str] = []
+        for item in reviewed_items:
+            if not isinstance(item, dict):
+                continue
+            original_item = item.get("original_item", {})
+            if isinstance(original_item, dict) and original_item.get("check_id"):
+                ids.append(original_item["check_id"])
+        return ids
+    if phase in ("01d", "01e"):
+        if isinstance(output_data, dict):
+            metadata = output_data.get("metadata", {})
+            source_files = metadata.get("source_files", []) if isinstance(metadata, dict) else []
+            if isinstance(source_files, list):
+                return [p for p in source_files if isinstance(p, str)]
+    return []
+
+
+def normalize_queue(queue_file: str, phase: str, output_file: str | None) -> bool:
+    """Normalize queue/processed consistency based on items and output file."""
+    try:
+        queue_data = load_json(queue_file)
+    except Exception as exc:
+        print(f"Warning: Failed to load queue file for normalization: {exc}", file=sys.stderr)
+        return False
+
+    items = queue_data.get("items", [])
+    items_ids = set(extract_item_ids(items))
+
+    processed_list = queue_data.get("processed", [])
+    if not isinstance(processed_list, list):
+        processed_list = []
+    processed_ids = set([p for p in processed_list if isinstance(p, str)])
+
+    output_ids: set[str] = set()
+    if output_file:
+        try:
+            output_data = load_json(output_file)
+            output_ids = set(extract_output_ids(output_data, phase))
+        except Exception as exc:
+            print(f"Warning: Failed to parse output file for normalization: {exc}", file=sys.stderr)
+
+    # Keep only IDs that exist in items; add only IDs that appeared in output.
+    normalized = (processed_ids | output_ids) & items_ids
+    queue_data["processed"] = sorted(normalized)
+
+    save_json(queue_file, queue_data)
+    return True
+
+
+def validate_output_ids(output_file: str | None, phase: str) -> list[str]:
+    """Return output IDs if output file is valid; empty list if invalid or missing."""
+    if not output_file or not os.path.exists(output_file):
+        return []
+    try:
+        output_data = load_json(output_file)
+    except Exception:
+        return []
+    return extract_output_ids(output_data, phase)
+
+
+def update_queue_with_ids(queue_file: str, new_ids: list[str]) -> None:
+    """Update queue processed list with new IDs, constrained to items."""
+    queue_data = load_json(queue_file)
+    items = queue_data.get("items", [])
+    items_ids = set(extract_item_ids(items))
+
+    processed_list = queue_data.get("processed", [])
+    if not isinstance(processed_list, list):
+        processed_list = []
+    processed_ids = set([p for p in processed_list if isinstance(p, str)])
+
+    normalized = (processed_ids | set(new_ids)) & items_ids
+    queue_data["processed"] = sorted(normalized)
+    save_json(queue_file, queue_data)
+
+
+def collect_01b_output_ids(worker_id: int, timestamp: int, iteration: int) -> list[str]:
+    """Collect processed URLs from 01b output files created this iteration."""
+    outputs_dir = ROOT_DIR / "outputs" / "01b_SUBGRAPHS"
+    pattern = f"spec_*_{timestamp}_{iteration}.json"
+    ids: list[str] = []
+    for path in outputs_dir.glob(pattern):
+        try:
+            data = load_json(str(path))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            src = data.get("source_url")
+            if isinstance(src, str) and src:
+                ids.append(src)
+    return ids
+
+
+def collect_01c_output_ids(worker_id: int, timestamp: int, iteration: int) -> list[str]:
+    """Collect processed file paths from 01c verified copies created this iteration."""
+    outputs_dir = ROOT_DIR / "outputs" / "01b_SUBGRAPHS"
+    pattern = f"spec_*_verified_{timestamp}_{iteration}.json"
+    ids: list[str] = []
+    for path in outputs_dir.glob(pattern):
+        name = path.name
+        if not name.startswith("spec_") or "_verified_" not in name:
+            continue
+        # spec_<hash>_verified_{timestamp}_{iteration}.json -> spec_<hash>.json
+        original = name.split("_verified_")[0] + ".json"
+        ids.append(str(outputs_dir / original))
+    return ids
 
 
 def load_bug_bounty_scope() -> dict[str, Any] | None:
@@ -408,6 +581,21 @@ def main():
                 f"outputs/03_AUDITMAP_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
             )
             env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
+        if args.phase == "01d":
+            output_file = (
+                f"outputs/01d_TRUSTMODEL_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
+            )
+            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
+        if args.phase == "01e":
+            output_file = (
+                f"outputs/01e_PROP_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
+            )
+            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
+        if args.phase == "04":
+            output_file = (
+                f"outputs/04_REVIEW_PARTIAL_W{args.worker_id}_{timestamp}_{iteration}.json"
+            )
+            env_vars["OUTPUT_FILE"] = resolve_root_path(output_file)
         batch_size = args.batch_size
         if batch_size is None and args.phase in ("01e", "02", "03"):
             max_bytes = config.get("max_batch_bytes", 160 * 1024)
@@ -417,6 +605,12 @@ def main():
             else:
                 print("  Dynamic batch size: 0 (no readable items; falling back to 1)")
                 batch_size = 1
+        # Snapshot queue before running Claude so we can restore on failure/invalid output.
+        try:
+            queue_snapshot = Path(queue_file).read_text()
+        except Exception:
+            queue_snapshot = ""
+
         success, duration, cost = run_claude(
             prompt_file,
             log_file,
@@ -437,9 +631,29 @@ def main():
         status = "OK" if success else "FAILED"
         print(f"  Iteration {iteration}: {status} ({duration:.1f}s, ${cost})")
 
+        if success and args.phase in ("01b", "01c", "01d", "01e", "02", "03", "04"):
+            output_ids: list[str] = []
+            if args.phase == "01b":
+                output_ids = collect_01b_output_ids(args.worker_id, timestamp, iteration)
+            elif args.phase == "01c":
+                output_ids = collect_01c_output_ids(args.worker_id, timestamp, iteration)
+            else:
+                output_ids = validate_output_ids(env_vars.get("OUTPUT_FILE"), args.phase)
+            if not output_ids:
+                print(
+                    f"Worker {args.worker_id}: Invalid or empty output for phase {args.phase}; restoring queue",
+                    file=sys.stderr,
+                )
+                success = False
+                if queue_snapshot:
+                    save_text(queue_file, queue_snapshot)
+            else:
+                update_queue_with_ids(queue_file, output_ids)
         if not success:
             print(f"Worker {args.worker_id}: Failed at iteration {iteration}", file=sys.stderr)
-            # Continue anyway - the queue state should be preserved
+            # Restore queue snapshot if Claude may have modified it.
+            if queue_snapshot:
+                save_text(queue_file, queue_snapshot)
 
     print(f"Worker {args.worker_id}: Completed {iteration} iterations, total cost: ${total_cost:.4f}")
 
