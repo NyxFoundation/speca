@@ -400,6 +400,8 @@ def run_claude(
         extra_args += f" ITERATION={env_vars['ITERATION']}"
     if "TIMESTAMP" in env_vars:
         extra_args += f" TIMESTAMP={env_vars['TIMESTAMP']}"
+    if "AUDIT_SCOPE" in env_vars:
+        extra_args += f" AUDIT_SCOPE={env_vars['AUDIT_SCOPE']}"
     prompt_content = f"{prompt_content}\n\n{extra_args}"
 
     # Build the command
@@ -546,6 +548,9 @@ def main():
         "WORKER_ID": str(args.worker_id),
         "QUEUE_FILE": queue_file,
     }
+    audit_scope = os.environ.get("AUDIT_SCOPE")
+    if audit_scope and audit_scope != "auto":
+        env_vars["AUDIT_SCOPE"] = audit_scope
     bug_bounty_scope = None
     if args.phase in ("01d", "01e", "02", "03"):
         bug_bounty_scope = load_bug_bounty_scope()

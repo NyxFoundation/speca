@@ -62,6 +62,21 @@ For each checklist item in the batch:
       - top-level `ambiguities`
       - top-level `implicit_assumptions`
     - Extract the associated code metadata: `file`, `function`, `line_range`, and any other relevant details. This is your **Code Scope**.
+5.  **Determine Audit Target**: Load `audit_scope` from trust model outputs (`outputs/01d_TRUSTMODEL*.json`) or runner-provided input, and record target components (CL/EL/both).
+
+### **Task 3.2.5: Early Exit (MANDATORY)**
+
+If **any** of the following is true:
+- `code_scope.file` is `N/A`, `SPECIFICATION-ONLY`, or missing
+- No concrete implementation location can be mapped
+- The code scope component is outside the declared audit target (EL vs CL mismatch)
+
+Then:
+- **Skip Phases 1–3 entirely**
+- Set `final_classification = "out-of-scope"`
+- Set `bug_bounty_eligible = false`
+- Set `summary` to: `No in-scope implementation; analysis skipped.`
+- In `audit_trail`, **only** include `phase3_5_scope_filtering` with `reason: "codebase-mismatch"` (keep it brief)
 
 ### **Task 3.3: Three-Phase Formal Audit**
 
@@ -108,6 +123,7 @@ For the identified **Code Scope**, perform the following three phases sequential
         - **defense-in-depth**: Counterexample exists, but validation layers make exploitation difficult.
         - **internal-only**: Counterexample requires internal bug (e.g., caller passes wrong value).
         - **unreachable**: Counterexample is not reachable from any entry point.
+    8.  **Do not rely solely on checklist reachability**: If you cannot demonstrate a data-flow path, classify as `inconclusive`.
 
 *   **Output (Phase 2.5)**: A reachability analysis report, including entry points, data flow path, validation layers, and final classification.
 
@@ -140,14 +156,16 @@ For the identified **Code Scope**, perform the following three phases sequential
     5.  **Check API Scope**: If the Code Scope is in `internal/ethapi/` or `beacon/light/api/`, classify as **out-of-scope-api**.
     6.  **Check Configuration**: If the vulnerability requires node operator misconfiguration, classify as **configuration-issue**.
     7.  **Check CL Dependency**: If the vulnerability requires a malicious CL node, classify as **cl-dependency**.
+    8.  **Priority rule**: If any out-of-scope condition applies (API/config/CL dependency/component mismatch), **final classification MUST be `out-of-scope`** regardless of Phase 2.5.
 
 *   **Output (Phase 3.5)**: A scope filtering report, including eligibility, reason, and recommendation.
 
 **Final Classification Guidance**:
-- Use `exploitable` when Phase 2.5 is exploitable and scope filtering says eligible.
+- Use `exploitable` only when all are true: (a) concrete implementation exists, (b) data-flow from an external entry point is demonstrated, (c) no validation layer blocks it, (d) scope filtering says eligible.
 - Use `defense-in-depth` when Phase 2.5 is defense-in-depth.
 - Use `out-of-scope` when Phase 3.5 indicates out-of-scope (API/config/CL dependency).
 - Use `inconclusive` when analysis cannot establish reachability or proof.
+If `summary` or `phase3_5_scope_filtering.reason` contradicts `final_classification`, **downgrade** to `defense-in-depth` or `inconclusive` and explain why.
 
 ### **Task 3.4: Write Outputs (Atomic & Strict)**
 
@@ -157,7 +175,7 @@ For the identified **Code Scope**, perform the following three phases sequential
 1.  **Generate Partial Audit Map (atomic write):**
     * Create `outputs/03_AUDITMAP_PARTIAL_W{WORKER_ID}_{TIMESTAMP}_{ITERATION}.json`.
     * Ensure all items in the batch are included.
-    * **NEW**: Include `phase2_5_reachability_analysis` and `phase3_5_scope_filtering` in the output.
+    * **NEW**: Include `phase2_5_reachability_analysis` and `phase3_5_scope_filtering` in the output (unless early-exit, in which case only `phase3_5_scope_filtering` is required).
     * Write to a temporary file first, then atomically rename to the final path.
 
 2.  **Update Worker Queue File:** **DO NOT UPDATE THE QUEUE FILE.**
