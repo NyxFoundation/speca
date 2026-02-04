@@ -1,0 +1,79 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W6-FULU-VAL-RETAIN-INV-001-INTERNAL",
+    "property_id": "PROP-W6-FULU-VAL-RETAIN-INV-001",
+    "code_scope": {
+      "file": "beacon_chain/consensus_object_pools/blob_quarantine.nim",
+      "function": "pruneAfterFinalization (ColumnQuarantine)",
+      "line_range": "746-775"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Retention period enforcement uses wrong constant (MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS instead of MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS), but pruning only occurs during finalization, not during normal operation.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analysis of retention period calculation shows that the code uses MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS (from line 848) instead of the correct MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS for data column sidecars. The abstract state includes: (1) quarantine.minEpochsForSidecarsRequests - initialized with wrong constant, (2) epoch - current finalization epoch, (3) backfillNeeded - boolean flag, (4) startEpoch - computed retention boundary, (5) epochSlot - slot threshold for pruning.",
+        "state_anomalies_found": [
+          "Wrong constant used: MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS instead of MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS",
+          "TODO comment on line 751-753 acknowledges this issue but was not fixed",
+          "If the blob constant is smaller than the data column constant, premature pruning could occur"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identifies a path where data column sidecars could be pruned prematurely if MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS < MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. The counterexample constructs a scenario where: (1) A data column sidecar is stored at slot S, (2) Current epoch E advances past (S + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS) but before (S + MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS), (3) pruneAfterFinalization is called with backfillNeeded=true, (4) The sidecar is incorrectly removed from storage.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "backfillNeeded=true AND epoch >= (sidecar.slot / SLOTS_PER_EPOCH + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS) AND epoch < (sidecar.slot / SLOTS_PER_EPOCH + MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS)",
+          "inputs": {
+            "sidecar_slot": 32,
+            "current_epoch": 5,
+            "MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS": 4,
+            "MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS": 8192,
+            "backfillNeeded": true,
+            "SLOTS_PER_EPOCH": 32
+          },
+          "expected_outcome": "Sidecar at slot 32 would be pruned at epoch 5 (actual epoch boundary: epoch 1 + 4 = 5), but should be retained until epoch 8193 (slot 32 / 32 = epoch 1, plus 8192 retention epochs)"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The pruneAfterFinalization function is called internally by the beacon node during finalization processing. While the counterexample is theoretically valid, the actual impact is limited by the fact that MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS (8192 epochs ≈ 36 days) is significantly larger than MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS (4096 epochs ≈ 18 days). Additionally, pruning only occurs at finalization boundaries, not continuously.",
+        "entry_points": [
+          "Internal finalization processing in beacon node",
+          "Called from consensus object pool management"
+        ],
+        "data_flow_path": "Finalization trigger → pruneAfterFinalization(ColumnQuarantine) → retention period check (line 761) → premature pruning if wrong constant used",
+        "validation_layers": [
+          {
+            "layer": "Finalization boundary",
+            "location": "Pruning only occurs at finalization (every ~6.4 minutes)",
+            "effectiveness": "Limits frequency of premature pruning attempts"
+          },
+          {
+            "layer": "Retention period calculation",
+            "location": "Lines 755-767",
+            "effectiveness": "BYPASSED - Uses wrong constant for data columns"
+          },
+          {
+            "layer": "Spec constants",
+            "location": "beacon_chain/spec/presets.nim",
+            "effectiveness": "MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS is much larger than MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS, providing implicit safety margin"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "This is an internal implementation bug rather than an attacker-exploitable vulnerability. The issue requires no attacker interaction - it's a deterministic code path error. However, the actual impact is mitigated by: (1) The large difference between the two constants (4096 vs 8192 epochs), (2) Pruning only occurring at finalization boundaries, (3) The TODO comment indicating developer awareness of the issue. The bug affects protocol correctness and validator obligations but does not create an exploitable attack surface."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the invariant holds due to the counterexample in Phase 2. The invariant states: 'Within the retention period, a validator MUST NOT prune any stored DataColumnSidecar'. The code violates this by using MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS instead of MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS.",
+        "proof_successful": false,
+        "guard_identified": "The guard condition at lines 756-764 attempts to enforce the retention period, but uses the wrong constant: 'if epoch < quarantine.minEpochsForSidecarsRequests' where minEpochsForSidecarsRequests is initialized with MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS (line 848) instead of MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. This guard is INSUFFICIENT to maintain the invariant for data column sidecars."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus/Geth developers as a protocol compliance issue and robustness improvement. This should be fixed to ensure correct retention period enforcement.",
+        "notes": "This finding is classified as defense-in-depth because: (1) It is an internal implementation error that does not require attacker interaction, (2) The actual security impact is mitigated by the large constant values and finalization-only pruning, (3) It affects protocol correctness but does not create an exploitable attack surface for network disruption or financial loss, (4) A TODO comment on line 751-753 explicitly acknowledges this issue ('In this procedure MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS should be used instead of MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS, but it was unavailable in the moment of this code being written'), indicating developer awareness. While this should be fixed for correctness, it does not meet the bug bounty criteria for an exploitable vulnerability."
+      }
+    }
+  }
+]

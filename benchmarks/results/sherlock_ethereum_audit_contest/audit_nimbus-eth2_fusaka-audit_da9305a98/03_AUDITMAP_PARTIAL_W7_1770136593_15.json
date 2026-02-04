@@ -1,0 +1,83 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W2-FULU-FORK-PRECOND-02-INTERNAL",
+    "property_id": "PROP-W2-FULU-FORK-PRECOND-02",
+    "code_scope": {
+      "files": [
+        "beacon_chain/sync/sync_manager.nim:218-228",
+        "beacon_chain/sync/sync_protocol.nim:152-203,357-376",
+        "beacon_chain/sync/request_manager.nim:752-762"
+      ],
+      "primary_functions": [
+        "shouldGetBlobs",
+        "getBlobSidecarsByRange",
+        "blobSidecarsByRange",
+        "switchToColumnLoop"
+      ],
+      "description": "Blob sidecar serving logic during Fulu fork transition period"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Missing explicit upper bound check for FULU_FORK_EPOCH in blobSidecarsByRange handler, but database schema implicitly prevents serving post-Fulu blobs.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed state space for blob sidecar serving during transition. Variables include epoch boundaries (DENEB_FORK_EPOCH, FULU_FORK_EPOCH), serve window (MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS=4096), and request parameters. Code correctly transitions from blob loop to data column loop at FULU_FORK_EPOCH via switchToColumnLoop().",
+        "state_anomalies_found": [
+          "No explicit upper bound check for FULU_FORK_EPOCH in getBlobSidecarsByRange template",
+          "Implicit dependency on database schema to prevent serving post-Fulu blob sidecars"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Traced execution paths through blobSidecarsByRange handler with symbolic epoch values. Found that the code enforces lower bound (epochBoundary) but lacks explicit upper bound check for FULU_FORK_EPOCH. The handler iterates through reqCount slots without checking if they exceed FULU_FORK_EPOCH.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "current_epoch = FULU_FORK_EPOCH + 100 AND startSlot.epoch = FULU_FORK_EPOCH - 50 AND reqCount = 100 epochs worth of slots (crossing fork boundary)",
+          "inputs": {
+            "current_epoch": "FULU_FORK_EPOCH + 100",
+            "startSlot": "slot_at(FULU_FORK_EPOCH - 50)",
+            "reqCount": "~25600 slots (100 epochs × 256 slots/epoch)"
+          },
+          "expected_outcome": "The getBlobSidecarsByRange template iterates from startSlot through startSlot+reqCount without checking an upper bound at FULU_FORK_EPOCH. If the database contained blob sidecars for post-Fulu slots, they would be served in violation of the property. However, the database schema ensures that post-Fulu blocks produce data column sidecars instead of blob sidecars, so dag.getBlobSidecar(slot >= FULU_FORK_EPOCH) returns none() and the iteration naturally skips post-Fulu slots."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Analyzed reachability from P2P entry points (blobSidecarsByRange, blobSidecarsByRoot). An attacker can send requests with arbitrary startSlot and reqCount parameters that span the fork boundary. The validation layer only checks the lower bound (epochBoundary), not the upper bound (FULU_FORK_EPOCH).",
+        "entry_points": [
+          "P2P libp2p protocol: blobSidecarsByRange",
+          "P2P libp2p protocol: blobSidecarsByRoot"
+        ],
+        "data_flow_path": "Attacker → P2P network → blobSidecarsByRange handler → epochBoundary validation (lower bound only) → database query loop → stream response",
+        "validation_layers": [
+          {
+            "layer": "epochBoundary check",
+            "location": "sync_protocol.nim:165-169",
+            "effectiveness": "Enforces lower bound only (current_epoch - 4096). Does not enforce upper bound (FULU_FORK_EPOCH)."
+          },
+          {
+            "layer": "Database schema",
+            "location": "Implicit (database stores only pre-Fulu blob sidecars)",
+            "effectiveness": "Post-Fulu blocks produce data column sidecars instead of blob sidecars. Query dag.getBlobSidecar(slot >= FULU_FORK_EPOCH) returns none(), causing iteration to skip."
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "The code relies on the architectural property that the database doesn't contain blob sidecars for post-Fulu slots. This is a defense-in-depth issue: if an internal bug causes the database to store post-Fulu blob sidecars (e.g., due to a reorg or corruption), the request handler would serve them in violation of the property. However, this scenario requires an internal bug rather than direct attacker control."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempted to prove the invariant: nodes MUST serve blobs only from [min(current_epoch - 4096, FULU_FORK_EPOCH), FULU_FORK_EPOCH). Lower bound is proven via explicit epochBoundary check. Upper bound relies on implicit database schema properties.",
+        "proof_successful": false,
+        "guard_identified": {
+          "lower_bound": "sync_protocol.nim:165-169 - if startSlot.epoch < epochBoundary: raise ResourceUnavailableError",
+          "upper_bound": "Implicit - Database schema ensures dag.getBlobSidecar(slot >= FULU_FORK_EPOCH) returns none(). No explicit guard in code."
+        },
+        "gap_in_proof": "The invariant holds under the assumption that the database does not contain blob sidecars for slots at or after FULU_FORK_EPOCH. This is an architectural assumption rather than a code-enforced invariant. If this assumption is violated (e.g., via database corruption, reorg, or internal bug), the upper bound is not guaranteed."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement. Add explicit upper bound check: if blockSlot.epoch >= dag.cfg.FULU_FORK_EPOCH: break to enforce the property explicitly rather than relying on database schema.",
+        "notes": "This is a code quality issue rather than an exploitable vulnerability. The issue requires an internal bug (database storing post-Fulu blob sidecars) to manifest. Direct attacker exploitation is not possible without first compromising the database layer. Classification: defense-in-depth, not eligible for bug bounty but valuable for improving protocol robustness."
+      }
+    }
+  }
+]

@@ -1,0 +1,74 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W5-EIP7825-TX-AMB-001-INTERNAL",
+    "property_id": "PROP-W5-EIP7825-TX-AMB-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/state_transition_block.nim",
+      "function": "process_execution_payload",
+      "line_range": "902-927 (Bellatrix); similar for Capella, Deneb, Electra, Fulu",
+      "description": "CL processing of execution payloads with delegation to EL via notify_new_payload"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "EIP-7825 transaction gas limit validation is an EL responsibility; CL correctly delegates validation and is not in scope for this EL-specific property.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "CL treats transactions as opaque byte arrays (List[byte, MAX_BYTES_PER_TRANSACTION]). No abstract interpretation of transaction fields occurs in CL code. All transaction-level validation is delegated to EL via Engine API.",
+        "state_anomalies_found": []
+      },
+      "phase2_symbolic_execution": {
+        "summary": "CL has no code path that validates transaction gas limits. Symbolic execution confirms CL delegates all validation to notify_new_payload(payload) which calls EL. A counterexample exists where a buggy EL checks actual gas usage instead of declared gasLimit, but this is an EL bug, not a CL bug.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "Buggy EL validates based on actualUsage instead of declared gasLimit; tx with gasLimit=20M and actualUsage=10M is accepted by EL",
+          "inputs": {
+            "tx.gasLimit": "20000000",
+            "tx.actualUsage": "10000000",
+            "EL_validates_correctly": "false"
+          },
+          "expected_outcome": "If EL has implementation bug, CL will accept invalid execution payload, causing consensus divergence. However, this demonstrates an EL bug, not a CL bug."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The vulnerability is in EL transaction validation, not CL. From CL perspective, this is a dependency on correct EL behavior. Engine API is a semi-trusted boundary per Bug Bounty scope.",
+        "entry_points": [
+          "External: Attacker submits transaction via EL (JSON-RPC, P2P)",
+          "Internal: EL sends execution payload to CL via Engine API (authenticated with JWT)"
+        ],
+        "data_flow_path": "Attacker Transaction (gasLimit > cap) → EL Mempool Validation [BUG LOCATION] → EL includes tx in block → Engine API: engine_newPayloadV3 → CL: process_execution_payload → CL: notify_new_payload (delegates to EL) → CL accepts if EL says valid → Consensus divergence across network",
+        "validation_layers": [
+          {
+            "layer": "EL transaction validation",
+            "location": "Execution Layer (Geth/Nethermind/Besu/etc.) - not in Nimbus CL codebase",
+            "effectiveness": "Critical - this is where the bug would exist if EL checks actual usage vs. declared limit"
+          },
+          {
+            "layer": "Engine API authentication",
+            "location": "Engine API JWT authentication",
+            "effectiveness": "Prevents external injection but does not protect against buggy co-located EL"
+          },
+          {
+            "layer": "CL payload validation",
+            "location": "beacon_chain/spec/state_transition_block.nim:921",
+            "effectiveness": "Delegates to EL; no independent verification of transaction gas limits"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "notes": "From CL perspective, attacker cannot directly control Engine API input (JWT authenticated). Exploitation requires buggy co-located EL. However, network-wide impact would be CRITICAL if a major EL client has this bug (consensus divergence affecting >33% of network)."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove invariant within CL code alone. CL correctly delegates validation to EL via notify_new_payload(payload). The invariant holds if and only if the EL implements the gas limit check correctly (based on declared gasLimit, not actual usage).",
+        "proof_successful": false,
+        "guard_identified": "if not notify_new_payload(payload): return err(...) at line 921-922",
+        "proof_notes": "Guard condition ensures CL rejects payloads that fail EL validation, but provides no independent verification of transaction gas limit cap. Invariant depends on external assumption about EL correctness. CL is defensively correct but dependent on EL."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "out-of-scope (CL-EL trust boundary)",
+        "recommendation": "This is an architectural observation, not a vulnerability in Nimbus CL. For EL clients (Geth, Nethermind, Besu, etc.): Ensure EIP-7825 validation checks the declared gasLimit field from transaction encoding, not estimated or actual gas usage during execution. Cross-client testing critical to prevent consensus divergence. For CL (Nimbus): No action required; architecture is correct.",
+        "notes": "Per Bug Bounty scope, Engine API is a semi-trusted boundary. 'If the EL is compromised or buggy, corrupted data may be propagated to the network.' This property tests EL behavior, not CL behavior. Should be submitted to EL bug bounties if a concrete bug is found in an EL client."
+      }
+    }
+  }
+]

@@ -1,0 +1,88 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W4-EIP7892-PRECOND-005-NODE-0",
+    "property_id": "PROP-W4-EIP7892-PRECOND-005",
+    "code_scope": {
+      "file": "beacon_chain/spec/forks.nim",
+      "function": "nextForkEpochAtEpoch",
+      "line_range": "1620-1643",
+      "related_files": [
+        "beacon_chain/networking/eth2_network.nim:2725-2741 (updateNextForkDigest)",
+        "beacon_chain/nimbus_beacon_node.nim:1986-1996 (fork digest rotation)",
+        "beacon_chain/spec/forks.nim:1763-1785 (compute_fork_digest_fulu)"
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "nextForkEpochAtEpoch does not sort BLOB_SCHEDULE, causing wrong fork digest computation if config is unsorted; mitigated by getTargetGossipState sorting for gossip topics.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed abstract state space of ENR nfd field and fork digest computation. Identified that nextForkEpochAtEpoch iterates BLOB_SCHEDULE without sorting, assuming it is pre-sorted in ascending epoch order.",
+        "state_anomalies_found": [
+          "BLOB_SCHEDULE ordering assumption not enforced - function returns wrong next fork epoch if schedule is unsorted",
+          "Empty BLOB_SCHEDULE for Fulu/Gloas causes FAR_FUTURE_EPOCH return, leading to default fork digest [0,0,0,0]",
+          "Duplicate EPOCH entries in BLOB_SCHEDULE would cause non-deterministic behavior (first match wins)"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed counterexample showing that unsorted BLOB_SCHEDULE causes different nodes to compute different fork digests, violating the deterministic computation property.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "current_epoch = 50 AND cfg.BLOB_SCHEDULE = [{EPOCH: 200, MAX_BLOBS: 8}, {EPOCH: 100, MAX_BLOBS: 6}, {EPOCH: 150, MAX_BLOBS: 7}]",
+          "inputs": {
+            "current_epoch": 50,
+            "BLOB_SCHEDULE": "[{EPOCH: 200}, {EPOCH: 100}, {EPOCH: 150}]"
+          },
+          "expected_outcome": "Next fork epoch should be 100 (earliest future fork)",
+          "actual_outcome": "Function returns 150 (last entry visited before loop completes)",
+          "trace": "Iteration 1: 50 >= 200? No, res=200. Iteration 2: 50 >= 100? No, res=100. Iteration 3: 50 >= 150? No, res=150. Return res=150.",
+          "impact": "Node advertises wrong next fork epoch in ENR, computes wrong fork digest at epoch 100"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Vulnerability is configuration-dependent. BLOB_SCHEDULE is loaded from local config files at startup. Attacker cannot control configuration. Official chain configs are correctly sorted. Impact limited to custom/test configs.",
+        "entry_points": [
+          "RuntimeConfig loaded from chain specification file (e.g., mainnet.yaml)"
+        ],
+        "data_flow_path": "Config File \u2192 RuntimeConfig.BLOB_SCHEDULE \u2192 nextForkEpochAtEpoch() \u2192 compute_fork_digest_fulu() \u2192 updateNextForkDigest() \u2192 ENR nfd field \u2192 P2P network",
+        "validation_layers": [
+          {
+            "layer": "REST API sorting",
+            "location": "beacon_chain/rpc/rest_config_api.nim:36",
+            "effectiveness": "Sorts BLOB_SCHEDULE before returning via REST API, but does NOT fix internal usage"
+          },
+          {
+            "layer": "Gossip topic sorting",
+            "location": "beacon_chain/spec/network.nim:209 (getTargetGossipState)",
+            "effectiveness": "Prevents gossip topic divergence by sorting combined epoch list, mitigating consensus split risk"
+          },
+          {
+            "layer": "Specification guidance",
+            "location": "Consensus spec for EIP-7892",
+            "effectiveness": "Spec says SHOULD be sorted (not MUST), weak enforcement"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "Developer comment at beacon_chain/spec/forks.nim:1622 states: 'probably wrong, definitely look at again, and if right, refactor' - indicating developers are aware of potential issues. Gossip sorting provides defense-in-depth, preventing worst-case consensus split."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Failed to prove invariant holds universally. Counterexample exists when BLOB_SCHEDULE is unsorted. Guard condition (sorted schedule) is assumed by code but not enforced.",
+        "proof_successful": false,
+        "guard_identified": "BLOB_SCHEDULE must be sorted in ascending epoch order for deterministic fork digest computation",
+        "guard_enforcement": "NOT ENFORCED - No validation at config load time, no sorting in nextForkEpochAtEpoch",
+        "compensating_controls": [
+          "getTargetGossipState sorts epochs before determining gossip subscriptions, preventing gossip divergence",
+          "Official chain configs (mainnet, holesky) are correctly sorted",
+          "Custom configs would need manual misconfiguration to trigger issue"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "configuration-dependent",
+        "recommendation": "Report to Nimbus developers as a robustness improvement",
+        "notes": "Bug Bounty scope excludes configuration-dependent issues requiring operator error. Impact is limited to peer connectivity issues (not consensus failure) due to defense-in-depth sorting in getTargetGossipState. Suggested fixes: (1) Add config validation to enforce sorted BLOB_SCHEDULE, (2) Sort in nextForkEpochAtEpoch like getTargetGossipState does, or (3) Change spec from SHOULD to MUST."
+      }
+    }
+  }
+]

@@ -1,0 +1,73 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W7-PCS-RECOVER-POSTCOND-001-INTERNAL",
+    "property_id": "PROP-W7-PCS-RECOVER-POSTCOND-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "recover_matrix, recover_cells_and_proofs, recover_cells_and_proofs_parallel",
+      "line_range": "111-235",
+      "key_call": "recoverCellsAndKzgProofs (kzg4844 library)"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "The polynomial recovery implementation delegates to the external kzg4844 C library without additional validation of the recovered polynomial coefficients, creating a potential silent data corruption vector if the C library has a bug. However, KZG proof validation provides defense-in-depth protection.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "The recovery functions accept partial cell sets (variable size arrays) and delegate to kzg4844's recoverCellsAndKzgProofs. The abstract state space includes: (1) cell_indices: sequence of uint64 values in [0, 127], (2) cells: sequence of Cell objects (byte arrays), (3) recovered polynomial coefficients: opaque return from C library. The Nim code does not validate the mathematical correctness of recovered coefficients.",
+        "state_anomalies_found": [
+          "No upper bound check on cell_indices length before calling C library",
+          "No validation that recovered polynomial coefficients match expected degree",
+          "No cross-validation of recovered data against known invariants (e.g., first FIELD_ELEMENTS_PER_BLOB coefficients)"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identifies a path where the C library returns SUCCESS but produces mathematically incorrect polynomial coefficients. This requires a bug in the kzg4844 library's Reed-Solomon implementation.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "1. cell_indices.len >= MIN_CELLS_FOR_RECOVERY (50% threshold). 2. kzg4844::recoverCellsAndKzgProofs returns Ok(_). 3. Internal C library bug causes incorrect coefficient computation. 4. Nim layer accepts result without validation.",
+          "inputs": {
+            "cell_indices": "[0, 1, 2, ..., 64] (symbolic, requires >= 50% cells)",
+            "cells": "[cell_0, cell_1, ..., cell_64] (symbolic Cell values)",
+            "precondition": "Input cells are valid KZG evaluations"
+          },
+          "expected_outcome": "If kzg4844 library has a bug (e.g., incorrect vanishing polynomial construction, coset division error), the recovered polynomial P'(x) may differ from the original P(x), but the Nim code will accept it as valid. This creates consensus divergence if different nodes recover different polynomials."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The vulnerability requires a bug in the external kzg4844 C library (maintained by Ethereum Foundation). This is not an attacker-exploitable path but rather an implementation correctness issue.",
+        "entry_points": [
+          "Internal: recover_matrix (line 111)",
+          "Internal: recover_cells_and_proofs (line 189)",
+          "Internal: recover_cells_and_proofs_parallel (line 151)"
+        ],
+        "data_flow_path": "P2P DataColumnSidecar \u2192 verify_data_column_sidecar (line 352) \u2192 recover_cells_and_proofs \u2192 kzg4844::recoverCellsAndKzgProofs \u2192 [C library Reed-Solomon recovery] \u2192 returned CellsAndProofs",
+        "validation_layers": [
+          {
+            "layer": "KZG Proof Batch Verification",
+            "location": "verify_data_column_sidecar_kzg_proofs (line 386-403)",
+            "effectiveness": "STRONG - KZG proofs mathematically bind recovered cells to the commitment. If proofs verify, the cells are correct. However, this validation happens AFTER recovery and may not catch internal C library bugs that affect polynomial coefficients while maintaining proof validity."
+          },
+          {
+            "layer": "Input Validation",
+            "location": "verify_data_column_sidecar (line 352-366)",
+            "effectiveness": "WEAK - Only checks structural properties (array lengths), not mathematical correctness"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "This is NOT directly attacker-exploitable because it requires a bug in the trusted kzg4844 C library. However, if such a bug exists, the KZG proof verification (verify_data_column_sidecar_kzg_proofs) provides a strong defense-in-depth layer that would catch incorrect recovery. The Nim code should ideally add additional validation (e.g., verify recovered polynomial degree, check coefficient bounds) but relies on the C library's correctness and KZG cryptographic proofs."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the post-condition (recovered polynomial matches original) holds without trusting the kzg4844 C library implementation. The KZG proof verification provides a cryptographic guarantee, but the Nim layer adds no additional mathematical checks.",
+        "proof_successful": false,
+        "guard_identified": "verify_data_column_sidecar_kzg_proofs (line 386-403) - KZG batch proof verification ensures recovered cells cryptographically match the original commitment. This is a STRONG cryptographic guard but operates at the cell level, not polynomial coefficient level."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus team as a robustness improvement. Suggest adding polynomial degree validation and coefficient bound checks after recovery.",
+        "notes": "While this finding identifies a gap in validation (trusting external C library without verification), the KZG proof system provides strong cryptographic guarantees. This is a 'defense-in-depth' issue rather than an exploitable vulnerability. The Ethereum Bug Bounty scope includes 'implementation bugs' but this requires a bug in the underlying cryptographic library, which is separately maintained and tested. Recommendation: Add explicit validation of recovered polynomial properties (degree, coefficient bounds) in the Nim layer to catch potential C library bugs early."
+      }
+    }
+  }
+]

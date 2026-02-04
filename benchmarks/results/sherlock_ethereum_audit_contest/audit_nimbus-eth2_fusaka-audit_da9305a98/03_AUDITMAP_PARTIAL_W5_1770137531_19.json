@@ -1,0 +1,83 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W6-EIP7927-NET-PRECOND-001-NODE-STATE-DATA-VALIDATED",
+    "property_id": "PROP-W6-EIP7927-NET-PRECOND-001",
+    "code_scope": {
+      "file": "beacon_chain/era_db.nim",
+      "function": "getEraFile, getBlock*, verify",
+      "line_range": "264-295 (getEraFile), 183-262 (verify), 297-367 (serving functions)"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "Era file validation is not called before serving historical data to clients, but exploitation requires operator error and API exposure (out-of-scope).",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analysis of era file data flow reveals a validation function exists (verify at line 183) but is not invoked in the data serving path (getBlock → getEraFile → getBlockSSZ). This creates a state where unverified external data can be served.",
+        "state_anomalies_found": [
+          "Missing verification call: verify() performs comprehensive validation (block signatures, state roots) but getEraFile() and getBlock*() do not call it",
+          "TOCTOU window: Data is loaded from file (line 284) but verification only happens if explicitly called, creating window for unverified data serving",
+          "Weak filename-only validation: eraRoot check (line 277) validates filename matches expected root but does not verify file content integrity"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identified a concrete path where malicious era file content can be served without cryptographic validation. The counterexample demonstrates that if an attacker can place a malicious era file with a valid filename on the node's filesystem, unverified blocks will be served to RPC clients.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "Path: RPC Request → db.getBlock() → getEraFile() → EraFile.open() → getBlockSSZ() → Return to client. Conditions: isFile(path)=true, filename matches eraRoot, e2store format valid, NO verify() call.",
+          "inputs": {
+            "requested_slot": "10000",
+            "era": "1",
+            "era_file_path": "/data/era/mainnet-00001-VALID_ROOT.era",
+            "era_file_content": "Malicious SSZ with valid e2store format but invalid block signatures and block roots that don't match canonical chain"
+          },
+          "expected_outcome": "Malicious block data is served to RPC client without cryptographic validation (signature verification and block root validation are skipped)"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reachability analysis shows the vulnerability is not directly exploitable via network attack. Exploitation requires node operator to load malicious era file from untrusted source (compromised Portal Network node, e2store mirror, or filesystem access). The attack then requires API exposure to serve malicious data, which is explicitly out-of-scope per bug bounty rules.",
+        "entry_points": [
+          "JSON-RPC API (eth_getBlockByNumber, eth_getBlockByHash)",
+          "Beacon API (historical block retrieval endpoints)",
+          "Filesystem (era files loaded from disk)"
+        ],
+        "data_flow_path": "External RPC Request → JSON-RPC Handler → db.getBlock() [era_db.nim:328] → getEraFile() [era_db.nim:264] → EraFile.open() [era_db.nim:35] → getBlockSSZ() [era_db.nim:80] → Response",
+        "validation_layers": [
+          {
+            "layer": "Filename validation (eraRoot check)",
+            "location": "era_db.nim:277",
+            "effectiveness": "WEAK - Only validates filename matches expected root from canonical historical_roots, does not verify content"
+          },
+          {
+            "layer": "e2store format validation",
+            "location": "ncli/e2store.nim:73-90 (readHeader)",
+            "effectiveness": "WEAK - Only validates file format structure, not cryptographic integrity"
+          },
+          {
+            "layer": "Signature verification (in verify() function)",
+            "location": "era_db.nim:250-260",
+            "effectiveness": "STRONG but NOT USED - verify() function exists and performs batch signature verification, but is never called in serving path"
+          },
+          {
+            "layer": "Block root verification (in verify() function)",
+            "location": "era_db.nim:229-231",
+            "effectiveness": "STRONG but NOT USED - Compares block root against canonical state.block_roots, but only in verify() which is not called"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "Direct attacker control of era file content requires: (1) Node operator downloads era file from compromised Portal Network node, compromised e2store mirror, or attacker has filesystem access via malware. (2) API exposure to serve malicious data to other clients. The vulnerability exists but exploitation requires operational error."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempted to prove invariant '∀ block_data ∈ external_sources: serve(block_data) → validated(block_data)' but proof FAILS. The verify() function at line 183 correctly implements validation (block root check at line 230, signature verification at lines 250-260), but the serving path (getBlock → getEraFile → getBlockSSZ) bypasses this function entirely. No guard condition enforces verification before serving.",
+        "proof_successful": false,
+        "guard_identified": "MISSING - verify() function exists and enforces the invariant when called, but no guard in the serving path invokes it. Only the test code at line 532 calls verify()."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "out-of-scope",
+        "recommendation": "Report to Nimbus developers as a robustness improvement. Consider adding verify() call in getEraFile() after opening the file, or implement lazy verification on first block access.",
+        "notes": "Per bug bounty scope: 'Vulnerabilities requiring the user to have publicly exposed an API, such as JSON-RPC or the Beacon API, are explicitly out-of-scope.' This vulnerability requires: (1) Node operator error (downloading malicious era file from untrusted source), (2) API exposure to serve malicious data. Additionally, exploitation does not directly affect consensus of >5% of network (severity threshold). This is a defense-in-depth improvement rather than a direct network exploit. The issue falls under 'configuration-issue' and 'out-of-scope-api' categories."
+      }
+    }
+  }
+]

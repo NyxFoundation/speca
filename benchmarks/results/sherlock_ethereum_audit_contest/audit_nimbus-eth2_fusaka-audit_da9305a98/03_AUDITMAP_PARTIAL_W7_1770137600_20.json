@@ -1,0 +1,214 @@
+[
+  {
+    "check_id": "CHECK-W2-PROP-W0-FULUFC-POSTCOND-003-INTERNAL",
+    "property_id": "PROP-W0-FULUFC-POSTCOND-003",
+    "code_scope": {
+      "file": "beacon_chain/fork_choice/fork_choice.nim",
+      "function": "process_block",
+      "line_range": "267-323",
+      "key_lines": {
+        "timeliness_check": "293-298",
+        "proposer_boost_application": "295-298",
+        "slot_reset": "145-146"
+      }
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Proposer boost timeliness check has correct implementation with strong guard conditions, but lacks explicit recording mechanism as specified.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analysis of proposer boost state transitions reveals three key state variables: checkpoints.proposer_boost_root, checkpoints.time, and block slot. Abstract domain analysis shows proposer_boost_root can be ZERO_HASH or a valid Eth2Digest, time is monotonically increasing BeaconTime, and slot is a monotonically increasing Slot.",
+        "state_anomalies_found": [
+          "proposer_boost_root is reset to ZERO_HASH at slot boundaries (line 145-146), creating a window where multiple blocks in the same slot could compete for boost",
+          "timeliness is checked via inequality (checkpoints.time < slot.attestation_deadline) but there is no explicit record_block_timeliness call as specified in the spec"
+        ],
+        "variables_analyzed": {
+          "proposer_boost_root": {
+            "domain": "Eth2Digest | ZERO_HASH",
+            "transitions": "ZERO_HASH at slot start -> block_root when timely block arrives",
+            "invariant": "At most one non-zero value per slot"
+          },
+          "checkpoints_time": {
+            "domain": "BeaconTime (monotonically increasing)",
+            "transitions": "Updated via on_tick and update_time",
+            "invariant": "Always <= current wall time"
+          },
+          "block_slot": {
+            "domain": "Slot (uint64)",
+            "invariant": "block.slot >= store.finalized_checkpoint.epoch * SLOTS_PER_EPOCH"
+          }
+        }
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identifies a path where a malicious proposer could submit a block at exactly slot.attestation_deadline to exploit race conditions in timeliness determination. However, strong guard conditions prevent practical exploitation.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "current_slot == block.slot",
+            "checkpoints.time < slot.attestation_deadline",
+            "checkpoints.proposer_boost_root == ZERO_HASH",
+            "checkpoints.time >= slot.attestation_deadline - epsilon (very small margin)"
+          ],
+          "inputs": {
+            "block_slot": "N",
+            "block_arrival_time": "slot_N_start + SECONDS_PER_SLOT/INTERVALS_PER_SLOT - 1ms",
+            "current_slot": "N",
+            "proposer_boost_root": "ZERO_HASH"
+          },
+          "expected_outcome": "Block receives proposer boost if it arrives before attestation_deadline, creating a narrow window where timing precision matters for fork choice weight",
+          "exploit_scenario": "A malicious proposer with precise timing control could attempt to: (1) delay block propagation until just before attestation_deadline, (2) cause honest validators to have inconsistent views of block timeliness due to network latency, (3) split the network on which block is considered timely"
+        },
+        "analysis_notes": "The implementation correctly enforces the three required conditions (same slot, before deadline, no prior boost). However, the lack of an explicit record_block_timeliness() function means the specification's intent for a persistent timeliness record may not be fully captured. The code implements timeliness implicitly through the proposer_boost_root assignment."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample requires proposer-controlled block timing, which is feasible but has multiple defense layers that make practical exploitation difficult.",
+        "entry_points": [
+          "P2P gossip: Proposer publishes SignedBeaconBlock to beacon_block topic",
+          "Block production: Local validator produces block via BeaconNode API"
+        ],
+        "data_flow_path": "P2P layer receives SignedBeaconBlock -> on_block handler -> ForkChoice.process_block (line 267) -> timeliness check (lines 293-298) -> proposer_boost_root assignment (line 298)",
+        "validation_layers": [
+          {
+            "layer": "Slot validation",
+            "location": "fork_choice.nim:274 (update_time call)",
+            "effectiveness": "Strong - ensures block.slot is not in the future and store.time is updated before processing"
+          },
+          {
+            "layer": "Attestation deadline check",
+            "location": "fork_choice.nim:296",
+            "effectiveness": "Strong - checkpoints.time < slot.attestation_deadline prevents late blocks from getting boost"
+          },
+          {
+            "layer": "Single boost per slot enforcement",
+            "location": "fork_choice.nim:297",
+            "effectiveness": "Strong - checkpoints.proposer_boost_root == ZERO_HASH ensures only first timely block gets boost"
+          },
+          {
+            "layer": "Network propagation variance",
+            "location": "P2P layer (implicit)",
+            "effectiveness": "Medium - network latency introduces timing variance that makes precise exploitation harder but also makes honest disagreement possible"
+          }
+        ],
+        "attacker_controlled": true,
+        "attacker_capabilities": {
+          "block_timing": "Proposer controls when to publish block within their assigned slot",
+          "network_positioning": "Cannot control all network paths but can choose which peers to send to first",
+          "timing_precision": "Limited by network propagation time (typically 100-500ms variance across network)"
+        },
+        "classification": "defense-in-depth",
+        "notes": "While the counterexample is theoretically valid, practical exploitation requires: (1) precise timing control within ~1-2 second window, (2) ability to cause inconsistent timeliness views across validators, (3) sufficient network influence to split fork choice views. The strong validation layers (slot check, deadline check, single-boost-per-slot) make this difficult but not impossible. This is a robustness concern rather than a direct vulnerability."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proof attempted for invariant: 'At most one block per slot receives proposer boost, and only if received before attestation deadline.' Proof succeeds with strong guard conditions but identifies spec deviation.",
+        "proof_successful": true,
+        "invariant_statement": "∀ slot S, blocks B1, B2: (B1.slot == S ∧ B2.slot == S ∧ B1 ≠ B2) → ¬(has_boost(B1) ∧ has_boost(B2))",
+        "proof_steps": [
+          "1. At slot transition (on_tick, line 145-146), proposer_boost_root is reset to ZERO_HASH",
+          "2. For any block B in slot S to receive boost, three conditions must hold (line 295-297): (a) current_slot == B.slot, (b) checkpoints.time < slot.attestation_deadline, (c) proposer_boost_root == ZERO_HASH",
+          "3. Once a block B1 receives boost (line 298), proposer_boost_root := B1.root, violating condition (c) for any subsequent block B2",
+          "4. Therefore, at most one block per slot can satisfy all three conditions",
+          "5. The invariant holds by construction"
+        ],
+        "guard_identified": {
+          "primary_guard": "checkpoints.proposer_boost_root == ZERO_HASH (line 297)",
+          "supporting_guards": [
+            "current_slot == block.slot (line 295)",
+            "checkpoints.time < slot.attestation_deadline (line 296)",
+            "Slot boundary reset (line 145-146)"
+          ]
+        },
+        "specification_deviation": "The consensus spec calls for record_block_timeliness(store, block_root) and update_proposer_boost_root(store, block_root) as separate functions (per SUBGRAPH-FULU-FC-STATE-TRANSITION edges EDGE-STATE-TO-TIMELINESS and EDGE-TIMELINESS-TO-BOOST). The implementation combines these into a single conditional assignment (line 298), which is functionally equivalent for the proposer boost feature but may not provide the persistent timeliness record that other parts of the spec or future features might rely on.",
+        "notes": "While the implementation correctly enforces the proposer boost invariant, the lack of separate record_block_timeliness() function represents a potential technical debt. If future Ethereum upgrades require explicit timeliness records (e.g., for attestation scoring, block rewards, or fork choice refinements), this implementation would need modification."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "classification_rationale": "This finding represents a specification adherence issue rather than an exploitable vulnerability. The counterexample in Phase 2 requires: (1) proposer role, (2) precise timing control within a ~1-2 second window, (3) ability to cause network-wide disagreement on block timeliness. The multiple validation layers (slot check, deadline check, single-boost enforcement) provide strong defense-in-depth. While the implementation deviates from the spec's two-function model (record_block_timeliness + update_proposer_boost_root), it achieves the security property (at most one boost per slot) correctly.",
+        "recommendation": "Report to Nimbus developers as a code quality and future-proofing issue",
+        "bug_bounty_scope_check": {
+          "in_fusaka_scope": true,
+          "reasoning": "Proposer boost is part of fork choice, which is in-scope for Fusaka audit"
+        },
+        "exploitability_analysis": {
+          "requires_proposer_role": true,
+          "requires_precise_timing": true,
+          "requires_network_control": "partial",
+          "impact_if_exploited": "Could cause temporary fork choice disagreement between validators with different network views, potentially lasting 1-2 slots until the next justified checkpoint update. Does not enable long-term chain splits or finality attacks.",
+          "severity_if_exploited": "LOW to MEDIUM (affects <5% of network unless attacker controls many validator positions and has sophisticated network positioning)"
+        },
+        "technical_debt_notes": "The implementation choice to inline timeliness recording into the boost assignment (line 298) is a minor optimization that saves a function call but makes the code less traceable to the spec. Future work: consider refactoring to match spec structure (separate record_block_timeliness and update_proposer_boost_root functions) for better maintainability and spec compliance.",
+        "notes": "This is a high-quality implementation with correct security properties. The spec deviation is minor and does not create an exploitable vulnerability given the strong guard conditions. Recommend accepting as-is with a documentation note about the inline timeliness check, or refactoring to match spec if spec traceability is prioritized."
+      }
+    }
+  },
+  {
+    "check_id": "CHECK-W2-PROP-W1-EIP7934-POSTCOND-001-INTERNAL",
+    "property_id": "PROP-W1-EIP7934-POSTCOND-001",
+    "code_scope": {
+      "file": "N/A - Execution Layer Specification",
+      "function": "N/A",
+      "line_range": "N/A",
+      "analysis_note": "Nimbus is a Consensus Layer (beacon chain) client. EIP-7934 (RLP Block Size Limit) is an Execution Layer specification that applies to execution clients like Geth, Nethermind, Besu, and Erigon. The consensus layer interacts with the execution layer via the Engine API but does not perform EL block validation."
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "EIP-7934 block size validation is an execution layer responsibility not implemented in Nimbus consensus client.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Code scope identification reveals that Nimbus is a consensus layer client and does not implement execution layer block validation. EIP-7934 MAX_RLP_BLOCK_SIZE checks occur in execution clients.",
+        "state_anomalies_found": [],
+        "architectural_analysis": {
+          "nimbus_role": "Consensus Layer (CL) - validates beacon blocks, manages fork choice, tracks validator duties",
+          "execution_layer_role": "Execution Layer (EL) via Engine API - Nimbus communicates with separate EL client (e.g., Geth) to get execution payloads",
+          "eip7934_location": "Execution clients (Geth, Nethermind, Besu, Erigon) implement MAX_RLP_BLOCK_SIZE = 8,388,608 bytes check",
+          "cl_el_boundary": "Nimbus receives ExecutionPayload via engine_getPayloadV3 and includes it in beacon blocks without re-validating EL-specific constraints like RLP size"
+        },
+        "trust_boundary_analysis": "Per the bug bounty scope trust assumptions, the Engine API is authenticated (JWT) and considered semi-trusted. The EL is responsible for validating execution payloads against EL rules (gas limits, transaction validity, block size). The CL trusts that the EL has performed these validations. If the EL is compromised or buggy, it could return invalid execution payloads, but this is a bug in the EL client, not the CL client."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No symbolic execution performed. The code scope is not applicable to Nimbus.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "analysis_notes": "Theoretical vulnerability: If all EL clients fail to implement EIP-7934 checks correctly, an attacker could create oversized execution payloads that cause resource exhaustion. However, this would be an EL bug, not a CL bug. The CL's role is limited to: (1) requesting execution payloads via Engine API, (2) including the returned payload in beacon blocks, (3) propagating beacon blocks (which include the execution payload) over P2P. The CL does not and should not re-validate EL-specific rules."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reachability analysis not applicable. EIP-7934 validation is outside Nimbus code scope.",
+        "entry_points": [],
+        "data_flow_path": "Execution payload validation flow: Attacker submits large transactions to EL mempool -> EL validator/block builder constructs block -> EL checks RLP size via EIP-7934 logic -> If oversized, EL rejects block -> CL never sees invalid payload. If EL fails to check (EL bug), CL will propagate invalid beacon block containing oversized payload, but the bug is in the EL.",
+        "validation_layers": [
+          {
+            "layer": "Execution Layer block validation",
+            "location": "Execution client (Geth, Nethermind, Besu, Erigon) - not in Nimbus",
+            "effectiveness": "Implementation-dependent - correctness depends on EL client"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "notes": "From Nimbus perspective, EIP-7934 validation is unreachable because it occurs in a separate process (the execution client). Nimbus cannot and should not implement this check."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant proving not applicable to out-of-scope specification.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "architectural_notes": "Separation of concerns: The Ethereum post-merge architecture deliberately separates execution layer and consensus layer validation. EL clients validate execution blocks against EL rules (EIP-7934, gas limits, state transitions). CL clients validate beacon blocks against CL rules (signatures, committees, epoch processing). This separation allows for independent client development and reduces complexity in each layer."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "out-of-scope-architecture",
+        "classification_rationale": "EIP-7934 is an execution layer specification that must be implemented in execution clients (Geth, Nethermind, Besu, Erigon), not in consensus layer clients like Nimbus. The bug bounty scope for Ethereum Fusaka covers both EL and CL, but each specification must be audited in the appropriate client. Auditing EIP-7934 in Nimbus is analogous to auditing a TCP/IP spec in an HTTP server - it's the wrong layer.",
+        "recommendation": "Audit EIP-7934 in execution layer clients (Geth, Nethermind, Besu, Erigon) where MAX_RLP_BLOCK_SIZE validation is actually implemented",
+        "bug_bounty_scope_check": {
+          "in_fusaka_scope": true,
+          "reasoning": "EIP-7934 is listed in the Fusaka EIPs",
+          "correct_audit_target": "Execution clients: Geth (go-ethereum), Nethermind (.NET), Besu (Java), Erigon (Go)"
+        },
+        "cross_client_considerations": {
+          "cl_dependency_on_el": "Consensus layer clients trust that execution layer clients correctly validate execution payloads. If an EL client fails to implement EIP-7934, oversized blocks could propagate through the CL network, but this is fundamentally an EL bug.",
+          "potential_cl_impact": "If EL fails EIP-7934 validation, CL nodes will propagate beacon blocks containing oversized execution payloads, potentially causing: (1) resource exhaustion in EL clients when processing blocks, (2) chain splits if some EL clients reject and others accept, (3) consensus failure if >33% of validators use buggy EL clients",
+          "defense_recommendation": "While CL cannot validate EL rules, CL clients could implement basic sanity checks on execution payload size (e.g., reject payloads > 10 MiB) to catch egregious EL bugs. This would be defense-in-depth, not a substitute for proper EL validation."
+        },
+        "notes": "This check_id should be removed from Nimbus audit queue and added to execution client audit queues (Geth, Nethermind, Besu, Erigon). Including EL-specific checks in CL audits creates false negatives (no findings because code doesn't exist) and wastes audit resources."
+      }
+    }
+  }
+]

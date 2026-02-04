@@ -1,0 +1,133 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W3-FULU-BLOB-SCHEDULE-POST-001-INTERNAL",
+    "property_id": "PROP-W3-FULU-BLOB-SCHEDULE-POST-001",
+    "code_scope": {
+      "primary_validation": {
+        "file": "beacon_chain/spec/state_transition_block.nim",
+        "function": "process_execution_payload (Fulu variant)",
+        "line_range": "1062-1099",
+        "specific_check": "1083-1086"
+      },
+      "gossip_validation": {
+        "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+        "function": "validateBeaconBlockDeneb template",
+        "line_range": "375-388",
+        "specific_check": "384-388"
+      },
+      "parameter_resolution": {
+        "file": "beacon_chain/spec/forks.nim",
+        "function": "get_blob_parameters",
+        "line_range": "1101-1109"
+      }
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "CRITICAL BUG: get_blob_parameters has iteration order bug. With ASCENDING sorted BLOB_SCHEDULE (as spec requires), it always returns the OLDEST entry instead of LATEST, causing incorrect blob limit enforcement and potential consensus splits.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract state analysis reveals critical semantic mismatch between spec and implementation in blob parameter resolution.",
+        "state_anomalies_found": [
+          {
+            "variable": "BLOB_SCHEDULE",
+            "domain": "seq[BlobParameters] with entries sorted ascending (per spec: AMB-FULU-BEACON-02)",
+            "anomaly": "get_blob_parameters iterates forward and returns FIRST match, expecting descending order, but spec says ascending. With ascending order, always returns OLDEST entry.",
+            "location": "beacon_chain/spec/forks.nim:1104-1106",
+            "severity": "CRITICAL"
+          },
+          {
+            "variable": "blob_params.MAX_BLOBS_PER_BLOCK",
+            "domain": "uint64 with expected range [6, 12] for mainnet, changes at epoch boundaries",
+            "anomaly": "Will be stuck at lowest value (6) for all epochs if BLOB_SCHEDULE is ascending-sorted as spec requires",
+            "location": "beacon_chain/spec/forks.nim:1102-1109",
+            "severity": "CRITICAL"
+          },
+          {
+            "variable": "body.blob_kzg_commitments",
+            "domain": "List with length validated against MAX_BLOBS_PER_BLOCK",
+            "anomaly": "Validation uses wrong MAX value, causing incorrect accept/reject decisions",
+            "location": "beacon_chain/spec/state_transition_block.nim:1085",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "CRITICAL ITERATION ORDER BUG CONFIRMED. With ascending-sorted BLOB_SCHEDULE (as spec requires), get_blob_parameters ALWAYS returns the first (oldest) entry, never upgrading to higher blob limits.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "BLOB_SCHEDULE = [(EPOCH: 500, MAX: 6), (EPOCH: 800, MAX: 9), (EPOCH: 1000, MAX: 12)] (ASCENDING, as spec requires)",
+            "Current epoch = 1000",
+            "Iteration: entry[0] = (500, 6), condition: 1000 >= 500 = TRUE → return (500, 6)",
+            "NEVER reaches entry[2] = (1000, 12)",
+            "Expected: should return (1000, 12) for epoch 1000",
+            "Actual: returns (500, 6) for ALL epochs >= 500"
+          ],
+          "inputs": {
+            "epoch": 1000,
+            "BLOB_SCHEDULE": [
+              {"EPOCH": 500, "MAX_BLOBS_PER_BLOCK": 6},
+              {"EPOCH": 800, "MAX_BLOBS_PER_BLOCK": 9},
+              {"EPOCH": 1000, "MAX_BLOBS_PER_BLOCK": 12}
+            ]
+          },
+          "expected_outcome": "MAX_BLOBS_PER_BLOCK = 12 at epoch 1000",
+          "actual_outcome": "MAX_BLOBS_PER_BLOCK = 6 (first entry) for ALL epochs >= 500",
+          "impact": "Network will NEVER upgrade blob limits beyond the first schedule entry. Blocks with 7-12 blobs will be REJECTED even after epochs 800 and 1000. This causes: (1) Network unable to scale blob throughput as planned, (2) Potential consensus split if some nodes incorrectly sort BLOB_SCHEDULE descending.",
+          "severity": "CRITICAL - Complete failure of dynamic blob scaling feature"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "NOT directly exploitable by external attackers, but WILL cause consensus splits and feature failure if BLOB_SCHEDULE is sorted as spec requires (ascending).",
+        "entry_points": [
+          "Client configuration file (config.yaml) - BLOB_SCHEDULE entries",
+          "Runtime config initialization at startup"
+        ],
+        "data_flow_path": "Config file → RuntimeConfig.BLOB_SCHEDULE → get_blob_parameters(epoch) → returns WRONG blob limit → blob validation uses wrong limit → blocks incorrectly accepted/rejected → consensus split",
+        "validation_layers": [
+          {
+            "layer": "Config file parsing",
+            "location": "beacon_chain/spec/presets.nim:808-826",
+            "effectiveness": "NONE - No validation of BLOB_SCHEDULE sorting order. Parser accepts both ascending and descending."
+          },
+          {
+            "layer": "Spec ambiguity note",
+            "location": "Subgraph AMB-FULU-BEACON-02",
+            "effectiveness": "WEAK - Spec says 'should be sorted ascending' (RFC 2119: SHOULD not MUST), but code REQUIRES descending for correctness."
+          },
+          {
+            "layer": "Runtime parameter resolution",
+            "location": "beacon_chain/spec/forks.nim:1102-1109",
+            "effectiveness": "BROKEN - Returns wrong value with ascending sort."
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "This is a CRITICAL IMPLEMENTATION BUG, not an attacker-exploitable vulnerability. Affects all Nimbus nodes if they follow the spec's 'ascending' sorting requirement. IMPACT: (1) Dynamic blob scaling completely broken - network stuck at lowest blob limit forever, (2) Consensus split if different clients interpret 'should be sorted' differently, (3) Ethereum unable to scale to 12 blobs/block as planned. URGENCY: IMMEDIATE FIX REQUIRED before Fulu activation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "INVARIANT VIOLATED. Post-condition 'blocks with excessive blobs are rejected' is FALSE when blob limits should increase but get_blob_parameters returns stale old limits.",
+        "proof_successful": false,
+        "guard_identified": {
+          "location": "beacon_chain/spec/state_transition_block.nim:1085",
+          "condition": "lenu64(body.blob_kzg_commitments) <= blob_params.MAX_BLOBS_PER_BLOCK",
+          "correctness": "Guard is CORRECT in form but INCORRECT in semantics due to upstream bug",
+          "proof_gap": "Let I(epoch) = 'blocks with > resolved_max blobs are rejected'. For I to hold, blob_params.MAX_BLOBS_PER_BLOCK must equal the LATEST schedule entry where entry.EPOCH <= current_epoch. Due to iteration order bug, blob_params = FIRST matching entry (oldest), not LATEST. Therefore I is FALSE.",
+          "counterexample_to_invariant": {
+            "setup": "BLOB_SCHEDULE = [(500,6), (800,9), (1000,12)] (ascending), epoch = 1000",
+            "expected_behavior": "MAX = 12, accept blocks with 7-12 blobs",
+            "actual_behavior": "MAX = 6, REJECT blocks with 7-12 blobs",
+            "invariant_violation": "Block with 10 blobs is INCORRECTLY REJECTED despite being within the intended epoch-1000 limit of 12",
+            "consensus_impact": "Correctly-implemented clients (with descending BLOB_SCHEDULE or fixed iteration) will ACCEPT the block. Buggy clients will REJECT. → CONSENSUS SPLIT"
+          }
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "configuration-dependent implementation bug, not exploitable by external attackers",
+        "recommendation": "URGENT: Report to Nimbus team and Ethereum Foundation immediately. This MUST be fixed before Fulu activation. Suggested fixes: (1) Change iteration to reverse order: 'for i in countdown(BLOB_SCHEDULE.high, 0)', OR (2) Enforce descending sort in spec and config validation, OR (3) Iterate to find MAX entry: 'var result = fallback; for entry: if epoch >= entry.EPOCH and entry.EPOCH > result.EPOCH: result = entry'",
+        "notes": "SEVERITY: CRITICAL for network health. EXPLOITABILITY: None (not bug bounty eligible). IMPACT: Complete failure of Fulu's dynamic blob scaling. Network cannot scale beyond 6 blobs/block. Potential consensus splits between implementations. TIMELINE: Must fix before Fulu mainnet activation. AFFECTED: All Nimbus clients following spec's 'ascending' sort guidance. DISCLOSURE: Responsible disclosure to Nimbus team and EF security immediately."
+      }
+    }
+  }
+]

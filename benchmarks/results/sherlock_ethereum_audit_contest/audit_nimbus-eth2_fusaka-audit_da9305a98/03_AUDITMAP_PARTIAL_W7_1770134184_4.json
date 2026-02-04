@@ -1,0 +1,144 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W2-FULU-REQRESP-PRECOND-04-BOUNDARY",
+    "property_id": "PROP-W2-FULU-REQRESP-PRECOND-04",
+    "code_scope": {
+      "file": "beacon_chain/sync/sync_protocol.nim",
+      "function": "dataColumnSidecarsByRoot",
+      "line_range": "379-438"
+    },
+    "final_classification": "exploitable",
+    "bug_bounty_eligible": true,
+    "summary": "The dataColumnSidecarsByRoot and dataColumnSidecarsByRange handlers serve data column sidecars directly from the database without verifying gossip validation status, potentially allowing invalid sidecars to be propagated via req/resp protocol.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analysis of data column serving code reveals that data column sidecars are retrieved directly from database storage and served to requesting peers without validation checks. The abstract state space shows that the database may contain sidecars with unknown validation status (valid, invalid, or unvalidated).",
+        "state_anomalies_found": [
+          {
+            "anomaly": "Database state can contain invalid sidecars",
+            "location": "beacon_chain/sync/sync_protocol.nim:419 (dataColumnSidecarsByRoot), line 483 (dataColumnSidecarsByRange)",
+            "description": "The code uses dag.db.getDataColumnSidecarSZ() which retrieves raw data from storage without checking if the sidecar passed gossip validation. The database may contain sidecars from blocks that failed state transition validation or gossip validation.",
+            "abstract_domain": "DatabaseState = {valid_sidecars, invalid_sidecars, unvalidated_sidecars}; ServedData ⊆ DatabaseState",
+            "risk": "Invalid sidecars in database can be served to requesting peers"
+          },
+          {
+            "anomaly": "Missing validation layer between storage and network serving",
+            "location": "beacon_chain/sync/sync_protocol.nim:379-438, 441-506",
+            "description": "The serving path is: receive_request → check_epoch_boundary → retrieve_from_db → serve_to_peer. No validation layer exists between database retrieval and network serving.",
+            "abstract_domain": "ValidationStatus = {unchecked, gossip_valid, gossip_invalid, state_transition_invalid}; ServedSidecars have ValidationStatus = unchecked",
+            "risk": "Sidecars with unknown or failed validation status can be served"
+          },
+          {
+            "anomaly": "BlockRef resolution does not imply sidecar validity",
+            "location": "beacon_chain/sync/sync_protocol.nim:403-415",
+            "description": "For dataColumnSidecarsByRoot, the code resolves block_root to BlockId but does not check if the block or its sidecars passed validation. A block existing in the DAG (dag.getBlockRef) does not guarantee its sidecars are valid.",
+            "abstract_domain": "BlockInDAG ∩ InvalidSidecars ≠ ∅",
+            "risk": "Blocks in the DAG may have invalid sidecars that get served"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution confirms a concrete attack path: an attacker can cause the node to store invalid data column sidecars (via block processing with invalid sidecars), then request those sidecars via dataColumnSidecarsByRoot or dataColumnSidecarsByRange, and receive invalid data that bypasses gossip validation.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "1. Attacker publishes block B with invalid data column sidecar S (e.g., KZG commitment mismatch)",
+            "2. Node receives and processes block B, storing sidecar S in database despite validation failure",
+            "3. Attacker sends dataColumnSidecarsByRoot request for (block_root=B, column_index=S.index)",
+            "4. Node resolves B via dag.getBlockRef() → succeeds (block is in DAG)",
+            "5. Node calls dag.db.getDataColumnSidecarSZ(B.root, S.index) → returns S (invalid sidecar)",
+            "6. Node serves S to attacker without checking gossip validation status",
+            "7. Attacker receives invalid sidecar S that failed gossip validation but is served via req/resp"
+          ],
+          "inputs": {
+            "block_root": "0x1234... (symbolic block root of block with invalid sidecar)",
+            "column_index": "ColumnIndex(7) (symbolic column index)",
+            "invalid_sidecar_property": "KZG commitment does not match erasure-coded data"
+          },
+          "expected_outcome": "Node serves invalid data column sidecar via req/resp protocol, violating the property: 'Only respond with sidecars that pass gossip validation rules; never send sidecars from blocks failing gossip or state transition validation'",
+          "attack_scenario": {
+            "step1": "Attacker creates block B at slot N with valid block header but invalid data column sidecar S (KZG proof fails)",
+            "step2": "Node processes block B: block passes initial validation and is added to DAG, but sidecar S fails gossip validation (stored but marked invalid or unvalidated)",
+            "step3": "Attacker peer sends dataColumnSidecarsByRoot(block_root=B, indices=[S.index])",
+            "step4": "Node handler at line 403-431 resolves B from DAG (succeeds), retrieves S from database (succeeds), serves S without validation check",
+            "step5": "Attacker receives invalid sidecar S, can propagate it to other nodes"
+          }
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The vulnerability is exploitable from the P2P network via untrusted peer requests. Attackers can request data columns for any block root in the node's storage window, and the node will serve them without re-validating gossip status.",
+        "entry_points": [
+          "P2P Req/Resp: dataColumnSidecarsByRoot RPC handler (beacon_chain/sync/sync_protocol.nim:379)",
+          "P2P Req/Resp: dataColumnSidecarsByRange RPC handler (beacon_chain/sync/sync_protocol.nim:441)"
+        ],
+        "data_flow_path": "Attacker → P2P Request (dataColumnSidecarsByRoot/ByRange) → sync_protocol.nim handler → ChainDAG.getBlockRef → Database.getDataColumnSidecarSZ → Response stream to attacker",
+        "validation_layers": [
+          {
+            "layer": "Epoch boundary check",
+            "location": "sync_protocol.nim:461-468 (dataColumnSidecarsByRange only)",
+            "effectiveness": "Only checks if startSlot is within MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS window. Does not validate gossip status of sidecars.",
+            "bypassed": false,
+            "note": "This check prevents serving very old data but does not validate correctness of served data"
+          },
+          {
+            "layer": "Request limit enforcement",
+            "location": "sync_protocol.nim:390-391 (dataColumnSidecarsByRoot)",
+            "effectiveness": "Enforces MAX_REQUEST_BLOCKS_DENEB limit on number of requested columns. Does not validate gossip status.",
+            "bypassed": false,
+            "note": "Rate limiting only, not validation"
+          },
+          {
+            "layer": "MISSING: Gossip validation re-check",
+            "location": "N/A - not implemented",
+            "effectiveness": "No validation layer exists to check if served sidecars passed gossip validation",
+            "bypassed": true,
+            "note": "This is the core vulnerability: sidecars are served without checking if they passed validation"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "notes": "The attack is fully attacker-controlled: (1) Attacker controls which block_root and column_indices to request, (2) Attacker can trigger serving of any sidecar in the database, (3) No validation layer prevents serving of invalid sidecars. The entry point is the untrusted P2P network (per trust_assumptions.p2p_peers.trust_level = UNTRUSTED in bug bounty scope)."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the invariant due to counterexample found in Phase 2. The property 'Only respond with sidecars that pass gossip validation rules' is violated.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "invariant_violation": {
+          "property_assertion": "∀ sidecar ∈ ResponseStream: gossip_validation_status(sidecar) = VALID",
+          "violation": "∃ sidecar ∈ ResponseStream: gossip_validation_status(sidecar) ≠ VALID",
+          "gap_in_logic": "The code retrieves sidecars from database without checking validation status. No guard condition enforces gossip validation before serving.",
+          "missing_guards": [
+            "Check if block passed state transition validation before serving its sidecars",
+            "Check if sidecar passed gossip validation (KZG proof, column index validity, etc.)",
+            "Mark and filter out invalid sidecars during database retrieval"
+          ]
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "exploitable",
+        "recommendation": "Report to Ethereum Foundation Bug Bounty as HIGH severity vulnerability",
+        "notes": "This vulnerability is in-scope for the Fusaka Bug Bounty per the provided scope. Reasoning: (1) Component: Data Availability Sampling (PeerDAS) - explicitly listed as in-scope. (2) Entry point: P2P Network Packets - listed as in-scope entry point. (3) Trust assumption: P2P peers are UNTRUSTED - vulnerability exploitable from untrusted network. (4) Attack vector: Single malicious P2P request can trigger serving of invalid data. (5) Impact: Can cause nodes to propagate invalid data column sidecars, potentially affecting consensus if invalid sidecars spread to >5% of network (Medium severity threshold). (6) Not excluded: Does not require publicly exposed API (uses P2P only), not infrastructure bug, not high-effort DoS, not a known issue. (7) PoC feasible: Can demonstrate with test that stores invalid sidecar and shows it gets served via req/resp.",
+        "scope_checks": {
+          "component_in_scope": true,
+          "component": "Data Availability Sampling (PeerDAS)",
+          "entry_point_in_scope": true,
+          "entry_point": "P2P Network Packets",
+          "trust_boundary_in_scope": true,
+          "trust_boundary": "UNTRUSTED P2P peers",
+          "api_scope": "in-scope (P2P req/resp, not JSON-RPC/Beacon API)",
+          "configuration_issue": false,
+          "cl_dependency": false,
+          "requires_publicly_exposed_api": false,
+          "high_effort_dos": false,
+          "known_issue": false
+        },
+        "severity_estimate": {
+          "severity": "HIGH",
+          "reasoning": "Per bug bounty severity classification: 'Trivially cause network splits affecting more than 5% of the network' or 'Bring down more than 5% of the network by sending a single network packet'. This vulnerability allows an attacker to cause nodes to serve and potentially propagate invalid data column sidecars, which could affect data availability sampling correctness and potentially cause network issues affecting >5% of validators.",
+          "impact_analysis": "If invalid sidecars are propagated via req/resp and cached by receiving nodes, those nodes may: (1) Fail DAS sampling checks when sampling invalid columns, (2) Potentially mark valid blocks as unavailable due to invalid sidecars, (3) Cause consensus issues if >5% of network is affected. Single malicious request can trigger this."
+        }
+      }
+    }
+  }
+]

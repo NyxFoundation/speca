@@ -1,0 +1,98 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W3-FULU-EXEC-PAYLOAD-PRE-004-INTERNAL",
+    "property_id": "PROP-W3-FULU-EXEC-PAYLOAD-PRE-004",
+    "code_scope": {
+      "file": "beacon_chain/spec/state_transition_block.nim",
+      "function": "process_execution_payload (Fulu fork)",
+      "line_range": "1082-1086",
+      "supporting_files": [
+        {
+          "file": "beacon_chain/spec/forks.nim",
+          "function": "get_blob_parameters",
+          "line_range": "1102-1109"
+        },
+        {
+          "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+          "function": "validateBeaconBlockDeneb",
+          "line_range": "384-388"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "The Fulu fork correctly implements dynamic blob limit validation via get_blob_parameters(), but lacks robustness checks for BLOB_SCHEDULE configuration integrity (sorting, duplicates).",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract state analysis identified that get_blob_parameters() has a fallback path to Electra defaults and assumes BLOB_SCHEDULE is sorted, but the code doesn't enforce this assumption.",
+        "state_anomalies_found": [
+          "Empty BLOB_SCHEDULE causes fallback to Electra defaults for all epochs",
+          "Unsorted BLOB_SCHEDULE entries cause incorrect parameter resolution (first match instead of highest epoch match)",
+          "No validation of BLOB_SCHEDULE integrity (duplicates, overlaps, invalid values)",
+          "Forward iteration through BLOB_SCHEDULE instead of reverse iteration means first matching entry is returned"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution found a counterexample where configuration divergence between nodes causes block validation divergence, leading to network split.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "epoch_current = 200 ∧ schedule_A = [{EPOCH: 100, MAX_BLOBS: 8}, {EPOCH: 200, MAX_BLOBS: 12}] ∧ schedule_B = [{EPOCH: 100, MAX_BLOBS: 8}] ∧ commitments_count = 10",
+          "inputs": {
+            "node_a_config": "BLOB_SCHEDULE = [{EPOCH: 100, MAX_BLOBS: 8}, {EPOCH: 200, MAX_BLOBS: 12}]",
+            "node_b_config": "BLOB_SCHEDULE = [{EPOCH: 100, MAX_BLOBS: 8}] (missing update)",
+            "block_epoch": 200,
+            "blob_commitments_count": 10
+          },
+          "expected_outcome": "Both nodes accept or reject consistently",
+          "actual_outcome": "Node A accepts (10 <= 12), Node B rejects (10 <= 8) → Network split"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The counterexample requires node operator misconfiguration (missing BLOB_SCHEDULE update). Attacker cannot directly control node configuration but can observe and amplify configuration divergence effects.",
+        "entry_points": [
+          "P2P Network (gossip messages)",
+          "Internal API (state transition)"
+        ],
+        "data_flow_path": "P2P Block Reception → gossip_validation.nim:validateBeaconBlockDeneb → get_blob_parameters(block.epoch) → Check commitments → state_transition_block.nim:process_execution_payload → get_blob_parameters(state.epoch) → Check commitments",
+        "validation_layers": [
+          {
+            "layer": "Gossip Validation",
+            "location": "gossip_validation.nim:384-388",
+            "effectiveness": "Strong: Rejects invalid blocks before state transition"
+          },
+          {
+            "layer": "State Transition Validation",
+            "location": "state_transition_block.nim:1082-1086",
+            "effectiveness": "Strong: Double-checks blob commitment count against dynamic limit"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "The code correctly implements the dynamic blob limit validation. The vulnerability is not in the implementation but in the operational assumption (ASSUM-FULU-BEACON-04) that all nodes update BLOB_SCHEDULE synchronously. Configuration divergence leads to block validation divergence and network split."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proven: The Fulu fork uses get_blob_parameters() (dynamic limit) instead of hardcoded constants. However, correctness depends on BLOB_SCHEDULE being properly configured and sorted, which is not enforced by the code.",
+        "proof_successful": true,
+        "guard_identified": "The invariant is enforced by the choice of function call (get_blob_parameters) in the Fulu fork. The code structurally prevents use of hardcoded limits.",
+        "caveats": [
+          "Proof assumes BLOB_SCHEDULE is correctly configured and sorted (not enforced by code)",
+          "Secondary invariant NOT proven: get_blob_parameters() returns correct MAX_BLOBS_PER_BLOCK IFF BLOB_SCHEDULE is valid and sorted",
+          "Specification ambiguity AMB-FULU-BEACON-02: 'should be sorted' vs 'must be sorted' - code assumes MUST but doesn't enforce"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement, not a bug bounty submission",
+        "notes": "The code correctly implements the specification. The issue is a configuration robustness gap: the code doesn't validate BLOB_SCHEDULE integrity (sorted, no duplicates). This aligns with implicit assumption ASSUM-FULU-BEACON-04 which states 'All client implementations are assumed to update their BLOB_SCHEDULE configuration in sync' with 'no protocol-level enforcement'. Adding validation would improve defense-in-depth against operator error.",
+        "suggested_improvements": [
+          "Add runtime validation in get_blob_parameters(): assert BLOB_SCHEDULE is sorted in ascending epoch order",
+          "Add validation for duplicate epochs in BLOB_SCHEDULE",
+          "Add warning log if BLOB_SCHEDULE is empty or contains only Electra defaults",
+          "Add fork digest monitoring to detect configuration divergence across network",
+          "Consider adding BLOB_SCHEDULE integrity check at node startup"
+        ]
+      }
+    }
+  }
+]

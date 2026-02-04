@@ -1,0 +1,231 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W5-EIP7594-BLOBTX-PRECOND-003-NODE-STATE-CELL-PROOF-COUNT-VALID",
+    "property_id": "PROP-W5-EIP7594-BLOBTX-PRECOND-003",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "verify_data_column_sidecar",
+      "line_range": "352-366",
+      "related_files": [
+        {
+          "file": "beacon_chain/spec/datatypes/fulu.nim",
+          "function": "constants and types",
+          "line_range": "43-100"
+        },
+        {
+          "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+          "function": "validateDataColumnSidecar",
+          "line_range": "586-716"
+        },
+        {
+          "file": "beacon_chain/spec/peerdas_helpers.nim",
+          "function": "verify_data_column_sidecar_kzg_proofs",
+          "line_range": "385-403"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Cell proof count validation exists but implementation differs from specification requirement; validation is per-column rather than per-transaction.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed state domains for sidecar.column.len, sidecar.kzg_commitments.len, and sidecar.kzg_proofs.len; all must be equal and non-zero.",
+        "state_anomalies_found": [
+          {
+            "variable": "sidecar.column.len",
+            "domain": "[0, MAX_BLOB_COMMITMENTS_PER_BLOCK]",
+            "anomaly": "Zero-length column passes first check but fails at line 359",
+            "impact": "Implementation rejects zero-blob columns, which is correct"
+          },
+          {
+            "variable": "sidecar.kzg_proofs.len",
+            "domain": "[0, unbounded]",
+            "anomaly": "Proof count is validated to equal column length, but spec requirement 'CELLS_PER_EXT_BLOB * len(blobs)' is not directly enforced",
+            "impact": "Implementation uses different validation approach - per-column validation instead of per-transaction"
+          },
+          {
+            "variable": "sidecar.index",
+            "domain": "[0, NUMBER_OF_COLUMNS-1]",
+            "anomaly": "Index bounds check at line 356 prevents out-of-bounds column indices",
+            "impact": "Correct bounds enforcement"
+          }
+        ],
+        "notes": "The implementation validates that column.len == kzg_commitments.len == kzg_proofs.len (lines 362-364), which ensures consistency within each column. However, the property states the requirement as 'cell_proofs length equals CELLS_PER_EXT_BLOB * len(blobs)', which is a transaction-level constraint. The Nimbus implementation uses a column-based architecture where each DataColumnSidecar contains one column across all blobs, rather than all cells for a single blob transaction."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to find counterexample where cell proof count validation fails; found that implementation uses different architecture than specification describes.",
+        "counterexample_found": false,
+        "symbolic_analysis": {
+          "path_1": {
+            "description": "Valid column with correct proof count",
+            "constraints": [
+              "sidecar.index < NUMBER_OF_COLUMNS",
+              "sidecar.kzg_commitments.len > 0",
+              "sidecar.column.len == sidecar.kzg_commitments.len",
+              "sidecar.column.len == sidecar.kzg_proofs.len"
+            ],
+            "outcome": "Returns ok(), validation passes",
+            "reachable": true
+          },
+          "path_2": {
+            "description": "Column with mismatched proof count",
+            "constraints": [
+              "sidecar.index < NUMBER_OF_COLUMNS",
+              "sidecar.kzg_commitments.len > 0",
+              "sidecar.column.len != sidecar.kzg_proofs.len"
+            ],
+            "outcome": "Returns err('Data column length must be equal to the number of commitments/proofs')",
+            "reachable": true,
+            "is_correct_rejection": true
+          },
+          "path_3": {
+            "description": "Zero-blob column",
+            "constraints": [
+              "sidecar.index < NUMBER_OF_COLUMNS",
+              "sidecar.kzg_commitments.len == 0"
+            ],
+            "outcome": "Returns err('Data column contains zero blob')",
+            "reachable": true,
+            "is_correct_rejection": true
+          },
+          "path_4": {
+            "description": "Out-of-bounds column index",
+            "constraints": [
+              "sidecar.index >= NUMBER_OF_COLUMNS"
+            ],
+            "outcome": "Returns err('Data column sidecar index exceeds the NUMBER_OF_COLUMNS')",
+            "reachable": true,
+            "is_correct_rejection": true
+          }
+        },
+        "architectural_observation": "The implementation does not match the specification's transaction-centric model. EIP-7594 describes validation at the blob transaction level (checking that cell_proofs.len == CELLS_PER_EXT_BLOB * blobs.len), but Nimbus implements a column-centric architecture where each DataColumnSidecar contains cells from multiple blobs in a single column. The validation logic ensures that each column has consistent lengths (column.len == commitments.len == proofs.len), which is semantically equivalent but structurally different.",
+        "potential_discrepancy": {
+          "description": "Implementation divergence from specification data model",
+          "spec_model": "Blob transaction contains all cells for all blobs (row-wise arrangement)",
+          "impl_model": "Data column sidecar contains one column across all blobs (column-wise arrangement)",
+          "security_implication": "If a client expects transaction-level validation per the spec but receives column-level data, there could be validation bypass. However, the mathematical constraint is preserved: total cells must equal CELLS_PER_EXT_BLOB * num_blobs across all columns.",
+          "mitigation_status": "The validateDataColumnSidecar function at gossip_validation.nim:586-716 performs comprehensive validation including KZG proof verification via verify_data_column_sidecar_kzg_proofs (line 701), which batch-verifies all proofs. The implementation ensures that the total number of cells is correct across the network, even though validation is performed per-column rather than per-transaction."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "No exploitable counterexample found; reachability analysis shows validation is correctly enforced at the gossip layer before malicious data can propagate.",
+        "entry_points": [
+          "P2P gossip: DATA_COLUMN_SIDECAR_{subnet_id} topic",
+          "Direct peer request via req/resp protocol"
+        ],
+        "data_flow_path": "External P2P message → validateDataColumnSidecar (gossip_validation.nim:586) → verify_data_column_sidecar (peerdas_helpers.nim:352) → verify_data_column_sidecar_kzg_proofs (peerdas_helpers.nim:386) → verifyCellKzgProofBatch",
+        "validation_layers": [
+          {
+            "layer": "Structural validation",
+            "location": "peerdas_helpers.nim:352-366 (verify_data_column_sidecar)",
+            "checks": [
+              "Column index bounds check (index < NUMBER_OF_COLUMNS)",
+              "Non-zero commitments check (kzg_commitments.len > 0)",
+              "Length equality check (column.len == kzg_commitments.len == kzg_proofs.len)"
+            ],
+            "effectiveness": "Prevents malformed sidecars with mismatched array lengths from proceeding to cryptographic verification"
+          },
+          {
+            "layer": "Merkle inclusion proof validation",
+            "location": "gossip_validation.nim:630 (check_data_column_sidecar_inclusion_proof)",
+            "checks": [
+              "Verifies KZG commitments are included in block body via Merkle proof"
+            ],
+            "effectiveness": "Prevents forged commitments that weren't part of the original block"
+          },
+          {
+            "layer": "Cryptographic proof verification",
+            "location": "peerdas_helpers.nim:385-403 (verify_data_column_sidecar_kzg_proofs)",
+            "checks": [
+              "Batch verification of cell KZG proofs using verifyCellKzgProofBatch",
+              "Creates cellIndices array based on sidecar.column.len",
+              "Verifies all proofs in the column against commitments"
+            ],
+            "effectiveness": "Cryptographically validates that each cell is correctly committed; this is the ultimate security boundary"
+          },
+          {
+            "layer": "Network timing and parent validation",
+            "location": "gossip_validation.nim:609-671",
+            "checks": [
+              "Slot timing constraints (not from future, not finalized)",
+              "Parent block validation",
+              "Proposer index verification",
+              "Signature verification"
+            ],
+            "effectiveness": "Prevents various DoS and consistency attacks unrelated to cell proof count"
+          }
+        ],
+        "attacker_controlled": true,
+        "attacker_capabilities": {
+          "can_craft_arbitrary_sidecars": true,
+          "can_manipulate_array_lengths": true,
+          "can_forge_kzg_proofs": false,
+          "can_bypass_structural_validation": false
+        },
+        "classification": "defense-in-depth",
+        "notes": "An attacker can send a DataColumnSidecar with incorrect proof counts, but it will be rejected at line 362-364 before reaching the expensive KZG verification. The defense is correctly placed early in the validation pipeline. The architectural difference between spec and implementation (transaction-level vs column-level validation) does not introduce a vulnerability because: (1) Each column is validated independently to ensure structural consistency, (2) The KZG batch verification cryptographically proves the cells are correct, (3) The network aggregates columns from multiple peers to reconstruct the full data, so the total cell count is verified collectively across the network."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant partially proven with architectural caveat; validation is correct but uses different data model than specification.",
+        "invariant_statement": "For all DataColumnSidecar inputs to verify_data_column_sidecar, if the function returns ok(), then (sidecar.column.len == sidecar.kzg_commitments.len) AND (sidecar.column.len == sidecar.kzg_proofs.len) AND (sidecar.kzg_commitments.len > 0) AND (sidecar.index < NUMBER_OF_COLUMNS)",
+        "proof_successful": true,
+        "proof_outline": {
+          "step1": "Precondition: sidecar is a valid DataColumnSidecar object",
+          "step2": "Guard 1 (line 356-357): If sidecar.index >= NUMBER_OF_COLUMNS, return err(). This establishes: sidecar.index < NUMBER_OF_COLUMNS for all ok() returns.",
+          "step3": "Guard 2 (line 359-360): If sidecar.kzg_commitments.len == 0, return err(). This establishes: sidecar.kzg_commitments.len > 0 for all ok() returns.",
+          "step4": "Guard 3 (line 362-364): If (sidecar.column.len != sidecar.kzg_commitments.len) OR (sidecar.column.len != sidecar.kzg_proofs.len), return err(). By propositional logic, the negation (required to reach line 366 ok()) is: (sidecar.column.len == sidecar.kzg_commitments.len) AND (sidecar.column.len == sidecar.kzg_proofs.len).",
+          "step5": "Conclusion: All four conjuncts of the invariant are enforced by guards before ok() is returned. QED.",
+          "note": "This proves the invariant as implemented, but the implementation diverges from the specification's stated requirement."
+        },
+        "guard_conditions": [
+          {
+            "location": "peerdas_helpers.nim:356-357",
+            "condition": "sidecar.index < NUMBER_OF_COLUMNS",
+            "enforces": "Column index bounds"
+          },
+          {
+            "location": "peerdas_helpers.nim:359-360",
+            "condition": "sidecar.kzg_commitments.len > 0",
+            "enforces": "Non-empty commitments"
+          },
+          {
+            "location": "peerdas_helpers.nim:362-364",
+            "condition": "(sidecar.column.len == sidecar.kzg_commitments.len) AND (sidecar.column.len == sidecar.kzg_proofs.len)",
+            "enforces": "Array length consistency"
+          }
+        ],
+        "spec_vs_implementation_gap": {
+          "specification_requirement": "Cell proof count MUST equal CELLS_PER_EXT_BLOB * len(blobs) before batch verification",
+          "implementation_behavior": "Each column's proof count must equal its cell count (column.len == kzg_proofs.len), with batch verification performed per-column",
+          "gap_analysis": "The specification describes validation at the blob transaction granularity (all cells for all blobs), while Nimbus implements validation at the column granularity (one column across all blobs). The mathematical equivalence holds: if each of the NUMBER_OF_COLUMNS columns has num_blobs cells with num_blobs proofs, the total is NUMBER_OF_COLUMNS * num_blobs cells with NUMBER_OF_COLUMNS * num_blobs proofs. Since CELLS_PER_EXT_BLOB == NUMBER_OF_COLUMNS (both are 128), the total cell count is CELLS_PER_EXT_BLOB * num_blobs, matching the spec requirement.",
+          "security_impact": "No direct security vulnerability. The column-based architecture is an implementation choice that maintains the same security guarantees as the transaction-based specification. However, this architectural difference should be explicitly documented to prevent confusion when comparing implementations.",
+          "recommendation": "Document that Nimbus uses column-based validation instead of transaction-based validation, and that the two approaches are mathematically equivalent. Consider adding a comment in verify_data_column_sidecar explaining how the per-column validation satisfies the spec's per-transaction requirement."
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "classification_reason": "defense-in-depth",
+        "scope_analysis": {
+          "is_fusaka_specific": true,
+          "component": "Consensus Layer - PeerDAS Data Availability Sampling (EIP-7594)",
+          "reachability": "external-reachable via P2P gossip",
+          "exploitability": "Not exploitable - validation layers prevent malicious input from propagating"
+        },
+        "validation_layer_effectiveness": [
+          {
+            "layer": "Structural validation (peerdas_helpers.nim:352-366)",
+            "prevents": "Malformed sidecars with incorrect array lengths",
+            "effectiveness": "100% - hard rejection before expensive operations"
+          },
+          {
+            "layer": "Cryptographic verification (peerdas_helpers.nim:385-403)",
+            "prevents": "Forged or incorrect cell proofs",
+            "effectiveness": "100% - cryptographic security boundary"
+          }
+        ],
+        "recommendation": "Report to Nimbus/Ethereum Foundation as architectural documentation improvement",
+        "notes": "While no exploitable vulnerability exists, the implementation's divergence from the specification's data model creates a documentation gap. This could lead to: (1) Confusion when comparing implementations, (2) Potential interoperability issues if clients make assumptions about data structure, (3) Difficulty in formal verification efforts that assume the spec's transaction-based model. Recommended action: Add explicit documentation explaining the column-based validation approach and its equivalence to the spec's transaction-based requirement."
+      }
+    }
+  }
+]

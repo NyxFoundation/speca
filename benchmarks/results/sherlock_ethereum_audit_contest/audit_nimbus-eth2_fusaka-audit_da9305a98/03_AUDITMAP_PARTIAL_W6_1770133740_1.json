@@ -1,0 +1,67 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W0-FULUFC-INV-004-INTERNAL",
+    "property_id": "PROP-W0-FULUFC-INV-004",
+    "code_scope": {
+      "file": "beacon_chain/gossip_processing/block_processor.nim",
+      "function": "processResolvedBlock / storeBlock",
+      "line_range": "439-447, 680-695"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "KZG proof re-verification occurs when blocks are retrieved from quarantine, preventing acceptance without DA confirmation.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Traced state space of quarantined blocks: blocks enter quarantine in STATE-DA-FAILED, are stored in sidecarless table, and later retrieved via popSidecars(). Abstract state analysis shows two paths: (1) sidecars present \u2192 verification, (2) sidecars absent \u2192 re-quarantine.",
+        "state_anomalies_found": [
+          "Potential race: popSidecars() at L439 returns Opt[DataColumnSidecars], which could be empty if sidecars not fully received",
+          "Re-verification is performed at L680-695 after retrieval, maintaining invariant"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to construct path where queued block bypasses DA verification. All execution paths from quarantine retrieval (L439) to block acceptance (L722 addHeadBlockWithParent) require passing through KZG verification at L680-695.",
+        "counterexample_found": false,
+        "counterexample": null
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "No counterexample found; reachability analysis not required. However, analyzed hypothetical scenario where verification was bypassed.",
+        "entry_points": [
+          "P2P network (gossip protocol)",
+          "RPC sync"
+        ],
+        "data_flow_path": "P2P peer \u2192 gossip handler \u2192 block_processor.enqueueBlock \u2192 processResolvedBlock \u2192 quarantine.popSidecars \u2192 storeBlock \u2192 verify_data_column_sidecar_kzg_proofs",
+        "validation_layers": [
+          {
+            "layer": "Signature verification",
+            "location": "block_processor.nim:435-438 checkBlobOrColumnlessSignature",
+            "effectiveness": "Strong (prevents forgery)"
+          },
+          {
+            "layer": "KZG proof verification",
+            "location": "block_processor.nim:680-695 verify_data_column_sidecar_kzg_proofs",
+            "effectiveness": "Strong (cryptographic proof of data availability)"
+          },
+          {
+            "layer": "Parent resolution check",
+            "location": "block_processor.nim:509 (comment: 'will be re-orphaned below')",
+            "effectiveness": "Strong (prevents acceptance without ancestry)"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "Attacker can trigger block quarantine by withholding column sidecars initially, then providing them later. However, KZG verification at L687 ensures that even re-processed blocks undergo full cryptographic verification. The invariant holds: blocks are not accepted without confirmed DA."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proved invariant holds: All paths from quarantine to block acceptance require KZG verification. Guard conditions: (1) popSidecars returns Opt.none if sidecars incomplete (L567-569 in blob_quarantine.nim), (2) verify_data_column_sidecar_kzg_proofs must return Ok (L687-695 in block_processor.nim), (3) block is only added to DAG after verification passes (L722 addHeadBlockWithParent).",
+        "proof_successful": true,
+        "guard_identified": "verify_data_column_sidecar_kzg_proofs (L687) returns err(VerifierError.Invalid) on failure, preventing block acceptance"
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus/Geth developers as a robustness confirmation. The invariant is correctly enforced through multiple layers of verification.",
+        "notes": "While externally reachable via P2P and attacker-controlled, the implementation correctly enforces the invariant through cryptographic verification. This is a case where the specification's defensive design is properly implemented."
+      }
+    }
+  }
+]

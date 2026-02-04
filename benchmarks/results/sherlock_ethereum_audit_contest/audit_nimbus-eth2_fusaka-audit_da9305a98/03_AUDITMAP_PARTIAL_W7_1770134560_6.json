@@ -1,0 +1,110 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W4-EIP7892-PRECOND-005-NODE-1",
+    "property_id": "PROP-W4-EIP7892-PRECOND-005",
+    "code_scope": {
+      "file": "beacon_chain/spec/forks.nim",
+      "function": "compute_fork_digest_fulu",
+      "line_range": "1764-1785",
+      "supporting_functions": [
+        "beacon_chain/spec/forks.nim:compute_fork_digest:1753-1761",
+        "beacon_chain/spec/network.nim:getForkDigest:137-143",
+        "beacon_chain/networking/eth2_network.nim:updateNextForkDigest:2725-2741"
+      ]
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "Fork digest computation is deterministic but depends on configuration consistency; misconfiguration can cause network partition, but this is an operational issue requiring node operator error, not a protocol vulnerability.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed fork digest computation and identified that determinism depends on consistent RuntimeConfig.BLOB_SCHEDULE across all nodes. The function compute_fork_digest_fulu deterministically computes digest = base_digest XOR hash(epoch || max_blobs), but requires identical input configurations.",
+        "state_anomalies_found": [
+          "Configuration dependency: Nodes with different BLOB_SCHEDULE entries will compute different fork digests for the same epoch",
+          "Epoch boundary transition: At FULU_FORK_EPOCH, logic switches from compute_fork_digest to compute_fork_digest_fulu",
+          "No protocol-level validation: No mechanism to detect or prevent configuration mismatches before fork activation"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identified a counterexample where two nodes with identical genesis_validators_root but different blob schedule configurations compute different fork digests, causing network partition.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "E >= cfg.FULU_FORK_EPOCH AND cfg_A.BLOB_SCHEDULE[i].MAX_BLOBS_PER_BLOCK != cfg_B.BLOB_SCHEDULE[i].MAX_BLOBS_PER_BLOCK for same epoch",
+          "inputs": {
+            "epoch": 100,
+            "cfg_A_max_blobs": 6,
+            "cfg_B_max_blobs": 8,
+            "genesis_validators_root": "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95"
+          },
+          "expected_outcome": "Node A and Node B compute different fork digests (fork_digest_A != fork_digest_B), causing them to subscribe to different gossip topics and partition from each other"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reachability analysis determined that the counterexample cannot be triggered by attacker-controlled P2P input. It requires node operator to load incorrect configuration or supply chain compromise to distribute wrong default configs.",
+        "entry_points": [
+          "Configuration file loading (node operator controlled)",
+          "P2P ENR advertisement (attacker can advertise wrong digest but cannot affect honest node's computation)",
+          "Gossip topic subscription (depends on local fork digest computation)"
+        ],
+        "data_flow_path": "Config File → RuntimeConfig.BLOB_SCHEDULE → getForkDigest() → compute_fork_digest_fulu() → updateNextForkDigest() → ENR update → P2P discovery",
+        "validation_layers": [
+          {
+            "layer": "Static Configuration Validation",
+            "location": "Node startup (client-specific validation)",
+            "effectiveness": "Limited - depends on client implementation; no spec-mandated validation"
+          },
+          {
+            "layer": "Social Consensus",
+            "location": "Network operators follow canonical EIP-7892 blob schedule",
+            "effectiveness": "Moderate - relies on proper communication and documentation"
+          },
+          {
+            "layer": "Fork Digest Mismatch Detection",
+            "location": "P2P layer - nodes detect incompatible fork digests and disconnect",
+            "effectiveness": "High for detection, Low for prevention - only discovers issue after fork activation"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "notes": "Attack requires: (1) Node operator misconfiguration, OR (2) Compromised build/distribution supplying wrong default configs, OR (3) Multiple independent configuration errors. Not exploitable via standard P2P attack vectors."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant 'fork_digest_A(E) == fork_digest_B(E) for identical configs' is mathematically proven. However, the configuration consistency assumption is NOT enforced by the protocol - it relies on social consensus.",
+        "proof_successful": true,
+        "guard_identified": {
+          "primary_guard": "Configuration Consistency Assumption",
+          "location": "RuntimeConfig.BLOB_SCHEDULE must be identical across all nodes",
+          "enforcement": "Social consensus and proper node operation (not protocol-enforced)",
+          "gap": "No protocol-level mechanism to validate blob schedule consistency before BPO fork activation. Nodes only discover mismatch when gossip communication fails."
+        },
+        "additional_guards": [
+          {
+            "guard": "Deterministic Hash Functions",
+            "location": "eth2digest(), toBytesLE(), compute_fork_data_root()",
+            "enforcement": "Pure functions with no side effects (strong guarantee)"
+          }
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "configuration-issue",
+        "classification_rationale": "Vulnerability requires node operator to load incorrect blob schedule configuration. Not exploitable via attacker-controlled P2P messages or transactions. Classified as operational error rather than protocol weakness.",
+        "scope_check_details": {
+          "in_scope_match": [
+            "Affects Network Splits (in-scope component)",
+            "Affects P2P Network and Fork Choice (in-scope components)",
+            "Related to EIP-7892 BPO forks (in-scope EIP)"
+          ],
+          "out_of_scope_match": [
+            "Requires node operator misconfiguration (out-of-scope per conditional exclusions)",
+            "Cannot be exploited via P2P packets or on-chain transactions alone",
+            "Similar to local validator misconfiguration (trust assumption marked out-of-scope)"
+          ]
+        },
+        "recommendation": "Report to Nimbus team as robustness improvement: (1) Add startup validation comparing loaded blob schedule against expected EIP-7892 values, (2) Add runtime detection of fork digest mismatch with clear operator warnings, (3) Consider adding blob schedule hash to ENR for early peer compatibility detection",
+        "internal_severity": "Medium",
+        "internal_severity_justification": "Could cause >5% network partition if multiple nodes deploy with misconfigured blob schedules, meeting Medium severity threshold per bug bounty criteria",
+        "notes": "While this is out-of-scope for bug bounty due to configuration dependency, it represents a valid robustness gap. Ethereum protocol historically relies on social consensus for fork parameters, but BPO forks' parameterized nature increases misconfiguration risk."
+      }
+    }
+  }
+]

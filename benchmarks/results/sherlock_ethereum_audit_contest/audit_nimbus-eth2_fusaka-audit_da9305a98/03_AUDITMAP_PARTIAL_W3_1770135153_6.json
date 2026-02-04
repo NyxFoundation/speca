@@ -1,0 +1,132 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W4-EIP7892-PRECOND-002-BOUNDARY",
+    "property_id": "PROP-W4-EIP7892-PRECOND-002",
+    "code_scope": {
+      "file": "beacon_chain/spec/state_transition_block.nim",
+      "function": "process_execution_payload (Fulu version)",
+      "line_range": "1062-1099",
+      "additional_files": [
+        "beacon_chain/el/engine_api_conversions.nim:127-128"
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Beacon chain lacks independent validation of blob_gas_used and excess_blob_gas fields, relying entirely on EL validation via notify_new_payload callback.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract state analysis reveals blob_gas_used and excess_blob_gas can take arbitrary uint64 values without explicit validation in beacon chain code.",
+        "state_anomalies_found": [
+          "blob_gas_used can be any value in [0, 2^64-1], but should be bounded by GAS_PER_BLOB * MAX_BLOBS_PER_BLOCK",
+          "excess_blob_gas can be any value in [0, 2^64-1], but should be consistent with parent values and blob schedule",
+          "No explicit validation that blob_gas_used <= MAX_BLOB_GAS",
+          "No validation that excess_blob_gas was correctly computed from parent values"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Counterexample found: beacon chain accepts invalid blob gas values if EL's notify_new_payload returns true despite invalid values.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "payload.parent_hash == state.latest_execution_payload_header.block_hash AND lenu64(body.blob_kzg_commitments) <= blob_params.MAX_BLOBS_PER_BLOCK AND notify_new_payload(payload) == true",
+          "inputs": {
+            "MAX_BLOBS_PER_BLOCK": 6,
+            "GAS_PER_BLOB": 131072,
+            "MAX_BLOB_GAS": 786432,
+            "C_blob_gas_used": 786433,
+            "C_excess_blob_gas": "0xFFFFFFFFFFFFFFFF",
+            "notify_new_payload_result": "true (buggy EL)"
+          },
+          "expected_outcome": "Beacon chain accepts payload without independent validation and stores invalid blob gas values in state.latest_execution_payload_header at line 1097."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Vulnerability is reachable via P2P block propagation but requires concurrent EL bug, classifying as defense-in-depth.",
+        "entry_points": [
+          "P2P block propagation (malicious peer sends block with crafted blob gas fields)"
+        ],
+        "data_flow_path": "P2P → Block validation → process_execution_payload (line 1062) → notify_new_payload callback (line 1093) → EL validation (semi-trusted) → State update (line 1097)",
+        "validation_layers": [
+          {
+            "layer": "P2P gossip validation",
+            "location": "P2P layer (not in code scope)",
+            "effectiveness": "Does not validate blob gas field values"
+          },
+          {
+            "layer": "Beacon chain block processing",
+            "location": "state_transition_block.nim:1062-1099",
+            "effectiveness": "MISSING - No explicit validation of blob gas fields"
+          },
+          {
+            "layer": "Engine API (EL validation)",
+            "location": "notify_new_payload callback (line 1093)",
+            "effectiveness": "Defense-in-depth only - Assumes EL is correct, but EL bugs during BPO fork transition are in-scope"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "Exploitation requires both: (1) attacker-controlled P2P block with invalid blob gas fields, AND (2) buggy EL that accepts these invalid values during BPO fork transition. Trust assumptions state Engine API is semi-trusted and EL bugs are in-scope. Different EL implementations may validate inconsistently during fork transition, creating consensus divergence risk."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proof attempt failed. The invariant cannot be proven because beacon chain lacks independent validation of blob gas fields.",
+        "proof_successful": false,
+        "guard_identified": {
+          "explicit_guards": [
+            "parent_hash validation (line 1070-1072)",
+            "blob_kzg_commitments count validation (line 1085-1086)"
+          ],
+          "missing_guards": [
+            "blob_gas_used <= GAS_PER_BLOB * MAX_BLOBS_PER_BLOCK validation",
+            "excess_blob_gas consistency validation"
+          ],
+          "implicit_guard": "notify_new_payload callback (line 1093) delegates to semi-trusted EL",
+          "gap": "Reliance on external EL validation without independent verification creates unproven dependency during BPO fork transition"
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement. Add independent validation of blob_gas_used and excess_blob_gas fields in beacon chain to protect against EL bugs during BPO fork transition.",
+        "notes": "Finding is in-scope for EIP-7892 (BPO fork), in core consensus logic (not API), does not require misconfiguration, and EL bugs are in-scope per trust assumptions. However, direct exploitation requires concurrent EL bug, making this a defense-in-depth issue rather than directly exploitable vulnerability. HIGH severity justified by potential consensus splits if EL implementations validate inconsistently during fork activation."
+      }
+    },
+    "detailed_findings": {
+      "vulnerability_type": "Missing Defense-in-Depth Validation",
+      "affected_component": "Beacon Chain Block Processing (Fulu/Fusaka)",
+      "specific_issue": "The beacon chain's process_execution_payload function does not independently validate blob_gas_used and excess_blob_gas fields received from the Execution Layer via the Engine API.",
+      "root_cause": "Incomplete validation logic in beacon chain state transition for BPO (Blob Parameter Only) fork changes.",
+      "impact_analysis": {
+        "direct_impact": "If an EL implementation has a bug in BPO fork transition validation logic, the beacon chain will accept and propagate invalid blob gas values without detection.",
+        "consensus_risk": "Different EL implementations may validate blob gas fields inconsistently during the BPO fork transition period, causing beacon nodes paired with different ELs to accept/reject the same blocks differently, leading to consensus splits.",
+        "network_scope": "Could affect >33% of network if major EL client has validation bug during fork transition (HIGH severity per bug bounty criteria)."
+      },
+      "proof_of_concept_outline": {
+        "step1": "Wait for BPO fork activation period when EL implementations are applying new validation rules",
+        "step2": "Craft a block with blob_gas_used exceeding MAX_BLOB_GAS = GAS_PER_BLOB * MAX_BLOBS_PER_BLOCK",
+        "step3": "Propagate block via P2P to nodes running buggy EL implementation",
+        "step4": "Buggy EL accepts the block and returns true to beacon chain via notify_new_payload",
+        "step5": "Beacon chain accepts and finalizes block with invalid blob gas values",
+        "step6": "Nodes with correct EL implementations reject the same block",
+        "step7": "Network splits as different node combinations accept/reject the block",
+        "note": "This PoC requires a concurrent EL bug, which is why the classification is defense-in-depth rather than directly exploitable."
+      },
+      "recommended_fix": {
+        "location": "beacon_chain/spec/state_transition_block.nim:1062-1099",
+        "fix_description": "Add explicit validation checks before calling notify_new_payload",
+        "specific_checks": [
+          "Validate blob_gas_used <= GAS_PER_BLOB * blob_params.MAX_BLOBS_PER_BLOCK",
+          "Validate blob_gas_used is non-negative (already guaranteed by uint64 type)",
+          "Consider validating excess_blob_gas consistency with parent values using the BPO fork formula",
+          "Add these checks at approximately line 1086, after blob commitment count validation"
+        ],
+        "code_example": "# After line 1086, add:\nlet max_blob_gas = GAS_PER_BLOB * blob_params.MAX_BLOBS_PER_BLOCK\nif not (payload.blob_gas_used <= max_blob_gas):\n  return err(\"process_execution_payload: blob_gas_used exceeds maximum\")\n\n# Optionally validate excess_blob_gas consistency:\nlet expected_excess = calc_excess_blob_gas(\n  state.latest_execution_payload_header.excess_blob_gas,\n  state.latest_execution_payload_header.blob_gas_used,\n  blob_params)\nif not (payload.excess_blob_gas == expected_excess):\n  return err(\"process_execution_payload: excess_blob_gas mismatch\")"
+      },
+      "defense_in_depth_rationale": "While the EL should validate these fields, the beacon chain should implement independent checks for defense-in-depth, especially during fork transitions when validation logic is changing and different implementations may have bugs or inconsistencies.",
+      "bpo_fork_specific_risks": [
+        "BPO fork introduces new blob schedule with per-fork target/max/baseFeeUpdateFraction parameters",
+        "Different EL implementations may interpret the new validation rules differently during the transition",
+        "The blob schedule timestamp (EL) and epoch (CL) activation may not align perfectly across implementations",
+        "First few blocks after BPO activation are highest risk for validation inconsistencies"
+      ]
+    }
+  }
+]

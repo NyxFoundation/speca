@@ -1,0 +1,110 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W2-EIP7642-HISTORY-INV-01-INTERNAL",
+    "property_id": "PROP-W2-EIP7642-HISTORY-INV-01",
+    "code_scope": {
+      "file": "beacon_chain/sync/*",
+      "function": "History range management (abstract)",
+      "line_range": "N/A - Specification-level property",
+      "notes": "EIP-7642 is a consensus layer specification change. This property is abstract and not yet mapped to specific code. Analysis is performed at the specification level."
+    },
+    "final_classification": "inconclusive",
+    "bug_bounty_eligible": false,
+    "summary": "Specification-level invariant for EIP-7642 history range tracking; concrete implementation not identified in Nimbus codebase.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract model analysis: Node maintains (earliestBlock, latestBlock) state that must match actual block availability. State transitions include: block pruning, new block arrival, finalization updates.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "Race condition: Block pruning may occur while advertised range is being broadcast",
+            "abstract_domain": "earliestBlock: monotonically increasing integer; latestBlock: monotonically increasing integer with reorg handling",
+            "potential_violation": "If pruning completes after range advertisement but before peer requests, node advertises unavailable blocks"
+          },
+          {
+            "anomaly": "Reorg handling: latestBlock may decrease during chain reorganization",
+            "abstract_domain": "latestBlock state space includes non-monotonic transitions",
+            "potential_violation": "Advertised latestBlock may temporarily exceed actual available blocks during reorg"
+          },
+          {
+            "anomaly": "Initialization state: Before first block received, what is the valid range?",
+            "abstract_domain": "earliestBlock and latestBlock may be undefined or use sentinel values (0, genesis, etc.)",
+            "potential_violation": "Node may advertise empty range or invalid sentinel values before sync completes"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic path exploration for invariant violation. Modeling state transitions without concrete implementation.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "Path: [Node initializes] -> [Advertise range (0, 0)] -> [Peer requests block 0] -> [Node does not have genesis block yet] -> VIOLATION",
+          "symbolic_variables": {
+            "earliestBlock": "symbolic_int E (uninitialized or 0)",
+            "latestBlock": "symbolic_int L (uninitialized or 0)",
+            "actualAvailableBlocks": "set() (empty)",
+            "advertisedRange": "(E, L)"
+          },
+          "inputs": {
+            "scenario": "Node just started, has not synced genesis yet",
+            "peer_request": "getBlocksByRange(0, 1)",
+            "node_state": "earliestBlock=0, latestBlock=0, actual blocks available=none"
+          },
+          "expected_outcome": "Node violates invariant by advertising blocks it cannot serve. Invariant: \u2200 block B \u2208 [earliestBlock, latestBlock], node can serve B. Violation: 0 \u2208 [0, 0] but node cannot serve block 0."
+        },
+        "additional_paths": [
+          {
+            "path": "Pruning race condition",
+            "conditions": "[Node advertises range (X, Y)] -> [Pruning thread prunes blocks < X'] where X' > X -> [Peer requests block X+1] -> VIOLATION if X+1 was pruned",
+            "notes": "Requires lack of atomic update between pruning operation and range advertisement"
+          },
+          {
+            "path": "Reorg boundary condition",
+            "conditions": "[Node advertises latestBlock=L] -> [Reorg occurs, new chain tip L' < L] -> [Peer requests block L] -> VIOLATION if block L is no longer on canonical chain and was discarded",
+            "notes": "Depends on whether node keeps orphaned blocks or discards them immediately"
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "This is an internal state consistency issue. No direct attacker control of earliestBlock/latestBlock values. However, attacker can trigger conditions (send blocks, trigger pruning via resource exhaustion) that expose the bug.",
+        "entry_points": [
+          "P2P sync protocol (receiving blocks)",
+          "Local node operations (pruning, finalization)",
+          "Chain reorganization events"
+        ],
+        "data_flow_path": "External blocks arrive via P2P -> Node processes blocks -> Internal state updated (earliestBlock, latestBlock) -> State advertised via P2P BlockRangeUpdate messages -> Peers request blocks based on advertised range -> Node serves blocks",
+        "validation_layers": [
+          {
+            "layer": "P2P message validation",
+            "location": "beacon_chain/sync/sync_protocol.nim (assumed)",
+            "effectiveness": "Does not validate internal state consistency"
+          },
+          {
+            "layer": "Internal state management",
+            "location": "History range update logic (not identified in codebase)",
+            "effectiveness": "Unknown - depends on implementation. If atomic updates and proper locking are used, violation is prevented."
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "notes": "Attacker cannot directly set earliestBlock/latestBlock, but can trigger conditions (rapid block arrival, pruning) that may expose race conditions or initialization bugs. This is primarily an internal consistency issue, not a direct attack vector. Classification: internal-only because it requires the node's own code to have a bug (race condition, improper initialization)."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant proving skipped due to counterexample found in Phase 2. However, we analyze what WOULD be required to prove the invariant.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "proof_sketch": "To prove \u2200t: advertisedRange(t) \u2286 actualAvailableBlocks(t), we would need: (1) Atomic update: any change to actualAvailableBlocks must be atomically reflected in advertisedRange. (2) Initialization guard: do not advertise range until at least one block is available. (3) Pruning guard: before pruning block B, ensure B is not in current advertisedRange, OR atomically update range before pruning. (4) Reorg guard: on reorg, immediately update advertisedRange to reflect new canonical chain before serving requests.",
+        "missing_guards": [
+          "No evidence of atomic update mechanism between block storage and range advertisement",
+          "Initialization state not examined - may advertise before blocks available",
+          "Pruning and range update synchronization not verified"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "internal-only (requires internal bug, not directly exploitable by attacker) AND inconclusive (concrete implementation not identified)",
+        "recommendation": "This is a specification-level property for EIP-7642. Geth developers should ensure implementation includes: (1) Atomic updates between block storage and advertised range, (2) Proper initialization guards, (3) Pruning synchronization. This is not bug-bounty eligible because it requires the node software itself to have a race condition or initialization bug, not attacker-controlled input.",
+        "scope_notes": "EIP-7642 defines eth/69 protocol changes including history range tracking. The invariant is critical for P2P network health (in-scope per bug bounty), BUT the violation scenario identified is an internal consistency bug, not an external attack. Per bug bounty scope: 'internal consistency issues' that require node bugs are not typically eligible unless they can be triggered remotely.",
+        "notes": "Classification rationale: (1) Phase 2.5 classified as 'internal-only' because violation requires node's own bug (race condition, initialization error). (2) No concrete code identified for analysis. (3) Specification-level property without implementation mapping. Final: inconclusive + not bug-bounty-eligible."
+      }
+    }
+  }
+]

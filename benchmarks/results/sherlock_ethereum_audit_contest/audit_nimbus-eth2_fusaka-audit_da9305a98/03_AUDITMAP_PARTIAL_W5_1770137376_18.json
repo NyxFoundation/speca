@@ -1,0 +1,151 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W5-EIP7825-BLK-PRECOND-001-BOUNDARY",
+    "property_id": "PROP-W5-EIP7825-BLK-PRECOND-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/state_transition_block.nim",
+      "function": "process_execution_payload (all forks)",
+      "line_range": "902-1099",
+      "context": "Consensus Layer (CL) - Execution payload processing",
+      "related_files": [
+        "beacon_chain/el/el_manager.nim",
+        "beacon_chain/el/engine_api_conversions.nim"
+      ]
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "EIP-7825 transaction gas limit validation is an Execution Layer responsibility; Nimbus CL delegates all transaction validation to the EL via notify_new_payload.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed the abstract state space of execution payload processing in Nimbus CL. The CL does not maintain any state related to individual transaction gas limits - it only validates consensus-level properties (parent hash, timestamp, randao, blob commitments). Transaction-level validation including gas limits is fully delegated to the EL.",
+        "state_anomalies_found": [],
+        "variables_analyzed": {
+          "payload.transactions": "Opaque byte array from CL perspective",
+          "notify_new_payload_result": "Boolean indicating EL validation success/failure",
+          "state.latest_execution_payload_header": "Cached header after EL validation"
+        },
+        "notes": "The CL treats transactions as opaque data. All transaction-level validation including gas limit checks per EIP-7825 occurs in the EL during notify_new_payload execution."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to construct a counterexample where a block with transactions exceeding the gas cap (16,777,216) is accepted by Nimbus CL. Symbolic analysis shows that CL acceptance depends entirely on the EL's notify_new_payload response.",
+        "counterexample_found": false,
+        "symbolic_analysis": {
+          "path_conditions": [
+            "payload.parent_hash == state.latest_execution_payload_header.block_hash",
+            "payload.prev_randao == get_randao_mix(state, current_epoch)",
+            "payload.timestamp == compute_timestamp_at_slot(state, state.slot)",
+            "lenu64(body.blob_kzg_commitments) <= MAX_BLOBS_PER_BLOCK",
+            "notify_new_payload(payload) == true"
+          ],
+          "critical_observation": "The CL has NO code path to inspect individual transaction gas limits. The symbolic variable tx.gasLimit is not accessible at the CL layer. Validation occurs at lines 1003-1004 (deneb), 1047-1048 (electra), 1093-1094 (fulu) via the opaque notify_new_payload callback.",
+          "delegation_boundary": "The notify_new_payload callback is the trust boundary where CL delegates to EL. If the EL is malicious or buggy and returns true for an invalid payload, the CL will accept it."
+        },
+        "notes": "Cannot construct a CL-level counterexample because the validation logic does not exist in the CL codebase. This is by design - the CL trusts the EL for transaction-level validation per the Engine API specification."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "EIP-7825 gas limit validation is an Execution Layer concern. Nimbus is a Consensus Layer client that delegates all transaction validation to a co-located EL via the authenticated Engine API (JWT). An attacker cannot exploit the CL directly for this issue.",
+        "entry_points": [
+          "P2P (BeaconBlock gossip)",
+          "Engine API (trust boundary to EL)"
+        ],
+        "data_flow_path": "P2P Peer → BeaconBlock → process_block() → process_execution_payload() → notify_new_payload(payload) → [EL VALIDATION OCCURS HERE] → Result[bool]",
+        "validation_layers": [
+          {
+            "layer": "CL Consensus Validation",
+            "location": "state_transition_block.nim:1068-1086 (fulu fork)",
+            "checks": [
+              "parent_hash consistency",
+              "prev_randao verification",
+              "timestamp verification",
+              "blob commitment count limit"
+            ],
+            "effectiveness": "Enforces consensus rules but does NOT inspect transaction gas limits"
+          },
+          {
+            "layer": "Engine API Boundary (JWT authenticated)",
+            "location": "el_manager.nim (notify_new_payload implementation)",
+            "checks": [
+              "Serializes ExecutionPayload to Engine API format",
+              "Sends engine_newPayloadV* RPC to EL",
+              "Returns EL validation result to CL"
+            ],
+            "effectiveness": "Trust boundary - CL assumes EL correctly validates per EIP-7825"
+          },
+          {
+            "layer": "EL Transaction Validation (OUT OF SCOPE FOR NIMBUS)",
+            "location": "Execution Layer client (e.g., Geth, Nethermind, Besu)",
+            "checks": [
+              "EIP-7825: tx.gasLimit <= 16,777,216",
+              "Other transaction validity rules"
+            ],
+            "effectiveness": "This is where EIP-7825 validation MUST occur"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "cl-dependency",
+        "trust_model": {
+          "cl_el_boundary": "SEMI_TRUSTED",
+          "rationale": "Engine API is authenticated via JWT and considered a trusted boundary per Ethereum architecture. The CL does not redundantly validate transaction-level rules that are the EL's responsibility. If the paired EL is compromised or buggy and fails to enforce EIP-7825, the CL will propagate the invalid block."
+        },
+        "notes": "This is not a Nimbus CL vulnerability. The architecture explicitly divides responsibilities: CL validates consensus rules, EL validates execution rules including EIP-7825. A bug in EIP-7825 validation would be in the EL client (e.g., Geth), not Nimbus. The checklist item incorrectly targets the CL for an EL-level validation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'Every block received via P2P MUST have each of its transactions gasLimit checked against the 16,777,216 cap' is NOT provable at the CL level because the CL does not implement this check. The invariant is provable only at the EL level, which is out of scope for Nimbus.",
+        "proof_successful": false,
+        "invariant_statement": "∀ block ∈ BeaconBlocks received via P2P, ∀ tx ∈ block.execution_payload.transactions: tx.gasLimit <= 16,777,216",
+        "proof_attempt": {
+          "step1": "The CL calls notify_new_payload(payload) at state_transition_block.nim:1093-1094 (fulu).",
+          "step2": "The notify_new_payload function is a callback that invokes the EL via Engine API.",
+          "step3": "The CL assumes the EL enforces EIP-7825 and all other transaction validity rules.",
+          "step4": "There is NO code in the CL that inspects tx.gasLimit or any other transaction field.",
+          "conclusion": "The invariant cannot be proven at the CL level. It must be proven at the EL level."
+        },
+        "guard_identified": {
+          "location": "state_transition_block.nim:1093-1094",
+          "code": "if not notify_new_payload(payload): return err(\"process_execution_payload: execution payload invalid\")",
+          "type": "DELEGATION_GUARD",
+          "effectiveness": "Enforces that the EL approves the payload, but does NOT directly enforce EIP-7825"
+        },
+        "notes": "The CL's trust model assumes the paired EL is correct. This is a fundamental architectural assumption in Ethereum's modular client design. A CL cannot and should not re-implement EL validation logic."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "cl-dependency (out-of-scope: wrong layer)",
+        "recommendation": "This checklist item targets the wrong component. EIP-7825 validation must be audited in Execution Layer clients (Geth, Nethermind, Besu, Erigon, Reth), not Consensus Layer clients (Nimbus, Prysm, Lighthouse, Teku, Lodestar).",
+        "scope_analysis": {
+          "bug_bounty_scope_definition": "in-scope per checklist metadata",
+          "actual_scope": "out-of-scope (architectural layer mismatch)",
+          "reason_for_override": "The checklist item references EDGE-PEER-SEND-BLOCK and ACTION-VALIDATE-BLOCK-TXS from the EIP-7825 specification. However, in the Ethereum architecture, blocks received via the CL's P2P network contain ExecutionPayloads with opaque transaction bytes. The CL does not parse or validate individual transactions - this is the EL's responsibility per the Engine API specification. Nimbus correctly delegates to the EL."
+        },
+        "fusaka_relevance": "EIP-7825 is part of the Fusaka upgrade, but validation occurs at the EL, not CL. A Fusaka-focused audit of Nimbus CL should verify correct Engine API integration, not transaction-level validation.",
+        "recommended_audit_target": {
+          "component": "Execution Layer clients",
+          "specific_files_example_geth": [
+            "core/txpool/validation.go",
+            "core/state_processor.go",
+            "core/types/transaction.go"
+          ],
+          "validation_to_check": "Ensure all transaction sources (RPC, P2P, mined blocks) enforce tx.Gas() <= 16777216"
+        },
+        "notes": "This finding highlights the importance of understanding the Ethereum client architecture when generating audit checklists. The checklist generation process should distinguish between CL and EL responsibilities. For Nimbus (CL), the relevant EIP-7825 audit would be: 'Verify that Nimbus correctly propagates EL validation failures and does not bypass the notify_new_payload check.'"
+      }
+    },
+    "architectural_context": {
+      "ethereum_client_architecture": "Ethereum post-Merge uses a modular architecture with separate Consensus Layer (CL) and Execution Layer (EL) clients communicating via the Engine API (authenticated with JWT).",
+      "nimbus_role": "Nimbus is a Consensus Layer client responsible for: beacon chain state, fork choice, validator duties, P2P gossip of consensus objects (BeaconBlocks, attestations). It is NOT responsible for transaction validation.",
+      "el_role": "The paired EL (e.g., Geth, Nethermind) is responsible for: transaction validation, state transition, EVM execution, mempool management, and enforcing EIPs like EIP-7825.",
+      "engine_api_boundary": "The Engine API is the trust boundary. The CL sends ExecutionPayloads to the EL via engine_newPayloadV* and trusts the EL to validate them. The EL returns a status (VALID, INVALID, SYNCING). The CL accepts or rejects blocks based on this status.",
+      "security_implication": "If the EL has a bug in EIP-7825 validation, the CL will propagate invalid blocks. This is a consensus failure, but the bug is in the EL, not the CL. Defense-in-depth would require running multiple diverse EL implementations."
+    },
+    "correctness_verification": {
+      "cl_implementation_correct": true,
+      "reasoning": "Nimbus CL correctly implements the consensus specification. The consensus specification does not require the CL to validate transaction gas limits - this is explicitly the EL's responsibility. The CL correctly delegates via notify_new_payload and correctly rejects blocks when the EL returns INVALID.",
+      "reference": "Consensus specs: https://github.com/ethereum/consensus-specs/blob/dev/specs/fulu/beacon-chain.md#process_execution_payload - Note that the spec calls is_valid_block_hash(execution_engine, execution_payload) which abstracts the EL validation."
+    },
+    "false_positive_analysis": {
+      "is_false_positive": true,
+      "reason": "The checklist item assumes the CL is responsible for EIP-7825 validation, but this is architecturally incorrect. The CL has no bug related to EIP-7825 because it is not supposed to implement EIP-7825 validation.",
+      "checklist_generation_issue": "The property graph (SUBGRAPH-EIP7825-BLOCK-VALIDATION) and checklist generation did not account for the CL/EL division of responsibilities. Future improvements should tag properties with their responsible layer (CL vs EL) during graph generation."
+    }
+  }
+]

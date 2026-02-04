@@ -1,0 +1,86 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W1-DASCORE-PRECOND-003-NODE-ACTION-VERIFY-COMMITMENT-INCLUSION",
+    "property_id": "PROP-W1-DASCORE-PRECOND-003",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "verify_data_column_sidecar_inclusion_proof",
+      "line_range": "369-383"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Inclusion proof verification function does not validate block header authenticity; relies on downstream signature verification to prevent forged sidecars.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Function accepts a DataColumnSidecar and verifies Merkle proof of kzg_commitments against body_root in signed_block_header. No bounds issues or overflow risks identified. Function does not verify signature of signed_block_header itself.",
+        "state_anomalies_found": [
+          "Function accepts signed_block_header without verifying signature",
+          "Empty kzg_commitments sequence is mathematically valid but represents degenerate case",
+          "No explicit check on kzg_commitments_inclusion_proof length before Merkle verification"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identified that an attacker can craft a sidecar with arbitrary kzg_commitments, compute a matching body_root via Merkle tree, generate a valid inclusion proof, and wrap it in an unsigned/forged signed_block_header. This sidecar will pass verify_data_column_sidecar_inclusion_proof even though it is not from the canonical chain.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "is_valid_merkle_branch(hash_tree_root(σ_commitments_fake), σ_proof_fake, DEPTH, subtree_index, σ_body_root_fake) == true",
+          "inputs": {
+            "σ_commitments_fake": "[attacker_generated_KZG_commitment]",
+            "σ_body_root_fake": "compute_merkle_root_from_commitments(σ_commitments_fake)",
+            "σ_proof_fake": "compute_merkle_proof(σ_commitments_fake, index=0, σ_body_root_fake)",
+            "σ_signed_block_header_fake": "SignedBeaconBlockHeader(message: BeaconBlockHeader(body_root: σ_body_root_fake), signature: <forged>)"
+          },
+          "expected_outcome": "Function returns ok() for a completely forged sidecar that is NOT part of the canonical chain, because the function only verifies Merkle consistency, not header authenticity."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample is reachable from P2P gossip network entry point (data_column_sidecar_subnet_id). However, downstream signature verification at gossip_validation.nim:689-696 prevents full exploitation. The forged sidecar will pass inclusion proof check but be rejected at signature verification.",
+        "entry_points": [
+          "P2P gossip network (data_column_sidecar_subnet_id topic)"
+        ],
+        "data_flow_path": "P2P gossip → eth2_processor.nim:369 → gossip_validation.nim:586 validateDataColumnSidecar() → line 630 check_data_column_sidecar_inclusion_proof() [WEAK CHECK] → line 689-696 verify_block_signature() [STRONG CHECK]",
+        "validation_layers": [
+          {
+            "layer": "Format validation (verify_data_column_sidecar)",
+            "location": "gossip_validation.nim:596",
+            "effectiveness": "Strong - rejects malformed sidecars"
+          },
+          {
+            "layer": "Inclusion proof verification (verify_data_column_sidecar_inclusion_proof)",
+            "location": "gossip_validation.nim:630 / peerdas_helpers.nim:369",
+            "effectiveness": "Weak - accepts forged sidecars with matching Merkle proofs but does not verify block header authenticity"
+          },
+          {
+            "layer": "Parent block validation",
+            "location": "gossip_validation.nim:641",
+            "effectiveness": "Moderate - requires parent to be known, but attacker can reference real parent"
+          },
+          {
+            "layer": "BLS signature verification",
+            "location": "gossip_validation.nim:689-696",
+            "effectiveness": "Strong - cryptographically prevents forged block headers; this is the ultimate defense layer"
+          },
+          {
+            "layer": "KZG proof verification",
+            "location": "gossip_validation.nim:700",
+            "effectiveness": "Strong - verifies data integrity"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "The verify_data_column_sidecar_inclusion_proof function is architecturally weak: it verifies Merkle proof consistency but not header authenticity. However, the BLS signature verification layer prevents exploitation. An attacker can craft sidecars that pass inclusion proof checks but will be rejected at signature verification. This creates a potential DoS vector (CPU waste on Merkle verification) and architectural risk if signature verification is moved/removed in future refactoring."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'KZG commitments must be part of the canonical block' is NOT enforced by verify_data_column_sidecar_inclusion_proof in isolation. The function only verifies Merkle consistency between kzg_commitments and body_root, but does not verify that the signed_block_header is authentic. The full validation pipeline in validateDataColumnSidecar enforces the invariant via BLS signature verification at line 689-696.",
+        "proof_successful": false,
+        "guard_identified": "BLS signature verification at gossip_validation.nim:689-696 is the strong guard that ultimately enforces the invariant. The signature verification ensures signed_block_header is authentic and signed by the expected proposer. However, this guard is downstream from the inclusion proof check, creating a defense-in-depth architecture rather than a single strong verification."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus (beacon chain client) developers as a robustness improvement. Suggest refactoring verify_data_column_sidecar_inclusion_proof to accept only pre-verified signed_block_headers, or move signature verification before inclusion proof verification to fail fast on forged sidecars.",
+        "notes": "While this is not a critical vulnerability due to defense layers, it represents an architectural weakness that could become exploitable if: (1) future refactoring accidentally removes signature verification, (2) performance optimizations reorder validation steps, or (3) the function is reused in a context without signature verification. Additionally, the current architecture allows attackers to waste CPU on Merkle verification of forged sidecars before rejection at signature check."
+      }
+    }
+  }
+]

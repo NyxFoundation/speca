@@ -1,0 +1,124 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W1-EIP8070-POSTCOND-001-INTERNAL",
+    "property_id": "PROP-W1-EIP8070-POSTCOND-001",
+    "code_scope": {
+      "file": "beacon_chain/validators/message_router.nim",
+      "function": "routeSignedBeaconBlock",
+      "line_range": "155-191",
+      "related_files": [
+        "beacon_chain/spec/peerdas_helpers.nim:78-87 (resolve_columns_from_custody_groups)",
+        "beacon_chain/networking/eth2_network.nim:2829-2837 (broadcastDataColumnSidecar)"
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Validators broadcast all 128 data columns instead of only custodied columns, violating the sampler announcement invariant but not creating an exploitable security vulnerability.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Code broadcasts all data columns (line 161-167) before filtering to custody columns for local storage (line 188-190). The broadcast operation does not check custody membership, creating a state anomaly where announcements diverge from specification.",
+        "state_anomalies_found": [
+          {
+            "location": "message_router.nim:161-167",
+            "variable": "dataColumns iteration",
+            "anomaly": "Loop broadcasts all N columns without custody filtering",
+            "expected": "Only custody columns should be broadcast for sampler role"
+          },
+          {
+            "location": "message_router.nim:188-190",
+            "variable": "final_columns",
+            "anomaly": "Custody filtering applied only to local storage, not announcements",
+            "note": "This creates announcement/storage inconsistency"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution confirms that for any node acting as sampler with custody set C ⊂ [0,127], the code broadcasts all received columns D = [0,127] instead of only C. This violates the post-condition that samplers propagate based on available data.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "typeof(blck).kind >= ConsensusFork.Fulu AND dataColumnsOpt.isSome() AND dataColumns.len > 0",
+          "inputs": {
+            "dataColumns.len": 128,
+            "custody_columns": [0, 32, 64, 96],
+            "node_role": "sampler",
+            "custody_group_count": 4
+          },
+          "symbolic_trace": [
+            "Line 161: for i in 0..<128",
+            "Line 163: subnet_id = compute_subnet_for_data_column_sidecar(i)",
+            "Line 166: broadcastDataColumnSidecar(subnet_id, dataColumns[i]) for ALL i",
+            "Line 183-185: custody_columns = resolve_columns_from_custody_groups(...) = {0,32,64,96}",
+            "Line 188-190: final_columns = filter(dataColumns, index in {0,32,64,96})"
+          ],
+          "expected_outcome": "Broadcast only columns [0, 32, 64, 96]",
+          "actual_outcome": "Broadcast ALL columns [0..127], then store only [0, 32, 64, 96] locally",
+          "violation": "Sampler announces columns it does not custody, violating post-condition"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The vulnerable code path is triggered during validator block production. This is an internal operation not controllable by external attackers. The bug causes honest validators to announce more data than required, but does not enable attacks.",
+        "entry_points": [
+          "Validator API - block production",
+          "routeSignedBeaconBlock() internal call"
+        ],
+        "data_flow_path": "Validator produces block → routeSignedBeaconBlock() → Data columns reconstructed → broadcastDataColumnSidecar() for ALL columns → resolve_columns_from_custody_groups() filters local storage",
+        "validation_layers": [
+          {
+            "layer": "None",
+            "location": "N/A",
+            "effectiveness": "No validation layer exists because this is outgoing announcement logic, not input validation"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "notes": "Only validators producing blocks exhibit this behavior. External attackers cannot trigger this code path. The bug causes bandwidth inefficiency but does not enable data withholding, consensus violations, or validator slashing."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove invariant holds. The code lacks role differentiation between provider and sampler. All nodes broadcast all columns (acting as provider), then filter custody columns only for local storage. The invariant 'sampler must propagate based on available data' is violated because announcement happens before custody filtering.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "invariant_analysis": {
+          "original_invariant": "After validation passes, a provider must announce with all-ones cell_mask, and a sampler must propagate based on its actually available data",
+          "provider_invariant": "Holds vacuously - all nodes act as provider by broadcasting all columns",
+          "sampler_invariant": "VIOLATED - no guard ensures sampler-only announcement of custody columns",
+          "missing_guards": [
+            "No role decision logic (provider vs sampler)",
+            "No custody check before broadcast operation",
+            "Custody filtering only applied to local storage, not announcements"
+          ]
+        },
+        "correctness_gap": "The implementation does not distinguish between provider and sampler roles. EIP-8070 specifies probabilistic role assignment (p=0.15 provider, p=0.85 sampler), but Nimbus PeerDAS has all validators act as providers by announcing all columns."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "internal-only + defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a bandwidth optimization issue, not a security bug bounty submission",
+        "notes": "This is a deviation from EIP-8070 specification but does not create an exploitable security vulnerability. The impact is bandwidth inefficiency, not consensus failure or validator slashing. Since the bug requires validator block production (internal-only) and does not enable attacks, it is classified as defense-in-depth rather than exploitable.",
+        "bug_bounty_scope_check": {
+          "component": "Consensus Layer - PeerDAS",
+          "in_scope_component": true,
+          "entry_point": "Validator block production (Internal API)",
+          "in_scope_entry_point": false,
+          "attacker_controlled": false,
+          "exploitability": "None - requires honest validator operation",
+          "severity": "Low",
+          "severity_justification": "Bandwidth inefficiency, not security vulnerability. Does not affect consensus, does not enable slashing, does not enable data withholding attacks.",
+          "ethereum_bug_bounty_eligible": false,
+          "out_of_scope_reasons": [
+            "Requires validator operation (not attacker-triggerable)",
+            "No consensus impact",
+            "No validator slashing risk",
+            "Bandwidth inefficiency, not security vulnerability"
+          ]
+        },
+        "impact_analysis": {
+          "network_impact": "Validators announce 128 columns instead of ~4-8 custody columns, increasing bandwidth by ~16-32x",
+          "consensus_impact": "None - all data is still available, no consensus failure",
+          "validator_impact": "None - no slashing risk, no missed proposals",
+          "availability_impact": "Positive - more data availability than required (redundant announcements)",
+          "attack_surface": "None - bug is in honest validator behavior, not exploitable by attackers"
+        }
+      }
+    }
+  }
+]

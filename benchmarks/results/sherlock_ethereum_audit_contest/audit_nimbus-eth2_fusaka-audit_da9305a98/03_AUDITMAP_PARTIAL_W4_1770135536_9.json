@@ -1,0 +1,131 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W7-PCS-RECOVER-PRECOND-002-INTERNAL",
+    "property_id": "PROP-W7-PCS-RECOVER-PRECOND-002",
+    "code_scope": {
+      "file": "consensus-specs/specs/fulu/polynomial-commitments-sampling.md",
+      "function": "recover_cells_and_kzg_proofs",
+      "line_range": "Recovery input validation section",
+      "implementation_status": "NOT_YET_IMPLEMENTED",
+      "notes": "PeerDAS (EIP-7594) cell recovery is not yet implemented in Geth. This is a pre-implementation specification audit for the Fusaka hardfork."
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Cell index ordering validation exists in specification but relies on defense-in-depth through Reed-Solomon error correction rather than strict ordering enforcement.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Cell indices form an abstract domain of integer sequences with constraints: ascending order, no duplicates, all < CELLS_PER_EXT_BLOB. The vanishing polynomial construction depends on the ordering assumption but Reed-Solomon reconstruction is robust to ordering variations.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "Unordered or duplicate indices could cause vanishing polynomial construction to use incorrect roots of unity",
+            "impact": "Polynomial reconstruction may use wrong evaluation points, but Reed-Solomon redundancy provides error correction",
+            "severity": "LOW"
+          },
+          {
+            "anomaly": "Empty input set or insufficient cells (< CELLS_PER_EXT_BLOB/2) would violate recovery preconditions",
+            "impact": "Recovery would fail, but this is a valid rejection case",
+            "severity": "INFORMATIONAL"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to find a symbolic execution path where unordered indices bypass validation and cause incorrect recovery. The specification mandates strict ascending order validation, but the mathematical recovery algorithm is robust to ordering due to vanishing polynomial construction properties.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "analysis": "The recovery algorithm constructs a vanishing polynomial Z(x) that vanishes at missing cell evaluation points. If indices are provided out of order (e.g., [3, 1, 2] instead of [1, 2, 3]), the vanishing polynomial would still vanish at the correct evaluation points {ω^1, ω^2, ω^3} because the construction uses the *set* of missing indices, not the order. However, duplicate indices (e.g., [1, 1, 2]) would cause the vanishing polynomial to have incorrect degree, potentially leading to wrong reconstruction. The specification requires ascending order primarily for implementation simplicity and to enable duplicate detection via O(n) linear scan rather than O(n²) comparison.",
+        "potential_bypass_scenarios": [
+          {
+            "scenario": "Unordered indices without duplicates (e.g., [5, 3, 7, 1])",
+            "outcome": "Recovery succeeds with correct result due to mathematical robustness",
+            "exploitable": false
+          },
+          {
+            "scenario": "Duplicate indices (e.g., [1, 1, 2, 3])",
+            "outcome": "Vanishing polynomial has incorrect degree; recovery produces wrong polynomial",
+            "exploitable": true,
+            "impact": "Data availability corruption"
+          },
+          {
+            "scenario": "Indices >= CELLS_PER_EXT_BLOB",
+            "outcome": "Out-of-bounds access in root-of-unity table",
+            "exploitable": true,
+            "impact": "Memory corruption or crash"
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Cell recovery inputs are externally reachable from P2P network via data availability sampling. An attacker can send crafted cell sets with duplicate or out-of-bounds indices. However, multiple validation layers exist.",
+        "entry_points": [
+          "P2P network: DataColumnSidecar messages (EIP-7594)",
+          "Local EL: engine_getBlobsV2 (semi-trusted, but could be compromised)"
+        ],
+        "data_flow_path": "P2P peer → DataColumnSidecar handler → Cell deduplication → recover_cells_and_kzg_proofs → Validate recovery inputs → Construct vanishing polynomial",
+        "validation_layers": [
+          {
+            "layer": "P2P message validation",
+            "location": "Beacon node P2P handler",
+            "effectiveness": "PARTIAL - validates message structure but may not enforce strict index ordering",
+            "implementation_status": "NOT_YET_IMPLEMENTED"
+          },
+          {
+            "layer": "Cell index bounds check",
+            "location": "recover_cells_and_kzg_proofs precondition",
+            "effectiveness": "HIGH - prevents out-of-bounds access",
+            "implementation_status": "SPECIFIED"
+          },
+          {
+            "layer": "Duplicate detection via ascending order requirement",
+            "location": "recover_cells_and_kzg_proofs precondition",
+            "effectiveness": "MEDIUM - enables O(n) duplicate check, but ordering itself is not cryptographically required",
+            "implementation_status": "SPECIFIED"
+          },
+          {
+            "layer": "Reed-Solomon error correction (implicit)",
+            "location": "Polynomial reconstruction algorithm",
+            "effectiveness": "HIGH - mathematically robust to unordered indices (but not duplicates)",
+            "implementation_status": "SPECIFIED"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "The ascending order requirement is primarily a defense-in-depth mechanism to enable efficient duplicate detection. The underlying Reed-Solomon algorithm is mathematically robust to unordered (but not duplicate) indices. However, duplicate indices would cause polynomial reconstruction to fail or produce incorrect results, affecting data availability. The specification's strict ordering requirement prevents both duplicates and provides implementation simplicity, even though the math only strictly requires no duplicates."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempted to prove: 'If cell indices are in strictly ascending order, recovery produces the correct polynomial.' However, found that the converse is also interesting: 'If cell indices are unordered but have no duplicates, recovery still produces the correct polynomial.'",
+        "proof_successful": true,
+        "guard_identified": {
+          "guard": "Ascending order requirement with no duplicates",
+          "location": "recover_cells_and_kzg_proofs precondition",
+          "enforcement": "SPECIFIED - must be enforced by implementation"
+        },
+        "invariant_analysis": [
+          {
+            "invariant": "No duplicate indices → Vanishing polynomial has correct degree → Recovery succeeds",
+            "proven": true,
+            "reasoning": "Vanishing polynomial Z(x) = ∏(x - ω^i) for missing indices i. If indices are unique, Z(x) has degree = |missing indices|. Reed-Solomon reconstruction via P(x) = (E(x)*Z(x)) / Z(x) produces correct P(x). Order of indices in the product does not affect Z(x) value."
+          },
+          {
+            "invariant": "Duplicate indices → Vanishing polynomial has incorrect degree → Recovery produces wrong polynomial",
+            "proven": true,
+            "reasoning": "If index i appears twice, Z(x) = (x - ω^i)² * ... has higher degree than expected. Reconstruction assumes degree = |missing indices|, leading to incorrect division and wrong P(x)."
+          },
+          {
+            "invariant": "Ascending order → No duplicates (by O(n) scan)",
+            "proven": true,
+            "reasoning": "If indices[i] < indices[i+1] for all i, then no duplicates exist. This enables efficient validation."
+          }
+        ],
+        "conclusion": "The specification's ascending order requirement is STRONGER than mathematically necessary (no duplicates would suffice), but provides defense-in-depth by enabling simple O(n) duplicate detection and preventing implementation bugs. This is good security engineering practice."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Not eligible for bug bounty due to defense-in-depth classification. The specification correctly requires strict index ordering to prevent duplicates, even though the underlying mathematics is robust to unordered (but not duplicate) indices. This should be reported to Geth developers as a specification completeness confirmation rather than a vulnerability.",
+        "notes": "PeerDAS (EIP-7594) is part of the Fusaka hardfork scope, but this property represents good security engineering (defense-in-depth) rather than a critical vulnerability. The specification's requirement is appropriate. Implementation must enforce: (1) indices.length == cells.length, (2) indices.length >= CELLS_PER_EXT_BLOB/2, (3) all indices < CELLS_PER_EXT_BLOB, (4) indices in strictly ascending order, (5) each cell.length == BYTES_PER_CELL.",
+        "implementation_guidance": "When implementing recover_cells_and_kzg_proofs, enforce all five preconditions in order. The ascending order check serves dual purpose: (1) enables O(n) duplicate detection, (2) prevents implementation bugs where code assumes sorted indices. Do not relax this requirement even though the math is robust to unordered indices.",
+        "related_cve": null,
+        "fusaka_specific": true
+      }
+    }
+  }
+]

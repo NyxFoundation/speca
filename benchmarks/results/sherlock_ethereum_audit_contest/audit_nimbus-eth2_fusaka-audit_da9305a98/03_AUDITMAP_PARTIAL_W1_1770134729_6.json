@@ -1,0 +1,153 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W3-FULU-EXEC-PAYLOAD-PRE-003-NODE-1",
+    "property_id": "PROP-W3-FULU-EXEC-PAYLOAD-PRE-003",
+    "code_scope": {
+      "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+      "function": "validateBeaconBlock",
+      "line_range": "884-910",
+      "related_files": [
+        "beacon_chain/spec/validator.nim:539-570 (get_beacon_proposer_index)",
+        "beacon_chain/consensus_object_pools/blockchain_dag.nim:2690-2709 (getProposer)",
+        "beacon_chain/consensus_object_pools/blockchain_dag.nim:643-644 (EpochRef initialization)"
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Proposer verification is correctly implemented using proposer_lookahead (Fulu) or on-demand computation (pre-Fulu), validated in multiple layers before accepting blocks.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "The proposer verification logic operates on two key data structures: (1) proposer_lookahead array (size SLOTS_PER_EPOCH * (MIN_SEED_LOOKAHEAD + 1)) for Fulu+, and (2) beacon_proposer_indices cache. The proposer_index in received blocks is an unsigned integer that must match the expected proposer for the slot.",
+        "state_anomalies_found": [
+          {
+            "type": "Index bounds safety",
+            "description": "Array access state.proposer_lookahead[slot mod SLOTS_PER_EPOCH] is safe because mod ensures result is in [0, SLOTS_PER_EPOCH)",
+            "severity": "None - bounds are mathematically guaranteed"
+          },
+          {
+            "type": "Validator index range",
+            "description": "A sanity check exists at blockchain_dag.nim:2701-2707 to verify proposer index does not exceed immutableValidators.lenu64()",
+            "severity": "Defense-in-depth - handled correctly"
+          },
+          {
+            "type": "Opt[ValidatorIndex] handling",
+            "description": "get_beacon_proposer_index returns Opt type, properly handled with valueOr at gossip_validation.nim:891-894",
+            "severity": "None - error handling is correct"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to find a path where a block with incorrect proposer_index is accepted. All execution paths either reject the block or correctly verify the proposer.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "paths_explored": [
+          {
+            "path_id": 1,
+            "description": "Fulu fork: Block with proposer_index != state.proposer_lookahead[slot mod SLOTS_PER_EPOCH]",
+            "conditions": [
+              "typeof(state).kind >= ConsensusFork.Fulu",
+              "signed_beacon_block.message.proposer_index != expected_proposer"
+            ],
+            "outcome": "REJECT - Line 896-898: quarantine.addUnviable() and checkedReject('Unexpected proposer')"
+          },
+          {
+            "path_id": 2,
+            "description": "Pre-Fulu fork: Block with proposer_index != computed proposer via compute_proposer_index",
+            "conditions": [
+              "typeof(state).kind < ConsensusFork.Fulu",
+              "signed_beacon_block.message.proposer_index != computed_proposer"
+            ],
+            "outcome": "REJECT - Line 896-898: Same rejection path"
+          },
+          {
+            "path_id": 3,
+            "description": "Valid block with correct proposer_index but invalid signature",
+            "conditions": [
+              "signed_beacon_block.message.proposer_index == expected_proposer",
+              "verify_block_signature() returns false"
+            ],
+            "outcome": "REJECT - Line 909-910: quarantine.addUnviable() and checkedReject('Invalid proposer signature')"
+          },
+          {
+            "path_id": 4,
+            "description": "Valid block with correct proposer_index and valid signature",
+            "conditions": [
+              "signed_beacon_block.message.proposer_index == expected_proposer",
+              "verify_block_signature() returns true"
+            ],
+            "outcome": "ACCEPT - ok() returned at line 912"
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Proposer verification is a critical defense layer, but is correctly enforced before block acceptance. The validation occurs in gossip processing (P2P entry point) before state transition.",
+        "entry_points": [
+          "P2P gossip: /eth2/<fork_digest>/beacon_block/<encoding>"
+        ],
+        "data_flow_path": "P2P message → validateBeaconBlock (gossip_validation.nim) → getProposer (blockchain_dag.nim) → get_beacon_proposer_index (validator.nim) → state.proposer_lookahead[slot mod SLOTS_PER_EPOCH] (Fulu+)",
+        "validation_layers": [
+          {
+            "layer": "P2P gossip validation",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:884-912",
+            "effectiveness": "Strong - blocks are rejected before entering quarantine or state transition",
+            "details": "validateBeaconBlock checks: (1) slot not finalized, (2) first block from proposer, (3) parent exists, (4) proposer_index matches expected, (5) signature valid"
+          },
+          {
+            "layer": "Proposer lookahead verification (Fulu+)",
+            "location": "beacon_chain/spec/validator.nim:548-551",
+            "effectiveness": "Strong - deterministic lookup from pre-computed proposer_lookahead array",
+            "details": "For Fulu+, proposer is read directly from state.proposer_lookahead without on-demand computation, preventing TOCTOU issues"
+          },
+          {
+            "layer": "On-demand proposer computation (pre-Fulu)",
+            "location": "beacon_chain/spec/validator.nim:556-570",
+            "effectiveness": "Strong - computed from RANDAO seed and active validator set",
+            "details": "For pre-Fulu, proposer is computed using get_seed() and compute_proposer_index() with cached results"
+          },
+          {
+            "layer": "Signature verification",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:902-910",
+            "effectiveness": "Strong - BLS signature verification with proposer's public key",
+            "details": "verify_block_signature() checks signature against dag.validatorKey(proposer).get()"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "While an attacker can send blocks via P2P with arbitrary proposer_index values, the validation layers correctly reject all invalid blocks. The property is enforced, but this is expected behavior, not a vulnerability."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proven: For all received blocks, proposer_index is verified against the expected proposer before acceptance. The property holds for both Fulu (proposer_lookahead) and pre-Fulu (on-demand computation) implementations.",
+        "proof_successful": true,
+        "guard_identified": [
+          {
+            "guard": "Proposer index check",
+            "location": "gossip_validation.nim:891-898",
+            "invariant": "∀ block: signed_beacon_block.message.proposer_index == getProposer(dag, parent, slot) ∨ REJECT",
+            "proof": "By case analysis: (1) If proposer_index != expected, block is rejected at line 896-898. (2) If proposer_index == expected but signature invalid, block is rejected at line 909-910. (3) Only if both checks pass does the function return ok(). ∴ The invariant holds."
+          },
+          {
+            "guard": "Signature verification",
+            "location": "gossip_validation.nim:902-910",
+            "invariant": "∀ accepted_block: verify_block_signature(fork, genesis_root, slot, block_root, proposer_pubkey, signature) == true",
+            "proof": "Sequential execution guarantees signature check happens after proposer_index check. If verify_block_signature returns false, function returns REJECT. Only blocks with valid signatures are accepted."
+          }
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "No action required. This is a security control that is correctly implemented and functioning as designed.",
+        "notes": "The property asserts that proposer identity must be verified, and this audit confirms it is. However, this is not a vulnerability - it's a correctly implemented security feature. The validation layers work as expected, rejecting invalid blocks. This finding demonstrates the security model is sound, not that there is a bug to report.",
+        "fulu_specific_analysis": {
+          "proposer_lookahead_implementation": "Correctly implemented at validator.nim:548-551",
+          "initialization": "initialize_proposer_lookahead at validator.nim:615-631 correctly populates the array",
+          "edge_cases_checked": [
+            "Epoch boundary transitions: Handled correctly by per-epoch proposer computation",
+            "Slot wraparound: Handled by 'slot mod SLOTS_PER_EPOCH'",
+            "Fork transition: Guarded by 'typeof(state).kind >= ConsensusFork.Fulu' check"
+          ]
+        }
+      }
+    }
+  }
+]

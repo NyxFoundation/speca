@@ -1,0 +1,128 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W7-PCS-VERIFY-PRECOND-002-BOUNDARY",
+    "property_id": "PROP-W7-PCS-VERIFY-PRECOND-002",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "verify_data_column_sidecar_kzg_proofs",
+      "line_range": "386-403",
+      "validation_function": "verify_data_column_sidecar",
+      "line_range_validation": "352-366",
+      "kzg_library_call": "verifyCellKzgProofBatch (kzg4844 external library)",
+      "data_types": {
+        "Cell": "KzgCell (from kzg4844 library, expected to be BYTES_PER_CELL = 2048 bytes)",
+        "KzgProof": "KzgProof (from kzg4844 library, expected to be 48 bytes)",
+        "KzgCommitment": "KzgCommitment (from kzg4844 library, expected to be 48 bytes)"
+      }
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Byte-length validation is enforced by type system at deserialization boundary in kzg4844 library, not by explicit runtime checks in Nimbus.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed abstract state space of data column sidecar verification pipeline from P2P ingestion to KZG proof verification.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "No explicit byte-length validation in verify_data_column_sidecar() or verify_data_column_sidecar_kzg_proofs()",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:352-403",
+            "state_analysis": "The DataColumnSidecar type uses SSZ List types (DataColumn = List[KzgCell, ...], KzgProofs = List[KzgProof, ...]) which enforce element types at deserialization, but the verification functions do not explicitly check byte lengths before calling verifyCellKzgProofBatch().",
+            "potential_impact": "If the kzg4844 library's verifyCellKzgProofBatch() does not validate byte lengths, malformed input could reach cryptographic operations."
+          },
+          {
+            "anomaly": "Type-level enforcement via SSZ deserialization",
+            "location": "SSZ deserialization layer (implicit)",
+            "state_analysis": "KzgCell, KzgProof, and KzgCommitment are defined as fixed-size types in the kzg4844 library (imported at line 14). SSZ deserialization will reject objects that don't match the expected type signature. However, this enforcement is implicit and depends on correct SSZ implementation.",
+            "potential_impact": "Defense-in-depth is provided by type system, but no explicit validation guard in Nimbus code."
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to construct a counterexample where malformed cell/proof/commitment bytes reach KZG verification.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "path_analysis": {
+          "entry_point": "P2P network message containing DataColumnSidecar",
+          "path_1": {
+            "description": "Normal path with valid SSZ deserialization",
+            "steps": [
+              "1. P2P message arrives with DataColumnSidecar payload",
+              "2. SSZ deserialization decodes DataColumnSidecar object",
+              "3. SSZ List[KzgCell, ...] deserialization enforces KzgCell type for each element",
+              "4. KzgCell is a fixed-size type (array[BYTES_PER_CELL, byte]) from kzg4844 library",
+              "5. SSZ rejects any cell that is not exactly BYTES_PER_CELL bytes",
+              "6. Same applies for KzgProof (48 bytes) and KzgCommitment (48 bytes)",
+              "7. verify_data_column_sidecar() checks array length equality (line 362-364)",
+              "8. verify_data_column_sidecar_kzg_proofs() calls verifyCellKzgProofBatch()",
+              "9. kzg4844 library performs cryptographic verification"
+            ],
+            "path_condition": "SSZ deserialization succeeds AND array lengths match",
+            "outcome": "Validation passes or fails based on cryptographic correctness"
+          },
+          "path_2": {
+            "description": "Attack path with malformed byte lengths",
+            "steps": [
+              "1. Attacker sends P2P message with cell/proof/commitment of wrong byte length",
+              "2. SSZ deserialization attempts to decode DataColumnSidecar",
+              "3. SSZ List[KzgCell, ...] expects fixed-size KzgCell elements",
+              "4. SSZ deserialization FAILS because element size doesn't match type definition",
+              "5. P2P message is rejected before reaching verify_data_column_sidecar()"
+            ],
+            "path_condition": "SSZ deserialization encounters type mismatch",
+            "outcome": "Message rejected at deserialization layer"
+          }
+        },
+        "conclusion": "No executable counterexample found. The SSZ type system enforces byte-length constraints at deserialization, preventing malformed data from reaching the verification functions. However, this is an implicit defense, not an explicit validation check in the Nimbus codebase."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Analyzed whether an attacker can bypass SSZ type enforcement to deliver malformed byte-length data to KZG verification.",
+        "entry_points": [
+          "P2P network: DataColumnSidecar received via gossipsub or req/resp protocols"
+        ],
+        "data_flow_path": "P2P message → SSZ deserialization → DataColumnSidecar object → verify_data_column_sidecar() → verify_data_column_sidecar_kzg_proofs() → verifyCellKzgProofBatch()",
+        "validation_layers": [
+          {
+            "layer": "SSZ deserialization type enforcement",
+            "location": "SSZ library (ssz_serialization module)",
+            "effectiveness": "STRONG - Fixed-size array types in SSZ reject any data that doesn't match declared byte length. Attacker cannot bypass this without exploiting an SSZ implementation bug.",
+            "notes": "KzgCell, KzgProof, and KzgCommitment are defined as fixed-size types in kzg4844 library. SSZ deserialization will fail if byte lengths don't match."
+          },
+          {
+            "layer": "P2P message validation",
+            "location": "P2P gossipsub/req-resp handlers",
+            "effectiveness": "MODERATE - P2P layer may perform additional validation (e.g., message size limits), but primary enforcement is at SSZ layer.",
+            "notes": "Not explicitly analyzed in this audit; assumed to be standard libp2p security."
+          }
+        ],
+        "attacker_controlled": true,
+        "attacker_capability": "Attacker controls P2P message content but cannot bypass SSZ type enforcement without an SSZ implementation vulnerability.",
+        "classification": "defense-in-depth",
+        "notes": "The property is enforced by the type system at the SSZ deserialization boundary, not by explicit runtime checks in Nimbus. This is a valid defense-in-depth strategy, but it means:\n1. No redundant validation layer in Nimbus code (single point of failure)\n2. Vulnerability would require an SSZ or kzg4844 library bug\n3. No explicit error message for byte-length violations (generic SSZ deserialization failure)\n\nThis is NOT exploitable in the current implementation, but represents a design pattern where security relies on implicit type enforcement rather than explicit validation guards."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempted to prove that the invariant 'all cells/proofs/commitments have correct byte lengths when reaching verifyCellKzgProofBatch()' holds for all execution paths.",
+        "proof_successful": true,
+        "proof_argument": {
+          "invariant": "∀ (sidecar: DataColumnSidecar) : verify_data_column_sidecar_kzg_proofs(sidecar) ⇒ (∀ cell ∈ sidecar.column : sizeof(cell) = BYTES_PER_CELL) ∧ (∀ proof ∈ sidecar.kzg_proofs : sizeof(proof) = BYTES_PER_PROOF) ∧ (∀ commitment ∈ sidecar.kzg_commitments : sizeof(commitment) = BYTES_PER_COMMITMENT)",
+          "proof_by": "Type system invariant enforcement",
+          "lemma_1": "SSZ deserialization enforces fixed-size array types. If DataColumnSidecar is successfully deserialized, then all elements conform to their declared types.",
+          "lemma_2": "KzgCell, KzgProof, and KzgCommitment are declared as fixed-size types in kzg4844 library (imported into fulu.nim:80-81 as type aliases).",
+          "lemma_3": "The SSZ List[T, Limit] type enforces that all elements are of type T. Since DataColumn = List[KzgCell, ...], all cells are guaranteed to be valid KzgCell objects.",
+          "conclusion": "If verify_data_column_sidecar_kzg_proofs() is called with a sidecar object, then SSZ deserialization has already enforced that all cells/proofs/commitments have the correct byte lengths. The invariant holds by type system construction.",
+          "caveat": "This proof assumes the SSZ library and kzg4844 library correctly implement their type specifications. A bug in either library could violate the invariant."
+        },
+        "guard_identified": {
+          "type": "Implicit type-system enforcement",
+          "location": "SSZ deserialization layer (before Nimbus code is reached)",
+          "mechanism": "Fixed-size array types in SSZ reject malformed data at deserialization",
+          "strength": "Strong (assuming correct SSZ implementation)"
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement: Add explicit byte-length validation in verify_data_column_sidecar() to provide defense-in-depth redundancy.",
+        "notes": "While the current implementation is secure (validation is enforced by SSZ type system), adding explicit validation would:\n1. Provide a redundant security layer in case of SSZ/kzg4844 library bugs\n2. Generate clearer error messages for debugging\n3. Align with defense-in-depth best practices for boundary validation\n\nSuggested code addition in verify_data_column_sidecar():\n```nim\nif sidecar.column.len > 0:\n  for cell in sidecar.column:\n    if cell.len != BYTES_PER_CELL:\n      return err(\"Cell byte length invalid\")\nfor proof in sidecar.kzg_proofs:\n  if proof.len != BYTES_PER_PROOF:\n    return err(\"Proof byte length invalid\")\nfor commitment in sidecar.kzg_commitments:\n  if commitment.len != BYTES_PER_COMMITMENT:\n    return err(\"Commitment byte length invalid\")\n```\n\nHowever, this may not be possible if KzgCell/KzgProof/KzgCommitment are opaque types without .len accessor. In that case, the type system is the only enforcement mechanism."
+      }
+    }
+  }
+]

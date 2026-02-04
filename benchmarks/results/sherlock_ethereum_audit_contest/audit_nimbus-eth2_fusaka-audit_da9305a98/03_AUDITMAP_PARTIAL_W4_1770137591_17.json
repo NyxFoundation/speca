@@ -1,0 +1,108 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W3-EIP7918-FORK-POST-001-INTERNAL",
+    "property_id": "PROP-W3-EIP7918-FORK-POST-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/forks.nim",
+      "function": "get_blob_parameters",
+      "line_range": "1102-1109",
+      "usage_location": "beacon_chain/spec/state_transition_block.nim:1084",
+      "caller_function": "process_execution_payload"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Blob schedule parameters are applied immediately at fork activation via get_blob_parameters lookup, but implementation relies on correct epoch ordering in BLOB_SCHEDULE.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "The get_blob_parameters function performs a linear search through cfg.BLOB_SCHEDULE to find the first entry where epoch >= entry.EPOCH. The abstract domain analysis reveals that the correctness depends on BLOB_SCHEDULE being sorted in descending epoch order.",
+        "state_anomalies_found": [
+          {
+            "variable": "cfg.BLOB_SCHEDULE",
+            "domain": "seq[BlobParameters]",
+            "anomaly": "If BLOB_SCHEDULE is not sorted in descending order by EPOCH, the function returns the first matching entry, which may not be the correct (most recent) schedule for the given epoch",
+            "impact": "Incorrect blob parameters could be applied at fork boundaries if the schedule is misordered"
+          },
+          {
+            "variable": "entry.EPOCH",
+            "domain": "Epoch (uint64)",
+            "anomaly": "No validation that entry.EPOCH values are distinct or properly ordered relative to actual fork epochs",
+            "impact": "Duplicate or overlapping epoch ranges could cause ambiguous parameter selection"
+          },
+          {
+            "variable": "return value",
+            "domain": "BlobParameters",
+            "anomaly": "Fallback returns ELECTRA_FORK_EPOCH parameters when no match found, assuming Electra is pre-Fulu",
+            "impact": "If called before Electra activation or with misconfigured schedule, returns potentially incorrect default"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution reveals that the function's correctness depends on an external invariant: cfg.BLOB_SCHEDULE must be sorted in descending epoch order. The presets.nim file enforces this via blobScheduleEntries.sort(cmp = cmpBlobParameters) at line 871, but there's no runtime validation in get_blob_parameters itself.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "cfg.BLOB_SCHEDULE is populated but not sorted in descending epoch order",
+          "inputs": {
+            "cfg.BLOB_SCHEDULE": "[{EPOCH: 100, MAX_BLOBS_PER_BLOCK: 6}, {EPOCH: 200, MAX_BLOBS_PER_BLOCK: 9}]",
+            "epoch": "150"
+          },
+          "expected_outcome": "Should return MAX_BLOBS_PER_BLOCK: 6 (most recent applicable schedule)",
+          "actual_outcome": "Returns MAX_BLOBS_PER_BLOCK: 9 (first matching entry, which is wrong)",
+          "trigger_condition": "Config file parsing bug or manual config construction bypasses the sort at presets.nim:871",
+          "consensus_impact": "At fork activation (epoch 150), nodes with correctly sorted schedules would enforce MAX_BLOBS_PER_BLOCK=6, while nodes with unsorted schedules would enforce MAX_BLOBS_PER_BLOCK=9, causing consensus split"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The counterexample requires a configuration file parsing bug or manual construction of RuntimeConfig that bypasses the sorting step. While theoretically reachable, multiple defense layers exist.",
+        "entry_points": [
+          "Config file parsing (readRuntimeConfig in presets.nim)",
+          "Manual RuntimeConfig construction in tests or alternative config loaders"
+        ],
+        "data_flow_path": "Config file → readRuntimeConfig (presets.nim:777) → blobScheduleEntries.sort (line 871) → cfg.BLOB_SCHEDULE → get_blob_parameters (forks.nim:1102) → process_execution_payload (state_transition_block.nim:1084)",
+        "validation_layers": [
+          {
+            "layer": "Config parsing with mandatory sort",
+            "location": "presets.nim:871",
+            "effectiveness": "Strong - All config files go through this path which sorts the schedule before assignment",
+            "bypass_conditions": [
+              "Direct RuntimeConfig field assignment bypassing readRuntimeConfig",
+              "Bug in cmpBlobParameters comparator",
+              "Memory corruption or race condition modifying cfg.BLOB_SCHEDULE after initialization"
+            ]
+          },
+          {
+            "layer": "Compile-time preset validation",
+            "location": "presets.nim:checkCompatibility calls",
+            "effectiveness": "Moderate - Validates many config fields but does not validate BLOB_SCHEDULE ordering",
+            "notes": "BLOB_SCHEDULE is dynamically parsed and assigned at lines 990-1000 without ordering validation"
+          },
+          {
+            "layer": "Test coverage",
+            "location": "tests/consensus_spec/test_fixture_fork_digest.nim",
+            "effectiveness": "Weak - Tests use hardcoded sorted schedules, would not detect unsorted config bug",
+            "notes": "Test at lines 25-30 provides sorted schedule, doesn't test unsorted case"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "The vulnerability requires either: (1) A bug in the config parser that bypasses the sort operation, (2) Direct manipulation of RuntimeConfig.BLOB_SCHEDULE after initialization, or (3) Memory corruption. Under normal operation, the sort at presets.nim:871 provides strong defense. However, the lack of runtime validation in get_blob_parameters creates a latent vulnerability if the defense layer is bypassed."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the post-condition 'new blobSchedule parameters must be applied immediately at fork activation' holds under all conditions. The proof depends on the unverified external invariant: cfg.BLOB_SCHEDULE is sorted in descending epoch order.",
+        "proof_successful": false,
+        "guard_identified": {
+          "location": "presets.nim:871",
+          "condition": "blobScheduleEntries.sort(cmp = cmpBlobParameters)",
+          "strength": "Strong but external to get_blob_parameters - no runtime verification"
+        },
+        "proof_gap": "The get_blob_parameters function at forks.nim:1102-1109 does not validate that cfg.BLOB_SCHEDULE is sorted. It trusts that the config loader performed the sort. If this trust assumption is violated (e.g., due to a parser bug, alternative config source, or memory corruption), the function returns incorrect parameters at fork boundaries, causing a consensus split.",
+        "recommended_fix": "Add a runtime assertion or compile-time static check in get_blob_parameters to validate cfg.BLOB_SCHEDULE is sorted in descending order, or use a different data structure (e.g., binary search on sorted array) that makes the ordering requirement explicit."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement",
+        "notes": "While the counterexample represents a genuine consensus risk, it requires a bug in the config parsing layer (presets.nim) or direct memory corruption. The existing sort operation at presets.nim:871 provides effective defense under normal operation. This finding is classified as 'defense-in-depth' rather than 'exploitable' because:\n\n1. **Strong validation layer exists**: readRuntimeConfig enforces sorting via blobScheduleEntries.sort at line 871\n2. **No direct attack vector**: Attacker cannot provide unsorted config via network or transaction\n3. **Requires internal bug**: Exploitation requires either a parser bug or memory corruption\n4. **Configuration-dependent**: Only affects nodes with misconfigured or corrupted BLOB_SCHEDULE\n\nHowever, this should still be reported to Nimbus developers because:\n- The lack of runtime validation in get_blob_parameters creates a latent vulnerability\n- Defense-in-depth principle suggests adding validation at the usage site, not just during config loading\n- Adding a debug assertion or compile-time check would catch this class of bugs in testing\n- Similar vulnerabilities have caused consensus issues in other clients (e.g., Geth's Shanghai timestamp bug)\n\nRecommended mitigation: Add debug assertion in get_blob_parameters to validate BLOB_SCHEDULE is sorted, and/or add a unit test that explicitly tests the function with an unsorted schedule to ensure it fails safely."
+      }
+    }
+  }
+]

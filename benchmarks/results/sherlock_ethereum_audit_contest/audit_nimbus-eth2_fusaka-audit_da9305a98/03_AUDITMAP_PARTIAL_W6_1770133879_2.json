@@ -1,0 +1,87 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W1-DASCORE-INV-004-INTERNAL",
+    "property_id": "PROP-W1-DASCORE-INV-004",
+    "code_scope": {
+      "file": "beacon_chain/sync/validator_custody.nim",
+      "function": "detectNewValidatorCustody",
+      "line_range": "66-88, specifically lines 76-77",
+      "additional_locations": [
+        {
+          "function": "checkIntersectingCustody",
+          "line_range": "128-154, specifically lines 142-143"
+        }
+      ]
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "Implementation uses validator balance-based custody requirement instead of advertised custody_group_count, causing under-sampling when nodes advertise higher custody; classified as configuration issue.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Identified semantic mismatch between spec requirement and implementation. The spec requires sampling max(SAMPLES_PER_SLOT, custody_group_count) but implementation uses max(SAMPLES_PER_SLOT, vcustody) where vcustody is computed from validator balance, not the advertised custody_group_count.",
+        "state_anomalies_found": [
+          {
+            "type": "semantic_mismatch",
+            "description": "Variable substitution: spec uses 'custody_group_count' (advertised in ENR), implementation uses 'vcustody' (computed from validator balance)",
+            "location": "beacon_chain/sync/validator_custody.nim:76-77, 142-143"
+          },
+          {
+            "type": "under_sampling",
+            "description": "When custody_group_count > vcustody and custody_group_count > SAMPLES_PER_SLOT, the node samples fewer groups than required by spec",
+            "impact": "Weakens data availability guarantees"
+          }
+        ],
+        "key_finding": "The implementation conflates two distinct values: validator custody requirement (balance-based) and node custody group count (ENR-advertised)"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Successfully constructed counterexample where node advertises custody_group_count=16 but only samples max(8,4)=8 groups due to low validator balance resulting in vcustody=4.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "custody_group_count > vcustody AND custody_group_count > SAMPLES_PER_SLOT AND vcustody < custody_group_count",
+          "inputs": {
+            "SAMPLES_PER_SLOT": 8,
+            "custody_group_count": 16,
+            "vcustody": 4,
+            "total_node_balance": "Low validator balance resulting in vcustody=4"
+          },
+          "expected_outcome": "Spec requires max(8,16)=16 groups sampled. Implementation samples max(8,4)=8 groups. Violation: 8 < 16.",
+          "violation_type": "invariant_violation",
+          "severity": "Insufficient sampling coverage when nodes opt for super-full operation with higher custody than validator balance supports"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample is internally triggered by node's own configuration, not externally exploitable. Requires node to advertise higher custody_group_count than its validator balance supports.",
+        "entry_points": [
+          "detectNewValidatorCustody (internal, called on validator balance changes)",
+          "checkIntersectingCustody (internal, called during column refill)"
+        ],
+        "data_flow_path": "Validator balance changes → get_validators_custody_requirement computes vcustody → max(SAMPLES_PER_SLOT, vcustody) determines sampling → Under-sampling occurs if custody_group_count > vcustody",
+        "validation_layers": [
+          {
+            "layer": "ENR custody verification",
+            "location": "checkIntersectingCustody verifies peer custody claims",
+            "effectiveness": "Peers can verify custody claims but this doesn't prevent self-inflicted under-sampling"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "notes": "Bug is self-inflicted. Node operator sets custody_group_count in ENR and controls validator balance. Attacker cannot force another node to under-sample. However, weakens network DA guarantees when nodes misconfigure super-full operation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant cannot be proven. Counterexample demonstrates that sampled_groups < max(SAMPLES_PER_SLOT, custody_group_count) when custody_group_count exceeds validator-based custody requirement.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "attempted_proof": "Tried to prove: ∀ node: sampled_groups(node) ≥ max(SAMPLES_PER_SLOT, custody_group_count(node)). Failed because implementation uses vcustody (balance-based) instead of custody_group_count (ENR-advertised). No guard condition enforces consistency between these values.",
+        "counterexample_reference": "See Phase 2: custody_group_count=16, vcustody=4, SAMPLES_PER_SLOT=8 → 8 < 16"
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "configuration-issue",
+        "recommendation": "Report to Nimbus developers as a spec compliance issue. Not eligible for bug bounty as it requires node operator misconfiguration (advertising higher custody than validator balance supports).",
+        "notes": "From Bug Bounty Scope: 'Local validator configuration is under operator control. Misconfigured or manipulated validator settings could cause incorrect node behavior.' This is considered 'configuration issues requiring operator error are typically out-of-scope'. The bug is a correctness issue where implementation doesn't match spec, but requires misconfiguration to trigger.",
+        "spec_compliance_issue": true,
+        "fix_recommendation": "Replace 'vcustody' with the actual 'custody_group_count' advertised in node's ENR, or add validation to ensure custody_group_count ≤ vcustody before advertising in ENR."
+      }
+    }
+  }
+]

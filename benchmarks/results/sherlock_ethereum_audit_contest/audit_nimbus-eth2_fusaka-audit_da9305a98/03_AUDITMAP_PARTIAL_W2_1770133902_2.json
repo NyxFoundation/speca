@@ -1,0 +1,251 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W0-FULUFC-PRECOND-008-NODE-0",
+    "property_id": "PROP-W0-FULUFC-PRECOND-008",
+    "code_scope": {
+      "primary_location": {
+        "file": "beacon_chain/sync/request_manager.nim",
+        "function": "fetchDataColumnsFromNetwork",
+        "line_range": "387-449",
+        "description": "P2P column sidecar retrieval and quarantine storage"
+      },
+      "validation_locations": [
+        {
+          "file": "beacon_chain/sync/request_manager.nim",
+          "function": "checkColumnResponse",
+          "line": "425",
+          "validation_type": "format_check",
+          "strength": "weak"
+        },
+        {
+          "file": "beacon_chain/consensus_object_pools/blob_quarantine.nim",
+          "function": "put",
+          "line_range": "337-358",
+          "validation_type": "none",
+          "note": "Assumes validation already occurred (comment line 315-317)"
+        },
+        {
+          "file": "beacon_chain/gossip_processing/block_processor.nim",
+          "function": "storeBlock",
+          "line_range": "680-695",
+          "validation_type": "kzg_verification",
+          "strength": "strong"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "P2P-fetched column sidecars bypass KZG verification before quarantine storage, violating the property that they should undergo the same validation as gossip-received sidecars.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed state transformations from P2P fetch through quarantine to block verification. Identified validation gap between quarantine storage and KZG verification.",
+        "variables_analyzed": [
+          {
+            "name": "columns (from P2P)",
+            "type": "seq[ref fulu.DataColumnSidecar]",
+            "abstract_domain": "Array of references, size [0, NUMBER_OF_COLUMNS], each element contains index, column, kzg_commitment, kzg_proof",
+            "trust_level": "untrusted (attacker-controlled)"
+          },
+          {
+            "name": "blockRoot",
+            "type": "Eth2Digest",
+            "abstract_domain": "32-byte hash value, any value from P2P peer",
+            "trust_level": "untrusted"
+          },
+          {
+            "name": "dataColumnsOpt",
+            "type": "Opt[DataColumnSidecars]",
+            "abstract_domain": "{Some(sidecars), None}",
+            "state_transition": "None → Some when loaded from quarantine"
+          }
+        ],
+        "state_anomalies_found": [
+          {
+            "anomaly": "validation_gap",
+            "location": "Between request_manager.nim:437 (quarantine.put) and block_processor.nim:687 (verify_data_column_sidecar_kzg_proofs)",
+            "description": "No cryptographic validation occurs between P2P fetch and quarantine storage, despite comment at blob_quarantine.nim:315-317 assuming validation has occurred",
+            "severity": "medium"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed symbolic execution path demonstrating how malicious peer can inject invalid column sidecars into quarantine. Found concrete counterexample with invalid KZG proof.",
+        "counterexample_found": true,
+        "counterexample": {
+          "description": "Malicious peer sends column sidecars with valid format but invalid KZG proofs",
+          "path_conditions": [
+            "fetchDataColumnsFromNetwork(rman, colIdList) called",
+            "peer returns columns with valid format but invalid KZG proofs",
+            "checkColumnResponse passes (only validates format, not cryptography)",
+            "dataColumnQuarantine.put() stores unvalidated columns",
+            "storeBlock() later fails KZG verification"
+          ],
+          "inputs": {
+            "malicious_column": {
+              "index": "0 (valid)",
+              "column": "[valid_bytes] (format valid but data incorrect)",
+              "kzg_commitment": "[valid_commitment]",
+              "kzg_proof": "[invalid_proof] (will fail KZG verification)",
+              "signed_block_header": "[valid_header]"
+            }
+          },
+          "expected_outcome": "Invalid columns stored in quarantine, consuming memory/disk resources. Eventually rejected during block processing when KZG verification fails at block_processor.nim:687.",
+          "impact": "Resource consumption (memory, disk, CPU) but no consensus impact due to final validation layer"
+        },
+        "paths_explored": [
+          {
+            "path_id": "P2P_TO_QUARANTINE",
+            "entry": "fetchDataColumnsFromNetwork",
+            "exit": "dataColumnQuarantine.put",
+            "validations": ["checkColumnResponse (format only)"],
+            "vulnerability": "No KZG verification on this path"
+          },
+          {
+            "path_id": "QUARANTINE_TO_BLOCK_PROCESSING",
+            "entry": "storeBlock",
+            "exit": "addHeadBlock",
+            "validations": ["verify_data_column_sidecar_kzg_proofs"],
+            "result": "Invalid data rejected here, but resources already consumed"
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Attack is reachable from P2P entry point with full attacker control. Multiple validation layers exist, with final KZG verification preventing consensus impact.",
+        "entry_points": [
+          {
+            "type": "P2P Network",
+            "interface": "dataColumnSidecarsByRoot RPC",
+            "attacker_controlled": true,
+            "trigger_condition": "Node requests missing columns for a block"
+          },
+          {
+            "type": "Block Gossip",
+            "interface": "Automatic fetch when block indicates data columns",
+            "attacker_controlled": true,
+            "trigger_condition": "Block propagation triggers automatic column fetch"
+          }
+        ],
+        "data_flow_path": "P2P Peer → dataColumnSidecarsByRoot RPC → fetchDataColumnsFromNetwork() → checkColumnResponse() → dataColumnQuarantine.put() → [storage] → storeBlock() → verify_data_column_sidecar_kzg_proofs() → rejection",
+        "validation_layers": [
+          {
+            "layer": "RPC deserialization",
+            "location": "request_manager.nim:421 (dataColumnSidecarsByRoot)",
+            "effectiveness": "partial",
+            "validates": "Message format and SSZ encoding",
+            "does_not_validate": "Cryptographic correctness"
+          },
+          {
+            "layer": "Response format checking",
+            "location": "request_manager.nim:425 (checkColumnResponse)",
+            "effectiveness": "weak",
+            "validates": "Response is subset of request, correct indices",
+            "does_not_validate": "KZG proofs, column data correctness"
+          },
+          {
+            "layer": "Peer scoring",
+            "location": "request_manager.nim:430 (peer.updateScore)",
+            "effectiveness": "partial",
+            "validates": "None (reactive punishment only)",
+            "mitigation": "Reduces repeat attacks from same peer"
+          },
+          {
+            "layer": "KZG proof verification",
+            "location": "block_processor.nim:687 (verify_data_column_sidecar_kzg_proofs)",
+            "effectiveness": "strong",
+            "validates": "Cryptographic correctness of column data",
+            "prevents": "Invalid data from affecting consensus"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "Attacker can trigger resource consumption but cannot affect consensus due to final validation layer. Issue is that validation happens too late, after resources are already spent on storage and processing."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Failed to prove invariant. Property requires same validation order as gossip (format + KZG before storage), but P2P path defers KZG verification until block processing.",
+        "original_property": "Column sidecars fetched from P2P peers for data availability must undergo the same validation as gossip-received sidecars: format verification followed by KZG proof verification.",
+        "formal_invariant": "∀ column_sidecar fetched_from_P2P: before_quarantine_storage(column_sidecar) ⟹ format_verified(column_sidecar) ∧ kzg_verified(column_sidecar)",
+        "proof_successful": false,
+        "proof_failure_reason": "Invariant violated on P2P-fetch path",
+        "comparison_analysis": {
+          "gossip_path": {
+            "validation_order": "format_check → KZG_verification → storage",
+            "invariant_holds": true,
+            "location": "gossip_validation.nim"
+          },
+          "p2p_fetch_path": {
+            "validation_order": "format_check → storage → KZG_verification",
+            "invariant_holds": false,
+            "gap": "KZG verification missing between format check and storage",
+            "location": "request_manager.nim:425-437"
+          }
+        },
+        "guard_identified": {
+          "exists": true,
+          "location": "block_processor.nim:687",
+          "guard_type": "verify_data_column_sidecar_kzg_proofs",
+          "enforces_property": false,
+          "reason": "Guard occurs AFTER quarantine storage, not before as property requires"
+        },
+        "assumption_violation": {
+          "assumption_location": "blob_quarantine.nim:315-317",
+          "assumption_text": "Sidecar should pass validation before being added to quarantine",
+          "violation": "P2P-fetched sidecars do not pass KZG validation before quarantine storage",
+          "impact": "Code assumes validation has occurred but this assumption is not enforced on all code paths"
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement",
+        "scope_analysis": {
+          "in_scope_components": [
+            "P2P Network (✓)",
+            "Data Availability Sampling/PeerDAS (✓)",
+            "Block Validation (✓)"
+          ],
+          "entry_points_in_scope": [
+            "P2P Network Packets (✓)"
+          ],
+          "trust_assumptions_met": [
+            "P2P peers are untrusted (✓)"
+          ],
+          "exploitability_classification": "defense-in-depth",
+          "rationale": "Final KZG verification layer prevents consensus impact"
+        },
+        "severity_assessment": {
+          "by_bug_bounty_criteria": "Informational",
+          "rationale": [
+            "Cannot cause network split (final validation prevents invalid data from affecting consensus)",
+            "Cannot slash validators",
+            "Cannot steal or burn ETH",
+            "Resource consumption is limited by quarantine size limits and peer scoring",
+            "High-effort DoS (requires sustained P2P messages) is explicitly out-of-scope"
+          ],
+          "impact_category": "Code quality / Defense-in-depth hardening"
+        },
+        "mitigation_analysis": {
+          "existing_mitigations": [
+            {
+              "mechanism": "Quarantine size limits",
+              "location": "blob_quarantine.nim (FIFO eviction)",
+              "effectiveness": "Prevents unbounded memory growth"
+            },
+            {
+              "mechanism": "Peer scoring",
+              "location": "request_manager.nim:430, 449",
+              "effectiveness": "Reduces repeat attacks from same peer"
+            },
+            {
+              "mechanism": "Final KZG verification",
+              "location": "block_processor.nim:687",
+              "effectiveness": "Prevents consensus impact"
+            }
+          ],
+          "recommended_improvement": "Add KZG verification in fetchDataColumnsFromNetwork before quarantine storage to match gossip validation order and reduce resource consumption",
+          "implementation_hint": "Call verify_data_column_sidecar_kzg_proofs on each column in the records loop before calling dataColumnQuarantine.put()"
+        },
+        "notes": "While the specification property is technically violated (validation order differs from gossip), the security impact is limited to resource consumption. The final validation layer provides defense-in-depth. This is a code quality issue rather than a critical security vulnerability."
+      }
+    }
+  }
+]

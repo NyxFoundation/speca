@@ -1,0 +1,119 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W6-FULU-VAL-CUSTODY-INV-002-INTERNAL",
+    "property_id": "PROP-W6-FULU-VAL-CUSTODY-INV-002",
+    "code_scope": {
+      "file": "beacon_chain/sync/validator_custody.nim",
+      "function": "validatorCustodyColumnLoop",
+      "line_range": "195-240",
+      "critical_lines": "219-223",
+      "additional_locations": [
+        {
+          "file": "beacon_chain/networking/eth2_network.nim",
+          "function": "loadCgcnetMetadataAndEnr",
+          "line_range": "2693-2705"
+        },
+        {
+          "file": "beacon_chain/nimbus_beacon_node.nim",
+          "function": "onSlotEnd (validator custody update)",
+          "line_range": "1970-1984"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Nimbus implements custody count decrease logic that violates the specification invariant, but exploitation requires node operator action rather than external attack.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract state analysis confirms the code allows custody_group_count to decrease from N to M where M < N",
+        "state_anomalies_found": [
+          {
+            "variable": "custody_group_count",
+            "abstract_domain": "uint64, range [CUSTODY_REQUIREMENT(8) to NUMBER_OF_CUSTODY_GROUPS(128)]",
+            "location": "beacon_chain/networking/eth2_network.nim:2694",
+            "anomaly": "Direct assignment without validation against previous value",
+            "details": "The function loadCgcnetMetadataAndEnr() performs: node.metadata.custody_group_count = cgcnets.uint64 with NO check that cgcnets >= previous custody_group_count"
+          },
+          {
+            "variable": "newer_column_set",
+            "abstract_domain": "HashSet[ColumnIndex], size range [0, 128]",
+            "location": "beacon_chain/sync/validator_custody.nim:219-223",
+            "anomaly": "Size comparison allows decrease",
+            "details": "Line 219 checks 'if vcus.older_column_set.len != vcus.newer_column_set.len' which allows newer_column_set.len < older_column_set.len"
+          },
+          {
+            "variable": "new_vcus",
+            "abstract_domain": "CgcCount (uint8), derived from newer_column_set.lenu64",
+            "location": "beacon_chain/nimbus_beacon_node.nim:1975-1981",
+            "anomaly": "Value can decrease when validators detach",
+            "details": "Comment on line 220 explicitly states 'Newer cgc count can also drop from previous if validators detach', confirming intentional decrease behavior"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Counterexample found: custody count decreases when node operator removes validators or validator balance decreases",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "Initial state: validator with balance >= 32 ETH, custody_group_count = N",
+            "vcus.older_column_set.len = N columns",
+            "Event: validator balance decreases OR validator keys are removed from node",
+            "detectNewValidatorCustody() called with lower total_node_balance",
+            "get_validators_custody_requirement(lower_balance) returns M where M < N",
+            "resolve_columns_from_custody_groups() returns fewer columns",
+            "vcus.newer_column_set.len = M where M < N",
+            "validatorCustodyColumnLoop executes, reaching line 219",
+            "Condition 'vcus.older_column_set.len != vcus.newer_column_set.len' evaluates to True",
+            "Line 222: vcus.older_column_set = vcus.newer_column_set (accept decrease)",
+            "nimbus_beacon_node.nim:1975 computes new_vcus = M",
+            "Line 1978 or 1980: loadCgcnetMetadataAndEnr(M) called",
+            "eth2_network.nim:2694 executes: node.metadata.custody_group_count = M (M < N)",
+            "ENR updated to advertise custody_group_count = M < N"
+          ],
+          "inputs": {
+            "initial_balance": "64 ETH (2 validators * 32 ETH)",
+            "initial_custody_group_count": 16,
+            "action": "Remove one validator from node",
+            "new_balance": "32 ETH (1 validator * 32 ETH)",
+            "expected_new_custody_count": 8
+          },
+          "expected_outcome": "custody_group_count decreases from 16 to 8, violating the specification invariant 'MUST NOT advertise a custody_group_count that is lower than a previously advertised value'"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Spec violation exists but requires node operator action, not external P2P attack",
+        "entry_points": [
+          "Node operator action (removing validator keys)",
+          "Validator balance change (on-chain slashing or exits)"
+        ],
+        "data_flow_path": "Node operator removes validators \u2192 total_node_balance decreases \u2192 detectNewValidatorCustody() \u2192 lower custody requirement computed \u2192 validatorCustodyColumnLoop accepts decrease \u2192 ENR updated with lower count",
+        "validation_layers": [
+          {
+            "layer": "None",
+            "location": "N/A",
+            "effectiveness": "No validation prevents custody count decrease"
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "The code allows custody count decrease (spec violation) but this requires node operator action (removing validators), not external attack. A malicious operator could intentionally reduce custody count to shirk data availability duties."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Proof of invariant FAILS - code explicitly implements behavior that violates the spec",
+        "proof_successful": false,
+        "guard_identified": null,
+        "code_evidence": [
+          "beacon_chain/sync/validator_custody.nim:220 - Comment: 'Newer cgc count can also drop from previous if validators detach'",
+          "beacon_chain/sync/validator_custody.nim:219 - Uses != instead of > allowing decreases",
+          "beacon_chain/networking/eth2_network.nim:2694 - No guard validates cgcnets >= previous value"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth (not externally exploitable)",
+        "recommendation": "Report to Nimbus/Ethereum Foundation as a SPECIFICATION VIOLATION requiring developer attention",
+        "notes": "This is a clear violation of the consensus specification. The spec states validators MUST NOT advertise a lower custody_group_count, but Nimbus explicitly allows this. However, triggering requires node operator action (removing validators), not external P2P attack. Should be fixed for spec compliance but not a traditional exploitable vulnerability."
+      }
+    }
+  }
+]

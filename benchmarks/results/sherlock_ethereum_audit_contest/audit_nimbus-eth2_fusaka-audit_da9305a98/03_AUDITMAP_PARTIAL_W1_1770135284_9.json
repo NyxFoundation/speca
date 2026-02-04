@@ -1,0 +1,103 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W7-PCS-VERIFY-PRECOND-001-BOUNDARY",
+    "property_id": "PROP-W7-PCS-VERIFY-PRECOND-001",
+    "code_scope": {
+      "file": "vendor/nim-kzg4844/kzg4844/kzg_abi.nim (C bindings to c-kzg-4844 library)",
+      "function": "verifyCellKzgProofBatch",
+      "line_range": "N/A (external C library)",
+      "nim_wrapper": "beacon_chain/spec/peerdas_helpers.nim:395",
+      "note": "The actual validation is performed in the C library c-kzg-4844"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "The c-kzg-4844 library performs array length validation before processing, preventing out-of-bounds access. Multiple validation layers provide defense-in-depth.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed abstract state space for array inputs (commitments_bytes, cell_indices, cells, proofs_bytes). Identified potential state anomaly: mismatched array lengths could cause out-of-bounds access if not validated.",
+        "state_anomalies_found": [
+          {
+            "variable": "commitments_bytes",
+            "abstract_domain": "array of length [0, UNBOUNDED]",
+            "anomaly": "Length may differ from other input arrays"
+          },
+          {
+            "variable": "cell_indices",
+            "abstract_domain": "array of length [0, UNBOUNDED]",
+            "anomaly": "Length may differ from other input arrays"
+          },
+          {
+            "variable": "cells",
+            "abstract_domain": "array of length [0, UNBOUNDED]",
+            "anomaly": "Length may differ from other input arrays"
+          },
+          {
+            "variable": "proofs_bytes",
+            "abstract_domain": "array of length [0, UNBOUNDED]",
+            "anomaly": "Length may differ from other input arrays"
+          }
+        ],
+        "potential_issue": "If arrays have different lengths and this is not checked, array access using index from one array to access another could go out-of-bounds."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to construct counterexample with mismatched array lengths. Found that c-kzg-4844 library validates array lengths at entry point.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "P2P peer sends verify_cell_kzg_proof_batch request with len(commitments) != len(cells)",
+          "inputs": {
+            "commitments_bytes": "[C1, C2, C3]  # length 3",
+            "cell_indices": "[0, 1]  # length 2",
+            "cells": "[CELL1, CELL2]  # length 2",
+            "proofs_bytes": "[P1, P2]  # length 2"
+          },
+          "expected_outcome": "Without validation: out-of-bounds read when accessing commitments[2]. With validation: early return with error.",
+          "actual_behavior": "c-kzg-4844 library checks that all input arrays have equal length in verify_cell_kzg_proof_batch_rust() before any array access.",
+          "validation_location": "c-kzg-4844/src/eip7594/lib.rs:verify_cell_kzg_proof_batch (Rust implementation) and c-kzg-4844/src/eip7594/eip7594.c (C implementation)"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample is reachable from P2P network via DataColumnSidecar messages, but validation in c-kzg-4844 library prevents exploitation.",
+        "entry_points": [
+          "P2P network: DataColumnSidecar gossip messages",
+          "P2P network: data_column_sidecar_by_root requests"
+        ],
+        "data_flow_path": "P2P message \u2192 DataColumnSidecar deserialization \u2192 verify_data_column_sidecar_kzg_proofs() \u2192 verifyCellKzgProofBatch() \u2192 c-kzg-4844 library",
+        "validation_layers": [
+          {
+            "layer": "SSZ deserialization",
+            "location": "beacon_chain/spec/datatypes/fulu.nim (DataColumnSidecar type)",
+            "effectiveness": "Does NOT enforce array length equality; SSZ allows variable-length arrays to have different lengths"
+          },
+          {
+            "layer": "c-kzg-4844 library input validation",
+            "location": "nim-kzg4844 (vendored c-kzg-4844 library)",
+            "effectiveness": "ENFORCES array length equality; returns error if arrays have mismatched lengths"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "The vulnerability would be exploitable if c-kzg-4844 did not validate array lengths. However, the library performs this check as the FIRST validation step, preventing out-of-bounds access. This is a defense-in-depth issue: Nimbus relies on c-kzg-4844's validation rather than validating in Nim code before calling the library."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove invariant in Nimbus code, but can prove it holds in c-kzg-4844 library.",
+        "proof_successful": true,
+        "proof_details": "The c-kzg-4844 library enforces the invariant 'len(commitments) == len(cell_indices) == len(cells) == len(proofs)' as a precondition check. The library returns an error if this condition is violated.",
+        "guard_identified": {
+          "location": "c-kzg-4844 library: verify_cell_kzg_proof_batch() function",
+          "guard_condition": "commitments.len() == cell_indices.len() && cell_indices.len() == cells.len() && cells.len() == proofs.len()",
+          "enforcement": "Early return with C_KZG_BADARGS error code if arrays have mismatched lengths"
+        },
+        "nimbus_layer_status": "Nimbus does NOT validate array lengths before calling verifyCellKzgProofBatch(). It trusts the c-kzg-4844 library to perform this validation.",
+        "defense_in_depth_recommendation": "Add explicit length validation in verify_data_column_sidecar_kzg_proofs() before calling verifyCellKzgProofBatch() to fail fast and provide clearer error messages."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement. Add explicit array length validation in Nim code before calling c-kzg-4844 library.",
+        "notes": "The vulnerability is NOT exploitable because c-kzg-4844 validates array lengths. However, relying solely on external library validation without defense-in-depth checks in application code is a maintenance risk. If c-kzg-4844 library were ever replaced or if a bug were introduced in the library, the vulnerability could become exploitable.",
+        "severity_if_exploitable": "HIGH (out-of-bounds memory access could crash >33% of nodes)",
+        "actual_severity": "INFORMATIONAL (defense-in-depth improvement)"
+      }
+    }
+  }
+]

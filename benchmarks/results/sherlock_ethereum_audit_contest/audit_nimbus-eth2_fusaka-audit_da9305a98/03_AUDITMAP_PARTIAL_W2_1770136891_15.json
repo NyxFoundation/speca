@@ -1,0 +1,122 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W3-FULU-BLOB-SCHEDULE-INV-003-INTERNAL",
+    "property_id": "PROP-W3-FULU-BLOB-SCHEDULE-INV-003",
+    "code_scope": {
+      "file": "beacon_chain/spec/presets.nim",
+      "function": "readRuntimeConfig",
+      "line_range": "808-871",
+      "description": "BLOB_SCHEDULE configuration loading from YAML/config file into RuntimeConfig structure"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "BLOB_SCHEDULE divergence can cause network splits, but existing ENRForkID mechanism provides partial defense via fork digest validation.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "BLOB_SCHEDULE is a sequence of BlobParameters loaded from external config files. Each node independently parses this schedule with no cryptographic commitment. The abstract state space includes: (1) correctly configured nodes with matching schedules, (2) misconfigured nodes with divergent schedules, and (3) malicious client implementations with hardcoded wrong defaults.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "No on-chain validation mechanism",
+            "location": "beacon_chain/spec/presets.nim:155",
+            "description": "BLOB_SCHEDULE is stored in RuntimeConfig as seq[BlobParameters] without any consensus-layer validation",
+            "severity": "CRITICAL"
+          },
+          {
+            "anomaly": "Configuration divergence possible",
+            "location": "beacon_chain/spec/presets.nim:808-871",
+            "description": "Each node parses BLOB_SCHEDULE from local config files. Different config files lead to different schedules.",
+            "severity": "CRITICAL"
+          },
+          {
+            "anomaly": "No peer comparison mechanism",
+            "location": "beacon_chain/spec/network.nim:145-159",
+            "description": "ENRForkID includes fork_digest but does not directly encode BLOB_SCHEDULE entries. Fork digest changes at BPO boundaries but does not validate the schedule itself.",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed a counterexample where two nodes have divergent BLOB_SCHEDULE configurations, leading to different fork digests at BPO transition epochs, causing network partitioning.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "NodeA loads config with BLOB_SCHEDULE=[{EPOCH:100,MAX:6},{EPOCH:200,MAX:9}] AND NodeB loads config with BLOB_SCHEDULE=[{EPOCH:100,MAX:6},{EPOCH:150,MAX:9}] AND current_epoch=150",
+          "inputs": {
+            "nodeA_config": "BLOB_SCHEDULE: [{EPOCH: 100, MAX_BLOBS_PER_BLOCK: 6}, {EPOCH: 200, MAX_BLOBS_PER_BLOCK: 9}]",
+            "nodeB_config": "BLOB_SCHEDULE: [{EPOCH: 100, MAX_BLOBS_PER_BLOCK: 6}, {EPOCH: 150, MAX_BLOBS_PER_BLOCK: 9}]",
+            "current_epoch": 150
+          },
+          "expected_outcome": "At epoch 150: NodeA uses MAX_BLOBS_PER_BLOCK=6 (from entry at EPOCH 100). NodeB uses MAX_BLOBS_PER_BLOCK=9 (from entry at EPOCH 150). NodeA rejects blocks from NodeB with >6 blobs. NodeB accepts blocks with up to 9 blobs. Network splits.",
+          "code_path": [
+            "beacon_chain/spec/presets.nim:808-871 (config loading)",
+            "beacon_chain/spec/forks.nim:1102-1109 (get_blob_parameters)",
+            "beacon_chain/spec/network.nim:141-143 (compute_fork_digest_fulu)",
+            "Block validation (implicit, via MAX_BLOBS_PER_BLOCK limit)"
+          ]
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Configuration divergence requires operator error (wrong config file) OR client bug (wrong default BLOB_SCHEDULE). The ENRForkID mechanism provides partial defense by encoding fork digest which changes at BPO boundaries, but does not directly validate BLOB_SCHEDULE contents.",
+        "entry_points": [
+          "Node startup: reads config file",
+          "P2P discovery: ENRForkID validation (partial defense)",
+          "Block gossip: implicit validation via MAX_BLOBS_PER_BLOCK"
+        ],
+        "data_flow_path": "Config file → readRuntimeConfig() → RuntimeConfig.BLOB_SCHEDULE → get_blob_parameters(epoch) → compute_fork_digest_fulu() → ENRForkID → P2P peer selection",
+        "validation_layers": [
+          {
+            "layer": "ENRForkID validation",
+            "location": "beacon_chain/spec/network.nim:145-159",
+            "effectiveness": "PARTIAL - Fork digest changes at BPO epoch boundaries (cfg.BLOB_SCHEDULE[].EPOCH), causing peers with different schedules to eventually reject each other. However, if schedules differ only in MAX_BLOBS_PER_BLOCK (not EPOCH boundaries), fork digest may be identical and no rejection occurs until block validation.",
+            "notes": "compute_fork_digest_fulu (line 141) uses epoch to determine fork version, and BLOB_SCHEDULE[].EPOCH influences next fork epoch (beacon_chain/spec/forks.nim:1626-1630). This provides implicit validation at epoch boundaries."
+          },
+          {
+            "layer": "Block validation",
+            "location": "Implicit: MAX_BLOBS_PER_BLOCK enforcement in block processing",
+            "effectiveness": "STRONG - Blocks exceeding MAX_BLOBS_PER_BLOCK are rejected. This prevents invalid blocks from being accepted.",
+            "notes": "If NodeA has MAX=6 and NodeB has MAX=9, NodeA will reject NodeB's blocks with >6 blobs. This causes network split but prevents incorrect state transitions."
+          },
+          {
+            "layer": "Client testing and configuration review",
+            "location": "External: client test suites, Ethereum Foundation reviews",
+            "effectiveness": "STRONG - Major clients undergo extensive testing. Wrong default BLOB_SCHEDULE would be caught in testnet deployment.",
+            "notes": "Operator misconfiguration is possible but unlikely due to standard config files being widely distributed."
+          }
+        ],
+        "attacker_controlled": false,
+        "classification": "defense-in-depth",
+        "notes": "The vulnerability exists (no on-chain BLOB_SCHEDULE validation), but multiple defense layers make exploitation difficult. ENRForkID provides partial defense via fork digest validation at BPO epoch boundaries. Block validation provides strong defense against accepting invalid blocks. However, network split is still possible if a significant fraction of nodes are misconfigured or a client ships with wrong defaults."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the invariant 'All nodes must agree on BLOB_SCHEDULE' due to lack of on-chain validation mechanism. However, defense-in-depth analysis shows that exploitation requires significant operator error or client bugs, both of which are unlikely in practice.",
+        "proof_successful": false,
+        "guard_identified": {
+          "guard_type": "partial",
+          "location": "beacon_chain/spec/network.nim:145-159 + beacon_chain/spec/forks.nim:1626-1630",
+          "description": "ENRForkID includes fork_digest which is computed using compute_fork_digest_fulu(). The nextForkEpochAtEpoch() function (forks.nim:1626-1630) iterates over cfg.BLOB_SCHEDULE to determine next fork epoch. This causes fork digest to change at BPO epoch boundaries, providing indirect BLOB_SCHEDULE validation.",
+          "limitation": "Fork digest does not directly encode MAX_BLOBS_PER_BLOCK values, only EPOCH boundaries. If two schedules have the same EPOCH boundaries but different MAX_BLOBS_PER_BLOCK values, fork digest may be identical."
+        },
+        "formal_statement": "∀ NodeA, NodeB ∈ Network: NodeA.cfg.BLOB_SCHEDULE ≠ NodeB.cfg.BLOB_SCHEDULE ⟹ ∃ epoch: fork_digest(NodeA, epoch) ≠ fork_digest(NodeB, epoch) ⟹ NodeA and NodeB do not gossip to each other",
+        "proof_gap": "The implication ∀ divergence ⟹ ∃ fork_digest difference does NOT hold if BLOB_SCHEDULE differs only in MAX_BLOBS_PER_BLOCK (not in EPOCH). In this case, fork_digest may be identical, and network split occurs only at block validation, not at ENR discovery.",
+        "counterexample_for_proof": {
+          "scenario": "BLOB_SCHEDULE_A = [{EPOCH: 100, MAX: 6}] vs BLOB_SCHEDULE_B = [{EPOCH: 100, MAX: 9}]",
+          "result": "Both nodes compute same fork_digest at epoch 100 (same EPOCH boundary). Fork digest does not encode MAX_BLOBS_PER_BLOCK value. Nodes peer with each other. Network split occurs only when a block with 7+ blobs is gossiped."
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement. Consider adding: (1) on-chain BLOB_SCHEDULE commitment (e.g., in beacon state), (2) explicit BLOB_SCHEDULE comparison in ENR handshake, or (3) stronger client testing to catch misconfigured schedules.",
+        "scope_analysis": {
+          "is_fusaka_specific": true,
+          "affects_network": true,
+          "requires_operator_error": true,
+          "requires_client_bug": false,
+          "exploitability": "LOW - requires significant operator misconfiguration or client shipping wrong defaults",
+          "impact_if_exploited": "CRITICAL - network split",
+          "bug_bounty_scope_match": "conditional (per checklist: 'Configuration-dependent. However, if a client implementation has wrong default BLOB_SCHEDULE, this becomes an internal-bug.')"
+        },
+        "notes": "Per bug bounty scope: 'Configuration disagreement is operator error, but could be exploited if a client ships with wrong defaults.' This is a valid concern but falls into 'defense-in-depth' category due to: (1) ENRForkID provides partial validation, (2) block validation provides strong defense, (3) client testing catches most bugs, (4) standard config files are widely distributed. Recommendation: inform Nimbus team for potential hardening (e.g., add BLOB_SCHEDULE hash to ENR)."
+      }
+    }
+  }
+]

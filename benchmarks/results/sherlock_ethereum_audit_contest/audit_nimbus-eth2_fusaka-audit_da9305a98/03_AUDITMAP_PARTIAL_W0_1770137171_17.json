@@ -1,0 +1,138 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W5-EIP7594-GOSSIP-PRECOND-001-BOUNDARY",
+    "property_id": "PROP-W5-EIP7594-GOSSIP-PRECOND-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "assemble_data_column_sidecars",
+      "line_range": "291-349",
+      "validation_functions": [
+        {
+          "file": "beacon_chain/spec/peerdas_helpers.nim",
+          "function": "verify_data_column_sidecar",
+          "line_range": "352-366"
+        },
+        {
+          "file": "beacon_chain/spec/peerdas_helpers.nim",
+          "function": "verify_data_column_sidecar_kzg_proofs",
+          "line_range": "386-403"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Wrapper format validation exists but lacks explicit version field check; defense-in-depth validation layers mitigate risk.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed the abstract state space of the wrapper creation and validation process. The DataColumnSidecar structure contains all required fields (index, column, kzg_commitments, kzg_proofs, signed_block_header, inclusion_proof) but no explicit wrapper_version field exists in the code.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "Missing wrapper_version field",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:338-343",
+            "description": "The DataColumnSidecar structure created at lines 338-343 does not include a wrapper_version=1 field as specified in the property. The EIP-7594 specification requires wrapper_version=1 for blob transaction wrappers.",
+            "abstract_state_impact": "If an attacker could craft a wrapper with a different version (or no version), nodes might accept it without proper version validation, potentially leading to protocol confusion."
+          },
+          {
+            "anomaly": "No explicit version check in validation",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:352-366",
+            "description": "The verify_data_column_sidecar function validates index bounds, non-zero commitments, and field length consistency, but does not check for wrapper_version field presence or value.",
+            "abstract_state_impact": "Malformed wrappers without version fields could pass basic validation if other fields are correct."
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Performed symbolic execution to find a path where a malformed wrapper (missing wrapper_version field) could be accepted by the validation logic. Analysis reveals the Nimbus implementation uses typed structures (DataColumnSidecar) which implicitly enforce field presence through type safety.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "analysis_notes": [
+          "Attempted to construct a symbolic wrapper with missing wrapper_version field",
+          "Nim's type system requires all fields in the DataColumnSidecar structure to be present at compile time",
+          "The structure is defined in the consensus-specs SSZ schema, which enforces field presence",
+          "Network deserialization uses SSZ encoding which would fail if the wrapper structure doesn't match the expected schema",
+          "The 'wrapper_version' field appears to be implicit in the DataColumnSidecar type itself (not a separate field)",
+          "Cross-referenced with web3/engine_api imports: BlobAndProofV2 indicates V2 API response format, suggesting version handling at API layer",
+          "No path found where arbitrary version values can bypass validation due to type-level constraints"
+        ],
+        "why_no_counterexample": "The Nim type system and SSZ encoding enforce structural integrity at the deserialization layer. An attacker cannot send a DataColumnSidecar that violates the schema because it would fail SSZ deserialization before reaching the validation functions. The wrapper_version is implicitly enforced by the API version (BlobAndProofV2) and SSZ schema definition."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Analyzed whether an attacker can control inputs to trigger wrapper format violations. The implicit version handling through typed structures and SSZ encoding provides defense-in-depth.",
+        "entry_points": [
+          "P2P gossip network (data_column_sidecar topics)",
+          "Engine API (engine_getBlobsV2)",
+          "Block proposal validation"
+        ],
+        "data_flow_path": "External transaction -> Engine API getBlobsV2 -> BlobAndProofV2 response -> assemble_data_column_sidecars -> DataColumnSidecar -> P2P gossip -> verify_data_column_sidecar",
+        "validation_layers": [
+          {
+            "layer": "SSZ Deserialization",
+            "location": "SSZ decoding at network layer (before verification functions)",
+            "effectiveness": "Strong - rejects any message that doesn't match DataColumnSidecar schema",
+            "rationale": "SSZ encoding enforces strict type matching. A message with wrong version or missing fields would fail deserialization with a type error before reaching application logic."
+          },
+          {
+            "layer": "Engine API Version Control",
+            "location": "beacon_chain/el/el_manager.nim:761-825 (sendGetBlobsV2)",
+            "effectiveness": "Strong - API versioning enforces format expectations",
+            "rationale": "The use of BlobAndProofV2 indicates V2 API response format. The EL-CL communication is authenticated via JWT and uses explicit API versions."
+          },
+          {
+            "layer": "Structural Validation",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:352-366 (verify_data_column_sidecar)",
+            "effectiveness": "Medium - validates field consistency but not explicit version",
+            "rationale": "Checks index bounds, non-zero commitments, and field length matching, providing additional defense even if SSZ deserialization passed."
+          },
+          {
+            "layer": "Cryptographic Validation",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:386-403 (verify_data_column_sidecar_kzg_proofs)",
+            "effectiveness": "Strong - cryptographic proof verification",
+            "rationale": "Even if wrapper format issues exist, invalid KZG proofs would be rejected, preventing malformed data from propagating."
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "While an attacker can submit arbitrary P2P messages or transactions, the combination of SSZ type safety, API versioning, and cryptographic validation creates multiple defensive layers. The lack of an explicit wrapper_version=1 check is mitigated by these implicit enforcement mechanisms."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempted to prove that all wrapper fields (blobs, commitments, cell_proofs) are present and correctly formatted. The invariant cannot be proven through explicit runtime checks alone, but is enforced through type-level constraints.",
+        "proof_successful": true,
+        "proof_approach": "Type-system proof",
+        "invariant_statement": "∀ wrapper W received via P2P or Engine API: W.structure = DataColumnSidecar ∧ W.index < NUMBER_OF_COLUMNS ∧ W.column.len = W.kzg_commitments.len = W.kzg_proofs.len ∧ W.kzg_commitments.len > 0",
+        "guard_identified": [
+          {
+            "guard_type": "Type-level constraint",
+            "location": "SSZ schema definition + Nim type system",
+            "guard_condition": "DataColumnSidecar structure enforces field presence at compile/deserialize time",
+            "proof": "By contradiction: Assume wrapper W violates schema. Then SSZ.deserialize(W) fails with type error. Therefore, no W violating schema can reach validation functions. QED."
+          },
+          {
+            "guard_type": "Runtime validation",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:356-364",
+            "guard_condition": "if sidecar.index >= NUMBER_OF_COLUMNS: return err(...); if sidecar.kzg_commitments.len == 0: return err(...); if sidecar.column.len != sidecar.kzg_commitments.len or sidecar.column.len != sidecar.kzg_proofs.len: return err(...)",
+            "proof": "These explicit checks ensure the invariant holds at runtime, providing defense even if type-level protections are bypassed."
+          }
+        ],
+        "limitations": "The proof assumes SSZ deserialization is correctly implemented and that the DataColumnSidecar schema matches the EIP-7594 specification. If the SSZ schema is incorrect or if there are deserialization bugs, the type-level proof fails."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a robustness improvement: Add explicit wrapper_version field to DataColumnSidecar and validate it in verify_data_column_sidecar",
+        "notes": "The current implementation relies on implicit version handling through API versioning (BlobAndProofV2) and SSZ type safety. While this provides strong defense-in-depth, adding an explicit wrapper_version=1 field to DataColumnSidecar would improve code clarity and make version mismatch errors easier to diagnose. This is not exploitable due to the multiple validation layers, but represents a specification-implementation gap that should be addressed for maintainability.",
+        "bug_bounty_scope_analysis": {
+          "in_scope_component": true,
+          "component": "Blob Transaction Gossip (EIP-7594)",
+          "entry_points_match": true,
+          "entry_points": [
+            "P2P Network",
+            "Transaction Pool (via Engine API)"
+          ],
+          "exploitability": "Not exploitable - defense-in-depth prevents exploitation",
+          "impact_if_exploited": "N/A - cannot be exploited",
+          "fusaka_specific": true,
+          "known_issue": false
+        }
+      }
+    }
+  }
+]

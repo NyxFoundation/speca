@@ -1,0 +1,160 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W1-EIP7934-PRECOND-001-NODE-STATE-BLOCK-RECEIVED",
+    "property_id": "PROP-W1-EIP7934-PRECOND-001",
+    "code_scope": {
+      "file": "beacon_chain/networking/eth2_network.nim",
+      "function": "addAsyncValidator (snappy decompression and SSZ decode)",
+      "line_range": "2589-2620",
+      "related_files": [
+        {
+          "file": "beacon_chain/gossip_processing/eth2_processor.nim",
+          "function": "processSignedBeaconBlock",
+          "line_range": "218-300",
+          "purpose": "Initial block processing after P2P reception"
+        },
+        {
+          "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+          "function": "validateBeaconBlock",
+          "line_range": "720-912",
+          "purpose": "Comprehensive gossip validation (10 checks, no RLP size check)"
+        },
+        {
+          "file": "beacon_chain/gossip_processing/block_processor.nim",
+          "function": "storeBlock",
+          "line_range": "618-670",
+          "purpose": "Execution payload validation via Engine API"
+        }
+      ],
+      "constants": [
+        {
+          "name": "MAX_PAYLOAD_SIZE",
+          "value": "10 MB",
+          "file": "beacon_chain/spec/datatypes/constants.nim",
+          "line": "78",
+          "note": "CL-level size limit, NOT the EIP-7934 RLP limit"
+        }
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Nimbus CL does not validate RLP-encoded execution payload size (8 MiB limit per EIP-7934) before forwarding to EL, relying on EL enforcement via Engine API.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "CL enforces 10 MB SSZ size limit for entire beacon block, but does not check RLP-encoded size of execution payload (8 MiB per EIP-7934). Execution payload validation is delegated to EL via Engine API.",
+        "state_anomalies_found": [
+          {
+            "type": "size_limit_mismatch",
+            "description": "Property requires MAX_RLP_BLOCK_SIZE (8 MiB) check, but CL only enforces MAX_PAYLOAD_SIZE (10 MB) at SSZ level",
+            "location": "beacon_chain/networking/eth2_network.nim:855-876",
+            "impact": "CL accepts blocks with execution payloads up to ~9.9 MB (10 MB - CL overhead) without checking EL-specific 8 MiB RLP limit"
+          },
+          {
+            "type": "missing_validation",
+            "description": "No RLP size check for execution payload in CL validation pipeline",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:720-912",
+            "impact": "CL relies entirely on EL to enforce EIP-7934 constraint"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed counterexample where attacker sends beacon block with oversized execution payload (9 MB RLP) that passes CL validation (< 10 MB SSZ) but violates EIP-7934 (> 8 MiB RLP).",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "attacker_crafts_cl_block: true",
+            "execution_payload_rlp_size = 9 MB",
+            "cl_overhead_size ≈ 100 KB",
+            "total_cl_block_ssz_size = execution_payload + cl_overhead = 9.1 MB",
+            "9.1 MB < MAX_PAYLOAD_SIZE (10 MB) → PASSES",
+            "9 MB > MAX_RLP_BLOCK_SIZE (8 MiB) → VIOLATES EIP-7934",
+            "CL forwards to EL via engine_newPayloadV3",
+            "IF EL checks RLP size → rejected by EL",
+            "IF EL does NOT check → network processes invalid block"
+          ],
+          "inputs": {
+            "attack_vector": "P2P gossip network",
+            "execution_payload_size": "9 MB (9,437,184 bytes)",
+            "cl_overhead": "~100 KB",
+            "total_beacon_block_size": "~9.1 MB",
+            "compression": "snappy (standard)",
+            "target": "All Nimbus CL nodes"
+          },
+          "expected_outcome": "CL accepts and propagates block without checking EL-specific RLP size constraint. Protection depends on EL enforcement."
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Attack is reachable via P2P gossip network with attacker-controlled block content. CL does not enforce EL-specific constraint, relying on EL validation via Engine API (defense-in-depth).",
+        "entry_points": [
+          "P2P gossip network (BeaconBlocksByRange, BeaconBlocksByRoot, block gossip topics)"
+        ],
+        "data_flow_path": "Attacker (P2P) → eth2_network.nim (snappy decompress, 10 MB check) → eth2_network.nim (SSZ decode) → eth2_processor.nim (processSignedBeaconBlock) → gossip_validation.nim (validateBeaconBlock, no RLP check) → block_processor.nim (storeBlock) → Engine API → EL (should check RLP size)",
+        "validation_layers": [
+          {
+            "layer": "Network - Snappy Decompression Size Limit",
+            "location": "beacon_chain/networking/eth2_network.nim:2601",
+            "effectiveness": "Prevents blocks > 10 MB SSZ, but NOT blocks with execution payloads > 8 MiB RLP",
+            "check": "decompressed.len <= gossipMaxSize(SignedBeaconBlock) = 10 MB"
+          },
+          {
+            "layer": "Gossip - 10-Step Validation Pipeline",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:720-912",
+            "effectiveness": "Validates slot, finalization, parent, proposer, signature, but NO RLP size check",
+            "check": "validateBeaconBlock() performs consensus checks, not EL-specific size validation"
+          },
+          {
+            "layer": "Engine API - Execution Payload Validation",
+            "location": "beacon_chain/gossip_processing/block_processor.nim:618-670",
+            "effectiveness": "UNKNOWN - depends on EL implementation (Geth, Nethermind, etc.)",
+            "check": "elManager.getExecutionValidity() forwards to EL, trusts EL to enforce EIP-7934"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "This is a CL-EL trust boundary issue. The CL (Nimbus) does not validate the EL-specific RLP size constraint (8 MiB per EIP-7934). The CL trusts the EL to enforce this constraint via Engine API. If the EL fails to enforce it, the network could process blocks violating EIP-7934. However, this is the expected division of responsibilities: EL enforces EL-specific constraints, CL enforces CL-specific constraints. The vulnerability exists only if BOTH CL and EL fail to check."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant CANNOT BE PROVEN in Nimbus CL codebase. No guard condition exists for checking RLP-encoded execution payload size against 8 MiB limit. Invariant holds only if EL enforcement is assumed.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "gap_in_logic": "CL-EL trust boundary: CL does not enforce EL-specific constraint (RLP size <= 8 MiB). CL checks SSZ size <= 10 MB for entire beacon block, but delegates execution payload validation to EL. Specification gap between EIP-7934 (EL-focused) and CL implementation (trust-based).",
+        "formal_analysis": {
+          "original_assertion": "∀ block received via P2P: LET rlp_size = size(RLP.encode(block.execution_payload)) BEFORE expensive_validation(block): ASSERT rlp_size ≤ MAX_RLP_BLOCK_SIZE",
+          "guards_present": [
+            {
+              "guard": "snappy.decode(message.data, gossipMaxSize(MsgType))",
+              "location": "eth2_network.nim:2601",
+              "enforces": "decompressed_size ≤ 10 MB (SSZ)",
+              "does_not_enforce": "rlp_size(execution_payload) ≤ 8 MiB"
+            },
+            {
+              "guard": "validateBeaconBlock()",
+              "location": "gossip_validation.nim:720-912",
+              "enforces": "10 consensus checks (slot, finalization, parent, proposer, signature, etc.)",
+              "does_not_enforce": "RLP size of execution payload"
+            }
+          ],
+          "guards_missing": [
+            "RLP size check for execution payload before Engine API call"
+          ],
+          "conclusion": "Invariant does not hold in Nimbus CL. CL relies on EL to enforce EIP-7934 constraint."
+        }
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a defense-in-depth improvement. The CL could add early validation of execution payload RLP size (8 MiB per EIP-7934) to avoid wasting resources on invalid blocks before forwarding to EL. Also verify that EL clients (Geth, Nethermind, Besu, Erigon) properly enforce the 8 MiB RLP limit per EIP-7934.",
+        "notes": "This issue falls under the CL-EL trust boundary. Per the bug bounty scope, the Engine API is considered a 'semi-trusted boundary' where CL and EL co-located clients communicate via authenticated Engine API (JWT). The scope states: 'Some data from EL may be used without full verification by CL.' This is the reverse case: CL forwards data to EL without full verification. However, EIP-7934 is an EL specification, so the primary responsibility for enforcement lies with EL clients. The CL's role is to avoid propagating blocks that would be rejected by the EL. While this is a valid architectural concern, it is not a direct vulnerability unless the EL also fails to enforce the limit. Classification: defense-in-depth improvement, not bug-bounty-eligible.",
+        "architectural_context": {
+          "responsibility_division": "EL enforces EL-specific constraints (RLP size, gas limits, state roots, etc.). CL enforces CL-specific constraints (attestations, finalization, fork choice, etc.). Engine API is the trust boundary between these layers.",
+          "eip7934_target": "EIP-7934 is primarily an EL specification targeting EL clients (Geth, Nethermind, etc.)",
+          "cl_role": "CL should ideally perform early validation to avoid wasting resources, but primary enforcement responsibility lies with EL",
+          "vulnerability_condition": "Full vulnerability exists only if BOTH CL and EL fail to enforce the limit",
+          "current_state": "Nimbus CL: missing check. EL status: requires separate audit of Geth, Nethermind, Besu, Erigon."
+        },
+        "fusaka_specific": true,
+        "fusaka_context": "EIP-7934 is part of the Fusaka hardfork. This check is Fusaka-specific."
+      }
+    }
+  }
+]

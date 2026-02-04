@@ -1,0 +1,174 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W0-FULUFC-PRECOND-006-NODE-ACTION-VERIFY-SIDECAR-FORMAT",
+    "property_id": "PROP-W0-FULUFC-PRECOND-006",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "verify_data_column_sidecar",
+      "line_range": "352-366",
+      "entry_point": "beacon_chain/gossip_processing/gossip_validation.nim:596",
+      "p2p_boundary": true
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Column sidecar format validation exists but has defense-in-depth gaps: missing bounds checks on array lengths could cause excessive memory allocation, though protected by upstream message size limits.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract interpretation reveals potential state-space anomalies in array length handling without upper bounds validation.",
+        "state_anomalies_found": [
+          {
+            "variable": "sidecar.index",
+            "domain": "ColumnIndex (uint64)",
+            "range": "[0, NUMBER_OF_COLUMNS)",
+            "validated": true,
+            "validation_location": "peerdas_helpers.nim:356-357",
+            "notes": "Index is properly bounded by NUMBER_OF_COLUMNS constant"
+          },
+          {
+            "variable": "sidecar.kzg_commitments.len",
+            "domain": "Natural",
+            "range": "[1, ∞)",
+            "validated": "partial",
+            "validation_location": "peerdas_helpers.nim:359-360",
+            "notes": "Zero-length check exists, but no upper bound validation on array length"
+          },
+          {
+            "variable": "sidecar.column.len",
+            "domain": "Natural",
+            "range": "[1, ∞)",
+            "validated": "partial",
+            "validation_location": "peerdas_helpers.nim:362-364",
+            "notes": "Equality check with kzg_commitments.len, but no absolute upper bound"
+          },
+          {
+            "variable": "sidecar.kzg_proofs.len",
+            "domain": "Natural",
+            "range": "[1, ∞)",
+            "validated": "partial",
+            "validation_location": "peerdas_helpers.nim:362-364",
+            "notes": "Equality check enforced, but no absolute upper bound"
+          }
+        ],
+        "abstract_state_conclusion": "The validation logic enforces structural consistency (all arrays have equal length, non-zero) but does not enforce absolute upper bounds on array lengths. An attacker could craft a sidecar with extremely large but equal-length arrays (e.g., 2^31 elements), which would pass format validation but potentially cause memory exhaustion during subsequent processing."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution identifies a potential memory exhaustion path through oversized but structurally valid sidecars.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "sidecar.index < NUMBER_OF_COLUMNS",
+            "sidecar.kzg_commitments.len > 0",
+            "sidecar.column.len == sidecar.kzg_commitments.len",
+            "sidecar.kzg_proofs.len == sidecar.kzg_commitments.len",
+            "sidecar.kzg_commitments.len > MAX_BLOBS_PER_BLOCK * FIELD_ELEMENTS_PER_BLOB"
+          ],
+          "inputs": {
+            "sidecar.index": "0 (within bounds)",
+            "sidecar.kzg_commitments.len": "1000000 (1 million commitments)",
+            "sidecar.column.len": "1000000 (equal to commitments)",
+            "sidecar.kzg_proofs.len": "1000000 (equal to commitments)",
+            "expected_max": "MAX_BLOBS_PER_BLOCK (6) * FIELD_ELEMENTS_PER_BLOB (4096) = 24576"
+          },
+          "expected_outcome": "verify_data_column_sidecar returns Ok(), allowing the oversized sidecar to proceed to KZG verification (verify_data_column_sidecar_kzg_proofs), which would allocate large temporary buffers and perform expensive cryptographic operations, potentially causing memory exhaustion or CPU DoS.",
+          "actual_code_behavior": "The function returns Ok() without checking absolute bounds, as confirmed in peerdas_helpers.nim:366"
+        },
+        "symbolic_paths_explored": [
+          {
+            "path_id": "PATH-1-VALID-OVERSIZED",
+            "description": "Valid structure but oversized arrays",
+            "satisfiable": true,
+            "leads_to_vulnerability": true
+          },
+          {
+            "path_id": "PATH-2-INDEX-OUT-OF-BOUNDS",
+            "description": "Index >= NUMBER_OF_COLUMNS",
+            "satisfiable": true,
+            "leads_to_vulnerability": false,
+            "rejection_point": "peerdas_helpers.nim:357"
+          },
+          {
+            "path_id": "PATH-3-ZERO-LENGTH",
+            "description": "kzg_commitments.len == 0",
+            "satisfiable": true,
+            "leads_to_vulnerability": false,
+            "rejection_point": "peerdas_helpers.nim:360"
+          },
+          {
+            "path_id": "PATH-4-LENGTH-MISMATCH",
+            "description": "column.len != kzg_commitments.len",
+            "satisfiable": true,
+            "leads_to_vulnerability": false,
+            "rejection_point": "peerdas_helpers.nim:364"
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample is reachable from P2P gossip network, but protected by upstream message size limits in libp2p layer.",
+        "entry_points": [
+          {
+            "type": "P2P Gossip",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:590-598",
+            "protocol": "DataColumnSidecar gossip topic",
+            "attacker_controlled": true
+          }
+        ],
+        "data_flow_path": "P2P Network → libp2p message parser → gossip_validation.nim:validateDataColumnSidecar() → verify_data_column_sidecar() (peerdas_helpers.nim:352) → [VULNERABLE CODE] → verify_data_column_sidecar_kzg_proofs() (peerdas_helpers.nim:386)",
+        "validation_layers": [
+          {
+            "layer": "libp2p max message size",
+            "location": "libp2p layer (external to Nimbus)",
+            "effectiveness": "STRONG - Messages exceeding max_chunk_size (10 MiB for Deneb) are rejected at network layer",
+            "notes": "The libp2p layer enforces MAX_CHUNK_SIZE (10485760 bytes = 10 MiB) on all gossip messages. A DataColumnSidecar with 1 million commitments would require approximately: (1000000 * 48 bytes) + (1000000 * 48 bytes) + (1000000 * 4096 bytes) ≈ 4 GB, which far exceeds the 10 MiB limit and would be rejected before reaching verify_data_column_sidecar."
+          },
+          {
+            "layer": "SSZ deserialization size limits",
+            "location": "SSZ decoder (beacon_chain/spec/eth2_ssz_serialization.nim or ssz_serialization library)",
+            "effectiveness": "STRONG - SSZ decoder typically enforces size limits during deserialization",
+            "notes": "The SSZ deserialization layer would likely fail to decode an oversized message due to memory allocation failures or internal size limits before the object reaches format validation."
+          },
+          {
+            "layer": "verify_data_column_sidecar bounds checking",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:352-366",
+            "effectiveness": "WEAK - No upper bounds on array lengths",
+            "notes": "This is the vulnerable layer: format validation only checks structural consistency, not absolute size bounds."
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "While the counterexample is theoretically valid (format validation is insufficient), practical exploitation is prevented by defense-in-depth: (1) libp2p max message size limit (10 MiB) prevents oversized messages from being delivered, and (2) SSZ deserialization would likely fail on extremely large arrays before reaching format validation. However, this represents a defense-in-depth gap: the verify_data_column_sidecar function SHOULD enforce explicit bounds rather than relying on upstream protections."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove the invariant 'all sidecars are reasonably bounded' from verify_data_column_sidecar alone, but can prove it holds under upstream constraints.",
+        "proof_successful": "conditional",
+        "invariant_statement": "∀ sidecar: DataColumnSidecar. verify_data_column_sidecar(sidecar) = Ok() ⟹ sidecar.kzg_commitments.len ≤ MAX_BLOBS_PER_BLOCK * FIELD_ELEMENTS_PER_BLOB ∧ sidecar.column.len ≤ MAX_BLOBS_PER_BLOCK * FIELD_ELEMENTS_PER_BLOB",
+        "proof_attempt": {
+          "direct_proof": "FAILED - The function does not check absolute bounds on array lengths, so the invariant cannot be proven from the function's logic alone.",
+          "conditional_proof": "SUCCESS - Under the precondition that the sidecar was deserialized from a message ≤ MAX_CHUNK_SIZE bytes, the invariant holds due to physical size limits.",
+          "guard_identified": [
+            {
+              "guard": "libp2p MAX_CHUNK_SIZE enforcement",
+              "location": "External to Nimbus (libp2p layer)",
+              "condition": "message_size ≤ 10485760 bytes",
+              "strength": "Strong (network layer rejection)"
+            },
+            {
+              "guard": "SSZ deserialization size limits",
+              "location": "SSZ library",
+              "condition": "Array lengths must fit within available memory and SSZ size limits",
+              "strength": "Moderate (implementation-dependent)"
+            }
+          ]
+        },
+        "gap_analysis": "The security property relies on implicit assumptions about upstream filtering rather than explicit enforcement at the verification boundary. This violates the principle of defense-in-depth and makes the code fragile to changes in upstream components."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Geth developers as a robustness improvement. While not directly exploitable due to upstream protections, adding explicit bounds checks in verify_data_column_sidecar would improve defense-in-depth and make the code more resilient to future changes in the network stack.",
+        "severity_if_eligible": "MEDIUM",
+        "severity_justification": "If upstream protections were absent or bypassed, an attacker could send oversized sidecars that pass format validation but cause memory exhaustion during KZG verification, potentially bringing down >5% of nodes. However, current upstream protections (libp2p message size limits) prevent practical exploitation.",
+        "notes": "This finding represents a best-practice violation rather than a directly exploitable vulnerability. The Ethereum Bug Bounty program typically requires proof of practical exploitability, not theoretical defense-in-depth gaps. However, the Nimbus team should consider adding explicit bounds checks:\n\n  if sidecar.kzg_commitments.len > MAX_BLOBS_PER_BLOCK * FIELD_ELEMENTS_PER_BLOB:\n    return err(\"Data column contains too many commitments\")\n\nThis would make the validation logic self-contained and independent of upstream assumptions."
+      }
+    }
+  }
+]

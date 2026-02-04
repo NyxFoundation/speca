@@ -1,0 +1,164 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W2-FULU-GOSSIP-PRECOND-10-BOUNDARY",
+    "property_id": "PROP-W2-FULU-GOSSIP-PRECOND-10",
+    "code_scope": {
+      "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+      "function": "validateDataColumnSidecar",
+      "line_range": "619-625",
+      "implementation_file": "beacon_chain/consensus_object_pools/blob_quarantine.nim",
+      "implementation_function": "hasSidecarImpl",
+      "implementation_line_range": "387-402"
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Anti-equivocation check exists but relies on local state that may differ across nodes, creating potential for state divergence under network partition.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Anti-equivocation state is maintained in ColumnQuarantine.roots table, keyed by (blockRoot, slot, proposer_index, column_index). State domain: HashMap with bounded size via pruning. Potential state anomalies identified.",
+        "state_anomalies_found": [
+          {
+            "variable": "quarantine.roots",
+            "domain": "HashMap[Eth2Digest -> RootTableRecord]",
+            "anomaly": "State is local to each node and not gossip-synchronized",
+            "impact": "Different nodes may have different anti-equivocation state"
+          },
+          {
+            "variable": "rootRecord.sidecars[index]",
+            "domain": "Array[SidecarHolder] with isEmpty/isLoaded/isUnloaded states",
+            "anomaly": "Pruning policy (maxMemSidecarsCount, maxDiskSidecarsCount) can evict entries",
+            "impact": "Node may forget previous sidecar, accepting duplicate later"
+          },
+          {
+            "variable": "gossip arrival order",
+            "domain": "Network timing dependent",
+            "anomaly": "First-to-arrive semantics means network race conditions determine acceptance",
+            "impact": "Network partition can cause different nodes to accept different sidecars"
+          }
+        ],
+        "key_finding": "The anti-equivocation cache is node-local, memory-bounded, and arrival-order-dependent. This creates a race condition where different honest nodes may accept different valid sidecars for the same (slot, proposer_index, column_index) tuple during network partitions or congestion."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed attack path where attacker exploits gossip network topology to cause different nodes to accept different valid sidecars for the same tuple.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "Attacker controls gossip network routing (e.g., via eclipse attack or strategic peering)",
+            "Attacker creates two distinct but valid DataColumnSidecar messages: S1 and S2 for (slot=N, proposer_index=P, column_index=C)",
+            "Both S1 and S2 have valid KZG proofs, valid inclusion proofs, valid proposer signatures",
+            "Attacker routes S1 to Node Group A first, S2 to Node Group B first",
+            "Validation check at line 623-625 runs: hasSidecar(block_root, slot, proposer_index, index)",
+            "For Group A: hasSidecar returns false (first time), S1 accepted",
+            "For Group B: hasSidecar returns false (first time), S2 accepted",
+            "Group A now has S1 in cache, will IGNORE S2 if it arrives",
+            "Group B now has S2 in cache, will IGNORE S1 if it arrives"
+          ],
+          "inputs": {
+            "slot": "N (current slot, within gossip window)",
+            "proposer_index": "P (valid proposer for slot N)",
+            "column_index": "C (valid column 0 <= C < 128)",
+            "sidecar_S1": "Valid DataColumnSidecar with column data D1, valid proofs",
+            "sidecar_S2": "Valid DataColumnSidecar with column data D2 (D1 != D2), valid proofs",
+            "network_topology": "Partitioned or attacker-controlled routing"
+          },
+          "expected_outcome": "Network splits: Group A accepts S1, Group B accepts S2. Both groups proceed with different data columns for the same block, causing potential consensus split or data availability failure."
+        },
+        "symbolic_trace": [
+          "START: Two valid sidecars S1, S2 for same (slot, proposer, column)",
+          "BRANCH 1 (Node in Group A):",
+          "  - S1 arrives first",
+          "  - validateDataColumnSidecar(S1) called",
+          "  - Line 596-598: verify_data_column_sidecar(S1) -> PASS (valid structure)",
+          "  - Line 602-603: compute_subnet_for_data_column_sidecar -> PASS",
+          "  - Lines 609-617: slot/finalization checks -> PASS",
+          "  - Line 623-625: hasSidecar(block_root, slot, proposer, index) -> FALSE (first time)",
+          "  - Lines 630-632: verify inclusion proof -> PASS",
+          "  - Lines 641-671: parent checks -> PASS",
+          "  - Lines 680-686: proposer verification -> PASS",
+          "  - Lines 689-696: proposer signature -> PASS",
+          "  - Lines 700-703: KZG proofs -> PASS",
+          "  - Result: S1 ACCEPTED, added to quarantine.roots",
+          "  - When S2 arrives later:",
+          "    - Line 623-625: hasSidecar() -> TRUE (S1 already stored)",
+          "    - Result: S2 IGNORED",
+          "BRANCH 2 (Node in Group B): Symmetric - S2 accepted first, S1 ignored",
+          "VULNERABILITY: Network now has inconsistent state"
+        ],
+        "notes": "This is an equivocation attack variant. The specification says 'only the first valid sidecar' should be accepted, but this is enforced locally, not globally. If an attacker can create two valid sidecars with different data but valid proofs, this would indicate a KZG binding break (cryptographically impossible). However, the more realistic attack is causing nodes to disagree on which sidecar arrived first through network manipulation."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Attack requires network-level manipulation (eclipse attack or strategic peering) but does NOT require breaking cryptographic assumptions. The validation layers provide defense-in-depth.",
+        "entry_points": [
+          "Gossip network: data_column_sidecar_{subnet_id} topic",
+          "Attacker publishes via P2P gossip"
+        ],
+        "data_flow_path": [
+          "1. Attacker creates two valid DataColumnSidecar messages for same (slot, proposer, column) tuple",
+          "2. Attacker controls network routing via eclipse attack or strategic peering",
+          "3. Routes sidecar S1 to subset of network first",
+          "4. Routes sidecar S2 to different subset of network first",
+          "5. Each subset accepts first-arriving sidecar, ignores second",
+          "6. Network now has divergent state"
+        ],
+        "validation_layers": [
+          {
+            "layer": "Structural validation (verify_data_column_sidecar)",
+            "location": "gossip_validation.nim:596-598",
+            "effectiveness": "Prevents malformed sidecars, but both S1 and S2 pass if well-formed"
+          },
+          {
+            "layer": "Subnet routing check",
+            "location": "gossip_validation.nim:602-603",
+            "effectiveness": "Ensures sidecar on correct subnet, but both S1 and S2 pass"
+          },
+          {
+            "layer": "Anti-equivocation check (hasSidecar)",
+            "location": "gossip_validation.nim:623-625",
+            "effectiveness": "VULNERABLE: Local state, arrival-order dependent, not globally synchronized"
+          },
+          {
+            "layer": "KZG inclusion proof verification",
+            "location": "gossip_validation.nim:630-632",
+            "effectiveness": "Prevents invalid commitments, but both S1 and S2 can have valid proofs if attacker controls EL"
+          },
+          {
+            "layer": "Parent block validation",
+            "location": "gossip_validation.nim:641-671",
+            "effectiveness": "Ensures fork-choice consistency, both S1 and S2 pass if same parent"
+          },
+          {
+            "layer": "Proposer signature verification",
+            "location": "gossip_validation.nim:689-696",
+            "effectiveness": "Prevents unauthorized publishing, but proposer can equivocate (sign both S1 and S2)"
+          },
+          {
+            "layer": "KZG column proof verification",
+            "location": "gossip_validation.nim:700-703",
+            "effectiveness": "STRONGEST DEFENSE: KZG binding property should prevent attacker from creating two valid sidecars with different data for same commitment"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "The attack path exists but is mitigated by multiple layers. The strongest defense is the KZG binding property: an attacker cannot create two different column data values that both verify against the same commitment without breaking the cryptographic binding. However, if the attacker controls the local EL (via the engine_getBlobsV2 trust boundary), they could potentially produce two different valid sidecars. The more realistic attack is exploiting arrival-order race conditions during network partition, but this requires significant network control and only causes temporary divergence until nodes re-sync. The implementation is correct per specification but the specification itself has an inherent race condition."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove invariant holds globally due to race condition in distributed setting. KZG binding provides cryptographic proof that column data matches commitment, but arrival-order semantics cannot be proven consistent across nodes.",
+        "proof_successful": false,
+        "guard_identified": {
+          "guard": "KZG binding property",
+          "location": "gossip_validation.nim:700-703 (check_data_column_sidecar_kzg_proofs)",
+          "strength": "Cryptographically strong",
+          "limitation": "Only proves data-commitment binding, not anti-equivocation across network"
+        },
+        "proof_attempt": "ATTEMPTED PROOF: For all valid sidecars S1, S2 where (S1.slot == S2.slot) AND (S1.proposer_index == S2.proposer_index) AND (S1.column_index == S2.column_index), if both pass all validation checks, then S1.column_data == S2.column_data. PROOF SKETCH: By KZG binding property, for a given commitment C and column index I, there exists at most one column data D such that KZG_verify(C, I, D) succeeds. Since both S1 and S2 reference the same kzg_commitments (via inclusion proof), they must have identical column_data. PROOF GAP: This assumes both sidecars reference the same block_root and kzg_commitments. An equivocating proposer could sign two different block headers with different kzg_commitments, creating two valid sidecars with different data. The anti-equivocation check attempts to prevent this, but its local/arrival-order nature creates a race. CONCLUSION: Invariant cannot be proven globally without consensus-level coordination.",
+        "recommendation": "The implementation correctly follows the specification, but the specification has an inherent race condition. Recommendation: Add gossip-level equivocation detection that tracks (slot, proposer_index, column_index) tuples globally via fork-choice, similar to proposer slashing. However, this would require spec-level change and may not be in scope for bug bounty."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Ethereum Foundation and Nimbus team as a defense-in-depth finding. Not bug bounty eligible because: (1) Attack requires cryptographic break (KZG binding) OR significant network control (eclipse attack); (2) Implementation correctly follows specification; (3) The race condition is a specification-level issue, not implementation bug; (4) No realistic attack path for external attacker without breaking crypto or controlling network topology.",
+        "notes": "This is a subtle consensus safety issue. While the implementation is correct, the specification's reliance on local arrival-order for anti-equivocation creates a potential consensus split vector during network partitions. The KZG binding property provides strong defense-in-depth, making the attack cryptographically impractical. However, the trust boundary with the local EL (engine_getBlobsV2) is a concern: if the EL is compromised or buggy, it could provide corrupted data that bypasses KZG verification (per spec, locally-retrieved blobs skip verification). Recommendation: (1) Nimbus should consider adding warning logs when receiving multiple valid sidecars for same tuple; (2) Ethereum Foundation should consider spec-level anti-equivocation coordination; (3) Monitor for unusual patterns in gossip traffic."
+      }
+    }
+  }
+]

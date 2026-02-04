@@ -1,0 +1,97 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W6-EIP7927-NET-PRECOND-001-BOUNDARY",
+    "property_id": "PROP-W6-EIP7927-NET-PRECOND-001",
+    "code_scope": {
+      "file": "beacon_chain/era_db.nim",
+      "function": "getEraFile",
+      "line_range": "264-295",
+      "related_functions": {
+        "verify": "183-262",
+        "getBlockSSZ": "107-135",
+        "getStateSSZ": "160-181"
+      }
+    },
+    "final_classification": "exploitable",
+    "bug_bounty_eligible": true,
+    "summary": "Era files from external sources are loaded without cryptographic verification, allowing malicious Portal Network nodes or e2store mirrors to serve manipulated historical data.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "The getEraFile function loads era files from disk without verifying their integrity. While an eraRoot is computed based on historical_roots, this only verifies the filename, not the file contents. The verify() function exists but is never invoked in the normal code path.",
+        "state_anomalies_found": [
+          {
+            "variable": "f (EraFile)",
+            "domain": "EraFile object with handle, stateIdx, blockIdx",
+            "anomaly": "EraFile is opened and added to db.files cache without cryptographic verification of contents",
+            "location": "era_db.nim:284-294"
+          },
+          {
+            "variable": "historical_roots",
+            "domain": "openArray[Eth2Digest]",
+            "anomaly": "Used only to compute expected eraRoot for filename matching, not to verify file contents against canonical chain",
+            "location": "era_db.nim:273-276"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "A malicious attacker can place a crafted era file with a valid filename (matching expected eraRoot) but manipulated block/state data. The getEraFile function will successfully load it, and subsequent getBlockSSZ/getStateSSZ calls will return the malicious data without verification.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": [
+            "Era file exists at expected path (era_db.nim:280)",
+            "EraFile.open() succeeds (basic format parsing) (era_db.nim:284)",
+            "File has not been previously cached (era_db.nim:268-270)"
+          ],
+          "inputs": {
+            "era_file": "mainnet-00001-40cf2f3c.era (with valid filename but manipulated block signatures)",
+            "attacker_controlled": "File contents (block data, signatures, state data)",
+            "historical_roots": "Legitimate historical roots from canonical chain"
+          },
+          "expected_outcome": "Malicious era file is loaded into cache, subsequent getBlock/getState calls return unverified attacker-controlled data, which is then served to RPC clients or used internally",
+          "vulnerable_code_path": "getEraFile (264-295) -> EraFile.open (35-73) -> getBlockSSZ (314-326) -> No verification before use"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Attacker can control era file contents by: (1) serving malicious era files via Portal Network, (2) operating a malicious e2store mirror, or (3) via MITM if era files are fetched over unencrypted HTTP. The vulnerability is reachable when a node requests pre-merge historical data that is not stored locally.",
+        "entry_points": [
+          "Portal Network P2P protocol (external era file source)",
+          "e2store HTTP/BitTorrent downloads (external era file source)",
+          "JSON-RPC client requests for historical blocks (triggers era file loading)"
+        ],
+        "data_flow_path": "External source (Portal/e2store) -> Era file placed in era/ directory -> getEraFile loads file -> getBlockSSZ/getStateSSZ reads data -> Served to RPC client or used internally",
+        "validation_layers": [
+          {
+            "layer": "Filename validation (eraRoot check)",
+            "location": "era_db.nim:273-277",
+            "effectiveness": "INSUFFICIENT - Only validates filename matches expected eraRoot, does not verify file contents"
+          },
+          {
+            "layer": "Basic file format parsing (EraFile.open)",
+            "location": "era_db.nim:35-73",
+            "effectiveness": "INSUFFICIENT - Only checks SSZ framing and index structure, does not verify block signatures or state roots"
+          },
+          {
+            "layer": "Cryptographic verification (verify function)",
+            "location": "era_db.nim:183-262",
+            "effectiveness": "NOT ENFORCED - Function exists and would properly validate block signatures and state roots, but is never called in production code path"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "notes": "The verify() function (lines 183-262) implements proper cryptographic verification including: (1) State root computation, (2) Block signature batch verification, (3) Validation that blocks match state block_roots. However, this function is ONLY called in tests (line 532) and the ncli_db verifyEra command (ncli/ncli_db.nim:554), not in production when loading era files via getEraFile."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Not performed due to counterexample in Phase 2.",
+        "proof_successful": false,
+        "guard_identified": null,
+        "notes": "The property assertion 'Data retrieved from alternate sources MUST be validated against canonical block hashes before use' is VIOLATED. While validation code exists (verify function), it is not enforced in the getEraFile code path."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "exploitable",
+        "recommendation": "Submit to Ethereum Bug Bounty as a MEDIUM severity finding. The vulnerability allows malicious external sources to serve manipulated historical data, which could mislead applications but does not directly affect consensus of >5% of the network.",
+        "notes": "This is in-scope for the bug bounty because: (1) Attacker-controlled entry point (Portal Network, e2store mirrors), (2) Trust boundary violation (external data not validated), (3) Affects network integrity (historical data authenticity). However, impact is limited to applications querying historical data, not live consensus."
+      }
+    }
+  }
+]

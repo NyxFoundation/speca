@@ -1,0 +1,103 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W2-FULU-REQRESP-PRECOND-05-INTERNAL",
+    "property_id": "PROP-W2-FULU-REQRESP-PRECOND-05",
+    "code_scope": {
+      "file": "beacon_chain/sync/sync_protocol.nim",
+      "function": "dataColumnSidecarsByRange",
+      "line_range": "441-506",
+      "specific_lines": {
+        "response_streaming": "481-503",
+        "column_iteration": "482",
+        "block_iteration": "481"
+      }
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "DataColumnSidecarsByRange response ordering does not enforce (slot, column_index) ascending order within each slot, causing protocol non-compliance.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analysis of variable state spaces and data flow through dataColumnSidecarsByRange function. Response items are streamed in nested loop order without enforcing column_index sorting within each slot.",
+        "state_anomalies_found": [
+          {
+            "anomaly": "Ordering violation",
+            "description": "Response items are ordered by (slot, reqColumns[i]) instead of (slot, column_index_ascending). If reqColumns is unsorted, response will not meet spec requirement.",
+            "location": "beacon_chain/sync/sync_protocol.nim:481-503"
+          },
+          {
+            "anomaly": "Missing pre-response validation",
+            "description": "No validation that reqColumns is sorted before iteration. No explicit enforcement of MAX_REQUEST_DATA_COLUMN_SIDECARS total response size.",
+            "location": "beacon_chain/sync/sync_protocol.nim:453-454"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Constructed counterexample demonstrating protocol non-compliance when reqColumns parameter is unsorted.",
+        "counterexample_found": true,
+        "counterexample": {
+          "path_conditions": "reqCount > 0 AND reqColumns.len > 0 AND reqColumns = [5, 2, 8, 1] (unsorted) AND blocks exist at consecutive slots",
+          "inputs": {
+            "startSlot": "slot S",
+            "reqCount": "3",
+            "reqColumns": "[5, 2, 8, 1]"
+          },
+          "expected_outcome": "Response should be ordered: (S, 1), (S, 2), (S, 5), (S, 8), (S+1, 1), (S+1, 2), (S+1, 5), (S+1, 8), ...",
+          "actual_outcome": "Response is ordered: (S, 5), (S, 2), (S, 8), (S, 1), (S+1, 5), (S+1, 2), (S+1, 8), (S+1, 1), ...",
+          "violation": "Column indices within each slot are NOT in ascending order"
+        }
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Counterexample is reachable via P2P DataColumnSidecarsByRange RPC with attacker-controlled unsorted reqColumns parameter.",
+        "entry_points": [
+          "P2P Request/Response: dataColumnSidecarsByRange RPC (beacon_chain/sync/sync_protocol.nim:441)"
+        ],
+        "data_flow_path": "Attacker sends DataColumnSidecarsByRange(startSlot, reqCount, reqColumns=[unsorted]) → Request validation (lines 453-468) → Response generation nested loop (lines 481-503, outer=slots, inner=reqColumns) → Stream response in loop order → Attacker receives misordered response",
+        "validation_layers": [
+          {
+            "layer": "Input validation",
+            "location": "beacon_chain/sync/sync_protocol.nim:453-454",
+            "effectiveness": "Checks for empty request but does not validate reqColumns ordering"
+          },
+          {
+            "layer": "Epoch boundary check",
+            "location": "beacon_chain/sync/sync_protocol.nim:461-468",
+            "effectiveness": "Ensures data availability window but does not affect ordering"
+          },
+          {
+            "layer": "Response limit",
+            "location": "beacon_chain/sync/sync_protocol.nim:472",
+            "effectiveness": "Partially enforces limit via min(reqCount, blockIds.lenu64) but does not account for reqColumns multiplier"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "This is a protocol compliance issue, not a security vulnerability. The spec (AMB-FULU-P2P-01) states responses MUST be ordered by (slot, column_index) ascending, but the implementation does not enforce column_index ordering within each slot. Impact limited to sync inefficiency and protocol non-compliance between Nimbus and other clients expecting sorted responses."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Cannot prove ordering invariant due to missing sort operation on reqColumns before iteration.",
+        "proof_successful": false,
+        "invariant": "∀ response items (slot₁, col₁), (slot₂, col₂): if (slot₁, col₁) appears before (slot₂, col₂), then (slot₁ < slot₂) ∨ (slot₁ = slot₂ ∧ col₁ < col₂)",
+        "proof_gap": "Outer loop (line 481) guarantees slot ordering, but inner loop (line 482) iterates reqColumns in arbitrary attacker-controlled order. No sorting enforced on reqColumns.",
+        "guard_identified": null,
+        "missing_guards": [
+          "Sort reqColumns before inner loop iteration (e.g., reqColumns.sorted() before line 482)",
+          "Validate reqColumns is sorted during input validation (lines 453-454)",
+          "Sort (slot, column_index) tuples before streaming response"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "Report to Nimbus developers as a protocol compliance improvement. This is not a security vulnerability but a deviation from the Fulu P2P spec requirement for response ordering.",
+        "notes": "Per the Ethereum Bug Bounty scope, protocol compliance issues that do not cause consensus splits, DoS, or affect >0.01% of the network are not eligible. This issue causes sync inefficiency between Nimbus and other clients but does not meet severity thresholds. Severity: Informational. Impact: Protocol non-compliance, potential sync inefficiency. Affected clients: Nimbus only (other clients may reject misordered responses or handle gracefully)."
+      }
+    },
+    "recommended_fix": {
+      "approach": "Sort reqColumns before iterating, or collect all (slot, column_index) tuples and sort before streaming",
+      "code_suggestion": "At line 481, before the nested loop, add: `let sortedColumns = reqColumns.sorted()` and iterate over `sortedColumns` instead of `reqColumns`. Alternatively, collect all response items in a sequence, sort by (slot, column_index), then stream.",
+      "alternative_fix": "Validate during input validation (line 453) that reqColumns is already sorted: `if not isSorted(reqColumns): raise newException(InvalidInputsError, \"Columns must be sorted\")`"
+    },
+    "related_ambiguity": "AMB-FULU-P2P-01",
+    "spec_reference": "https://github.com/ethereum/consensus-specs/blob/v1.5.0-alpha.10/specs/fulu/p2p-interface.md#datacolumnsidecarsbyrange-v1"
+  }
+]

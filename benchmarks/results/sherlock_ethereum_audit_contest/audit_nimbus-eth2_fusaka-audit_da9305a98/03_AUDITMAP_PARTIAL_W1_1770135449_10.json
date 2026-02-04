@@ -1,0 +1,262 @@
+[
+  {
+    "check_id": "CHECK-W1-PROP-W0-EIP7951-PRECOND-002-NODE-STATE-SIGNATURE-BOUNDS-INVALID",
+    "property_id": "PROP-W0-EIP7951-PRECOND-002",
+    "code_scope": {
+      "file": "N/A - EIP-7951 not yet implemented in Nimbus (CL client)",
+      "function": "secp256r1 precompile signature bounds validation (EL feature)",
+      "line_range": "N/A",
+      "notes": "EIP-7951 is an execution layer precompile. Nimbus is a consensus layer client. The CL client validates execution payloads from the EL via Engine API, but does not implement the precompile itself.",
+      "relevant_cl_components": [
+        "beacon_chain/validators/block_payloads.nim - validates execution payloads",
+        "Engine API - interface between CL and EL"
+      ]
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "summary": "EIP-7951 secp256r1 precompile is an execution layer feature. Nimbus is a consensus layer client and does not implement EL precompiles. The signature bounds validation logic is out of scope for this codebase.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Specification analysis of EIP-7951 signature bounds validation reveals the requirement that signature components r and s must satisfy 0 < r < n and 0 < s < n where n is the secp256r1 subgroup order (n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551). The specification requires the precompile to return empty output for out-of-range values.",
+        "state_anomalies_found": [
+          {
+            "type": "specification_completeness",
+            "description": "The specification defines the abstract validation requirement but does not provide implementation guidance on edge cases",
+            "severity": "informational",
+            "details": "Edge cases to consider: r=0 (invalid), r=n (invalid), r=n-1 (valid), s=0 (invalid), s=n (invalid), s=n-1 (valid). Big-endian vs little-endian encoding of 32-byte values must be clearly specified."
+          },
+          {
+            "type": "constant_definition",
+            "description": "The secp256r1 curve order n is a well-defined constant but implementations must use the exact value",
+            "severity": "informational",
+            "details": "Implementations must hardcode n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551 and perform modular comparison correctly"
+          }
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic analysis of potential implementation reveals multiple attack vectors if bounds checking is implemented incorrectly. Key symbolic variables: r (32-byte input), s (32-byte input), n (curve order constant).",
+        "counterexample_found": true,
+        "counterexamples": [
+          {
+            "vulnerability_type": "off-by-one error in upper bound check",
+            "path_conditions": [
+              "Input r is parsed as 32-byte big-endian integer",
+              "Input s is parsed as 32-byte big-endian integer",
+              "Implementation checks r < n using unsigned integer comparison",
+              "Implementation FAILS to check r > 0 (allows r=0)",
+              "Implementation proceeds to signature verification with r=0"
+            ],
+            "inputs": {
+              "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+              "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+            },
+            "expected_outcome": "Precompile should return empty output (signature bounds invalid), but buggy implementation might proceed to verification and return incorrect result",
+            "consensus_impact": "HIGH - divergent verification results across clients would cause consensus split",
+            "exploitability": "external-attack",
+            "attack_scenario": "Attacker crafts transaction calling precompile with r=0 or s=0. If implementation accepts r=0 or s=0, mathematical operations may: (1) cause division by zero in modular inverse s^(-1), (2) produce trivial signatures that always verify, (3) produce undefined behavior. Different implementations handling this differently would cause consensus failure."
+          },
+          {
+            "vulnerability_type": "incorrect handling of r=n or s=n",
+            "path_conditions": [
+              "Input r is exactly equal to curve order n",
+              "Implementation checks r <= n (WRONG) instead of r < n (CORRECT)",
+              "Implementation proceeds to signature verification with r=n"
+            ],
+            "inputs": {
+              "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "r": "0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+              "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+              "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+            },
+            "expected_outcome": "Precompile should return empty output (r=n is invalid in ECDSA), but buggy implementation might proceed to verification",
+            "consensus_impact": "HIGH - r \u2261 n \u2261 0 (mod n), so r=n is mathematically equivalent to r=0 in the verification equation. This should always be rejected.",
+            "exploitability": "external-attack",
+            "attack_scenario": "Attacker crafts transaction with r=n or s=n. Standard ECDSA requires strict inequality 0 < r < n. If implementation uses <= instead of <, it accepts invalid signatures. Different handling across clients causes consensus split."
+          },
+          {
+            "vulnerability_type": "endianness confusion in 32-byte comparison",
+            "path_conditions": [
+              "Input r is provided as 32-byte array in calldata",
+              "Implementation parses r as little-endian instead of big-endian (or vice versa)",
+              "Comparison r < n uses wrong byte order"
+            ],
+            "inputs": {
+              "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "r": "0x5125632FC6C2B9F3849E17A7ADFAE6BC1FFFFFFFFFFFFFFFFFFFFFF00000000FF",
+              "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+              "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+            },
+            "expected_outcome": "If parsed as little-endian, this r value (which is n in reverse byte order) would be interpreted as a completely different number. Big-endian: r > n (invalid). Little-endian: r < n (appears valid).",
+            "consensus_impact": "CRITICAL - endianness mismatch between clients would cause systematic divergence on many inputs",
+            "exploitability": "external-attack",
+            "attack_scenario": "If one client implements big-endian parsing and another implements little-endian, they will disagree on almost all inputs. This is a catastrophic consensus failure. EIP-7951 must explicitly specify big-endian encoding (standard for Ethereum calldata)."
+          }
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reachability analysis for EIP-7951 secp256r1 precompile in execution layer context. The precompile is called via EVM CALL/STATICCALL opcode to address 0x100. Attacker fully controls all 160 bytes of calldata.",
+        "entry_points": [
+          "Transaction calldata to smart contract",
+          "Smart contract CALL/STATICCALL to precompile address 0x100"
+        ],
+        "data_flow_path": "User transaction → Smart contract → EVM CALL(0x100, calldata) → Precompile input parsing → Signature bounds check → Verification or rejection",
+        "validation_layers": [
+          {
+            "layer": "Transaction validation",
+            "location": "Execution layer transaction pool",
+            "effectiveness": "N/A - does not validate precompile inputs, only transaction format"
+          },
+          {
+            "layer": "EVM gas limits",
+            "location": "EVM execution context",
+            "effectiveness": "Prevents resource exhaustion but does not validate signature bounds"
+          },
+          {
+            "layer": "Precompile input length check",
+            "location": "Precompile entry point",
+            "effectiveness": "Validates input is exactly 160 bytes, but does not validate signature bounds"
+          },
+          {
+            "layer": "Signature bounds validation (SUBJECT OF THIS AUDIT)",
+            "location": "Precompile ACTION-CHECK-SIGNATURE-BOUNDS",
+            "effectiveness": "This is the ONLY validation layer for signature bounds. If implemented incorrectly, no other layer will catch the error."
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "notes": "Attacker has complete control over the 160-byte precompile input via transaction calldata. The signature bounds check is the ONLY defense against invalid r/s values. No other validation layer provides defense-in-depth. If this check is buggy, consensus failure is guaranteed when clients disagree.",
+        "cl_perspective": "From the consensus layer perspective, Nimbus validates execution payloads received from the execution layer via Engine API. The CL does not re-execute EVM transactions or validate precompile logic. The CL trusts the EL to correctly implement precompiles. If the EL has a buggy precompile, the CL will accept the buggy execution payload, propagate it to the network, and cause consensus issues if other nodes have different EL implementations."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant proving not performed due to counterexamples found in Phase 2. However, we can state the required invariants and the conditions under which they hold.",
+        "proof_successful": false,
+        "required_invariants": [
+          {
+            "invariant": "For all inputs (h, r, s, qx, qy), if r <= 0 or r >= n, then precompile returns empty output",
+            "formal_statement": "∀(r : ℤ). (r ≤ 0 ∨ r ≥ n) → output = []",
+            "enforcement_mechanism": "Explicit bounds check at ACTION-CHECK-SIGNATURE-BOUNDS before proceeding to ECDSA verification",
+            "proof_sketch": "The invariant holds IF AND ONLY IF the implementation includes the following guard: if (r <= 0 || r >= n) { return []; }. Any implementation missing this guard, or using <= instead of <, or checking the wrong variable, will violate the invariant.",
+            "can_be_proven": "YES - if implementation matches specification exactly",
+            "blockers_to_proof": "Implementation does not exist yet in Nimbus (CL client). Cannot verify implementation matches specification."
+          },
+          {
+            "invariant": "For all inputs (h, r, s, qx, qy), if s <= 0 or s >= n, then precompile returns empty output",
+            "formal_statement": "∀(s : ℤ). (s ≤ 0 ∨ s ≥ n) → output = []",
+            "enforcement_mechanism": "Explicit bounds check at ACTION-CHECK-SIGNATURE-BOUNDS before proceeding to ECDSA verification",
+            "proof_sketch": "The invariant holds IF AND ONLY IF the implementation includes the following guard: if (s <= 0 || s >= n) { return []; }. Same vulnerability surface as the r bounds check.",
+            "can_be_proven": "YES - if implementation matches specification exactly",
+            "blockers_to_proof": "Implementation does not exist yet in Nimbus (CL client). Cannot verify implementation matches specification."
+          },
+          {
+            "invariant": "Signature bounds check is performed BEFORE attempting ECDSA verification (temporal ordering)",
+            "formal_statement": "STATE-SIGNATURE-BOUNDS-INVALID is reachable only via EDGE-SIG-BOUNDS-FAIL, and ECDSA verification is unreachable from STATE-SIGNATURE-BOUNDS-INVALID",
+            "enforcement_mechanism": "Control flow graph structure in implementation",
+            "proof_sketch": "The specification's subgraph shows the correct control flow: ACTION-CHECK-SIGNATURE-BOUNDS → STATE-SIGNATURE-BOUNDS-INVALID → ACTION-RETURN-EMPTY. The verification (ACTION-VERIFY-SIGNATURE) is only reachable from STATE-SIGNATURE-BOUNDS-VALID, not from STATE-SIGNATURE-BOUNDS-INVALID. This ordering prevents TOCTOU issues.",
+            "can_be_proven": "YES - via control flow graph analysis of implementation",
+            "blockers_to_proof": "Implementation does not exist yet in Nimbus (CL client). Cannot verify control flow."
+          }
+        ],
+        "guard_identified": null,
+        "notes": "The invariants are provable in principle, but cannot be verified without implementation. The specification correctly defines the required behavior. The risk is that execution layer client implementations may deviate from the specification due to: (1) off-by-one errors in bounds checks, (2) endianness errors in 32-byte parsing, (3) missing checks for r=0 or s=0, (4) incorrect constant n value, (5) TOCTOU issues if bounds check is separated from verification."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "out-of-scope-wrong-layer",
+        "recommendation": "This check is not applicable to Nimbus (consensus layer client). EIP-7951 secp256r1 precompile is an execution layer feature. Bug bounty submissions should target execution clients (Geth, Nethermind, Besu, Erigon, Reth) that implement the precompile. Nimbus's role is to validate execution payloads via Engine API, but it does not implement or validate the internal logic of EL precompiles.",
+        "notes": "The consensus layer client validates the STATE ROOT of the execution payload, not the individual precompile operations. If the EL returns a buggy state root due to incorrect precompile implementation, the CL will accept it. Consensus failures would occur when different EL clients disagree on precompile behavior. The bug would be in the EL implementation, not the CL.",
+        "actionable_for_nimbus": false,
+        "actionable_for_el_clients": true,
+        "severity_if_implemented_in_el": "HIGH",
+        "severity_justification_if_implemented_in_el": "Incorrect signature bounds validation in the secp256r1 precompile would cause consensus divergence between execution clients. Different clients accepting/rejecting the same signature inputs would lead to different state roots, causing network split. This is a HIGH severity consensus bug.",
+        "recommended_action": "Generate test vectors for execution clients to validate EIP-7951 signature bounds checking. Test cases: (1) r=0, s=valid → expect empty output, (2) r=n, s=valid → expect empty output, (3) r=n-1, s=valid → expect verification to run, (4) s=0, r=valid → expect empty output, (5) s=n, r=valid → expect empty output, (6) s=n-1, r=valid → expect verification to run."
+      }
+    },
+    "additional_notes": {
+      "test_vector_generation": "The following test vectors should be included in the Ethereum consensus test suite for EIP-7951",
+      "test_vectors": [
+        {
+          "name": "reject_r_equals_zero",
+          "input": {
+            "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+            "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+          },
+          "expected_output": "0x (empty)",
+          "rationale": "r=0 violates ECDSA requirement 0 < r < n"
+        },
+        {
+          "name": "reject_r_equals_n",
+          "input": {
+            "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "r": "0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+            "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+            "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+          },
+          "expected_output": "0x (empty)",
+          "rationale": "r=n violates ECDSA requirement 0 < r < n (strict inequality)"
+        },
+        {
+          "name": "accept_r_equals_n_minus_1",
+          "input": {
+            "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "r": "0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632550",
+            "s": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+            "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+          },
+          "expected_output": "0x (empty) OR 0x0000...0001 (valid) depending on signature validity",
+          "rationale": "r=n-1 satisfies 0 < r < n and should proceed to verification"
+        },
+        {
+          "name": "reject_s_equals_zero",
+          "input": {
+            "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "r": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+            "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+          },
+          "expected_output": "0x (empty)",
+          "rationale": "s=0 violates ECDSA requirement 0 < s < n. Also would cause division by zero in s^(-1) mod n."
+        },
+        {
+          "name": "reject_s_equals_n",
+          "input": {
+            "h": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "r": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "s": "0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+            "qx": "0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296",
+            "qy": "0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"
+          },
+          "expected_output": "0x (empty)",
+          "rationale": "s=n violates ECDSA requirement 0 < s < n (strict inequality)"
+        }
+      ],
+      "implementation_guidance": {
+        "language_agnostic": [
+          "Parse r and s as 32-byte big-endian unsigned integers",
+          "Define constant n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551",
+          "Check: if (r == 0 || r >= n) { return empty }",
+          "Check: if (s == 0 || s >= n) { return empty }",
+          "Only proceed to ECDSA verification if both checks pass"
+        ],
+        "common_pitfalls": [
+          "Using <= instead of < in upper bound check",
+          "Forgetting to check for zero",
+          "Using wrong endianness (little-endian instead of big-endian)",
+          "Using wrong constant for n",
+          "Checking bounds after attempting verification (TOCTOU)",
+          "Not handling the case where r or s is a 33-byte value (should be rejected by length check first)"
+        ]
+      }
+    }
+  }
+]

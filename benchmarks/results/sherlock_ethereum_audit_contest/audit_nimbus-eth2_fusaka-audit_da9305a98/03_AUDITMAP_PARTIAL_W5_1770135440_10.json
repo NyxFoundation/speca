@@ -1,0 +1,146 @@
+[
+  {
+    "check_id": "CHECK-W0-PROP-W7-PCS-SECBND-POSTCOND-001-INTERNAL",
+    "property_id": "PROP-W7-PCS-SECBND-POSTCOND-001",
+    "code_scope": {
+      "file": "beacon_chain/spec/peerdas_helpers.nim",
+      "function": "verify_data_column_sidecar_kzg_proofs",
+      "line_range": "385-403",
+      "related_files": [
+        "beacon_chain/gossip_processing/gossip_validation.nim:586-716 (validateDataColumnSidecar)",
+        "beacon_chain/sync/sync_protocol.nim:89-109 (readChunkPayload)",
+        "beacon_chain/spec/datatypes/fulu.nim:94-101 (DataColumnSidecar type)"
+      ]
+    },
+    "final_classification": "defense-in-depth",
+    "bug_bounty_eligible": false,
+    "summary": "Trust boundary validation pipeline is architecturally complete but relies on external kzg4844 library correctness for final trust transition.",
+    "audit_trail": {
+      "phase1_abstract_interpretation": {
+        "summary": "Analyzed validation pipeline from raw P2P bytes through trust boundaries to cryptographic verification. Validation layers establish progressive trust transformation.",
+        "state_anomalies_found": [
+          "DataColumnSidecar object remains structurally 'untrusted' until final KZG verification",
+          "SSZ deserialization (sync_protocol.nim:89-109) accepts any valid-structure bytes without cryptographic validation",
+          "Intermediate validation steps (length checks, inclusion proofs, signatures) provide defense-in-depth but do not establish cryptographic cell validity"
+        ],
+        "abstract_state_domains": {
+          "raw_bytes": "Arbitrary byte sequence from P2P network (domain: 0..2^64)",
+          "deserialized_object": "Typed DataColumnSidecar with fields (column: List[KzgCell, 128], commitments: List[KzgCommitment, 16], proofs: List[KzgProof, 128])",
+          "validated_structure": "Object passing length checks (column.len == commitments.len == proofs.len, index < NUMBER_OF_COLUMNS)",
+          "trusted_elements": "Cells cryptographically verified via verifyCellKzgProofBatch() with BLS field elements < BLS_MODULUS"
+        },
+        "validation_layers": [
+          "Layer 1 (sync_protocol.nim:89-109): SSZ deserialization + fork digest validation",
+          "Layer 2 (peerdas_helpers.nim:352-366): Structural validation (lengths, ranges)",
+          "Layer 3 (peerdas_helpers.nim:369-383): Merkle inclusion proof (commitments in block)",
+          "Layer 4 (gossip_validation.nim:673-685): Proposer signature validation",
+          "Layer 5 (peerdas_helpers.nim:385-403): KZG batch verification (cryptographic trust boundary)"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to find a path where validation completes but resulting elements are unsafe for cryptographic operations. No counterexample found assuming correct kzg4844 library implementation.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "symbolic_analysis": {
+          "precondition": "sidecar.column.len == sidecar.kzg_commitments.len == sidecar.kzg_proofs.len && sidecar.index < NUMBER_OF_COLUMNS",
+          "path_through_validation": [
+            "Path 1: verify_data_column_sidecar() passes → verify_data_column_sidecar_inclusion_proof() passes → verify_data_column_sidecar_kzg_proofs() passes",
+            "Symbolic constraint: verifyCellKzgProofBatch(commitments, indices, cells, proofs) == true"
+          ],
+          "symbolic_variables": {
+            "cells": "List[KzgCell, 128] where each cell = List[BLSFieldElement, 64]",
+            "commitments": "List[KzgCommitment, 16]",
+            "proofs": "List[KzgProof, 128]",
+            "index": "ColumnIndex < NUMBER_OF_COLUMNS"
+          },
+          "potential_unsafe_scenarios": [
+            "Scenario 1: verifyCellKzgProofBatch() has implementation bug → returns true for invalid cells",
+            "Scenario 2: Field element deserialization in kzg4844 does not validate < BLS_MODULUS → field arithmetic undefined behavior",
+            "Scenario 3: BLS deserialization does not perform subgroup check → invalid curve points used in pairings"
+          ],
+          "constraint_solver_result": "Cannot construct satisfying input if kzg4844 library is correct. All unsafe scenarios require external library bug.",
+          "paths_analyzed": 3,
+          "satisfiable_paths": 0
+        },
+        "boundary_conditions_tested": [
+          "Empty column (column.len == 0) → rejected by verify_data_column_sidecar() line 357",
+          "Mismatched lengths (column.len != commitments.len) → rejected by verify_data_column_sidecar() line 363",
+          "Invalid index (index >= NUMBER_OF_COLUMNS) → rejected by verify_data_column_sidecar() line 354",
+          "All validations pass → Trust transition depends on kzg4844 correctness"
+        ]
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Validation pipeline is external-reachable from P2P network but relies on defense-in-depth layers. No direct counterexample reachable assuming kzg4844 correctness.",
+        "entry_points": [
+          "P2P gossip: validateDataColumnSidecar() via beacon_chain/gossip_processing/light_client.nim",
+          "Req/Resp protocol: dataColumnSidecarsByRoot() and dataColumnSidecarsByRange() via beacon_chain/sync/sync_protocol.nim"
+        ],
+        "data_flow_path": "P2P raw bytes → readChunkPayload() [SSZ deser] → validateDataColumnSidecar() [gossip validation] → verify_data_column_sidecar_kzg_proofs() [KZG verification] → STATE-TRUSTED-ELEMENTS-READY",
+        "validation_layers": [
+          {
+            "layer": "SSZ Deserialization",
+            "location": "beacon_chain/sync/sync_protocol.nim:89-109",
+            "effectiveness": "Rejects malformed SSZ but accepts any valid structure"
+          },
+          {
+            "layer": "Structural Validation",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:352-366",
+            "effectiveness": "Rejects mismatched lengths and out-of-range indices; defense-in-depth"
+          },
+          {
+            "layer": "Merkle Inclusion Proof",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:369-383",
+            "effectiveness": "Ensures commitments are in claimed block; prevents commitment substitution"
+          },
+          {
+            "layer": "Proposer Signature",
+            "location": "beacon_chain/gossip_processing/gossip_validation.nim:673-685",
+            "effectiveness": "Validates block header authenticity; prevents fake block claims"
+          },
+          {
+            "layer": "KZG Batch Verification",
+            "location": "beacon_chain/spec/peerdas_helpers.nim:395 (calls kzg4844 library)",
+            "effectiveness": "CRITICAL LAYER: Cryptographic proof that cells match commitments; effectiveness depends on kzg4844 library correctness"
+          }
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "notes": "An attacker controls all P2P input (cells, commitments, proofs). However, multiple validation layers prevent exploitation. The final KZG verification provides cryptographic guarantee IF the kzg4844 library is correct. A bug in kzg4844 (e.g., missing BLS subgroup check, field element overflow) would bypass all layers."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Attempting to prove: 'After validation, resulting elements are safe for crypto operations.' Proof depends on external library correctness assumption.",
+        "proof_successful": false,
+        "guard_identified": {
+          "location": "beacon_chain/spec/peerdas_helpers.nim:395-399",
+          "code": "let res = verifyCellKzgProofBatch(sidecar.kzg_commitments.asSeq, cellIndices, sidecar.column.asSeq, sidecar.kzg_proofs.asSeq).valueOr: return err(...); if not res: return err(...)",
+          "type": "external-function-call",
+          "strength": "Depends on kzg4844 library correctness"
+        },
+        "invariant_statement": "∀ sidecar: DataColumnSidecar. (verify_data_column_sidecar_kzg_proofs(sidecar) == ok()) → safe_for_crypto_operations(sidecar.column)",
+        "proof_attempt": {
+          "step1": "Assume: sidecar passes all validation layers",
+          "step2": "Layer 1-4 provide defense-in-depth but do not guarantee cell validity",
+          "step3": "Layer 5 (KZG verification) invokes verifyCellKzgProofBatch(commitments, indices, cells, proofs)",
+          "step4": "If verifyCellKzgProofBatch() returns true, cells are valid evaluations of polynomials committed by commitments",
+          "step5": "This guarantee holds IF verifyCellKzgProofBatch() correctly implements:",
+          "step5a": "  - BLS deserialization with subgroup checks (bytes_to_kzg_commitment, bytes_to_kzg_proof)",
+          "step5b": "  - Field element range validation (bytes_to_bls_field checks < BLS_MODULUS)",
+          "step5c": "  - Correct pairing equation: e(proof, [s^n]) == e(commitment - evaluation_point, [1])",
+          "conclusion": "Invariant proven CONDITIONAL on kzg4844 library correctness"
+        },
+        "proof_gap": "The Nimbus codebase does NOT directly implement KZG verification primitives. It delegates to an external library (kzg4844, likely nim-kzg4844 or c-kzg-4844 bindings). The trust boundary STATE-TRUSTED-ELEMENTS-READY is established by this external call. If the library has bugs in BLS deserialization (missing subgroup checks) or field element validation (missing < BLS_MODULUS check), unsafe elements could pass validation.",
+        "architectural_completeness": "The validation pipeline architecture is COMPLETE and well-structured. It correctly identifies the trust boundary (KZG verification) and performs comprehensive defense-in-depth checks. However, the final trust transition depends on external code correctness."
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "defense-in-depth",
+        "recommendation": "This is an architectural completeness property. The validation pipeline is correctly designed with appropriate defense-in-depth layers. No exploitable vulnerability found assuming kzg4844 library correctness. Report to Nimbus developers as architectural validation success.",
+        "notes": "This property validates that the security boundary architecture is complete. Since no counterexample was found (assuming correct kzg4844 implementation), this confirms the design is sound. Potential vulnerabilities would exist in the kzg4844 library itself (e.g., PROP-W7-PCS-SECBND-PRECOND-003 and PROP-W7-PCS-SECBND-PRECOND-004 cover those boundary checks).",
+        "related_properties_for_followup": [
+          "PROP-W7-PCS-SECBND-PRECOND-003: BLS subgroup checks in bytes_to_kzg_commitment/proof",
+          "PROP-W7-PCS-SECBND-PRECOND-004: Field element range validation in bytes_to_bls_field"
+        ]
+      }
+    }
+  }
+]
