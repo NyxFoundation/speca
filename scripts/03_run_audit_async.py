@@ -156,6 +156,7 @@ class AuditOrchestratorAsync:
         self.all_checklist_items: Dict[str, Dict[str, Any]] = {}
         self.property_subgraph_map: Dict[str, Tuple[str | None, str]] = {}
         self._batch_counter = 0
+        self.failed_batches: List[Tuple[int, int]] = []
 
     def _load_all_checklist_items(self) -> None:
         import glob
@@ -389,6 +390,7 @@ class AuditOrchestratorAsync:
                     f"[W{worker_id}] Claude failed for batch {batch_index} (exit {proc.returncode})",
                     file=sys.stderr,
                 )
+                self.failed_batches.append((worker_id, batch_index))
                 return []
 
             results = parse_audit_results(output_path)
@@ -434,6 +436,15 @@ class AuditOrchestratorAsync:
                     result = await task
                     self.results.extend(result)
                     pbar.update(task_sizes.get(task, 0))
+
+        if self.failed_batches:
+            print(
+                f"❌ Claude failed for {len(self.failed_batches)} batch(es); aborting.",
+                file=sys.stderr,
+            )
+            for worker_id, batch_index in self.failed_batches:
+                print(f" - worker {worker_id}, batch {batch_index}", file=sys.stderr)
+            sys.exit(1)
 
         final_results = early_exit_results + self.results
         timestamp = int(time.time())
