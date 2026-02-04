@@ -200,15 +200,11 @@ class AuditOrchestratorAsync:
         self.all_checklist_items = items
 
     def _is_early_exit(self, item: Dict[str, Any]) -> bool:
-        code_scope = item.get("code_scope")
-        if not code_scope and isinstance(item.get("checklist_item"), dict):
-            code_scope = item["checklist_item"].get("code_scope")
-        if not isinstance(code_scope, dict):
-            return True
-        file_path = code_scope.get("file")
-        if not file_path or file_path in ("N/A", "SPECIFICATION-ONLY"):
-            return True
-        return False
+        checklist_item = item.get("checklist_item")
+        property_id = item.get("property_id")
+        if not property_id and isinstance(checklist_item, dict):
+            property_id = checklist_item.get("property_id")
+        return not property_id
 
     def _create_token_based_batches(self, items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
         print("Creating token-based batches...")
@@ -251,10 +247,10 @@ class AuditOrchestratorAsync:
             "code_scope": code_scope,
             "final_classification": "out-of-scope",
             "bug_bounty_eligible": False,
-            "summary": "No in-scope implementation; analysis skipped.",
+            "summary": "Early exit: insufficient item metadata.",
             "audit_trail": {
                 "phase1_abstract_interpretation": {
-                    "summary": "Early exit: no in-scope code scope.",
+                    "summary": "Early exit: missing required identifiers.",
                     "state_anomalies_found": [],
                 },
                 "phase2_symbolic_execution": {
