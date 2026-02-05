@@ -41,16 +41,26 @@ class PhaseConfig:
     
     # Queue item configuration
     item_id_field: str = "check_id"
-    
+    result_id_field: str = ""  # ID field in result items (falls back to item_id_field)
+
     # Result parsing
     result_key: str = "items"
 
     # Output naming: semantic prefix for PARTIAL files (e.g., "TRUSTMODEL" → 01d_TRUSTMODEL_PARTIAL_W...)
     output_prefix: str = ""
+
+    # Output mode: "file" (default) writes a single JSON; "directory" writes
+    # .mmd graphs + index.json under outputs/graphs/<batch>/
+    output_mode: str = "file"
     
     # Early exit conditions
     early_exit_check: Callable[[dict], bool] | None = None
     early_exit_builder: Callable[[dict], dict] | None = None
+
+    @property
+    def effective_result_id_field(self) -> str:
+        """ID field name in result items. Falls back to item_id_field."""
+        return self.result_id_field or self.item_id_field
 
 
 # Phase configurations - ALL use token-based batching
@@ -76,14 +86,16 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/subgraph-extractor/SKILL.md"),
         prompt_path=Path("prompts/01b_extract_worker.md"),
         queue_pattern="outputs/01b_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01b_SUBGRAPHS/spec_*.json",
+        output_pattern="outputs/graphs/*/index.json",
         depends_on=["01a"],
         input_patterns=["outputs/01a_STATE.json"],
         batch_strategy="count",
         max_batch_size=2,
         item_id_field="url",
-        result_key="sub_graphs",
+        result_id_field="source_url",
+        result_key="specs",
         output_prefix="SUBGRAPHS",
+        output_mode="directory",
     ),
 
     "01c": PhaseConfig(

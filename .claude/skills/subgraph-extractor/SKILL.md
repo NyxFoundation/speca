@@ -1,7 +1,7 @@
 ---
 name: subgraph-extractor
-description: Extract structured subgraphs from specification documents.
-allowed-tools: read, write, mcp__filesystem__read_multiple_files, mcp__tree_sitter__get_symbols, mcp__tree_sitter__run_query
+description: Extract program graphs from a single specification document following Nielson & Nielson's formal definition.
+allowed-tools: read, write, mcp__fetch__fetch, mcp__filesystem__write_text_file, mcp__tree_sitter__get_symbols, mcp__tree_sitter__run_query
 context: fork
 ---
 
@@ -9,64 +9,211 @@ context: fork
 
 ## Mindset
 
-You are a **Technical Document Analyst** specializing in blockchain protocol specifications. Your task is to transform unstructured specification documents (in Markdown or text format) into structured, machine-readable subgraphs. You have a deep understanding of how protocols are defined and can identify the core components.
+You are a **Formal Methods Specialist** trained in program graph extraction. Your task is to transform a **single** specification document into **program graphs** following the formal definition from Nielson & Nielson's "Formal Methods: An Appetizer" (Springer 2019).
 
-## Goal
+> A program graph **PG = (Q, q▷, q◀, Act, E)** consists of:
+> - **Q**: a finite set of nodes (program points)
+> - **q▷, q◀ ∈ Q**: initial and final nodes
+> - **Act**: a set of actions (assignments, tests/guards)
+> - **E ⊆ Q × Act × Q**: a finite set of edges
 
-For each given specification document, parse its content to identify discrete functional units and extract them as structured "subgraphs". A subgraph represents a specific mechanism, function, or component of the protocol.
+## Scope
+
+This skill processes **one specification URL** per invocation. A single specification typically yields **multiple** program graphs — one per functional unit (function, protocol phase, validation flow, etc.).
+
+The calling worker is responsible for batching and aggregation.
 
 ## Input
 
-A JSON object containing a list of items, where each item is a specification document to process.
+The caller provides:
+- `url` — the source URL of the specification (always provided)
+- `output_dir` — directory where `.mmd` files should be written
+- `local_path` *(optional)* — path to a pre-downloaded copy of the specification
+
+## Procedure
+
+1. **Read Specification**: If `local_path` is provided and the file exists, read from it. Otherwise, fetch the content from `url` using `mcp__fetch__fetch`.
+
+2. **Identify Functional Units**: Break down the document into logical units:
+   - Function definitions
+   - State transition descriptions
+   - Protocol phases
+   - Validation logic
+
+   Each functional unit becomes one program graph.
+
+3. **Extract Program Graph Components**:
+
+   For each functional unit, identify:
+
+   | Component | What to Extract |
+   | :--- | :--- |
+   | **Nodes (Q)** | Program points: entry, exit, decision points, intermediate states |
+   | **Initial (q▷)** | The starting point of the function/process |
+   | **Final (q◀)** | The termination point(s) |
+   | **Actions (Act)** | Assignments (`x = expr`), function calls, tests/guards (`x > 0`) |
+   | **Edges (E)** | Transitions: `(source_node, action, target_node)` |
+
+4. **Generate Mermaid Diagrams**: For each program graph, write a `.mmd` file to:
+   ```
+   {output_dir}/{spec_id}/{SG-ID}_{name}.mmd
+   ```
+   Where `spec_id` is a short identifier derived from the specification (e.g., `EIP-7594`, `fulu-beacon-chain`).
+
+5. **Return Result**: Return the JSON structure described in Output Format below. Do **not** write `index.json` — the calling worker handles aggregation.
+
+## Mermaid Syntax Rules
+
+**CRITICAL**: Follow these rules to avoid parse errors:
+
+1. **No `:=` in labels**: Use `=` instead of `:=` for assignments
+2. **No spaces after colon**: Write `q1 --> q2: action` (space before colon is OK)
+3. **Escape special characters**: Avoid `<`, `>`, `{`, `}` in labels, or use quotes
+4. **Use simple node names**: `q1`, `q_validate`, etc. (alphanumeric + underscore only)
+
+### Correct Mermaid Syntax
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> q1: y = 1
+    q1 --> q2: x > 0
+    q1 --> [*]: x <= 0
+    q2 --> q3: y = x * y
+    q3 --> q1: x = x - 1
+```
+
+### Incorrect (Will Fail)
+
+```
+[*] --> q1 : y := 1     # WRONG: space before colon, := syntax
+q1 --> q2 : x > 0       # WRONG: space before colon
+```
+
+## Output Format
+
+The skill returns one JSON object per invocation (one spec → one object).
+
+**Important**: `mermaid_file` paths are **relative to `output_dir`**, including the `spec_id` directory prefix.
 
 ```json
 {
-  "items": [
+  "source_url": "https://...",
+  "title": "EIP-7892: Blob Schedule",
+  "sub_graphs": [
     {
-      "url": "https://example.com/project/docs/spec.md",
-      "local_path": "/path/to/downloaded/spec.md"
+      "id": "SG-001",
+      "name": "get_blob_parameters",
+      "mermaid_file": "EIP-7892/SG-001_get_blob_parameters.mmd",
+      "program_graph": {
+        "Q": ["q_init", "q_iter", "q_check", "q_return", "q_final"],
+        "q_init": "q_init",
+        "q_final": "q_final",
+        "Act": [
+          "for entry in BLOB_SCHEDULE",
+          "epoch >= entry.epoch",
+          "epoch < entry.epoch",
+          "return entry.params",
+          "return DEFAULT_PARAMS"
+        ],
+        "E": [
+          ["q_init", "for entry in BLOB_SCHEDULE", "q_iter"],
+          ["q_iter", "epoch >= entry.epoch", "q_return"],
+          ["q_iter", "epoch < entry.epoch", "q_iter"],
+          ["q_return", "return entry.params", "q_final"]
+        ]
+      },
+      "invariants": [
+        "INV-001: BLOB_SCHEDULE entries have unique epochs"
+      ]
     }
   ]
 }
 ```
 
-## Procedure
+### Mermaid File (.mmd)
 
-1.  **Batch Read**: Use `mcp__filesystem__read_multiple_files` to load all specification files from the batch simultaneously for efficiency. Fall back to individual `read` if batch read fails.
-2.  **Identify Sections**: Break down the document into logical sections based on headings (e.g., `## State Transition`, `### Token Transfer`).
-3.  **Extract Components**: Within each section, identify and extract the following components:
-    *   **Invariants**: Statements of properties that must always be true.
-    *   **Pre/Post-conditions**: Conditions that must hold before and after a function or state change.
-    *   **State Transitions**: Descriptions of how the system state changes.
-    *   **Functions/Methods**: Code signatures or descriptions of functions.
-    *   **Data Structures**: Definitions of structs, enums, or other data types.
-4.  **Use Tree-sitter**: If the document contains code blocks, use `mcp__tree_sitter__*` tools to parse them and accurately extract function names, parameters, and other symbols.
-5.  **Generate Subgraphs**: For each identified functional unit, create a subgraph object that consolidates the extracted components.
-6.  **Assign IDs**: Assign a unique, descriptive ID to each subgraph and its internal elements (e.g., `SG-state-transition`, `INV-total-supply`).
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> q_iter: for entry in BLOB_SCHEDULE
+    q_iter --> q_return: epoch >= entry.epoch
+    q_iter --> q_iter: epoch < entry.epoch
+    q_return --> [*]: return entry.params
+```
 
-## Output Format
+## Action Classification
 
-Return a JSON object containing the list of extracted subgraphs. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.
+| Type | Pattern | Mermaid Label |
+| :--- | :--- | :--- |
+| Assignment | `var := expr` | `var = expr` |
+| Function Call | `func(args)` | `func(args)` |
+| Test/Guard | boolean | `x > 0` |
+| Return | `return expr` | `return expr` |
+| Revert | `revert msg` | `revert msg` |
+| Loop Entry | `for/while` | `for item in list` |
 
+## Node Naming Convention
+
+| Type | Pattern | Example |
+| :--- | :--- | :--- |
+| Initial | `q_init` | Entry point |
+| Final | `q_final` | Exit point |
+| Validation | `q_validate` | Input validation |
+| Iteration | `q_iter` | Loop body |
+| Decision | `q_check` | Branch point |
+| Processing | `q_process` | Main logic |
+| Error | `q_error` | Error handling |
+
+## Quality Criteria
+
+1. **Completeness**: Every function/process should have a corresponding program graph
+2. **Correctness**: Edges must form valid paths from q_init to q_final
+3. **Minimality**: Avoid redundant nodes; merge sequential assignments if appropriate
+4. **Readability**: Use semantic node names, not just `q1`, `q2`, etc.
+5. **Valid Mermaid**: All `.mmd` files must render without errors
+
+## Example: Factorial Function
+
+**Input (pseudocode)**:
+```
+function factorial(x):
+    y := 1
+    while x > 0:
+        y := x * y
+        x := x - 1
+    return y
+```
+
+**Output (Mermaid)** - `examples/SG-factorial_factorial.mmd`:
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> q1: y = 1
+    q1 --> q2: x > 0
+    q1 --> [*]: x <= 0
+    q2 --> q3: y = x * y
+    q3 --> q1: x = x - 1
+```
+
+**Output (JSON)**:
 ```json
 {
-  "source_url": "https://example.com/project/docs/spec.md",
-  "sub_graphs": [
-    {
-      "id": "SG-001",
-      "name": "State Transition Logic",
-      "description": "Defines the core state transition function...",
-      "invariants": [
-        {"id": "INV-001", "text": "Total supply must remain constant."}
-      ],
-      "functions": [
-        {"id": "FN-001", "signature": "transfer(from, to, amount)"}
-      ],
-      "state_variables": [...]
-    }
-  ],
-  "metadata": {
-    "timestamp": "..."
+  "id": "SG-factorial",
+  "name": "factorial",
+  "mermaid_file": "examples/SG-factorial_factorial.mmd",
+  "program_graph": {
+    "Q": ["q_init", "q1", "q2", "q3", "q_final"],
+    "q_init": "q_init",
+    "q_final": "q_final",
+    "Act": ["y = 1", "x > 0", "x <= 0", "y = x * y", "x = x - 1"],
+    "E": [
+      ["q_init", "y = 1", "q1"],
+      ["q1", "x > 0", "q2"],
+      ["q1", "x <= 0", "q_final"],
+      ["q2", "y = x * y", "q3"],
+      ["q3", "x = x - 1", "q1"]
+    ]
   }
 }
 ```

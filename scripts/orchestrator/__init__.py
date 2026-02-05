@@ -25,6 +25,7 @@ from .queue import QueueManager
 from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
 from .runner import ClaudeRunner
 from .collector import ResultCollector
+from .resume import ResumeManager
 from .factory import create_orchestrator
 
 __all__ = [
@@ -37,5 +38,6 @@ __all__ = [
     "CountBasedBatch",
     "ClaudeRunner",
     "ResultCollector",
+    "ResumeManager",
     "create_orchestrator",
 ]

@@ -34,7 +34,15 @@ class ResultCollector:
         """Save partial results from a single batch."""
         timestamp = int(time.time())
         output_path = self.output_dir / f"{self.config.phase_id}_PARTIAL_W{worker_id}B{batch_index}_{timestamp}.json"
-        
+
+        # Extract processed IDs for fast resume lookup
+        id_field = self.config.effective_result_id_field
+        processed_ids = [
+            str(item[id_field])
+            for item in results
+            if isinstance(item, dict) and id_field in item
+        ]
+
         output_data = {
             self.config.result_key: results,
             "metadata": {
@@ -43,10 +51,11 @@ class ResultCollector:
                 "batch_index": batch_index,
                 "item_count": len(results),
                 "timestamp": timestamp,
+                "processed_ids": processed_ids,
             },
         }
-        
+
         with open(output_path, "w") as f:
             json.dump(output_data, f, indent=2)
-        
+
         return output_path

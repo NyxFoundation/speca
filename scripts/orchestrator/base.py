@@ -6,6 +6,7 @@ Provides the abstract base class for all phase orchestrators.
 
 import asyncio
 import json
+import os
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -19,6 +20,7 @@ from .queue import QueueManager
 from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
 from .runner import ClaudeRunner
 from .collector import ResultCollector
+from .resume import ResumeManager
 
 
 class BaseOrchestrator(ABC):
@@ -50,6 +52,7 @@ class BaseOrchestrator(ABC):
         self.batch_strategy = self._create_batch_strategy()
         self.runner = ClaudeRunner(self.config, self.semaphore)
         self.collector = ResultCollector(self.config)
+        self.resume_manager = ResumeManager(self.config)
         
         # State
         self.results: list[dict[str, Any]] = []
@@ -87,11 +90,23 @@ class BaseOrchestrator(ABC):
         # Step 1: Load items
         all_items = self.load_items()
         print(f"Loaded {len(all_items)} items")
-        
+
         if not all_items:
             print("No items to process. Exiting.")
             return
-        
+
+        # Step 1.5: Resume — skip already-processed items
+        force_execute = os.environ.get("FORCE_EXECUTE", "") == "1"
+        if force_execute:
+            print("FORCE_EXECUTE=1: skipping resume filter")
+        else:
+            all_items, skipped = self.resume_manager.filter_remaining(all_items)
+            if skipped:
+                print(f"Resume: skipped {skipped} already-processed items, {len(all_items)} remaining")
+            if not all_items:
+                print("All items already processed. Nothing to do.")
+                return
+
         # Step 2: Apply early exit logic
         early_exit_results, items_to_process = self.apply_early_exit(all_items)
         print(f"Early exit: {len(early_exit_results)} items")

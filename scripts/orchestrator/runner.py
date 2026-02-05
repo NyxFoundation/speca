@@ -82,7 +82,8 @@ class ClaudeRunner:
         """Internal method to execute a single batch."""
         timestamp = int(time.time())
         phase_id = self.config.phase_id
-        
+        directory_mode = self.config.output_mode == "directory"
+
         # Create queue file
         prefix = self.config.output_prefix
         if prefix:
@@ -90,23 +91,33 @@ class ClaudeRunner:
         else:
             partial_base = f"{phase_id}_PARTIAL"
         queue_path = self.output_dir / f"{phase_id}_ASYNC_QUEUE_W{worker_id}B{batch_index}_{timestamp}.json"
-        output_path = self.output_dir / f"{partial_base}_W{worker_id}B{batch_index}_{timestamp}.json"
         log_file = self.log_dir / f"{phase_id}_w{worker_id}b{batch_index}_{timestamp}.log.jsonl"
-        
+
+        # Determine output paths based on output_mode
+        if directory_mode:
+            # Worker writes .mmd files + index.json into a per-batch directory
+            batch_output_dir = self.output_dir / "graphs" / f"W{worker_id}B{batch_index}_{timestamp}"
+            batch_output_dir.mkdir(parents=True, exist_ok=True)
+            result_parse_path = batch_output_dir / "index.json"
+            output_kwargs: dict[str, str] = {"output_dir": str(batch_output_dir)}
+        else:
+            result_parse_path = self.output_dir / f"{partial_base}_W{worker_id}B{batch_index}_{timestamp}.json"
+            output_kwargs = {"output_file": str(result_parse_path)}
+
         # Save queue
         queue_payload = self._build_queue_payload(batch, worker_id)
         self._save_json(queue_path, queue_payload)
-        
+
         # Build prompt
         prompt_content = self._build_prompt(
             worker_id=worker_id,
             queue_file=str(queue_path),
             batch_size=len(batch),
-            output_file=str(output_path),
             iteration=batch_index,
             timestamp=timestamp,
+            **output_kwargs,
         )
-        
+
         # Build command
         cmd = [
             "claude",
@@ -115,17 +126,17 @@ class ClaudeRunner:
             "--output-format", "stream-json",
             "-p", prompt_content,
         ]
-        
+
         # Build environment
         env = self._build_env(
             worker_id=worker_id,
             queue_file=str(queue_path),
             batch_size=len(batch),
-            output_file=str(output_path),
             iteration=batch_index,
             timestamp=timestamp,
+            **output_kwargs,
         )
-        
+
         # Execute
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -134,7 +145,7 @@ class ClaudeRunner:
             env=env,
             cwd=self.config.workdir or str(Path.cwd()),
         )
-        
+
         try:
             # Stream stdout to log file
             async with aiofiles.open(log_file, mode="wb") as f:
@@ -144,13 +155,13 @@ class ClaudeRunner:
                         if not chunk:
                             break
                         await f.write(chunk)
-            
+
             await asyncio.wait_for(proc.wait(), timeout=self.config.timeout_seconds)
         except asyncio.TimeoutError:
             proc.kill()
             print(f"[W{worker_id}] Batch {batch_index} timed out", file=sys.stderr)
             return None
-        
+
         # Check result
         if proc.returncode != 0:
             stderr = await proc.stderr.read() if proc.stderr else b""
@@ -160,9 +171,9 @@ class ClaudeRunner:
                 file=sys.stderr,
             )
             return None
-        
-        # Parse results from output file, fallback to log if empty
-        results = self._parse_results(output_path)
+
+        # Parse results from output file / index.json, fallback to log
+        results = self._parse_results(result_parse_path)
         if not results:
             results = self._parse_results_from_log(log_file)
             if results:
@@ -170,11 +181,12 @@ class ClaudeRunner:
                     f"[W{worker_id}] Batch {batch_index}: recovered {len(results)} result(s) from inline response",
                     file=sys.stderr,
                 )
-        
-        # Clean up intermediate output file (collector.save_partial writes the final version)
-        if output_path.exists():
-            output_path.unlink()
-        
+
+        # Clean up: delete intermediate file only in file mode
+        # In directory mode the .mmd files must be preserved
+        if not directory_mode and result_parse_path.exists():
+            result_parse_path.unlink()
+
         return results
     
     def _build_queue_payload(
@@ -187,7 +199,6 @@ class ClaudeRunner:
             "worker_id": worker_id,
             "phase": self.config.phase_id,
             "items": batch,
-            "processed": [],
             "total_items": len(batch),
         }
     
@@ -265,7 +276,7 @@ class ClaudeRunner:
             return [item for item in data if isinstance(item, dict)]
 
         if isinstance(data, dict):
-            for key in [self.config.result_key, "items", "results", "audit_items"]:
+            for key in [self.config.result_key, "items", "results", "audit_items", "graphs", "specs"]:
                 if key in data and isinstance(data[key], list):
                     return [item for item in data[key] if isinstance(item, dict)]
             # If no known key matched, return the dict itself as a single-item list
