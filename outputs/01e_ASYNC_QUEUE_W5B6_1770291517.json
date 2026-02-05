@@ -1,0 +1,823 @@
+{
+  "worker_id": 5,
+  "phase": "01e",
+  "items": [
+    {
+      "source_file": "outputs/01b_PARTIAL_W3B4_1770278926.json",
+      "status": "success",
+      "trust_model": {
+        "actors": [
+          {
+            "id": "actor-blob-submitter",
+            "name": "Blob Submitter (External Data Provider)",
+            "description": "Any entity that submits blob data to the system for encoding into polynomial commitments and cells. The blob is raw bytes of exactly BYTES_PER_BLOB length. This is the outermost data origin and the system's primary untrusted input surface. Blob content determines all downstream polynomial evaluations, KZG proofs, and data columns."
+          },
+          {
+            "id": "actor-kzg-trusted-setup",
+            "name": "KZG Trusted Setup (KZG_SETUP_G1_MONOMIAL / KZG_SETUP_G2_MONOMIAL)",
+            "description": "The cryptographic trusted setup ceremony that produced the structured reference string (SRS) used in KZG_SETUP_G1_MONOMIAL and KZG_SETUP_G2_MONOMIAL. This is a foundational trust anchor: all KZG proof generation (SG-014 compute_kzg_proof_multi_impl) and batch verification (SG-015 verify_cell_kzg_proof_batch_impl) depend on these parameters being honestly generated. If the toxic waste from the ceremony was not destroyed, the entire commitment scheme is broken."
+          },
+          {
+            "id": "actor-polynomial-engine",
+            "name": "Polynomial Arithmetic Engine",
+            "description": "The internal computational module implementing polynomial operations over BLS12-381 scalar fields: FFT (SG-003, SG-004), coset FFT (SG-005), polynomial addition (SG-008), multiplication (SG-009), division (SG-010), interpolation (SG-011), vanishing polynomial construction (SG-012), and Horner evaluation (SG-013). This engine is trusted as a correct implementation of finite field arithmetic."
+          },
+          {
+            "id": "actor-cell-encoder",
+            "name": "Cell Encoder / Decoder",
+            "description": "The component responsible for serializing and deserializing field elements to/from cell byte representations (SG-001 cell_to_coset_evals, SG-002 coset_evals_to_cell). It bridges the byte-level blob representation and the algebraic field element domain. Encoding/decoding correctness is critical: any error here corrupts all downstream polynomial operations."
+          },
+          {
+            "id": "actor-proof-generator",
+            "name": "KZG Proof Generator",
+            "description": "The component that generates KZG multi-opening proofs for cells (SG-014 compute_kzg_proof_multi_impl, SG-019 compute_cells_and_kzg_proofs_polynomialcoeff, SG-020 compute_cells_and_kzg_proofs). It computes quotient polynomials and commits them using the trusted setup. The proof generator must produce proofs that are verifiable by any honest verifier."
+          },
+          {
+            "id": "actor-batch-verifier",
+            "name": "Batch KZG Proof Verifier",
+            "description": "The component that performs batched verification of multiple cell KZG proofs in a single pairing check (SG-015 verify_cell_kzg_proof_batch_impl, SG-021 verify_cell_kzg_proof_batch). It uses the Fiat-Shamir heuristic (SG-006) to derive a random challenge for aggregation. This is the primary cryptographic gatekeeper: it determines whether cells and proofs are accepted as valid."
+          },
+          {
+            "id": "actor-recovery-engine",
+            "name": "Data Recovery Engine (Reed-Solomon Erasure Coding)",
+            "description": "The component that recovers the original polynomial from a subset of cells using Reed-Solomon erasure coding techniques (SG-023 recover_polynomialcoeff, SG-024 recover_cells_and_kzg_proofs). It requires at least 50% of cells (CELLS_PER_EXT_BLOB / 2) to be available. Recovery correctness is essential for data availability guarantees."
+          },
+          {
+            "id": "actor-fiat-shamir-oracle",
+            "name": "Fiat-Shamir Random Oracle (Hash Function)",
+            "description": "The hash function (hash_to_bls_field) used to derive the random challenge r for batch verification via the Fiat-Shamir heuristic (SG-006 compute_verify_cell_kzg_proof_batch_challenge). This transforms the interactive proof protocol into a non-interactive one. The hash function is assumed to behave as a random oracle."
+          },
+          {
+            "id": "actor-validator-node",
+            "name": "Validator Node (Honest Validator)",
+            "description": "A consensus-layer validator that computes cells from blobs (SG-002 cells_and_kzg_proofs_construction), constructs data column sidecars (SG-003 get_data_column_sidecars), publishes sidecars to gossip subnets (SG-006 sidecar_publishing), and retains sidecars for the required epochs (SG-007 sidecar_retention). Validators have custody requirements proportional to their stake (SG-001 get_validators_custody_requirement)."
+          },
+          {
+            "id": "actor-beacon-state",
+            "name": "Beacon State (Consensus State)",
+            "description": "The beacon chain state that provides validator effective balances for custody requirement computation (SG-001), block headers for sidecar construction (SG-004), and KZG commitments for data integrity verification. The state is assumed to be the canonical finalized or justified state."
+          },
+          {
+            "id": "actor-gossip-network",
+            "name": "Gossip Network (Data Column Subnets)",
+            "description": "The GossipSub network layer over which data column sidecars are published (SG-006 sidecar_publishing). Each sidecar is published to a deterministic subnet based on column_index. The network is an untrusted transport: messages may be dropped, duplicated, reordered, or injected by adversaries."
+          },
+          {
+            "id": "actor-data-requester",
+            "name": "Data Requester (Peer / Light Client)",
+            "description": "Any entity requesting data column sidecars from a validator during the retention period (SG-007 sidecar_retention). The validator MUST serve sidecars when requested during the retention period. The requester is untrusted and may attempt to exhaust the validator's resources."
+          },
+          {
+            "id": "actor-external-user",
+            "name": "External User / Transaction Sender",
+            "description": "An external entity (EOA) that initiates transactions, including set-code transactions (EIP-7702) containing Authorization tuples. They originate the data that eventually gets encoded, hashed, and stored on-chain. Users interact with the deposit contract to make beacon chain deposits."
+          },
+          {
+            "id": "actor-deposit-contract",
+            "name": "Deposit Contract",
+            "description": "The canonical beacon chain deposit contract at address 0x00000000219ab540356cbb839cbe05303d7705fa. It emits DepositEvent logs that the execution layer parses to construct deposit requests for the consensus layer. Its address and event signature hash are hardcoded constants."
+          },
+          {
+            "id": "actor-execution-client",
+            "name": "Execution Layer Client",
+            "description": "The execution layer node software that processes blocks, executes transactions, maintains state tries, encodes accounts via RLP (encode_account), parses transaction receipts, extracts deposit data (extract_deposit_data, parse_deposit_requests), computes requests hashes (compute_requests_hash), encodes and decodes receipts (encode_receipt, decode_receipt), constructs bloom filters (add_to_bloom, logs_bloom), and manages block/header/receipt/log/withdrawal data structures. This is the system under specification for the Osaka fork."
+          },
+          {
+            "id": "actor-consensus-layer",
+            "name": "Consensus Layer",
+            "description": "The beacon chain / consensus layer that consumes the requests_hash and deposit requests produced by the execution layer. It relies on the execution layer to faithfully extract and order deposit data. It also performs BLS signature validation for deposits. It supplies withdrawal instructions, parent_beacon_block_root, requests_hash (EIP-7685), and prev_randao to the execution layer."
+          },
+          {
+            "id": "actor-block-builder",
+            "name": "Block Builder / Proposer",
+            "description": "The entity responsible for constructing blocks, ordering transactions, and producing the BlockOutput (including receipts_trie and receipt_keys). Controls transaction inclusion and ordering within a block, which directly determines deposit request ordering. Sets header fields including coinbase, timestamp, extra_data, and prev_randao."
+          },
+          {
+            "id": "actor-state-trie",
+            "name": "State / Receipts Trie",
+            "description": "The Merkle Patricia Trie data structures (state trie for accounts, receipts trie for transaction receipts). These are trusted internal data structures that provide integrity guarantees via cryptographic roots."
+          },
+          {
+            "id": "actor-authorizer",
+            "name": "EIP-7702 Authorizer",
+            "description": "An account holder who signs an Authorization tuple (chain_id, address, nonce, y_parity, r, s) to delegate code execution to another address via EIP-7702 set-code transactions. This is a distinct role from the transaction sender."
+          },
+          {
+            "id": "actor-rlp-codec",
+            "name": "RLP Codec Library (ethereum_rlp)",
+            "description": "The ethereum_rlp library responsible for serializing and deserializing data structures including Receipt, Header, Block, and Account objects. Both encode_receipt and decode_receipt depend on this library for correct round-trip encoding. Bugs could cause consensus splits across clients."
+          },
+          {
+            "id": "actor-keccak",
+            "name": "Keccak-256 Hash Function",
+            "description": "The cryptographic hash primitive used in bloom filter construction (add_to_bloom), account code hashing (encode_account), and transaction signing. Correctness, collision-resistance, and preimage-resistance of keccak256 are assumed."
+          },
+          {
+            "id": "actor-smart-contract",
+            "name": "Smart Contract (Log Emitter)",
+            "description": "Deployed contract code that emits Log events (address, topics, data) during EVM execution. Logs are consumed by the bloom filter (logs_bloom) and receipt construction pipelines. The log address must match the executing contract, and topics are bounded by LOG0-LOG4 opcodes."
+          },
+          {
+            "id": "actor-p2p-peer",
+            "name": "P2P Network Peer",
+            "description": "A remote execution-layer node that transmits encoded blocks, headers, receipts, and transactions over the devp2p wire protocol. Data from peers crosses a network trust boundary and must be decoded and validated before acceptance."
+          }
+        ],
+        "trust_boundaries": [
+          {
+            "id": "tb-001",
+            "from_actor": "actor-blob-submitter",
+            "to_actor": "actor-cell-encoder",
+            "description": "Raw blob bytes cross into the cryptographic domain when cell_to_coset_evals (SG-001) converts byte segments into BLS field elements via bytes_to_bls_field. Malformed or adversarial blob data could encode values outside the valid field range. The assertion len(blob) == BYTES_PER_BLOB (SG-018 INV-001, SG-020 INV-002) is the first validation gate."
+          },
+          {
+            "id": "tb-002",
+            "from_actor": "actor-cell-encoder",
+            "to_actor": "actor-polynomial-engine",
+            "description": "Deserialized field elements from cells are passed to the polynomial engine for FFT, interpolation, and evaluation. The polynomial engine trusts that input field elements are valid members of the BLS12-381 scalar field. If bytes_to_bls_field produces invalid field elements, all polynomial operations produce incorrect results."
+          },
+          {
+            "id": "tb-003",
+            "from_actor": "actor-polynomial-engine",
+            "to_actor": "actor-proof-generator",
+            "description": "Polynomial coefficients produced by polynomial_eval_to_coeff (SG-007) are consumed by compute_kzg_proof_multi_impl (SG-014) to generate KZG proofs. The proof generator trusts the polynomial engine to produce correct coefficient representations. An incorrect inverse FFT or bit-reversal permutation would produce invalid proofs that fail verification."
+          },
+          {
+            "id": "tb-004",
+            "from_actor": "actor-kzg-trusted-setup",
+            "to_actor": "actor-proof-generator",
+            "description": "The proof generator uses KZG_SETUP_G1_MONOMIAL from the trusted setup to compute g1_lincomb (SG-014, q_commit). The entire security of the KZG commitment scheme rests on the trusted setup being honestly generated. This is a static, ceremony-level trust boundary that cannot be verified at runtime."
+          },
+          {
+            "id": "tb-005",
+            "from_actor": "actor-kzg-trusted-setup",
+            "to_actor": "actor-batch-verifier",
+            "description": "The batch verifier uses both KZG_SETUP_G1_MONOMIAL[:n] and KZG_SETUP_G2_MONOMIAL[n] from the trusted setup in the pairing check (SG-015). If the structured reference string is compromised, an adversary can forge proofs that pass batch verification for arbitrary data."
+          },
+          {
+            "id": "tb-006",
+            "from_actor": "actor-fiat-shamir-oracle",
+            "to_actor": "actor-batch-verifier",
+            "description": "The batch verifier derives the random challenge r from the hash function via compute_verify_cell_kzg_proof_batch_challenge (SG-006). The challenge r must be unpredictable before all inputs are committed. The Fiat-Shamir heuristic security requires the hash function to behave as a random oracle and that all verifier-relevant data is included in the hash input (SG-006 INV-001)."
+          },
+          {
+            "id": "tb-007",
+            "from_actor": "actor-blob-submitter",
+            "to_actor": "actor-batch-verifier",
+            "description": "When externally supplied cells, commitments, and proofs are presented for batch verification (SG-021 verify_cell_kzg_proof_batch), all inputs cross from the untrusted external domain into the verifier. The verifier performs exhaustive input validation: length checks (INV-002), commitment byte length (BYTES_PER_COMMITMENT), cell index bounds (INV-004), cell byte length (BYTES_PER_CELL), and proof byte length (BYTES_PER_PROOF)."
+          },
+          {
+            "id": "tb-008",
+            "from_actor": "actor-data-requester",
+            "to_actor": "actor-recovery-engine",
+            "description": "Partial cell sets provided for recovery (SG-024 recover_cells_and_kzg_proofs) cross into the recovery engine. The recovery engine validates: matching lengths (INV-001), at least 50% cell availability (INV-002), no duplicate indices (INV-003), sorted indices (INV-003), valid index bounds (INV-004), and correct cell byte lengths. A malicious requester could provide inconsistent cells that lead to recovery of an incorrect polynomial."
+          },
+          {
+            "id": "tb-009",
+            "from_actor": "actor-recovery-engine",
+            "to_actor": "actor-proof-generator",
+            "description": "The recovered polynomial from recover_polynomialcoeff (SG-023) is passed to compute_cells_and_kzg_proofs_polynomialcoeff (SG-019) to regenerate all cells and proofs. If the recovery engine produces an incorrect polynomial (e.g., due to adversarial cell inputs or insufficient cell count), all regenerated proofs will be invalid."
+          },
+          {
+            "id": "tb-010",
+            "from_actor": "actor-validator-node",
+            "to_actor": "actor-gossip-network",
+            "description": "Validators publish data column sidecars to gossip subnets (SG-006 sidecar_publishing). Each sidecar is deterministically routed to subnet compute_subnet_for_data_column_sidecar(column_index). The validator trusts the network to propagate sidecars, but the network may drop, censor, or delay them. Publishing to the wrong subnet would prevent peers from receiving the data."
+          },
+          {
+            "id": "tb-011",
+            "from_actor": "actor-beacon-state",
+            "to_actor": "actor-validator-node",
+            "description": "The beacon state provides validator effective balances used to compute custody requirements (SG-001 get_validators_custody_requirement). Custody is proportional to stake: total_node_balance // BALANCE_PER_ADDITIONAL_CUSTODY_GROUP, clamped to [VALIDATOR_CUSTODY_REQUIREMENT, NUMBER_OF_CUSTODY_GROUPS]. The validator trusts the state to be canonical. A stale or forked state would produce incorrect custody assignments."
+          },
+          {
+            "id": "tb-012",
+            "from_actor": "actor-data-requester",
+            "to_actor": "actor-validator-node",
+            "description": "During the retention period (MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS), validators MUST serve sidecars on request (SG-007). Requesters are untrusted: they may flood the validator with requests (DoS), request data outside the retention window, or attempt to extract custody group membership information."
+          },
+          {
+            "id": "tb-013",
+            "from_actor": "actor-validator-node",
+            "to_actor": "actor-cell-encoder",
+            "description": "During sidecar construction (SG-002 cells_and_kzg_proofs_construction), the validator uses compute_cells to decompose blobs into cells and pairs them with proofs from blobs_bundle.proofs. The validator trusts that blobs_bundle.proofs are correctly aligned with cells: proofs[start:end] for each blob (INV-003). Misaligned proof slicing would produce sidecars with invalid cell-proof pairings."
+          },
+          {
+            "id": "tb-014",
+            "from_actor": "actor-validator-node",
+            "to_actor": "actor-proof-generator",
+            "description": "get_data_column_sidecars_from_block (SG-004) extracts KZG commitments and computes a Merkle inclusion proof from the signed block. The block is trusted (already validated), but the Merkle proof computation is a cryptographic operation that must correctly target the blob_kzg_commitments field in the block body tree."
+          },
+          {
+            "id": "tb-015",
+            "from_actor": "actor-external-user",
+            "to_actor": "actor-execution-client",
+            "description": "External user submits transaction data (including account data and EIP-7702 Authorization tuples) to the execution client. The execution client must validate all inputs before processing. This is the primary untrusted input boundary for the execution layer."
+          },
+          {
+            "id": "tb-016",
+            "from_actor": "actor-deposit-contract",
+            "to_actor": "actor-execution-client",
+            "description": "The deposit contract emits DepositEvent logs that the execution client must parse. The execution client trusts the log data format but validates all offsets and sizes rigorously via extract_deposit_data. The contract address (DEPOSIT_CONTRACT_ADDRESS) and event signature hash (DEPOSIT_EVENT_SIGNATURE_HASH) serve as the authentication mechanism."
+          },
+          {
+            "id": "tb-017",
+            "from_actor": "actor-execution-client",
+            "to_actor": "actor-consensus-layer",
+            "description": "The execution client produces deposit_requests bytes and a requests_hash (via compute_requests_hash using SHA-256) that the consensus layer consumes. The consensus layer trusts the execution client to have faithfully extracted and ordered all deposit data from transaction receipts."
+          },
+          {
+            "id": "tb-018",
+            "from_actor": "actor-block-builder",
+            "to_actor": "actor-execution-client",
+            "description": "The block builder provides the BlockOutput containing receipt_keys ordering and the receipts_trie. The execution client trusts receipt_keys ordering to determine deposit request ordering, and trusts that trie_get returns valid receipt data for each key."
+          },
+          {
+            "id": "tb-019",
+            "from_actor": "actor-authorizer",
+            "to_actor": "actor-execution-client",
+            "description": "An EIP-7702 authorizer signs an Authorization tuple with ECDSA (y_parity, r, s) delegating code to a target address. The execution client must verify the signature, chain_id for replay protection, and nonce for freshness before accepting the authorization."
+          },
+          {
+            "id": "tb-020",
+            "from_actor": "actor-state-trie",
+            "to_actor": "actor-execution-client",
+            "description": "The execution client reads from and writes to the state and receipts tries. Account encoding (encode_account) produces RLP data stored in the state trie. The storage_root parameter is a 32-byte Merkle root that must be externally supplied and correct."
+          },
+          {
+            "id": "tb-021",
+            "from_actor": "actor-external-user",
+            "to_actor": "actor-deposit-contract",
+            "description": "External users interact with the deposit contract to make beacon chain deposits. The contract emits logs that later get parsed by the execution client. The user trusts the contract to correctly emit deposit events with proper BLS public keys, withdrawal credentials, amounts, signatures, and indices."
+          },
+          {
+            "id": "tb-022",
+            "from_actor": "actor-external-user",
+            "to_actor": "actor-execution-client",
+            "description": "Transaction submission boundary for blocks.py. Raw transactions from EOAs enter the execution engine for validation and inclusion. The transaction carries a type discriminator (Legacy/AccessList/FeeMarket/Blob/SetCode) and a cryptographic signature (v/r/s or y_parity). The execution engine must validate the transaction type, decode it correctly, and recover the sender via ECDSA before trusting any field."
+          },
+          {
+            "id": "tb-023",
+            "from_actor": "actor-block-builder",
+            "to_actor": "actor-execution-client",
+            "description": "Block construction boundary. The proposer supplies a Block containing a Header (21 fields), a list of transactions (typed or legacy), ommers (always empty post-merge), and withdrawals. The execution engine must validate every header field against consensus rules, verify transaction ordering, and ensure the proposer has not manipulated coinbase, timestamp, or extra_data."
+          },
+          {
+            "id": "tb-024",
+            "from_actor": "actor-consensus-layer",
+            "to_actor": "actor-execution-client",
+            "description": "Consensus-to-execution layer boundary for withdrawals and beacon data. The beacon chain supplies Withdrawal objects (index, validator_index, address, amount), parent_beacon_block_root, and requests_hash (EIP-7685). The execution layer trusts these values as authoritative but must validate their format and consistency with header commitments."
+          },
+          {
+            "id": "tb-025",
+            "from_actor": "actor-smart-contract",
+            "to_actor": "actor-execution-client",
+            "description": "Log emission boundary. Smart contracts emit Log events (address, topics, data) during EVM execution. These logs are consumed by logs_bloom for bloom filter construction and by receipt_construction for inclusion in Receipt objects. The execution engine must ensure the log address matches the executing contract and that topics do not exceed the LOG4 limit (4 topics max)."
+          },
+          {
+            "id": "tb-026",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-client",
+            "description": "Network deserialization boundary for receipts. Encoded receipts (with type-prefix bytes 0x01-0x04 or raw RLP for legacy) arrive from peers and are decoded via decode_receipt. The assert statement in decode_receipt (receipt[0] in {1,2,3,4}) is a critical gatekeeper. Malformed or adversarial payloads could exploit the RLP decoder."
+          },
+          {
+            "id": "tb-027",
+            "from_actor": "actor-execution-client",
+            "to_actor": "actor-rlp-codec",
+            "description": "Serialization library boundary. The execution engine delegates encoding and decoding of Receipt, Header, Block, and other data structures to the RLP codec. Bugs in the RLP library could produce malformed encodings or fail to reject invalid inputs, causing consensus splits between clients using different RLP implementations."
+          },
+          {
+            "id": "tb-028",
+            "from_actor": "actor-execution-client",
+            "to_actor": "actor-keccak",
+            "description": "Cryptographic primitive boundary for bloom filter. The bloom filter's add_to_bloom function depends on keccak256 to derive 3 bit positions per entry. A weak or incorrect hash implementation would undermine the bloom filter's probabilistic guarantees and could cause false negatives in log search."
+          },
+          {
+            "id": "tb-029",
+            "from_actor": "actor-execution-client",
+            "to_actor": "actor-p2p-peer",
+            "description": "Receipt encoding output boundary. The execution engine serializes receipts via encode_receipt (type-prefix + RLP) for transmission to peers. If the encoding is inconsistent with the canonical specification, receiving peers will reject the data, causing network partitions."
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "asm-001",
+            "text": "KZG Trusted Setup Integrity: The structured reference string (KZG_SETUP_G1_MONOMIAL, KZG_SETUP_G2_MONOMIAL) was honestly generated during the trusted setup ceremony and all toxic waste was destroyed. If the discrete log relationships between setup elements are known to an adversary, they can forge valid KZG proofs for arbitrary polynomials, breaking all data availability guarantees."
+          },
+          {
+            "id": "asm-002",
+            "text": "BLS12-381 Cryptographic Hardness: The security of all KZG commitments, proofs, and pairing-based verification relies on the computational hardness of the discrete logarithm problem in BLS12-381 G1/G2 groups and the bilinear Diffie-Hellman assumption in the pairing group."
+          },
+          {
+            "id": "asm-003",
+            "text": "Random Oracle Model for Fiat-Shamir: The hash function hash_to_bls_field used in compute_verify_cell_kzg_proof_batch_challenge (SG-006) behaves as a random oracle. This is essential for the Fiat-Shamir transformation that converts interactive proof verification into non-interactive batch verification."
+          },
+          {
+            "id": "asm-004",
+            "text": "Domain Separator Uniqueness: RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN (SG-006 INV-002) is globally unique across all protocols using the same hash function. This prevents cross-protocol replay attacks."
+          },
+          {
+            "id": "asm-005",
+            "text": "Field Element Serialization Correctness: bytes_to_bls_field and bls_field_to_bytes (used in SG-001, SG-002) are assumed to be correct inverse operations for valid field elements."
+          },
+          {
+            "id": "asm-006",
+            "text": "Polynomial Arithmetic Correctness: FFT (SG-003, SG-004), coset FFT (SG-005), polynomial addition (SG-008), multiplication (SG-009), division (SG-010), interpolation (SG-011), and evaluation (SG-013) are all assumed to be correctly implemented over the BLS12-381 scalar field."
+          },
+          {
+            "id": "asm-007",
+            "text": "Roots of Unity Correctness: compute_roots_of_unity produces primitive roots of unity of the correct order for the BLS12-381 scalar field. PRIMITIVE_ROOT_OF_UNITY (SG-005 INV-001) must be a genuine primitive root."
+          },
+          {
+            "id": "asm-008",
+            "text": "Bit-Reversal Permutation Consistency: bit_reversal_permutation is applied consistently in polynomial_eval_to_coeff (SG-007), coset_shift_for_cell (SG-016), coset_for_cell (SG-017), and recover_polynomialcoeff (SG-023)."
+          },
+          {
+            "id": "asm-009",
+            "text": "Reed-Solomon Recovery Threshold: Data recovery (SG-023, SG-024) requires at least 50% of cells (CELLS_PER_EXT_BLOB / 2). This is the information-theoretic minimum for a rate-1/2 Reed-Solomon code over the extension domain."
+          },
+          {
+            "id": "asm-010",
+            "text": "Honest Majority of Validators for Data Availability: The data availability sampling scheme assumes that at least 50% of cells are available across the network."
+          },
+          {
+            "id": "asm-011",
+            "text": "Custody Requirement Proportionality: Higher-staked validators (larger effective_balance) are assigned more custody groups (SG-001 get_validators_custody_requirement)."
+          },
+          {
+            "id": "asm-012",
+            "text": "Sidecar Retention Compliance: Validators MUST retain sidecars for MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS epochs (SG-007 INV-001) and MUST serve them on request during this period (INV-002)."
+          },
+          {
+            "id": "asm-013",
+            "text": "Gossip Subnet Routing Integrity: Sidecars are published to deterministic subnets via compute_subnet_for_data_column_sidecar (SG-006 INV-002)."
+          },
+          {
+            "id": "asm-014",
+            "text": "Non-Zero Divisor in Polynomial Division: divide_polynomialcoeff (SG-010 INV-001) assumes the divisor polynomial b is not the zero polynomial."
+          },
+          {
+            "id": "asm-015",
+            "text": "Lagrange Interpolation Point Distinctness: interpolate_polynomialcoeff (SG-011 INV-001) requires all x-values to be distinct."
+          },
+          {
+            "id": "asm-016",
+            "text": "Pairing Check Soundness: The bilinear pairing check e(LL, LR) == e(RL, [1]) in verify_cell_kzg_proof_batch_impl (SG-015 INV-001) is assumed to be sound."
+          },
+          {
+            "id": "asm-017",
+            "text": "Deposit Contract Correctness and Immutability: The deposit contract at DEPOSIT_CONTRACT_ADDRESS (0x00000000219ab540356cbb839cbe05303d7705fa) is assumed to be correct and immutable."
+          },
+          {
+            "id": "asm-018",
+            "text": "Deposit Event Signature Hash Correctness: The DEPOSIT_EVENT_SIGNATURE_HASH is assumed to be the correct keccak256 hash of the DepositEvent signature."
+          },
+          {
+            "id": "asm-019",
+            "text": "Deposit Event Data Format Rigidity: The deposit event data format has fixed, known offsets and sizes with total length of exactly 576 bytes."
+          },
+          {
+            "id": "asm-020",
+            "text": "Receipt Processing Order Determinism: Receipt processing order (block_output.receipt_keys) deterministically defines the deposit request ordering."
+          },
+          {
+            "id": "asm-021",
+            "text": "Receipts Trie Completeness: trie_get is assumed to always return a valid (non-None) receipt for every key in block_output.receipt_keys."
+          },
+          {
+            "id": "asm-022",
+            "text": "Storage Root External Validity: The storage_root parameter passed to encode_account is assumed to be a valid 32-byte Merkle root of the account's storage trie."
+          },
+          {
+            "id": "asm-023",
+            "text": "Hash Function Collision Resistance: keccak256 and SHA-256 hash functions are assumed to be collision-resistant and preimage-resistant."
+          },
+          {
+            "id": "asm-024",
+            "text": "RLP Encoding Determinism: RLP encoding is assumed to be deterministic and canonical. The tuple ordering (nonce, balance, storage_root, code_hash) in encode_account must be strictly maintained for consensus compatibility."
+          },
+          {
+            "id": "asm-025",
+            "text": "Authorization Signature Verification Elsewhere: Authorization signatures (y_parity, r, s) in the Authorization dataclass are assumed to be verified elsewhere in the transaction processing pipeline."
+          },
+          {
+            "id": "asm-026",
+            "text": "EIP-7702 Replay Protection: The chain_id in Authorization provides replay protection across different chains. The nonce must match the current nonce of the authorizing account."
+          },
+          {
+            "id": "asm-027",
+            "text": "Type Alias Length Enforcement: Type aliases (Address=Bytes20, Root=Hash32, VersionedHash=Hash32, Bloom=Bytes256) enforce length constraints at construction time."
+          },
+          {
+            "id": "asm-028",
+            "text": "EMPTY_ACCOUNT Immutability: EMPTY_ACCOUNT is a module-level frozen constant that cannot be mutated after construction (via @slotted_freezable)."
+          },
+          {
+            "id": "asm-029",
+            "text": "Requests Hash Construction: compute_requests_hash uses a two-level SHA-256 construction. Order matters, and the double-hashing provides domain separation between individual requests."
+          },
+          {
+            "id": "asm-030",
+            "text": "Transaction Type Discriminator Exhaustiveness: Every transaction is exactly one of LegacyTransaction, AccessListTransaction, FeeMarketTransaction, BlobTransaction, or SetCodeTransaction. If a new transaction type is introduced without updating encode_receipt/decode_receipt, the system will fail silently for encode (fall-through to legacy path) or hard-fail for decode (assertion error)."
+          },
+          {
+            "id": "asm-031",
+            "text": "RLP Codec Correctness (ethereum_rlp): The ethereum_rlp library correctly implements the Ethereum RLP specification (deterministic encoding, canonical form enforcement). Any deviation causes consensus failure across the network."
+          },
+          {
+            "id": "asm-032",
+            "text": "Keccak-256 Correctness for Bloom Filters: The keccak256 implementation is a correct, collision-resistant cryptographic hash function. The bloom filter's correctness (no false negatives) depends on this."
+          },
+          {
+            "id": "asm-033",
+            "text": "Withdrawal Data Validity from Consensus Layer: Withdrawal objects from the consensus layer are well-formed: index and validator_index are valid U64 values, address is a valid 20-byte Address, and amount is a valid U256. The execution layer trusts these values without additional validation beyond type constraints."
+          },
+          {
+            "id": "asm-034",
+            "text": "Immutability via slotted_freezable: All core data structures (Block, Header, Withdrawal, Log, Receipt) are immutable after construction via the @slotted_freezable decorator. No actor can mutate fields after the freeze operation. This relies on the Python runtime enforcing the frozen dataclass invariant."
+          },
+          {
+            "id": "asm-035",
+            "text": "Post-Merge PoS Constraints: In post-merge (PoS) forks, difficulty is always 0, nonce is always zero-bytes, ommers_hash is always EMPTY_OMMER_HASH, and the ommers tuple is always empty. Any non-zero values in these fields indicate an invalid block."
+          },
+          {
+            "id": "asm-036",
+            "text": "Bloom Filter Size Invariant: The bloom filter bytearray is always exactly 256 bytes (2048 bits). Under- or over-sized bloom arrays would cause index-out-of-bounds errors or incorrect bit-setting in add_to_bloom."
+          },
+          {
+            "id": "asm-037",
+            "text": "Receipt Type-Prefix Injectivity: The type-prefix byte in encoded receipts is injective: 0x01 maps to AccessListTransaction, 0x02 to FeeMarketTransaction, 0x03 to BlobTransaction, 0x04 to SetCodeTransaction. No two transaction types share a prefix."
+          },
+          {
+            "id": "asm-038",
+            "text": "Log Topic Bound from EVM: Log topics are bounded by EVM opcode constraints (LOG0-LOG4), meaning at most 4 topics per log entry. The bloom filter processes all topics without bounds-checking because this invariant is enforced at the EVM level."
+          },
+          {
+            "id": "asm-039",
+            "text": "Cumulative Gas Monotonicity: The cumulative_gas_used field in Receipt is monotonically non-decreasing within a block. This is enforced by sequential transaction processing, not by the Receipt data structure itself."
+          },
+          {
+            "id": "asm-040",
+            "text": "Header Fee and Gas Rules: base_fee_per_gas in the Header follows EIP-1559 dynamic fee adjustment rules and blob_gas_used/excess_blob_gas follow EIP-4844 rules. These are validated during header validation, not at construction time."
+          },
+          {
+            "id": "asm-041",
+            "text": "EIP-7685 Requests Hash: The requests_hash field follows EIP-7685 general purpose request computation. Its correctness depends on the consensus layer providing accurate request data."
+          }
+        ],
+        "stride_analysis": [
+          {
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An adversary submitting a blob with carefully crafted byte sequences that, when deserialized by bytes_to_bls_field, produce field elements that exploit edge cases in polynomial arithmetic.",
+            "mitigation": "bytes_to_bls_field must validate that input bytes represent a value strictly less than BLS_MODULUS. The assertion len(blob) == BYTES_PER_BLOB and the fixed segment size of BYTES_PER_FIELD_ELEMENT prevent buffer overflows."
+          },
+          {
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "An adversary could submit maximally-sized blobs that are computationally expensive to encode into cells, requiring a full inverse FFT, CELLS_PER_EXT_BLOB polynomial evaluations, and CELLS_PER_EXT_BLOB KZG proof generations.",
+            "mitigation": "Rate-limiting blob submissions. The FK20 algorithm is recommended for production to reduce proof generation complexity. Cell computation can be parallelized per-coset."
+          },
+          {
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Spoofing",
+            "description": "If the KZG trusted setup is compromised, an adversary possessing the secret trapdoor can forge KZG proofs that validate against arbitrary commitments.",
+            "mitigation": "Multi-party computation ceremonies with hundreds/thousands of participants where only one honest participant is needed."
+          },
+          {
+            "trust_boundary_id": "tb-005",
+            "threat_type": "Tampering",
+            "description": "If KZG_SETUP_G2_MONOMIAL[n] used in the pairing check does not correspond to the same trusted setup as KZG_SETUP_G1_MONOMIAL, the verification equation could accept invalid proofs or reject valid ones.",
+            "mitigation": "The G1 and G2 setup elements must be loaded from the same verified trusted setup file and validated against known checksums before use."
+          },
+          {
+            "trust_boundary_id": "tb-006",
+            "threat_type": "Tampering",
+            "description": "If an adversary can manipulate the hash input to compute_verify_cell_kzg_proof_batch_challenge by injecting, reordering, or omitting data before hashing, they could influence the random challenge r.",
+            "mitigation": "SG-006 INV-001 mandates that all verifier-relevant data is included in the hash input. INV-003 requires the hash input order to be deterministic and canonical."
+          },
+          {
+            "trust_boundary_id": "tb-006",
+            "threat_type": "Spoofing",
+            "description": "An adversary could attempt to find two different sets of (commitments, cells, proofs) that produce the same Fiat-Shamir challenge r, allowing them to substitute invalid data.",
+            "mitigation": "Using a collision-resistant hash function for hash_to_bls_field. The domain separator ensures domain separation."
+          },
+          {
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Tampering",
+            "description": "An adversary could submit cells with valid formatting but containing tampered evaluation data that does not correspond to the claimed KZG commitment.",
+            "mitigation": "The pairing-based verification equation cryptographically binds cells to commitments via KZG proofs. Random linear combination via the Fiat-Shamir challenge ensures tampering detection."
+          },
+          {
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Denial of Service",
+            "description": "An adversary could submit a large batch of (commitments, cell_indices, cells, proofs) for verification, causing expensive operations.",
+            "mitigation": "Rate-limiting verification requests. Batch verification with a single pairing check is already an optimization. Maximum batch sizes should be bounded."
+          },
+          {
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Spoofing",
+            "description": "An adversary could present a valid proof for one (commitment, cell) pair and attempt to reuse it for a different cell or commitment.",
+            "mitigation": "The deterministic inclusion of commitment_indices, cell_indices, coset evaluations, and proofs in the Fiat-Shamir hash ensures that any substitution changes the challenge r."
+          },
+          {
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Tampering",
+            "description": "An adversary providing partial cells for recovery could supply cells that are individually valid but mutually inconsistent (from different polynomials).",
+            "mitigation": "After recovery, the regenerated cells and proofs should be verified against the original KZG commitment using verify_cell_kzg_proof_batch."
+          },
+          {
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Denial of Service",
+            "description": "Recovery involves multiple FFTs, inverse FFTs, coset FFTs, and element-wise operations over large vectors. An adversary could trigger recovery with the minimum number of cells to maximize cost.",
+            "mitigation": "Nodes should rate-limit recovery attempts and prioritize recovering data for blocks on the canonical chain."
+          },
+          {
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Information Disclosure",
+            "description": "The division step in recovery could fail if zp_over_coset contains zero elements, leaking side-channel timing information.",
+            "mitigation": "The coset FFT evaluation domain is specifically chosen to avoid evaluation points where the vanishing polynomial is zero."
+          },
+          {
+            "trust_boundary_id": "tb-009",
+            "threat_type": "Tampering",
+            "description": "If recover_polynomialcoeff returns an incorrect polynomial (degree >= FIELD_ELEMENTS_PER_BLOB), regenerated cells and proofs would be for a different polynomial.",
+            "mitigation": "The recovered polynomial is truncated to degree < FIELD_ELEMENTS_PER_BLOB. Post-recovery verification against known KZG commitments is essential."
+          },
+          {
+            "trust_boundary_id": "tb-010",
+            "threat_type": "Denial of Service",
+            "description": "A network-level adversary could selectively drop or delay data column sidecars published to specific gossip subnets.",
+            "mitigation": "The custody group system distributes columns across multiple subnets and validators. Redundancy ensures sufficient cells remain available for recovery."
+          },
+          {
+            "trust_boundary_id": "tb-010",
+            "threat_type": "Repudiation",
+            "description": "A validator could claim to have published sidecars but actually withhold them (data withholding attack).",
+            "mitigation": "Data availability sampling by multiple independent peers detects withheld data. Staked ETH provides economic incentive alignment."
+          },
+          {
+            "trust_boundary_id": "tb-011",
+            "threat_type": "Tampering",
+            "description": "If the beacon state is forked or stale, the effective_balance values used in custody requirement computation would be incorrect.",
+            "mitigation": "Custody requirements should be computed from finalized or justified state. VALIDATOR_CUSTODY_REQUIREMENT provides a minimum floor."
+          },
+          {
+            "trust_boundary_id": "tb-011",
+            "threat_type": "Elevation of Privilege",
+            "description": "A validator with low effective_balance could be assigned minimum custody requirement. If many low-stake validators coordinate, they could reduce data availability coverage.",
+            "mitigation": "Minimum floor VALIDATOR_CUSTODY_REQUIREMENT ensures baseline contribution. Maximum cap NUMBER_OF_CUSTODY_GROUPS prevents overload."
+          },
+          {
+            "trust_boundary_id": "tb-012",
+            "threat_type": "Denial of Service",
+            "description": "An adversary could flood a validator with sidecar requests during the retention period, exhausting resources.",
+            "mitigation": "Rate-limiting per-peer requests. Prioritizing requests from peers with known custody obligations."
+          },
+          {
+            "trust_boundary_id": "tb-012",
+            "threat_type": "Information Disclosure",
+            "description": "By probing which columns a validator serves, an adversary could infer the validator's custody group membership.",
+            "mitigation": "Validators could serve all columns they have to mask custody assignment. Response timing should not vary based on custody."
+          },
+          {
+            "trust_boundary_id": "tb-013",
+            "threat_type": "Tampering",
+            "description": "During cells_and_kzg_proofs_construction, the proof slicing must be correctly aligned with the cells from compute_cells. Misalignment produces invalid sidecars.",
+            "mitigation": "Invariants INV-002 and INV-003 provide structural correctness guarantees. The proof ordering must match the cell ordering from compute_cells."
+          },
+          {
+            "trust_boundary_id": "tb-014",
+            "threat_type": "Tampering",
+            "description": "An incorrect Merkle inclusion proof computed in get_data_column_sidecars_from_block would cause all resulting sidecars to fail inclusion proof verification at receiving peers.",
+            "mitigation": "The Merkle proof must target the blob_kzg_commitments field at its correct generalized index in the BeaconBlockBody SSZ tree."
+          },
+          {
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Elevation of Privilege",
+            "description": "If polynomial_eval_to_coeff does not correctly apply the inverse FFT with bit-reversal permutation, the resulting coefficient representation could have higher degree than expected.",
+            "mitigation": "INV-001 of SG-007 constrains the input to exactly FIELD_ELEMENTS_PER_BLOB evaluations. Explicit degree bound checks exist in multiply_polynomialcoeff."
+          },
+          {
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Denial of Service",
+            "description": "The recursive FFT implementation requires len(vals) to be a power of 2. Non-power-of-2 length would cause incorrect splits in recursive calls.",
+            "mitigation": "INV-001 mandates power-of-2 input length. All protocol-defined constants are powers of 2."
+          },
+          {
+            "trust_boundary_id": "tb-015",
+            "threat_type": "Spoofing",
+            "description": "An attacker could craft a transaction with a forged Authorization tuple, claiming to be a different account holder.",
+            "mitigation": "ECDSA signature verification must be performed by the transaction processing pipeline before any Authorization is acted upon."
+          },
+          {
+            "trust_boundary_id": "tb-015",
+            "threat_type": "Tampering",
+            "description": "A malicious actor could submit account data with manipulated nonce, balance, or code values.",
+            "mitigation": "Account data must come from the validated state trie. The encode_account function trusts its inputs; the caller must ensure data is from verified state."
+          },
+          {
+            "trust_boundary_id": "tb-016",
+            "threat_type": "Spoofing",
+            "description": "A malicious contract could attempt to spoof deposit events by emitting logs that mimic the DepositEvent signature.",
+            "mitigation": "parse_deposit_requests performs a two-layer filter: log.address must equal DEPOSIT_CONTRACT_ADDRESS and log.topics[0] must equal DEPOSIT_EVENT_SIGNATURE_HASH."
+          },
+          {
+            "trust_boundary_id": "tb-016",
+            "threat_type": "Tampering",
+            "description": "A compromised deposit contract could emit logs with malformed data (incorrect offsets, sizes, or truncated data).",
+            "mitigation": "extract_deposit_data performs exhaustive validation of total data length, all five field offsets, and all five field sizes. Any mismatch raises InvalidBlock."
+          },
+          {
+            "trust_boundary_id": "tb-016",
+            "threat_type": "Denial of Service",
+            "description": "An attacker could flood the deposit contract with many small deposits, causing a large number of deposit logs in a single block.",
+            "mitigation": "The deposit contract has a minimum deposit amount. Gas costs for deposit transactions provide economic rate limiting."
+          },
+          {
+            "trust_boundary_id": "tb-017",
+            "threat_type": "Tampering",
+            "description": "If the execution client produces an incorrect requests_hash, the consensus layer would accept a corrupted view of deposits.",
+            "mitigation": "compute_requests_hash uses SHA-256. Consensus nodes independently verify this hash, and any mismatch causes block rejection."
+          },
+          {
+            "trust_boundary_id": "tb-017",
+            "threat_type": "Repudiation",
+            "description": "An execution client could claim it processed deposits correctly while having silently dropped or altered some.",
+            "mitigation": "The requests_hash provides a cryptographic commitment. Multiple independent clients verify the same block."
+          },
+          {
+            "trust_boundary_id": "tb-017",
+            "threat_type": "Information Disclosure",
+            "description": "Deposit data (public keys, withdrawal credentials, amounts, signatures) is inherently public.",
+            "mitigation": "This is by design. Beacon chain deposits are public operations."
+          },
+          {
+            "trust_boundary_id": "tb-018",
+            "threat_type": "Tampering",
+            "description": "A malicious block builder could manipulate receipt_keys ordering to change the order of deposit requests.",
+            "mitigation": "Receipt keys ordering must follow canonical transaction ordering. The receipts_trie root is committed to in the block header."
+          },
+          {
+            "trust_boundary_id": "tb-018",
+            "threat_type": "Denial of Service",
+            "description": "A block builder could include transactions that produce many logs from the deposit contract, slowing down block processing.",
+            "mitigation": "Block gas limits constrain total transactions and thus total logs. Gas cost per deposit provides an economic bound."
+          },
+          {
+            "trust_boundary_id": "tb-018",
+            "threat_type": "Elevation of Privilege",
+            "description": "If trie_get returns None for a key in receipt_keys, the assertion failure would halt the client rather than gracefully handling the error.",
+            "mitigation": "The assert acts as a fail-stop mechanism. Block validation at the consensus level should prevent such blocks."
+          },
+          {
+            "trust_boundary_id": "tb-019",
+            "threat_type": "Spoofing",
+            "description": "An attacker could create an Authorization tuple impersonating another account by forging the ECDSA signature.",
+            "mitigation": "Signature verification recovers the signer's address and confirms it matches the expected authorizer."
+          },
+          {
+            "trust_boundary_id": "tb-019",
+            "threat_type": "Tampering",
+            "description": "An attacker could replay an Authorization on a different chain (if chain_id not validated) or same chain (if nonce check bypassed).",
+            "mitigation": "chain_id provides cross-chain replay protection. Nonce must match current nonce for same-chain replay prevention."
+          },
+          {
+            "trust_boundary_id": "tb-019",
+            "threat_type": "Elevation of Privilege",
+            "description": "EIP-7702 set-code transactions allow EOA code delegation. Without proper validation, an attacker could take control of a victim's account.",
+            "mitigation": "Strict validation of chain_id, nonce, and signature prevents unauthorized code delegation."
+          },
+          {
+            "trust_boundary_id": "tb-020",
+            "threat_type": "Tampering",
+            "description": "The storage_root passed to encode_account is not validated by the function itself. An incorrect storage_root would produce semantically incorrect account encoding.",
+            "mitigation": "The storage_root must be computed from the account's actual storage trie. The Merkle Patricia Trie structure ensures tampering detection."
+          },
+          {
+            "trust_boundary_id": "tb-020",
+            "threat_type": "Information Disclosure",
+            "description": "Account balances and nonces are stored in plaintext in the RLP encoding, making them visible to anyone reading the state trie.",
+            "mitigation": "This is by design in Ethereum's public account model."
+          },
+          {
+            "trust_boundary_id": "tb-021",
+            "threat_type": "Tampering",
+            "description": "A user could submit deposits with invalid BLS public keys, withdrawal credentials, or signatures. The execution layer extracts data without validating BLS cryptographic correctness.",
+            "mitigation": "BLS signature validation is performed by the consensus layer. The execution layer's role is limited to faithful extraction."
+          },
+          {
+            "trust_boundary_id": "tb-021",
+            "threat_type": "Repudiation",
+            "description": "A depositor could claim they did not make a deposit or that it was altered in transit.",
+            "mitigation": "Deposit events are immutable transaction logs. The BLS signature in the deposit data proves the depositor's intent."
+          },
+          {
+            "trust_boundary_id": "tb-022",
+            "threat_type": "Spoofing",
+            "description": "A malicious actor could submit a transaction claiming to be from a different sender. The transaction carries v/r/s (or y_parity) ECDSA signature components binding the payload to the sender's private key.",
+            "mitigation": "The recover_sender function uses SECP256K1 signature recovery to derive the sender address. Only the holder of the private key can produce a valid signature. Each transaction type has its own signing hash function to prevent cross-type replay."
+          },
+          {
+            "trust_boundary_id": "tb-022",
+            "threat_type": "Tampering",
+            "description": "A transaction's fields (gas, value, data, to, nonce) could be modified in transit between the sender and the execution engine, altering the intended operation.",
+            "mitigation": "The ECDSA signature covers the full transaction payload. Any modification invalidates the signature. Typed transactions include chain_id in the signing hash to prevent cross-chain replay."
+          },
+          {
+            "trust_boundary_id": "tb-022",
+            "threat_type": "Elevation of Privilege",
+            "description": "A SetCodeTransaction (EIP-7702) allows an EOA to delegate to contract code via the authorizations field. If authorization validation is weak, an attacker could trick an EOA into authorizing malicious code execution under the EOA's identity.",
+            "mitigation": "SetCodeTransaction authorizations must be individually signed by the authorizing account. The execution engine validates each authorization signature before granting code delegation privileges."
+          },
+          {
+            "trust_boundary_id": "tb-023",
+            "threat_type": "Tampering",
+            "description": "A malicious block proposer could manipulate header fields: setting a future timestamp for MEV advantages, choosing a favorable coinbase, or stuffing extra_data with non-standard content.",
+            "mitigation": "validate_header enforces timestamp progression (must be > parent timestamp), verifies block number sequencing, checks PoS constraints (difficulty=0, nonce=0), and validates base_fee_per_gas against EIP-1559. The header is frozen after construction (slotted_freezable)."
+          },
+          {
+            "trust_boundary_id": "tb-023",
+            "threat_type": "Denial of Service",
+            "description": "A proposer could construct a block with maximum gas_limit to force excessive computation, or include many zero-value transactions to inflate bloom filter and receipt processing overhead.",
+            "mitigation": "Gas limits follow the 1/1024 adjustment rule constraining per-block increases. Transaction intrinsic costs ensure minimum gas charge. Blob gas has independent limits governed by EIP-4844."
+          },
+          {
+            "trust_boundary_id": "tb-023",
+            "threat_type": "Repudiation",
+            "description": "A block proposer could deny having produced a block with particular contents, claiming modification in transit.",
+            "mitigation": "The block header's parent_hash, state_root, transactions_root, receipt_root, and withdrawals_root commit to full block contents via Merkle Patricia Trie roots. The consensus layer signs blocks via BLS signatures, binding proposer identity to the block."
+          },
+          {
+            "trust_boundary_id": "tb-024",
+            "threat_type": "Tampering",
+            "description": "Corrupted withdrawal instructions from the consensus layer could credit incorrect amounts to wrong addresses, or fabricate withdrawals the consensus layer never authorized.",
+            "mitigation": "The Withdrawal data structure enforces typed fields (U64 for index/validator_index, Address for recipient, U256 for amount). The withdrawals_root in the header commits to the exact withdrawal list. Cross-layer validation ensures only authorized withdrawals are processed."
+          },
+          {
+            "trust_boundary_id": "tb-024",
+            "threat_type": "Spoofing",
+            "description": "An attacker at the consensus-execution interface could inject fabricated withdrawal instructions not authorized by the beacon chain, causing unauthorized ETH minting on the execution layer.",
+            "mitigation": "The Engine API uses authenticated JSON-RPC (JWT authentication). The parent_beacon_block_root field provides a cryptographic anchor to the beacon chain state for cross-layer integrity verification."
+          },
+          {
+            "trust_boundary_id": "tb-025",
+            "threat_type": "Information Disclosure",
+            "description": "The bloom filter (logs_bloom) is a probabilistic data structure that reveals the presence of specific addresses and topics in a block's logs. An attacker could use it for privacy analysis, identifying which addresses interacted within a block without downloading full receipts.",
+            "mitigation": "This is an accepted design trade-off. The bloom filter intentionally provides a compact index for log filtering. Addresses and topics are already public on-chain, so the bloom filter does not leak additional private information beyond full receipt data."
+          },
+          {
+            "trust_boundary_id": "tb-025",
+            "threat_type": "Denial of Service",
+            "description": "A contract could emit an excessive number of logs (each with up to 4 topics), causing bloom filter construction (logs_bloom) to process many add_to_bloom calls, increasing receipt processing time proportionally.",
+            "mitigation": "Log emission is bounded by the block gas limit. Each LOG opcode charges gas proportional to topics and data size (375 gas base + 375 per topic + 8 gas per byte). This naturally limits total logs per block."
+          },
+          {
+            "trust_boundary_id": "tb-026",
+            "threat_type": "Tampering",
+            "description": "A malicious peer could send a receipt with an invalid type-prefix byte (not in {1,2,3,4}) or malformed RLP payload after the prefix, causing decode_receipt to produce incorrect data or crash.",
+            "mitigation": "decode_receipt includes an explicit assertion: 'assert receipt[0] in (1, 2, 3, 4)'. This gate rejects any unrecognized type prefix. The RLP decoder performs structural validation against the Receipt schema. Non-Bytes receipts (legacy) bypass the type-prefix check and are returned as-is."
+          },
+          {
+            "trust_boundary_id": "tb-026",
+            "threat_type": "Spoofing",
+            "description": "A peer could send a receipt encoded with a different type prefix than the actual transaction type, causing the execution engine to misattribute the receipt to the wrong transaction type.",
+            "mitigation": "Receipt type prefixes are verified against the corresponding transaction type during block validation. The receipts_root commits to the exact set of encoded receipts, so any mismatch causes block rejection."
+          },
+          {
+            "trust_boundary_id": "tb-026",
+            "threat_type": "Denial of Service",
+            "description": "A peer could send extremely large RLP-encoded receipts or deeply nested structures to exhaust memory or CPU during decode_receipt processing.",
+            "mitigation": "The RLP decoder enforces maximum element sizes and nesting depth. The Receipt schema has a fixed structure (4 fields), so the decoder rejects non-conforming payloads. Network-level message size limits in devp2p provide additional defense."
+          },
+          {
+            "trust_boundary_id": "tb-027",
+            "threat_type": "Tampering",
+            "description": "A bug in the RLP codec could produce non-canonical encodings for Receipt objects. If different clients use different RLP implementations with subtle encoding differences, the resulting receipt_root would diverge, causing a consensus split.",
+            "mitigation": "The ethereum_rlp library enforces canonical RLP encoding rules (no leading zeros, shortest-form encoding). Extensive test vectors exist for RLP encoding. Consensus-critical code paths use a single, audited RLP implementation."
+          },
+          {
+            "trust_boundary_id": "tb-028",
+            "threat_type": "Tampering",
+            "description": "If the keccak256 implementation has a bug producing incorrect hashes, the bloom filter bits would be set at wrong positions. This would cause false negatives in log queries, where valid logs would not be found by bloom filter matching.",
+            "mitigation": "keccak256 is a well-tested NIST-standardized hash function (SHA-3 family). The bloom filter's 11-bit masking (0x07FF) ensures bit indices stay within the valid 2048-bit range regardless of hash output."
+          },
+          {
+            "trust_boundary_id": "tb-029",
+            "threat_type": "Information Disclosure",
+            "description": "Encoded receipts transmitted to peers reveal transaction success/failure status, cumulative gas consumption patterns, and bloom filter contents. An eavesdropper on the P2P network can reconstruct which contracts emitted events.",
+            "mitigation": "Receipt data is public by design in Ethereum's transparency model. The devp2p protocol does not provide confidentiality guarantees. Encryption would conflict with public verifiability."
+          },
+          {
+            "trust_boundary_id": "tb-029",
+            "threat_type": "Tampering",
+            "description": "encode_receipt's type-dispatch logic uses isinstance checks that fall through to legacy encoding if no typed transaction matches. If a new transaction type is added without updating encode_receipt, receipts for that type would be silently encoded as legacy receipts, producing incorrect encodings.",
+            "mitigation": "The encode_receipt control flow has an implicit assumption that the transaction type set is exhaustive. Adding a new transaction type requires coordinated updates to encode_receipt, decode_receipt, and the Transaction union type. Type-safe union patterns or exhaustiveness checks at the language level could strengthen this defense."
+          }
+        ]
+      },
+      "_source_file": "outputs/01d_PARTIAL_W0B1_1770284080.json"
+    }
+  ],
+  "total_items": 1
+}
