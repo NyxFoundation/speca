@@ -45,6 +45,9 @@ class PhaseConfig:
     
     # Result parsing
     result_key: str = "items"
+
+    # Output naming: semantic prefix for PARTIAL files (e.g., "TRUSTMODEL" → 01d_TRUSTMODEL_PARTIAL_W...)
+    output_prefix: str = ""
     
     # Early exit conditions
     early_exit_check: Callable[[dict], bool] | None = None
@@ -81,8 +84,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=10,
         item_id_field="url",
         result_key="sub_graphs",
+        output_prefix="SUBGRAPHS",
     ),
-    
+
     "01c": PhaseConfig(
         phase_id="01c",
         name="Subgraph Verification",
@@ -96,8 +100,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         batch_strategy="count",
         max_batch_size=10,
         item_id_field="file_path",
+        output_prefix="VERIFIED",
     ),
-    
+
     "01d": PhaseConfig(
         phase_id="01d",
         name="Trust Model Analysis",
@@ -112,8 +117,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_bytes=160 * 1024,
         item_id_field="file_path",
         result_key="trust_model",
+        output_prefix="TRUSTMODEL",
     ),
-    
+
     "01e": PhaseConfig(
         phase_id="01e",
         name="Property Generation",
@@ -128,8 +134,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_bytes=160 * 1024,
         item_id_field="property_id",
         result_key="properties",
+        output_prefix="PROP",
     ),
-    
+
     "02": PhaseConfig(
         phase_id="02",
         name="Checklist Generation",
@@ -144,8 +151,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_bytes=120 * 1024,
         item_id_field="property_id",
         result_key="checklist",
+        output_prefix="CHECKLIST",
     ),
-    
+
     "03": PhaseConfig(
         phase_id="03",
         name="Audit Map Generation",
@@ -162,8 +170,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="check_id",
         result_key="audit_items",
         workdir="target_workspace",
+        output_prefix="AUDITMAP",
     ),
-    
+
     "04": PhaseConfig(
         phase_id="04",
         name="Audit Review",
@@ -179,6 +188,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="check_id",
         result_key="reviewed_items",
         workdir="target_workspace",
+        output_prefix="REVIEW",
     ),
 }
 

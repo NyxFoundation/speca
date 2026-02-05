@@ -201,7 +201,23 @@ class BaseOrchestrator(ABC):
 
 class Phase01Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 01 (Specification Analysis) sub-phases."""
-    
+
+    def load_items(self) -> list[dict[str, Any]]:
+        """Load items, using file-path-based loading for 01c/01d."""
+        if self.config.phase_id in ("01c", "01d"):
+            return self._load_file_path_items()
+        return super().load_items()
+
+    def _load_file_path_items(self) -> list[dict[str, Any]]:
+        """Load each matching file as a single work item (file_path = item)."""
+        import glob as glob_mod
+
+        items = []
+        for pattern in self.config.input_patterns:
+            for filepath in sorted(glob_mod.glob(pattern)):
+                items.append({"file_path": filepath})
+        return items
+
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich items with subgraph context for 01d/01e."""
         if self.config.phase_id in ("01d", "01e"):

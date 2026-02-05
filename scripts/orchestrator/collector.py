@@ -161,7 +161,8 @@ def merge_partial_results(
                 data = json.load(f)
             
             # Find the result key
-            for key in ["items", "checklist", "properties", "audit_items", "reviewed_items"]:
+            for key in ["items", "found_specs", "sub_graphs", "trust_model",
+                        "checklist", "properties", "audit_items", "reviewed_items"]:
                 if key in data and isinstance(data[key], list):
                     all_results.extend(data[key])
                     source_files.append(filepath)
