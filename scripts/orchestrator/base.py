@@ -221,9 +221,18 @@ class Phase01Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 01 (Specification Analysis) sub-phases."""
 
     def load_items(self) -> list[dict[str, Any]]:
-        """Load items, using file-path-based loading for 01c/01d."""
+        """
+        Load items for Phase 01.
+        - 01a: Returns a single seed item (no input file).
+        - 01c/01d: Loads file paths as items.
+        - Others: Standard queue loading.
+        """
+        if self.config.phase_id == "01a":
+            return [{"id": "seed", "source": "manual"}]
+        
         if self.config.phase_id in ("01c", "01d"):
             return self._load_file_path_items()
+            
         return super().load_items()
 
     def _load_file_path_items(self) -> list[dict[str, Any]]:
@@ -237,7 +246,19 @@ class Phase01Orchestrator(BaseOrchestrator):
         return items
 
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Enrich items with subgraph context for 01d/01e."""
+        """Enrich items with necessary context."""
+        if self.config.phase_id == "01a":
+            # For 01a, we need to ensure KEYWORDS and SPEC_URLS are available
+            # We don't necessarily modify the item, as env vars are handled in runner
+            # But we can validate here
+            keywords = os.environ.get("KEYWORDS")
+            spec_urls = os.environ.get("SPEC_URLS")
+            if not keywords or not spec_urls:
+                 # Fallback defaults if not set (mirroring Makefile defaults)
+                 # These should ideally be passed from run_phase.py or env
+                 print("Warning: KEYWORDS or SPEC_URLS not set, using defaults")
+            return items
+
         if self.config.phase_id in ("01d", "01e"):
             return self._enrich_with_subgraph_context(items)
         return items
