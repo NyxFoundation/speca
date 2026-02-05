@@ -2,6 +2,7 @@
 name: spec-discovery
 description: Crawl and discover specification documents from a given URL.
 allowed-tools: mcp__fetch__fetch, browser_navigate, browser_scroll, browser_click, browser_view, write
+context: fork
 ---
 
 # SKILL: Specification Discovery

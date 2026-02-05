@@ -161,8 +161,18 @@ class ClaudeRunner:
             )
             return None
         
-        # Parse results
-        return self._parse_results(output_path)
+        # Parse results from output file, fallback to log if empty
+        results = self._parse_results(output_path)
+        if not results:
+            results = self._parse_results_from_log(log_file)
+            if results:
+                # Save extracted results to the expected output path for downstream
+                self._save_json(output_path, results)
+                print(
+                    f"[W{worker_id}] Batch {batch_index}: recovered {len(results)} result(s) from inline response",
+                    file=sys.stderr,
+                )
+        return results
     
     def _build_queue_payload(
         self,
@@ -241,25 +251,77 @@ class ClaudeRunner:
                 f.write("\n[claude_debug_latest]\n")
                 f.write(debug_text)
     
+    def _normalize_result_data(self, data: Any) -> list[dict[str, Any]]:
+        """
+        Normalize parsed JSON data into a flat list of result dicts.
+
+        Handles both raw lists and wrapper dicts with a known result key
+        (e.g. {"sub_graphs": [...]}).
+        """
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+
+        if isinstance(data, dict):
+            for key in [self.config.result_key, "items", "results", "audit_items"]:
+                if key in data and isinstance(data[key], list):
+                    return [item for item in data[key] if isinstance(item, dict)]
+            # If no known key matched, return the dict itself as a single-item list
+            return [data]
+
+        return []
+
+    def _parse_results_from_log(self, log_file: Path) -> list[dict[str, Any]]:
+        """
+        Fallback: extract results from inline text in the Claude CLI log.
+
+        When Claude returns results as markdown text (```json blocks) instead
+        of writing to the output file, this method recovers those results from
+        the stream-json log.
+        """
+        import re
+
+        if not log_file.exists():
+            return []
+
+        # Find the final "result" message in the JSONL log
+        result_text = ""
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    try:
+                        msg = json.loads(line)
+                        if msg.get("type") == "result" and msg.get("result"):
+                            result_text = msg["result"]
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except Exception:
+            return []
+
+        if not result_text:
+            return []
+
+        # Extract JSON from ```json ... ``` blocks
+        json_blocks = re.findall(r"```json\s*(.*?)```", result_text, re.DOTALL)
+
+        results: list[dict[str, Any]] = []
+        for block in json_blocks:
+            try:
+                data = json.loads(block.strip())
+            except json.JSONDecodeError:
+                continue
+            results.extend(self._normalize_result_data(data))
+
+        return results
+
     def _parse_results(self, output_path: Path) -> list[dict[str, Any]]:
         """Parse results from output file."""
         if not output_path.exists():
             return []
-        
+
         try:
             with open(output_path) as f:
                 data = json.load(f)
         except Exception:
             return []
-        
-        # Handle different result formats
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        
-        if isinstance(data, dict):
-            # Try common result keys
-            for key in [self.config.result_key, "items", "results", "audit_items"]:
-                if key in data and isinstance(data[key], list):
-                    return [item for item in data[key] if isinstance(item, dict)]
-        
-        return []
+
+        return self._normalize_result_data(data)

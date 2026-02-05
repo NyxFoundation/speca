@@ -2,6 +2,7 @@
 name: property-generator
 description: Generate formal properties from a trust model and subgraphs.
 allowed-tools: read, write
+context: fork
 ---
 
 # SKILL: Formal Property Generator

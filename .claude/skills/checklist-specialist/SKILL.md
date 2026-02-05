@@ -2,6 +2,7 @@
 name: checklist-specialist
 description: Generate a security audit checklist from formal properties.
 allowed-tools: read, write, mcp__github__search_code, mcp__github__list_issues
+context: fork
 ---
 
 # SKILL: Checklist Specialist

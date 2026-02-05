@@ -160,42 +160,44 @@ class BaseOrchestrator(ABC):
     
     async def execute_batches(self, batches: list[list[dict[str, Any]]]) -> None:
         """Execute all batches in parallel with progress tracking."""
+
+        async def _run_with_meta(
+            batch: list[dict[str, Any]],
+            worker_id: int,
+            batch_index: int,
+        ) -> tuple[list[dict[str, Any]] | None, int, int, int]:
+            """Wrap runner call to carry metadata through asyncio.as_completed."""
+            result = await self.runner.run_batch(batch, worker_id, batch_index)
+            return result, worker_id, batch_index, len(batch)
+
         tasks = []
-        task_sizes: dict[asyncio.Task, int] = {}
-        task_meta: dict[asyncio.Task, tuple[int, int]] = {}
-        
         for batch in batches:
             worker_id = self._batch_counter % self.num_workers
             self._batch_counter += 1
             batch_index = self._batch_counter
-            
-            task = asyncio.create_task(
-                self.runner.run_batch(batch, worker_id, batch_index)
-            )
-            tasks.append(task)
-            task_sizes[task] = len(batch)
-            task_meta[task] = (worker_id, batch_index)
-        
+
+            tasks.append(asyncio.create_task(
+                _run_with_meta(batch, worker_id, batch_index)
+            ))
+
         total_items = sum(len(b) for b in batches)
-        
+
         with tqdm(total=total_items, desc=f"Processing {self.config.name}", unit="item") as pbar:
-            for task in asyncio.as_completed(tasks):
-                worker_id, batch_index = task_meta.get(task, (0, 0))
+            for coro in asyncio.as_completed(tasks):
+                batch_size = 0
                 try:
-                    result = await task
+                    result, worker_id, batch_index, batch_size = await coro
                     if result is None:
-                        # Task failed after retries
                         self.failed_batches.append((worker_id, batch_index))
                     else:
                         self.results.extend(result)
-                        # Persist partial results to disk immediately
                         if result:
                             self.collector.save_partial(result, worker_id, batch_index)
                 except Exception as e:
                     print(f"Task failed with error: {e}", file=sys.stderr)
-                    self.failed_batches.append((worker_id, batch_index))
+                    self.failed_batches.append((0, 0))
                 finally:
-                    pbar.update(task_sizes.get(task, 0))
+                    pbar.update(batch_size)
     
 
 

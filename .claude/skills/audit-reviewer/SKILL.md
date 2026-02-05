@@ -2,6 +2,7 @@
 name: audit-reviewer
 description: Review and validate formal audit findings.
 allowed-tools: read, write, mcp__filesystem__read_multiple_files
+context: fork
 ---
 
 # SKILL: Audit Reviewer

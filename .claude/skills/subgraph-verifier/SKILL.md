@@ -2,6 +2,7 @@
 name: subgraph-verifier
 description: Verify and validate extracted subgraphs for completeness and consistency.
 allowed-tools: read, write, grep, mcp__filesystem__search_files, mcp__filesystem__read_text_file
+context: fork
 ---
 
 # SKILL: Subgraph Verifier

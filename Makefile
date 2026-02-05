@@ -110,7 +110,6 @@ init-prep:
 	@echo "Initializing for preparation phase..."
 	mkdir -p $(LOG_DIR)
 	mkdir -p $(OUTPUT_DIR)
-	mkdir -p $(OUTPUT_DIR)/01b_SUBGRAPHS
 	@echo "Output directories ready"
 	@echo "Checking MCP servers..."
 	@bash scripts/setup_mcp.sh --verify || echo "  Run 'make mcp-setup' to register MCP servers."
@@ -119,7 +118,6 @@ init-prep:
 clean:
 	@echo "Cleaning outputs..."
 	rm -rf $(OUTPUT_DIR)/*.json
-	rm -rf $(OUTPUT_DIR)/01b_SUBGRAPHS
 	rm -rf $(LOG_DIR)/*.json
 	rm -rf $(WORKDIR)/outputs/*.json
 	@echo "✅ Clean completed"
@@ -174,20 +172,20 @@ mcp-verify:
 	@if [ ! -f "$(OUTPUT_DIR)/01a_STATE.json" ]; then \
 		echo "❌ Error: $(OUTPUT_DIR)/01a_STATE.json not found. Run 01a first."; exit 1; \
 	fi; \
-	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01b_SUBGRAPHS/spec_*.json >/dev/null 2>&1; then \
-		SUBGRAPH_COUNT=$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/spec_*.json 2>/dev/null | wc -l); \
-		echo "⏭️  Skipping 01b-parallel: $$SUBGRAPH_COUNT subgraphs already exist (use FORCE_EXECUTE=1 to override)"; \
+	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01b_PARTIAL_*.json >/dev/null 2>&1; then \
+		SUBGRAPH_COUNT=$$(ls $(OUTPUT_DIR)/01b_PARTIAL_*.json 2>/dev/null | wc -l); \
+		echo "⏭️  Skipping 01b-parallel: $$SUBGRAPH_COUNT partials already exist (use FORCE_EXECUTE=1 to override)"; \
 	else \
 		echo "🚀 Running 01b extraction in parallel with $(WORKERS) workers..."; \
 		$(PYTHON_RUNNER) scripts/run_phase.py --phase 01b --workers $(WORKERS) --max-concurrent $(MAX_CONCURRENT); \
-		SUBGRAPH_COUNT=$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/*.json 2>/dev/null | wc -l); \
-		echo "✅ Parallel extraction complete. Total subgraphs: $$SUBGRAPH_COUNT"; \
+		SUBGRAPH_COUNT=$$(ls $(OUTPUT_DIR)/01b_PARTIAL_*.json 2>/dev/null | wc -l); \
+		echo "✅ Parallel extraction complete. Total partials: $$SUBGRAPH_COUNT"; \
 	fi
 
 # Step 01c-parallel: Parallel subgraph verification
 01c-parallel:
-	@if [ ! -d "$(OUTPUT_DIR)/01b_SUBGRAPHS" ] || [ -z "$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/*.json 2>/dev/null)" ]; then \
-		echo "❌ Error: No subgraphs found. Run 01b-parallel first."; exit 1; \
+	@if [ -z "$$(ls $(OUTPUT_DIR)/01b_PARTIAL_*.json 2>/dev/null)" ]; then \
+		echo "❌ Error: No 01b partials found. Run 01b-parallel first."; exit 1; \
 	fi; \
 	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01d_TRUSTMODEL_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 01c-parallel: trust model partials exist (use FORCE_EXECUTE=1 to override)"; \
@@ -199,8 +197,8 @@ mcp-verify:
 
 # Step 01d-parallel: Parallel trust model generation
 01d-parallel:
-	@if [ ! -d "$(OUTPUT_DIR)/01b_SUBGRAPHS" ] || [ -z "$$(ls $(OUTPUT_DIR)/01b_SUBGRAPHS/*.json 2>/dev/null)" ]; then \
-		echo "❌ Error: No subgraphs found. Run 01b-parallel first."; exit 1; \
+	@if [ -z "$$(ls $(OUTPUT_DIR)/01c_PARTIAL_*.json 2>/dev/null)" ]; then \
+		echo "❌ Error: No 01c partials found. Run 01c-parallel first."; exit 1; \
 	fi; \
 	if [ -z "$(FORCE_EXECUTE)" ] && ls $(OUTPUT_DIR)/01e_PROP_PARTIAL_*.json >/dev/null 2>&1; then \
 		echo "⏭️  Skipping 01d-parallel: property partials exist (use FORCE_EXECUTE=1 to override)"; \

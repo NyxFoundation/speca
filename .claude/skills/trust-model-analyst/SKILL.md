@@ -2,6 +2,7 @@
 name: trust-model-analyst
 description: Analyze trust boundaries and security assumptions from subgraphs.
 allowed-tools: read, write, grep, mcp__filesystem__directory_tree, mcp__filesystem__search_files
+context: fork
 ---
 
 # SKILL: Trust Model Analyst

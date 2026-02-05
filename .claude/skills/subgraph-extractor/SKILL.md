@@ -2,6 +2,7 @@
 name: subgraph-extractor
 description: Extract structured subgraphs from specification documents.
 allowed-tools: read, write, mcp__filesystem__read_multiple_files, mcp__tree_sitter__get_symbols, mcp__tree_sitter__run_query
+context: fork
 ---
 
 # SKILL: Subgraph Extractor
