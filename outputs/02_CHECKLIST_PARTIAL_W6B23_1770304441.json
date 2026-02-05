@@ -1,0 +1,728 @@
+{
+  "source_files": [],
+  "source_properties": ["PROP-0022", "PROP-0023", "PROP-0024"],
+  "filtering_summary": {
+    "total_properties_input": 3,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 3
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Is the multiplication_complexity formula 2 * ceil(max_length/8)^2 computed using overflow-safe arithmetic when max(base_length, modulus_length) > 32?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. Locate the multiplication_complexity implementation in each Ethereum execution client for the Osaka/EIP-7883 path: go-ethereum (osakaMultComplexity or berlinMultComplexity called within it), reth/revm (osaka_gas_calc in crates/precompile/src/modexp.rs), Erigon (modExpMultComplexityEip7883), Besu (gas calculator), Nethermind, Nimbus-eth1. 2. For the large-operand path (max_length > 32), identify the exact arithmetic sequence: (a) words = ceil(max_length / 8), (b) words_squared = words * words, (c) result = 2 * words_squared. Verify each step. 3. CRITICAL: Determine the integer type used for 'words' and 'words_squared' in each client. If a client uses uint64 (Go, Rust), the maximum safe value before overflow is sqrt(2^63) = ~3,037,000,499. With EIP-7823 limiting max_length to 1024 bytes, words = ceil(1024/8) = 128, so words^2 = 16,384, which fits safely. However, verify that the EIP-7823 bounds check (max_length <= 1024) is applied BEFORE the multiplication_complexity calculation in every client. If the bounds check is missing, bypassed, or applied after gas calculation, an attacker could supply max_length up to 2^256-1 (the full uint256 input range), causing words = ceil((2^256-1)/8) to overflow any fixed-width integer type. 4. Test attack scenario: Craft a MODEXP call with base_length = 2^64 (or any value > 1024 but within uint256 range). Verify that EIP-7823 rejects this BEFORE the gas calculation runs. If the gas calculation runs first with an overflowed multiplication_complexity, the computed gas could wrap to a small value, making the precompile nearly free while the actual computation is astronomically expensive. 5. Specifically test the ordering in each client: (a) Are EIP-7823 bounds checks in the gas calculation function or in a separate pre-check? (b) If the gas function is called first and bounds checks happen later, there is a window for overflow. (c) In go-ethereum, verify that the length check (> 1024) occurs before osakaMultComplexity is called. (d) In reth/revm, verify that the bounds check is in the gas calculation closure before the words^2 computation. 6. Test with max_length values that are exact multiples of 8 and non-multiples to verify the ceiling division: (a) max_length=33: ceil(33/8) = 5, complexity = 2*25 = 50. (b) max_length=40: ceil(40/8) = 5, complexity = 2*25 = 50. (c) max_length=41: ceil(41/8) = 6, complexity = 2*36 = 72. (d) max_length=1024: ceil(1024/8) = 128, complexity = 2*16384 = 32768. 7. Verify that the ceiling division itself does not overflow: ceil(x/8) is typically computed as (x + 7) / 8. If x = 2^256-1, then x + 7 overflows uint256 and wraps to 6, yielding words = 0, and complexity = 0. This is the canonical overflow attack path. 8. Cross-client differential test: Submit MODEXP calls with max_length in {33, 64, 128, 256, 512, 1024} and compare the exact gas consumed across all clients. Any disagreement indicates a multiplication_complexity computation bug.",
+      "bug_class": "Integer Overflow / Gas Undercharging",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaMultComplexity / berlinMultComplexity",
+          "description": "EIP-7883 multiplication_complexity. For max_length > 32, calls berlinMultComplexity(x) which computes words = (x + 7) / 8; return words * words. osakaMultComplexity then returns 2 * result. Verify overflow safety of (x+7), words*words, and 2*result."
+        },
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaModexpGas (or RequiredGas for modexp)",
+          "description": "Gas calculation entry point. Verify that EIP-7823 length bounds (base_length <= 1024, exponent_length <= 1024, modulus_length <= 1024) are checked BEFORE calling osakaMultComplexity."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "osaka_gas_calc / gas calculation closure",
+          "description": "Rust implementation. Verify that div_ceil(max_len, 8) and the subsequent squaring use overflow-checked or big-integer arithmetic. Rust's default integer arithmetic panics on overflow in debug builds but wraps in release builds."
+        },
+        {
+          "file": "ethereum/execution-specs: ethereum/forks/osaka/vm/precompiled_contracts/modexp.py",
+          "function": "gas_cost / complexity",
+          "description": "Reference implementation uses Python arbitrary-precision integers. The spec says: words = math.ceil(max_length / 8); multiplication_complexity = 2 * words**2. Python cannot overflow, but implementations in fixed-width languages can."
+        },
+        {
+          "file": "erigon: execution/vm/contracts.go",
+          "function": "modExpMultComplexityEip7883",
+          "description": "Go implementation (likely using uint64 or *big.Int). Verify overflow safety and bounds-check ordering."
+        },
+        {
+          "file": "besu: evm/src/main/java/org/hyperledger/besu/evm/gascalculator/",
+          "function": "Osaka gas calculator for ModExp",
+          "description": "Java implementation. Java long is signed 64-bit. Verify that words^2 does not silently overflow, especially if using long arithmetic instead of BigInteger."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: multiplication_complexity(33) == 50, multiplication_complexity(40) == 50, multiplication_complexity(41) == 72, multiplication_complexity(1024) == 32768 across all clients",
+        "Boundary test: multiplication_complexity(32) == 16 (small path) vs multiplication_complexity(33) == 50 (large path) -- verify no discontinuity bugs at the transition",
+        "Overflow test: If EIP-7823 bounds check is removed (test harness), verify that multiplication_complexity(2^64) does not silently wrap to 0 or a small value",
+        "Ordering test: Submit MODEXP with base_length=2^32 (exceeds EIP-7823 limit). Verify the call is rejected with all gas consumed BEFORE any multiplication_complexity calculation occurs",
+        "Cross-client differential: Deploy a contract calling MODEXP with max_length in {33, 100, 500, 1024}. Compare exact gas costs across go-ethereum, reth, Erigon, Besu, Nethermind. Any divergence is a consensus bug",
+        "Ceiling division test: Verify ceil(max_length/8) for max_length in {33,34,35,36,37,38,39,40} all produce the correct words value (5,5,5,5,5,5,5,5) and complexity (50)"
+      ],
+      "notes": "Source: PROP-0022, Invariant: INV-003, Trust Boundary: tb-007, Threat: stride-008. This is a CRITICAL boundary property because the gas cost determines how much computation an attacker can extract per unit of gas. If multiplication_complexity overflows to a small value, the attacker pays minimal gas for an operation that actually takes O(n^2) time in the number of limbs. With EIP-7823 limiting inputs to 1024 bytes, the maximum legitimate complexity is 32,768 -- safely within uint64 range. The critical question is whether EIP-7823 bounds checking happens BEFORE the complexity calculation in every client. If bounds checking is missing or happens after, the full uint256 input range could trigger overflow. The reference Python implementation is immune (arbitrary precision) but all production clients use fixed-width integers."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Is the ceiling division ceil(max_length/8) implemented correctly and overflow-safely in the words computation?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. The ceiling division ceil(x/8) is commonly implemented as (x + 7) / 8 in integer arithmetic. This is the primary overflow vector: if x is close to the maximum value of the integer type, x + 7 overflows. 2. For each client, identify the exact implementation of ceil(max_length/8): (a) go-ethereum: Likely uses (x + 7) / 8 with big.Int or uint64. If uint64 and x = 2^64-1, then x + 7 = 6 (wraps), words = 0, complexity = 0. (b) reth/revm: May use checked_add or saturating arithmetic. Verify. div_ceil may be a library function. (c) Besu: Java's Math.ceilDiv or manual implementation. (d) Erigon: Similar to go-ethereum. 3. Alternative safe implementations of ceil(x/8): (a) (x / 8) + (1 if x % 8 != 0 else 0) -- safe, no addition overflow. (b) x.div_ceil(8) using a library that handles edge cases. (c) (x + 7) / 8 with prior overflow check (if x > MAX - 7, handle specially). 4. Test with max_length values near the type boundary: (a) max_length = 2^64 - 8: words = (2^64-8+7)/8 = (2^64-1)/8 = 2305843009213693951. words^2 overflows uint64. (b) max_length = 2^64 - 1: (x+7) overflows uint64 to 6, words = 0, complexity = 0. This is the catastrophic case. (c) max_length = 2^64 - 7: (x+7) = 2^64, which wraps to 0 in uint64, words = 0, complexity = 0. 5. Verify that EIP-7823 makes these test cases unreachable by limiting max_length to 1024. But the defense-in-depth question is: what happens if a future EIP raises the limit? The code should be safe regardless. 6. For clients that use big.Int (arbitrary precision) for the gas calculation (e.g., go-ethereum may use *big.Int in some paths), verify that the big.Int path is actually used and not a uint64 fast-path that could overflow. 7. Static analysis: Search each client codebase for patterns like 'words * words', 'x * x', or squaring operations in the modexp gas calculation. Verify each is overflow-protected.",
+      "bug_class": "Integer Overflow in Ceiling Division",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "berlinMultComplexity",
+          "description": "Computes words = (x + 7) / 8 then words * words. In Go, if x is a *big.Int, this is safe. If x is uint64, (x+7) can overflow."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "div_ceil or equivalent",
+          "description": "Rust's u64::div_ceil is available since Rust 1.73. Verify it's used instead of manual (x+7)/8. Also verify U256 arithmetic path."
+        },
+        {
+          "file": "besu: evm/src/main/java/org/hyperledger/besu/evm/gascalculator/",
+          "function": "ModExp gas calculation (words computation)",
+          "description": "Java implementation. Math.ceilDiv available since Java 18. Verify no manual (x+7)/8 with long arithmetic."
+        },
+        {
+          "file": "nethermind: src/Nethermind/Nethermind.Evm/Precompiles/ModExpPrecompile.cs",
+          "function": "Gas calculation (words computation)",
+          "description": "C# implementation. Verify integer type (int, long, BigInteger) and ceiling division safety."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: ceil(33/8) == 5, ceil(40/8) == 5, ceil(41/8) == 6, ceil(1024/8) == 128 in all clients",
+        "Unit test: ceil(1/8) == 1, ceil(8/8) == 1, ceil(9/8) == 2 -- verify edge cases for small values",
+        "Overflow test (test harness with bounds check disabled): ceil((2^64-1)/8) should NOT produce 0 -- verify the implementation either uses big integers or has explicit overflow protection",
+        "Static analysis: grep for '+ 7' or '+ 7)' near modexp gas calculation code to identify vulnerable ceiling division patterns"
+      ],
+      "notes": "Source: PROP-0022, Invariant: INV-003, Trust Boundary: tb-007. The ceiling division ceil(x/8) via (x+7)/8 is a classic integer overflow pattern. While EIP-7823 bounds checking (max_length <= 1024) should prevent attacker-controlled values from reaching this code path with dangerous values, defense-in-depth requires the arithmetic itself to be safe. If a client implementation checks bounds AFTER computing gas (or has a code path where bounds are not checked), the ceiling division overflow directly enables the gas undercharging attack described in the property. PoC concept: base_length such that ceil(base_length/8)^2 overflows the integer type."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Are EIP-7823 bounds checks enforced BEFORE the EIP-7883 gas calculation to prevent overflow in multiplication_complexity?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. In every execution client, trace the complete code path from CALL to address 0x05 (ModExp precompile) through to gas deduction. Map the exact sequence: (a) input parsing (extract base_length, exponent_length, modulus_length), (b) EIP-7823 bounds validation (each length <= 1024), (c) EIP-7883 gas calculation (multiplication_complexity, iteration_count, final gas cost), (d) gas deduction, (e) actual computation. 2. CRITICAL VERIFICATION: Confirm that step (b) occurs BEFORE step (c) in every client. If step (c) runs before step (b), the overflow window exists. 3. Go-ethereum: In the RequiredGas method for the Osaka ModExp precompile, trace whether the length extraction and bounds check (EIP-7823) is a separate function called before the gas calculation, or whether it's integrated into the same function. If integrated, verify the check is at the top of the function before any arithmetic. 4. Reth/revm: In the gas calculation closure for osaka_gas_calc, verify that the bounds check happens before div_ceil and squaring operations. The gas closure may be called before the precompile's run() method, so bounds checking must be in the gas function, not just in run(). 5. Besu: In the Java gas calculator, verify bounds checking order. Some implementations compute gas first and then validate bounds in the execute() method -- this is vulnerable. 6. Test scenario: Submit MODEXP with base_length = 2^128 (clearly exceeds 1024). (a) Correct behavior: EIP-7823 rejects, all gas consumed, no computation. (b) Vulnerable behavior: Gas calculation runs first with overflowed multiplication_complexity = 0, deducts 500 gas (minimum), then bounds check rejects. But by this point the gas has been calculated incorrectly, and if the bounds check is in the execution path (not the gas path), the precompile might execute with vastly undercharged gas. 7. Specifically check: Is EIP-7823 validation in the gas calculation function or in the execution function? These are often separate in precompile implementations. If only in the execution function, the gas function may compute an overflowed value. 8. Verify that when EIP-7823 rejects an input, it returns ALL remaining gas consumed (not just the incorrectly-calculated gas amount). The spec says 'consume all gas and revert'.",
+      "bug_class": "Check Ordering / Time-of-Check-Time-of-Use",
+      "risk_category": "Denial of Service / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaModexpGas / Run (for ModExp)",
+          "description": "RequiredGas is typically called before Run. If EIP-7823 check is only in Run but not in RequiredGas, the gas calculation may overflow."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "Gas closure vs run function",
+          "description": "In revm, gas calculation and execution are often separate closures. Verify bounds check is in the gas closure."
+        },
+        {
+          "file": "erigon: execution/vm/contracts.go",
+          "function": "RequiredGas vs Run for ModExp",
+          "description": "Same pattern as go-ethereum. Verify EIP-7823 is in RequiredGas."
+        },
+        {
+          "file": "besu: evm/src/main/java/org/hyperledger/besu/evm/precompile/",
+          "function": "BigIntegerModularExponentiationPrecompiledContract.gasRequirement vs computePrecompile",
+          "description": "Java precompile interface separates gas estimation from execution. Verify bounds check in gasRequirement."
+        }
+      ],
+      "executable_checks": [
+        "Ordering test: Submit MODEXP with base_length=2^128, trace execution. Verify EIP-7823 rejection occurs before any multiplication_complexity arithmetic",
+        "Gas function isolation test: Call only the RequiredGas/gas_calc function (not Run/execute) with base_length=2^128. Verify it either returns all-gas-consumed or rejects, not a small gas value from overflow",
+        "Cross-client test: Submit MODEXP with base_length=1025 (just over EIP-7823 limit). All clients must reject with identical gas consumption (all gas consumed)",
+        "Static analysis: In each client, verify that the code path from RequiredGas to multiplication_complexity never executes without first checking base_length <= 1024 and modulus_length <= 1024"
+      ],
+      "notes": "Source: PROP-0022, Invariant: INV-003, Trust Boundary: tb-007, Threat: stride-008. This check is the linchpin of the defense: EIP-7823 was specifically designed to bound the inputs to ModExp, making the EIP-7883 arithmetic safe within fixed-width integer types. If EIP-7823 bounds checking is in the wrong location (after gas calculation instead of before), the entire defense fails. The separation of RequiredGas/gasRequirement from Run/execute in most client architectures creates a natural point where this ordering bug can occur -- the gas function may not include the bounds check if the implementer assumed bounds checking happens in the execution phase."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0022",
+      "title": "Verify the squaring step words^2 in multiplication_complexity does not silently overflow in any client's integer representation",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. The multiplication_complexity formula for max_length > 32 is: result = 2 * (ceil(max_length/8))^2. The squaring step is the primary overflow risk. With max_length capped at 1024 by EIP-7823, words = 128 and words^2 = 16384. However, if bounds checking fails, words can be extremely large. 2. For each client, identify the integer type used for the squaring operation: (a) Go: If *big.Int is used, overflow is impossible. If uint64, overflow occurs at words > ~4.29 billion (sqrt(2^64)). (b) Rust: u64 wraps in release mode (panic in debug). U256 is safe for all inputs. Verify which type is used. (c) Java: long (signed 64-bit) overflows at words > ~3.03 billion (sqrt(2^63)). BigInteger is safe. (d) C#: long (signed 64-bit) or BigInteger. 3. Even with EIP-7823 in place (max_length <= 1024, words <= 128), verify that the intermediate result 2 * words^2 = 2 * 16384 = 32768 fits in all integer types used. This should be trivially safe, but verify no truncation or type narrowing occurs. 4. Test the multiplication by 2: After computing words^2, the result is multiplied by 2 (EIP-7883 specific). Verify this multiplication is also overflow-safe. With EIP-7823, 2 * 16384 = 32768, which is safe. But without bounds: if words^2 = 2^63, then 2 * 2^63 overflows int64 (not uint64). 5. Verify the final result type: multiplication_complexity is used in a further multiplication: gas = multiplication_complexity * iteration_count. With EIP-7883, iteration_count can be up to max(1, 16*(exponent_length-32) + (first_256_bits_of_exponent.bit_length()-1)). With exponent_length capped at 1024: iteration_count = max(1, 16*(1024-32) + 255) = max(1, 16127) = 16127. Final gas = 32768 * 16127 = 528,744,576. Verify this fits in uint64/int64 (yes, safely). 6. Verify that in the absence of EIP-7823 bounds, multiplication_complexity * iteration_count would overflow: max_complexity = 2*(2^32)^2 = 2^65 (already overflows uint64). Even with smaller values, the product could overflow. 7. Check for signed vs unsigned issues: In Java and C#, default integer arithmetic is signed. words^2 for large words could produce a negative number due to signed overflow, which when used as a gas cost, could have unpredictable effects (negative gas?).",
+      "bug_class": "Integer Overflow in Squaring",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "berlinMultComplexity (called by osakaMultComplexity)",
+          "description": "words.Mul(words, words) -- if using *big.Int, safe. Verify *big.Int is used, not uint64."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "words * words (or equivalent squaring)",
+          "description": "Verify U256 or checked_mul is used. Rust u64 wrapping is silent in release."
+        },
+        {
+          "file": "besu: evm/src/main/java/org/hyperledger/besu/evm/gascalculator/",
+          "function": "multiplication_complexity squaring step",
+          "description": "Verify BigInteger.multiply or Math.multiplyHigh is used instead of long * long."
+        },
+        {
+          "file": "nethermind: src/Nethermind/Nethermind.Evm/Precompiles/ModExpPrecompile.cs",
+          "function": "Gas calculation squaring",
+          "description": "Verify BigInteger or checked arithmetic is used for the squaring step."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: multiplication_complexity(1024) == 32768, and gas(base_length=1024, modulus_length=1024, exponent_length=1024) fits in uint64",
+        "Unit test: Verify multiplication_complexity result type can hold at least 32768 without truncation in every client",
+        "Overflow test (with bounds check disabled in test harness): multiplication_complexity(2^32) should not silently produce a small value due to overflow",
+        "Signed overflow test: In Java/C# clients, verify that words^2 for large words does not produce negative values due to signed long overflow",
+        "Property-based test: For all valid inputs (base_length, modulus_length in [33..1024]), verify multiplication_complexity == 2 * ceil(max(base_length, modulus_length)/8)^2 exactly"
+      ],
+      "notes": "Source: PROP-0022, Invariant: INV-003, Trust Boundary: tb-007, Threat: stride-008. The squaring operation is the core vulnerability: it amplifies any overflow in the words value. Even a moderate-sized words value (e.g., 2^32) produces a squared result (2^64) that exceeds uint64. The property explicitly states 'The ceil operation and squaring MUST use overflow-checked or arbitrary-precision arithmetic.' This is a direct requirement, not a derived one. Each client must either use arbitrary-precision integers for this calculation or verify that EIP-7823 bounds make overflow impossible AND that the bounds check is correctly ordered."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0022",
+      "title": "Verify that gas undercharge from multiplication_complexity overflow enables network-wide DoS via a single transaction",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. Assess the impact of a successful overflow attack: If multiplication_complexity wraps to 0 or a small value, the gas cost becomes max(500, 0 * iteration_count) = 500 gas. With EIP-7825 transaction gas limit cap of 2^24 = 16,777,216, an attacker could invoke ModExp 16,777,216/500 = 33,554 times per transaction, each performing an astronomically expensive modular exponentiation. 2. Estimate the actual computation time: Without EIP-7823 bounds, an attacker could set base_length = modulus_length = 2^32 bytes (4 GiB). A single modular exponentiation on 4 GiB operands would take hours or days on commodity hardware. Even one such invocation per block would halt the network. 3. Verify the combined defense: EIP-7823 (input bounds) + EIP-7883 (cost increase) + EIP-7825 (gas limit cap) together should make it impossible to submit a transaction that causes excessive computation. Check that these three EIPs are all active simultaneously in the Fusaka fork. 4. Verify EIP interaction: (a) EIP-7823 limits inputs to 1024 bytes, making max computation O(1024^2) per invocation. (b) EIP-7883 charges at least 500 gas and up to 32768 * 16127 = ~528M gas for maximum inputs. (c) EIP-7825 caps transaction gas at 16,777,216. So max invocations with max-cost inputs = 16,777,216 / 528,744,576 < 1 (cannot even afford one). Max invocations with min-cost inputs (complexity=16, iteration=1) = 16,777,216 / 500 = 33,554. 5. Verify: Can 33,554 invocations of ModExp with base_length=32, modulus_length=32, exponent_length=1 cause DoS? Each is trivial (32-byte modexp), so this should be fast. Estimate wall-clock time. 6. Worst-case scenario test: Find the input combination within EIP-7823 bounds that maximizes computation-per-gas-unit. This is the most expensive operation divided by its gas cost. Check that this ratio is bounded and within acceptable execution time. 7. Network-level impact: If even one client has the overflow bug and others don't, the buggy client computes a different gas cost, leading to different state roots, causing a consensus split. This is a network split vulnerability, not just a DoS.",
+      "bug_class": "Gas Undercharging / Network DoS / Consensus Split",
+      "risk_category": "Denial of Service / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "Full MODEXP gas and execution path",
+          "description": "End-to-end path from CALL to gas deduction to computation."
+        },
+        {
+          "file": "ethereum/execution-specs: ethereum/forks/osaka/vm/precompiled_contracts/modexp.py",
+          "function": "modexp gas_cost and run",
+          "description": "Reference implementation for correct gas calculation."
+        },
+        {
+          "file": "consensus-critical: all execution clients",
+          "function": "State transition / receipt gas usage",
+          "description": "If clients disagree on gas cost, the cumulative gas in the receipt will differ, causing different state roots."
+        }
+      ],
+      "executable_checks": [
+        "PoC: Craft a transaction calling MODEXP with base_length such that ceil(base_length/8)^2 overflows uint64. Submit to all clients. Verify all clients reject via EIP-7823 before overflow occurs",
+        "PoC: On a test network with EIP-7823 disabled (hypothetical), craft a MODEXP call with base_length=2^64-7. Measure: does the gas cost wrap to 500? Does the computation hang?",
+        "Differential test: Submit the same MODEXP transaction to all Fusaka-enabled clients. Compare gas_used in transaction receipts. Any difference is a consensus bug",
+        "Worst-case execution time test: Submit MODEXP with base_length=1024, modulus_length=1024, exponent_length=1024 (max within EIP-7823 bounds). Measure wall-clock execution time. Verify it's within acceptable block processing time",
+        "Multi-invocation test: Deploy a contract that calls MODEXP in a loop with minimum-cost inputs. Fill an entire block (gas limit 60M per EIP-7935). Measure total block processing time"
+      ],
+      "notes": "Source: PROP-0022, Invariant: INV-003, Trust Boundary: tb-007, Threat: stride-008. The severity justification from the property is explicit: 'Integer overflow in multiplication_complexity wraps the gas cost to a small value, making an extremely expensive operation nearly free. This enables network-wide DoS.' This maps directly to the Sherlock severity classification for Critical: 'Take down the entire network by sending a single malicious on-chain transaction that ends up crashing all clients.' The combined defense of EIP-7823 + EIP-7883 + EIP-7825 should prevent this, but each layer must be correctly implemented. The bug bounty PoC hint from the property: 'Provide base_length such that ceil(base_length/8)^2 overflows the implementation's integer type.'"
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0022",
+      "title": "Verify Supporting Node: Does the smart contract actor's CALL to the ModExp precompile correctly propagate large length values to trigger EIP-7823 rejection?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker provides extremely large base_length or modulus_length to trigger integer overflow in words^2 computation."
+      },
+      "test_procedure": "1. Review how the EVM handles CALL to address 0x05 with attacker-controlled calldata. The length values (base_length, modulus_length, exponent_length) are read as 256-bit big-endian unsigned integers from the first 96 bytes of calldata. An attacker can set these to any value up to 2^256-1. 2. Verify that the 256-bit length values are correctly propagated from the EVM's CALL instruction to the ModExp precompile's gas calculation and execution functions. Some implementations may truncate to uint64 or int64 during this propagation. 3. Test: A contract uses CALL with calldata where base_length = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF (2^256-1). Verify EIP-7823 correctly rejects this (2^256-1 > 1024). 4. Test truncation risk: If a client reads base_length as uint64 (truncating the upper 192 bits), then base_length = 0x...FFFFFFFFFFFFFFFF would become 2^64-1. If instead truncated to the lower 64 bits of a carefully crafted value like 0x...0000000000000400 (1024 in the lower 64 bits), EIP-7823 would pass despite the full 256-bit value being much larger. 5. Verify that all length comparisons against 1024 use the full 256-bit value, not a truncated representation. 6. Test: calldata with base_length = (1024 + 2^64). If truncated to uint64, this becomes 1024, passing EIP-7823. But the actual base data area in calldata would be interpreted as starting at the wrong offset, potentially reading into other parts of the input. 7. Verify gas forwarding: When a contract calls the ModExp precompile, how much gas is forwarded? If the 63/64ths rule applies and the gas calculation overflows, the forwarded gas amount would be based on the overflowed (small) value, but the actual computation would be expensive, causing an out-of-gas in the precompile -- which may or may not consume all remaining gas depending on the error handling path.",
+      "bug_class": "Integer Truncation / Type Narrowing",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "modexpLengthExtract / getData",
+          "description": "Extracts base_length, exp_length, mod_length from calldata as *big.Int (256-bit). Verify no truncation to uint64 before bounds check."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "Input parsing (U256 to usize/u64 conversion)",
+          "description": "Rust may convert U256 to usize for memory operations. Verify bounds check uses U256 comparison, not post-conversion value."
+        },
+        {
+          "file": "besu: evm/src/main/java/org/hyperledger/besu/evm/precompile/",
+          "function": "BigIntegerModularExponentiationPrecompiledContract input parsing",
+          "description": "Java reads 32-byte big-endian values. Verify BigInteger comparison against 1024, not int/long comparison."
+        }
+      ],
+      "executable_checks": [
+        "Truncation test: Submit MODEXP with base_length = 2^64 + 1024 (256-bit value). Verify rejection by EIP-7823, not acceptance due to truncation to 1024",
+        "Full-width comparison test: Submit MODEXP with base_length = 2^128 + 512. Verify EIP-7823 rejects (> 1024), even though lower bits < 1024",
+        "Edge case: Submit MODEXP with base_length = 1024 exactly (uint256). Verify acceptance. Submit with base_length = 1025. Verify rejection",
+        "Cross-client: All clients must produce identical behavior (accept/reject) for base_length values {1024, 1025, 2^64, 2^64+1024, 2^128, 2^256-1}"
+      ],
+      "notes": "Source: PROP-0022, Supporting node check for actor-smart-contract. The attacker fully controls the calldata to the ModExp precompile. The length fields are uint256 in the ABI encoding, but client implementations may use narrower integer types internally. Truncation from uint256 to uint64 is a well-known vulnerability pattern in EVM precompile implementations. If truncation occurs before the EIP-7823 bounds check, a carefully crafted uint256 value can bypass the bounds check while still causing overflow in the multiplication_complexity calculation."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0023",
+      "title": "Verify Trust Boundary Integrity: Is iteration_count correctly set to exactly 1 when exponent_length <= 32 and exponent == 0 at the Smart Contract to ModExp Precompile boundary?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with exponent = 0 to test if iteration_count is correctly set to 1."
+      },
+      "test_procedure": "1. Identify the iteration_count calculation function in each Ethereum client implementation: (a) go-ethereum: modexpIterationCount in core/vm/contracts.go (~line 640-660), (b) Nethermind: equivalent in Nethermind.Evm/Precompiles/ModExpPrecompile.cs, (c) Besu: BigIntegerModularExponentiationPrecompiledContract.java, (d) Reth/revm: crates/precompile/src/modexp.rs, (e) Erigon: execution/vm/contracts.go. 2. For each client, trace the code path when exponent_length <= 32 and exponent == 0. The EIP-2565 spec (and EIP-7883 update) defines: iteration_count = 0 initially, then return max(iteration_count, 1). Verify the max(0, 1) = 1 floor is correctly implemented. 3. Construct a ModExp precompile call with test vector: base_length=1, modulus_length=1, exponent_length=1, base=0x02, modulus=0x03, exponent=0x00. Execute on each client and record the exact gas consumed. 4. Verify gas consumed is max(500, floor(multiplication_complexity * 1)) per EIP-7883. With base_length=1, modulus_length=1: multiplication_complexity = max(base_length, modulus_length)^2 / 4 = (1)^2 / 4 = 0 (for length <= 32, complexity = ceil(max_length/8)^2 = 1). So gas = max(500, 1 * 1) = 500. All clients must return 500 gas. 5. Compare gas values across all five major client implementations to confirm consensus-level agreement. 6. Test edge sub-cases: (a) exponent_length=0 with empty exponent data (implies exponent=0), (b) exponent_length=32 with 32 zero bytes, (c) exponent_length=1 with a single 0x00 byte, (d) exponent_length=32 with leading zeros and trailing zero (e.g., 0x00...00). 7. Verify that no client implementation returns iteration_count=0 (which would produce different gas costs if used as a multiplier or loop bound). 8. Check if any client uses iteration_count in internal logic beyond gas calculation (e.g., as a loop bound in the actual modular exponentiation algorithm). If iteration_count=0 were used as a loop bound, it could cause the computation to not execute at all, returning incorrect results.",
+      "bug_class": "Input Validation / Edge Case Handling",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "modexpIterationCount",
+          "line_range": "~640-660",
+          "notes": "Geth implementation of iteration count calculation. Check the max(iterCount, 1) floor."
+        },
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaModexpGas / berlinModexpGas",
+          "line_range": "~700-750",
+          "notes": "Gas calculation functions that consume iteration_count. Verify they receive 1, not 0."
+        },
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "bigModExp.Run",
+          "line_range": "~820-890",
+          "notes": "Execution function. Check if iteration_count is used as a loop bound or in any way beyond gas calculation."
+        },
+        {
+          "file": "ethereum/execution-specs: src/ethereum/*/vm/precompiled_contracts/modexp.py",
+          "function": "calculate_iteration_count",
+          "notes": "Reference Python specification. Canonical definition: max(0, 1) = 1 for exponent == 0."
+        },
+        {
+          "file": "Nethermind: src/Nethermind/Nethermind.Evm/Precompiles/ModExpPrecompile.cs",
+          "function": "CalculateIterationCount or equivalent",
+          "notes": "Nethermind has had prior ModExp consensus bugs (OOM issue, October 2022). Extra scrutiny warranted."
+        },
+        {
+          "file": "Besu: evm/src/main/java/org/hyperledger/besu/evm/precompile/BigIntegerModularExponentiationPrecompiledContract.java",
+          "function": "gasRequirement / iterationCount calculation",
+          "notes": "Besu Java implementation. Verify edge case handling matches spec."
+        },
+        {
+          "file": "Reth/revm: crates/precompile/src/modexp.rs",
+          "function": "iteration_count / gas_calc",
+          "notes": "Rust implementation. Verify max(iteration_count, 1) is applied."
+        }
+      ],
+      "executable_checks": [
+        "Cross-client differential test: Call ModExp(base=2, mod=3, exp=0) on Geth, Nethermind, Besu, Reth, Erigon and compare gas costs",
+        "Unit test: Verify modexpIterationCount returns exactly 1 when exponent_length=1 and exponent=0",
+        "Unit test: Verify modexpIterationCount returns exactly 1 when exponent_length=0 (empty exponent)",
+        "Unit test: Verify modexpIterationCount returns exactly 1 when exponent_length=32 and exponent is 32 zero bytes",
+        "Fuzz test: Randomize base_length, modulus_length, and exponent_length (all <= 32) with exponent always 0, verify iteration_count is always 1",
+        "Property-based test: For all (exponent_length <= 32, exponent == 0): assert gas_cost == max(500, multiplication_complexity * 1) under EIP-7883",
+        "Regression test: Verify Nethermind does not regress on ModExp edge cases (ref: iosiro 2022 OOM consensus issue)"
+      ],
+      "notes": "Source: PROP-0023, Trust Boundary: tb-007, Invariant: INV-002, Threat: stride-013. The EIP-2565 spec defines iteration_count=0 for exponent==0, but max(iteration_count, 1) ensures the return is 1. Under EIP-7883 (Fusaka), the gas floor increased from 200 to 500 and the division by 3 was removed. Cross-client consistency at this edge case is critical for consensus. Historical precedent: Nethermind had a ModExp OOM consensus bug in 2022 involving edge case handling differences."
+    },
+    {
+      "check_id": "CHK-0008",
+      "property_id": "PROP-0023",
+      "title": "Verify Supporting Node: Does the EVM precompile dispatch correctly route exponent==0 calls to ModExp without short-circuiting iteration_count?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with exponent = 0 to test if iteration_count is correctly set to 1."
+      },
+      "test_procedure": "1. Review the precompile dispatch logic (address 0x05) in each client to confirm that ModExp calls with exponent=0 are not short-circuited or fast-pathed in a way that skips iteration_count calculation. 2. Verify that the RequiredGas function is always called before Run, and that both functions see the same parsed input. 3. Check if any client has an early-return optimization for exponent==0 that returns result=1 (since x^0=1 for any x) but still charges the correct gas based on iteration_count=1. 4. Verify that if a client does fast-path the computation (returning base^0 mod modulus = 1 for modulus > 1, or 0 for modulus <= 1), the gas charged still reflects iteration_count=1, not iteration_count=0. 5. Check that the actor-smart-contract node (call originator) cannot influence iteration_count by manipulating input encoding (e.g., leading zeros in exponent field, exponent_length=0 vs exponent_length=1 with zero byte). 6. Verify behavior consistency between exponent_length=0 (no exponent data) and exponent_length=1 with exponent=0x00 -- both must result in iteration_count=1 and identical gas costs. 7. Test exponent_length=32 with all-zero exponent bytes -- must still yield iteration_count=1, not any value based on bit_length calculations on zero.",
+      "bug_class": "Logic Error / Short-Circuit Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "bigModExp.RequiredGas",
+          "line_range": "~760-810",
+          "notes": "Gas calculation entry point. Verify it is always called and correctly parses exponent_length and exponent."
+        },
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "bigModExp.Run",
+          "line_range": "~820-890",
+          "notes": "Check for early-return paths when exponent==0 and whether they interact with gas charging."
+        }
+      ],
+      "executable_checks": [
+        "Trace test: Execute ModExp(base=7, mod=13, exp=0) with EVM tracing enabled, verify RequiredGas is called and returns gas based on iteration_count=1",
+        "Unit test: Verify that ModExp.Run returns correct result (1 mod modulus) when exponent==0",
+        "Unit test: Verify that leading zeros in exponent field do not alter iteration_count (e.g., exponent_length=32, exponent=0x00...00 should still yield iteration_count=1)",
+        "Equivalence test: Verify gas(exponent_length=0) == gas(exponent_length=1, exp=0x00) == gas(exponent_length=32, exp=0x00...00) across all clients"
+      ],
+      "notes": "Source: PROP-0023, Supporting node check for actor-smart-contract and actor-modexp-precompile. The relationship between gas charging (RequiredGas) and execution (Run) must be consistent. Any fast-path for exponent==0 must not diverge from the gas model."
+    },
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0023",
+      "title": "Verify Cross-Client Consensus: Do all Ethereum clients produce identical gas costs for ModExp with exponent==0 across all encoding variants?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with exponent = 0 to test if iteration_count is correctly set to 1."
+      },
+      "test_procedure": "1. Deploy a test contract that calls the ModExp precompile (address 0x05) with the following test vectors designed to probe the exponent==0 / iteration_count==1 invariant: (a) base_length=1, mod_length=1, exp_length=1, base=0x02, mod=0x03, exp=0x00 -- canonical case, expect gas=500 (EIP-7883 floor). (b) base_length=32, mod_length=32, exp_length=32, base=large_value, mod=large_value, exp=0x00...00 (32 zero bytes) -- larger operands but still exponent=0, expect gas=max(500, multiplication_complexity * 1). (c) base_length=0, mod_length=0, exp_length=0 (all zero lengths) -- degenerate case, exponent is implicitly 0. (d) base_length=1, mod_length=1, exp_length=0 (zero-length exponent, which implies exponent=0) -- test that empty exponent data is handled identically. (e) base_length=1, mod_length=1, exp_length=32, exp=0x00...01 -- exponent=1, NOT zero, iteration_count should be 0 via bit_length(1)-1=0, then max(0,1)=1. Compare with exponent=0 to verify both produce iteration_count=1 but for different code paths. (f) base_length=1024, mod_length=1024, exp_length=32, exp=0x00...00 -- maximum-size base/modulus with zero exponent, stress test. 2. Execute each test vector on Geth, Nethermind, Besu, Reth, and Erigon. 3. Record the exact gas consumed for each call on each client. 4. Compare gas values. Any discrepancy indicates a consensus-critical bug in iteration_count or multiplication_complexity handling. 5. For test vectors (c) and (d), pay special attention: exponent_length=0 is a sub-edge-case where the exponent data is empty, and clients must interpret this as exponent=0 with iteration_count=1. 6. Verify that under EIP-7883 rules, the minimum gas cost of 500 is applied consistently. 7. Check that the multiplication_complexity calculation is identical across clients for each test vector.",
+      "bug_class": "Consensus Divergence",
+      "risk_category": "Tampering / Denial of Service",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaModexpGas",
+          "notes": "Geth gas calculation under EIP-7883"
+        },
+        {
+          "file": "Nethermind: Nethermind.Evm/Precompiles/ModExpPrecompile.cs",
+          "function": "Gas calculation method",
+          "notes": "Nethermind gas calculation. Historical ModExp bugs make this high priority."
+        },
+        {
+          "file": "Besu: BigIntegerModularExponentiationPrecompiledContract.java",
+          "function": "gasRequirement",
+          "notes": "Besu gas calculation"
+        },
+        {
+          "file": "Reth/revm: crates/precompile/src/modexp.rs",
+          "function": "gas calculation",
+          "notes": "Reth/revm gas calculation"
+        },
+        {
+          "file": "ethereum/tests: src/GeneralStateTestsFiller/stPreCompiledContracts/modexpFiller.json",
+          "function": "N/A",
+          "notes": "Official Ethereum test suite for ModExp. Verify test vectors cover exponent==0 edge case with iteration_count=1."
+        }
+      ],
+      "executable_checks": [
+        "Cross-client differential test: Run identical ModExp(exp=0) transactions on all 5 major clients, compare gas and output",
+        "Test vector (a): base_length=1, mod_length=1, exp_length=1, exp=0x00 -> expect gas=500 (EIP-7883 floor) on all clients",
+        "Test vector (b): base_length=32, mod_length=32, exp_length=32, exp=0 -> expect gas=max(500, ceil(32/8)^2 * 1) = max(500, 16) = 500 on all clients",
+        "Test vector (c): all lengths=0 -> expect gas=500 on all clients",
+        "Test vector (d): base_length=1, mod_length=1, exp_length=0 -> expect gas=500 on all clients (empty exponent treated as exponent=0)",
+        "Test vector (f): base_length=1024, mod_length=1024, exp_length=32, exp=0 -> expect gas=max(500, 2*128^2 * 1) = max(500, 32768) = 32768 on all clients",
+        "Verify ethereum/tests repository includes explicit test cases for exponent==0 with iteration_count=1 under EIP-7883 gas rules"
+      ],
+      "notes": "Source: PROP-0023, Trust Boundary: tb-007. Cross-client consensus divergence on gas calculation is a critical consensus-layer vulnerability. The Nethermind OOM bug (October 2022, reported by iosiro) demonstrated that ModExp edge cases can and do cause client divergence. EIP-7883 changed the gas formula (removed /3, raised floor to 500, doubled large-exponent multiplier from 8 to 16), so all clients must have been updated consistently for Fusaka activation. The iteration_count=1 invariant for exponent==0 is explicitly specified in the EIP but relies on the max(iteration_count, 1) floor -- any client that omits or misplaces this floor will produce iteration_count=0, yielding gas=max(500, complexity * 0) = 500 regardless of operand size, which is an undercharge for large operands."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0024",
+      "title": "Verify Trust Boundary Integrity: Is iteration_count computed as exactly bit_length(exponent) - 1 when exponent_length <= 32 and exponent != 0, with consistent bit_length semantics across all clients?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with various exponent values to probe bit_length calculation consistency."
+      },
+      "test_procedure": "1. Locate the iteration_count calculation for the exponent_length <= 32, exponent != 0 code path in each Ethereum execution client: (a) go-ethereum: modexpIterationCount in core/vm/contracts.go (line ~468-489). The relevant code is: if bitLen := expHead.BitLen(); bitLen > 0 { count, carry := bits.Add64(iterationCount, uint64(bitLen-1), 0); ... }. Uses uint256.Int.BitLen() which returns int. (b) reth/revm: calculate_iteration_count in crates/precompile/src/modexp.rs (line ~159-172). The relevant code is: else if exp_length <= 32 { iteration_count = exp_highp.bit_len() as u64 - 1; }. Uses U256::bit_len() which returns usize. (c) Besu: BigIntegerModularExponentiationPrecompiledContract.java -- locate the equivalent iteration_count path using BigInteger.bitLength(). (d) Nethermind: ModExpPrecompile.cs -- locate the equivalent path. (e) Erigon: contracts.go -- likely mirrors go-ethereum. 2. CRITICAL: Verify the definition of bit_length/BitLen across all implementations matches the EIP specification. The EIP-2565/EIP-7883 spec uses Python's int.bit_length() semantics: 'the number of bits necessary to represent the integer in binary, excluding the sign and leading zeros.' Specifically: bit_length(0)=0, bit_length(1)=1, bit_length(2)=2, bit_length(3)=2, bit_length(4)=3, bit_length(128)=8, bit_length(255)=8, bit_length(256)=9. 3. For each client, verify that the implementation's BitLen/bit_len function matches Python's bit_length semantics exactly. Key equivalences: (a) Go's big.Int.BitLen() and uint256.Int.BitLen(): Returns the length of the absolute value in bits; 0 for the number 0. This matches Python. (b) Rust's U256::bit_len() (from alloy-primitives): Verify it returns 0 for 0, 1 for 1, etc. Some implementations define bit_len as the position of the highest set bit, which may be 0-indexed (returning 0 for value 1) -- this would be off-by-one. (c) Java's BigInteger.bitLength(): Returns 'the number of bits in the minimal two's complement representation, excluding the sign bit.' For positive integers this matches Python. Verify no edge cases with Java's two's complement semantics. (d) C# BigInteger: Verify the equivalent method. 4. Power-of-2 boundary testing -- these are the critical values where bit_length transitions: exponent=1 (bit_length=1, iter=0, final=max(0,1)=1), exponent=2 (bit_length=2, iter=1), exponent=3 (bit_length=2, iter=1), exponent=4 (bit_length=3, iter=2), exponent=7 (bit_length=3, iter=2), exponent=8 (bit_length=4, iter=3), exponent=128 (bit_length=8, iter=7), exponent=255 (bit_length=8, iter=7), exponent=256 (bit_length=9, iter=8). 5. Test the maximum 32-byte exponent: exponent = 2^256-1 (all 32 bytes set to 0xFF). bit_length should be 256, iteration_count = 255. Then final = max(255, 1) = 255. Verify all clients agree. 6. Test exponent values at each power-of-2 boundary from 2^0 through 2^255: For exponent = 2^k, bit_length = k+1, iteration_count = k. For exponent = 2^k - 1, bit_length = k, iteration_count = k-1. These transition points are where off-by-one bugs manifest. 7. Verify the subtraction bit_length - 1 does not underflow: When exponent=1, bit_length=1, and 1-1=0. This is safe in unsigned arithmetic. But if a client computes bit_length as 0-indexed (returning 0 for value 1), then 0-1 would underflow uint64 to 2^64-1, catastrophically inflating iteration_count. 8. Verify the max(iteration_count, 1) floor is applied AFTER the subtraction. The spec says: iteration_count = exponent.bit_length() - 1 first, then return max(iteration_count, 1). For exponent=1: bit_length=1, iter=0, final=1. If a client applies max first then subtracts, it would get max(1,1)-1=0, which is wrong.",
+      "bug_class": "Off-by-One / Bit Length Inconsistency / Consensus Divergence",
+      "risk_category": "Tampering / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "modexpIterationCount",
+          "line_range": "466-489",
+          "description": "Uses expHead.BitLen() (uint256.Int method) returning int. The code computes uint64(bitLen-1) and adds to iterationCount. Verify: (a) BitLen() matches Python semantics, (b) bitLen-1 does not underflow when bitLen=1 (Go int subtraction is safe), (c) the cast to uint64 is safe since bitLen <= 256."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "calculate_iteration_count",
+          "line_range": "159-172",
+          "description": "Uses exp_highp.bit_len() as u64 - 1. CRITICAL: If bit_len() returns 0 for value 1 (0-indexed), then 0u64 - 1 would wrap to u64::MAX in Rust release mode. Verify bit_len() returns 1 for value 1. Also verify: the 'as u64' cast does not truncate (bit_len returns usize, which is 64-bit on 64-bit systems)."
+        },
+        {
+          "file": "Besu: evm/src/main/java/org/hyperledger/besu/evm/precompile/BigIntegerModularExponentiationPrecompiledContract.java",
+          "function": "iterationCount calculation",
+          "description": "Uses BigInteger.bitLength(). Verify Java's bitLength() returns 1 for value 1 (it does per JDK docs). Verify signed arithmetic does not cause issues for very large positive exponents."
+        },
+        {
+          "file": "Nethermind: src/Nethermind/Nethermind.Evm/Precompiles/ModExpPrecompile.cs",
+          "function": "Iteration count calculation",
+          "description": "C# implementation. Verify the bit length method used and its semantics. Historical ModExp bugs in Nethermind make this high priority."
+        },
+        {
+          "file": "Erigon: core/vm/contracts.go or equivalent",
+          "function": "modexpIterationCount or equivalent",
+          "description": "Likely mirrors go-ethereum. Verify independently as forks can diverge over time."
+        },
+        {
+          "file": "ethereum/execution-specs: src/ethereum/osaka/vm/precompiled_contracts/modexp.py",
+          "function": "calculate_iteration_count",
+          "description": "Reference Python implementation: iteration_count = exponent.bit_length() - 1. This is the canonical definition all clients must match."
+        }
+      ],
+      "executable_checks": [
+        "Cross-client differential: Call ModExp with exponent values at every power-of-2 boundary {1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256} and compare exact gas cost across Geth, Reth, Besu, Nethermind, Erigon",
+        "Unit test per client: Verify iteration_count(exp=1) == 1 (via max(0,1)=1), iteration_count(exp=2) == 1, iteration_count(exp=128) == 7, iteration_count(exp=255) == 7, iteration_count(exp=256) == 8",
+        "Max exponent test: Verify iteration_count(exp=2^256-1) == 255 across all clients. This is the maximum iteration_count for exponent_length <= 32",
+        "Off-by-one boundary test: For each k in 0..255, verify iteration_count(2^k) == k and iteration_count(2^k - 1) == k-1 (for k >= 1). These transitions are where bit_length disagreements surface",
+        "Underflow test: Verify that for exponent=1, the subtraction bit_length(1)-1 = 0 does not wrap to a large value in any client's unsigned integer arithmetic",
+        "PoC from property: Call ModExp with exponent values at power-of-2 boundaries {2^0, 2^1, 2^7, 2^8, 2^31, 2^32-1, 2^128, 2^255, 2^256-1} and compare gas costs across all clients. Any divergence is a consensus bug",
+        "Gas formula verification: For exponent=256 (bit_length=9, iter=8) with base_length=32, mod_length=32: gas = max(500, 16 * 8) = max(500, 128) = 500. Verify across all clients"
+      ],
+      "notes": "Source: PROP-0024, Invariant type, Trust Boundary: tb-007, Threat: stride-013. This is a CRITICAL boundary property because the attacker fully controls the exponent value. The bit_length computation is deceptively simple but has subtle cross-language differences: Python's int.bit_length(), Go's big.Int.BitLen()/uint256.Int.BitLen(), Rust's U256::bit_len(), Java's BigInteger.bitLength(), and C#'s equivalent must all agree on the same value for the same input. Off-by-one errors at power-of-2 boundaries are the most likely divergence vector. The property's PoC hint explicitly targets this: 'Call ModExp with exponent values at power-of-2 boundaries and compare gas costs across clients.' A single bit_length disagreement produces different iteration_count values, different gas costs, different receipts, and a consensus split."
+    },
+    {
+      "check_id": "CHK-0011",
+      "property_id": "PROP-0024",
+      "title": "Verify Trust Boundary Integrity: Is the exponent correctly extracted from calldata and zero-padded/truncated consistently before bit_length computation?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with various exponent values to probe bit_length calculation consistency."
+      },
+      "test_procedure": "1. The ModExp precompile ABI encodes the exponent as: first 96 bytes = base_length (32 bytes) + exponent_length (32 bytes) + modulus_length (32 bytes), followed by base_data (base_length bytes), then exponent_data (exponent_length bytes), then modulus_data (modulus_length bytes). The 'exponent head' (expHead) used for gas calculation is the first min(exponent_length, 32) bytes of the exponent_data, right-aligned into a 256-bit integer. 2. CRITICAL EDGE CASE: What happens when exponent_length < 32? The exponent_data contains exponent_length bytes, which must be interpreted as a big-endian integer. If exponent_length = 3 and exponent_data = [0x01, 0x00, 0x00], the exponent = 65536 (0x10000), and bit_length = 17, iteration_count = 16. Verify all clients interpret this identically. 3. CRITICAL EDGE CASE: What happens when calldata is shorter than expected? If the calldata does not contain enough bytes for the full exponent, clients must zero-pad the missing bytes. Example: exponent_length=32 but only 16 bytes of exponent data are provided. The exponent should be treated as the 16 provided bytes followed by 16 zero bytes (big-endian), which could change the bit_length significantly. 4. Test the expHead extraction logic in each client: (a) go-ethereum: Uses getData(input, baseLen+96, expLen) to extract exponent bytes, then new(uint256.Int).SetBytes(). Verify getData zero-pads if input is too short. (b) reth/revm: Uses get_input_data or similar. Verify zero-padding behavior. (c) Besu/Nethermind: Verify respective extraction logic. 5. Test vectors for exponent extraction edge cases: (a) exponent_length=1, exponent_data=[0x80] -> exponent=128, bit_length=8, iter=7. (b) exponent_length=2, exponent_data=[0x00, 0x80] -> exponent=128, bit_length=8, iter=7. (c) exponent_length=2, exponent_data=[0x80, 0x00] -> exponent=32768, bit_length=16, iter=15. (d) exponent_length=32, exponent_data=[0x00]*31 + [0x01] -> exponent=1, bit_length=1, iter=0, final=1. (e) exponent_length=32, exponent_data=[0x80] + [0x00]*31 -> exponent=2^255, bit_length=256, iter=255. (f) exponent_length=1, but calldata is truncated (no exponent bytes) -> exponent=0 (zero-padded), which enters the exponent==0 path, NOT this code path. 6. Verify that leading zero bytes in the exponent_data do NOT affect the bit_length computation. The bit_length is computed on the integer value, not on the byte representation. 7. Verify endianness consistency: All clients must interpret exponent_data as big-endian. A little-endian interpretation would produce completely different bit_length values.",
+      "bug_class": "Input Parsing / Byte Interpretation / Zero-Padding Inconsistency",
+      "risk_category": "Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "RequiredGas (expHead extraction)",
+          "line_range": "561-600",
+          "description": "Extracts expHead via getData() and SetBytes(). getData returns zero-padded slice. SetBytes interprets big-endian. Verify the slice offset calculation: 96 + baseLen for the start of exponent data."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "run_inner (exp_highp extraction)",
+          "line_range": "175-260",
+          "description": "Extracts the exponent head bytes and converts to U256. Verify big-endian interpretation and zero-padding when calldata is short."
+        },
+        {
+          "file": "Besu: BigIntegerModularExponentiationPrecompiledContract.java",
+          "function": "Input parsing for exponent",
+          "description": "Java BigInteger(1, bytes) interprets as big-endian positive. Verify bytes are correctly sliced from input."
+        },
+        {
+          "file": "Nethermind: ModExpPrecompile.cs",
+          "function": "Input parsing for exponent",
+          "description": "Verify exponent extraction from Span<byte> with correct offset and zero-padding."
+        }
+      ],
+      "executable_checks": [
+        "Cross-client test: exponent_length=2, exponent_data=[0x01, 0x00] -> exponent=256, bit_length=9, iter=8. Verify gas cost across all clients",
+        "Cross-client test: exponent_length=2, exponent_data=[0x00, 0x01] -> exponent=1, bit_length=1, iter=0, final=1. Verify gas cost across all clients",
+        "Truncated calldata test: exponent_length=32 but only 1 byte of exponent data provided (0xFF). Exponent should be 0xFF followed by 31 zero bytes = 0xFF000...000 = 2^248 * 255. bit_length=256, iter=255. Verify across all clients",
+        "Zero-padding test: exponent_length=32 with calldata ending right after base data (no exponent bytes). Exponent should be 0 (all zero-padded). This should enter the exponent==0 path. Verify across all clients",
+        "Endianness test: exponent_length=4, exponent_data=[0x00, 0x00, 0x01, 0x00] -> exponent=256 (big-endian). Verify no client interprets as little-endian (which would give exponent=65536)"
+      ],
+      "notes": "Source: PROP-0024, Trust Boundary: tb-007, Threat: stride-013. The exponent extraction from calldata is a trust boundary crossing: attacker-controlled bytes are parsed into a numeric value used for gas calculation. Parsing inconsistencies (endianness, zero-padding, truncation handling) directly cause different bit_length values and thus different iteration_count values. This is a particularly subtle vector because the EIP specification describes the algorithm in terms of Python integer operations, but each client must implement byte-to-integer conversion in its own language, each with its own conventions. The go-ethereum implementation uses getData() which returns zero-padded slices, and SetBytes() which interprets big-endian -- but other clients may handle edge cases differently."
+    },
+    {
+      "check_id": "CHK-0012",
+      "property_id": "PROP-0024",
+      "title": "Verify Supporting Node: Does the ModExp precompile correctly apply max(iteration_count, 1) after computing bit_length(exponent) - 1 for small non-zero exponents?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with various exponent values to probe bit_length calculation consistency."
+      },
+      "test_procedure": "1. Focus on exponent=1, the unique case where bit_length(exponent) - 1 = 0 for a non-zero exponent. The spec defines: iteration_count = exponent.bit_length() - 1 = 1 - 1 = 0, then return max(0, 1) = 1. This is the only non-zero exponent that hits the max() floor. 2. Verify the ordering of operations in each client: The subtraction (bit_length - 1) MUST happen before the max(). If a client computes max(bit_length, 1) - 1 instead, for exponent=1 this gives max(1,1)-1=0, which is WRONG (should be 1). For exponent=2 this gives max(2,1)-1=1, which is correct. Only exponent=1 triggers this off-by-one. 3. In go-ethereum (modexpIterationCount): The function adds bitLen-1 to iterationCount (which is 0 for expLen <= 32), then returns max(iterationCount, 1). For exponent=1: bitLen=1, iterationCount=0+0=0, return max(0,1)=1. Correct. 4. In reth/revm (calculate_iteration_count): For exp_length <= 32 and non-zero: iteration_count = exp_highp.bit_len() as u64 - 1. For exponent=1: bit_len()=1, iteration_count=0. Then return max(0, 1)=1. Correct IF bit_len() returns 1 for value 1. 5. Verify the gas impact: For exponent=1 with base_length=1024, mod_length=1024: multiplication_complexity = 2 * 128^2 = 32768. With iteration_count=1: gas = 32768 * 1 = 32768. With incorrect iteration_count=0: gas = max(500, 32768 * 0) = 500. The difference is 32768 vs 500 -- a 65x undercharge. This is exploitable: the attacker pays 500 gas for an operation that should cost 32768. 6. Test vector: base=large_1024_byte_value, modulus=large_1024_byte_value, exponent=0x01 (1 byte). Expected gas=32768 (under EIP-7883). If any client returns 500, it has the bug. 7. Verify that exponent=1 does NOT enter the exponent==0 code path. Some implementations might check 'is exponent zero' by examining the raw bytes rather than the integer value -- but exponent_data=[0x01] is clearly non-zero. However, test: exponent_length=32, exponent_data=[0x00]*31 + [0x01]. The expHead value is 1. Verify this enters the non-zero path.",
+      "bug_class": "Operation Ordering / Gas Undercharging",
+      "risk_category": "Tampering / Gas Mispricing",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "modexpIterationCount",
+          "line_range": "466-489",
+          "description": "The function first computes bitLen-1 and adds to iterationCount, then applies max(iterationCount, 1). Order is correct. Verify no refactoring has changed this."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "calculate_iteration_count",
+          "line_range": "159-172",
+          "description": "Line 165: iteration_count = exp_highp.bit_len() as u64 - 1. Line 171: max(iteration_count, 1). Order is correct. Verify."
+        },
+        {
+          "file": "Besu: iteration count calculation",
+          "function": "Gas calculation for small non-zero exponents",
+          "description": "Verify bitLength()-1 is computed first, then max(result, 1) is applied."
+        },
+        {
+          "file": "Nethermind: iteration count calculation",
+          "function": "Gas calculation for small non-zero exponents",
+          "description": "Verify the same ordering. Nethermind's prior ModExp bugs make this critical to verify."
+        }
+      ],
+      "executable_checks": [
+        "Critical test: ModExp(base=random_1024_bytes, mod=random_1024_bytes, exp=0x01). Expected gas = max(500, 2*128^2 * max(bit_length(1)-1, 1)) = max(500, 32768*1) = 32768. If any client returns 500, the max() floor is misapplied",
+        "Comparison test: ModExp(exp=0x01) vs ModExp(exp=0x02) with same base/mod. For exp=1: iter=max(0,1)=1, gas=32768. For exp=2: iter=max(1,1)=1, gas=32768. Both should yield same gas. If exp=1 is cheaper, the floor is broken",
+        "Comparison test: ModExp(exp=0x01) vs ModExp(exp=0x03). For exp=1: iter=1. For exp=3: iter=max(1,1)=1. Same gas. Verify",
+        "Comparison test: ModExp(exp=0x04). bit_length(4)=3, iter=2. Gas = 32768*2 = 65536. This should be MORE expensive than exp=1 (32768). Verify across all clients",
+        "Unit test per client: Verify calculate_iteration_count(exp_length=1, exp=1) returns exactly 1, not 0"
+      ],
+      "notes": "Source: PROP-0024, Supporting node check for actor-modexp-precompile. The exponent=1 case is the unique non-zero exponent where bit_length()-1 = 0, making it the only case where the max(iteration_count, 1) floor activates for non-zero exponents. If the max() floor is missing or misplaced, exponent=1 with large base/modulus would cost only 500 gas instead of 32768 -- a 65x undercharge. This is exploitable for gas undercharging attacks within EIP-7823 bounds."
+    },
+    {
+      "check_id": "CHK-0013",
+      "property_id": "PROP-0024",
+      "title": "Verify Cross-Client Consensus: Do all clients produce identical gas costs for ModExp across a comprehensive set of exponent values at power-of-2 boundaries?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["EVM execution", "Precompile dispatch"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker calls ModExp with various exponent values to probe bit_length calculation consistency."
+      },
+      "test_procedure": "1. This is the definitive cross-client consensus test for PROP-0024. Deploy a test contract or use direct precompile calls to test the following comprehensive exponent value matrix. For each test, use base_length=64, modulus_length=64, exponent_length=32 to ensure multiplication_complexity > 500 (complexity = 2 * ceil(64/8)^2 = 2*64 = 128) so that iteration_count differences are visible in the gas cost (gas = 128 * iteration_count, not floored at 500 for most values). 2. Test Matrix -- exponent values and expected results under EIP-7883: (a) exp=1 (0x01): bit_length=1, iter=max(0,1)=1, gas=max(500,128*1)=500. (b) exp=2 (0x02): bit_length=2, iter=1, gas=max(500,128*1)=500. (c) exp=3 (0x03): bit_length=2, iter=1, gas=max(500,128*1)=500. (d) exp=4 (0x04): bit_length=3, iter=2, gas=max(500,128*2)=500. (e) exp=7 (0x07): bit_length=3, iter=2, gas=500. (f) exp=8 (0x08): bit_length=4, iter=3, gas=500. (g) exp=15 (0x0F): bit_length=4, iter=3, gas=500. (h) exp=16 (0x10): bit_length=5, iter=4, gas=max(500,512)=512. (i) exp=31 (0x1F): bit_length=5, iter=4, gas=512. (j) exp=32 (0x20): bit_length=6, iter=5, gas=max(500,640)=640. (k) exp=64 (0x40): bit_length=7, iter=6, gas=768. (l) exp=128 (0x80): bit_length=8, iter=7, gas=896. (m) exp=255 (0xFF): bit_length=8, iter=7, gas=896. (n) exp=256 (0x0100): bit_length=9, iter=8, gas=1024. (o) exp=2^128 (0x01 followed by 16 zero bytes): bit_length=129, iter=128, gas=128*128=16384. (p) exp=2^255 (0x80 followed by 31 zero bytes): bit_length=256, iter=255, gas=128*255=32640. (q) exp=2^256-1 (32 bytes of 0xFF): bit_length=256, iter=255, gas=32640. 3. Execute all test vectors on Geth, Reth, Besu, Nethermind, and Erigon. 4. Compare the exact gas consumed for each test vector across all clients. 5. ANY difference in gas for ANY test vector indicates a consensus-critical bug. The most likely failure points are: (a) power-of-2 boundaries where bit_length transitions (exp=2^k vs 2^k-1), (b) exponent=1 where the max() floor activates, (c) large exponents near 2^255-2^256 where byte interpretation matters. 6. Additionally test with exponent_length < 32 to verify correct zero-padding: (a) exponent_length=1, exp_data=[0x80] -> exp=128, same as test (l). (b) exponent_length=1, exp_data=[0xFF] -> exp=255, same as test (m). (c) exponent_length=2, exp_data=[0x01, 0x00] -> exp=256, same as test (n). 7. Verify the test results match the Python reference implementation output exactly.",
+      "bug_class": "Consensus Divergence / Cross-Client Inconsistency",
+      "risk_category": "Consensus Divergence / Network Split",
+      "code_locations": [
+        {
+          "file": "go-ethereum: core/vm/contracts.go",
+          "function": "osakaModexpGas (complete gas path)",
+          "description": "Full gas calculation including modexpIterationCount and osakaMultComplexity."
+        },
+        {
+          "file": "revm: crates/precompile/src/modexp.rs",
+          "function": "osaka_gas_calc / calculate_iteration_count / gas_calc",
+          "description": "Full gas calculation path in Rust."
+        },
+        {
+          "file": "Besu: gas calculation for Osaka ModExp",
+          "function": "gasRequirement",
+          "description": "Full gas calculation path in Java."
+        },
+        {
+          "file": "Nethermind: gas calculation for Osaka ModExp",
+          "function": "Gas calculation method",
+          "description": "Full gas calculation path in C#."
+        },
+        {
+          "file": "Erigon: gas calculation for Osaka ModExp",
+          "function": "Gas calculation method",
+          "description": "Full gas calculation path in Go (may differ from Geth)."
+        },
+        {
+          "file": "ethereum/execution-specs: osaka/vm/precompiled_contracts/modexp.py",
+          "function": "calculate_gas_cost",
+          "description": "Python reference implementation -- canonical source of truth for expected gas values."
+        }
+      ],
+      "executable_checks": [
+        "PoC (from property): Call ModExp with exponent values at power-of-2 boundaries {1, 2, 4, 8, 16, 32, 64, 128, 256, 2^128, 2^255, 2^256-1} and compare gas costs across all clients. Any divergence is a consensus bug",
+        "Full test matrix: Execute all 17 test vectors from the test procedure above on all 5 clients, record gas values in a comparison table",
+        "Pair-wise transition test: For each k in {1,2,...,8,128,255}, verify gas(2^k) > gas(2^k - 1) -- confirming bit_length transitions at power-of-2 boundaries",
+        "Encode-equivalence test: Verify gas(exp_length=32, exp=0x00...0100) == gas(exp_length=2, exp=0x0100) == gas(exp_length=1, exp=...) for exponent=256. The encoding should not affect gas",
+        "Python reference comparison: Run all test vectors through the EIP-7883 Python reference implementation and verify each client matches exactly"
+      ],
+      "notes": "Source: PROP-0024, Trust Boundary: tb-007, Threat: stride-013. This is the comprehensive cross-client consensus verification for the bit_length property. The property's severity justification states: 'Inconsistent bit_length computation across clients causes different gas costs for the same inputs, leading to consensus failure.' The bug bounty PoC hint is explicit: 'Call ModExp with exponent values at power-of-2 boundaries and compare gas costs across clients.' Power-of-2 boundaries are where bit_length(2^k)=k+1 but bit_length(2^k-1)=k, so a single off-by-one in any client's bit_length implementation creates a gas disagreement at exactly these boundary values. Historical precedent: The Nethermind ModExp OOM consensus issue (October 2022, reported by iosiro) showed that edge case handling in ModExp implementations can and does diverge across clients."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T09:30:00Z",
+    "total_checks": 13,
+    "by_severity": {
+      "Critical": 10,
+      "High": 3,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 13,
+      "Formal Verification Engineer": 0
+    },
+    "all_in_scope": true,
+    "defense_layers": [
+      {
+        "eip": "EIP-7823",
+        "role": "Input bounds: limits base_length, exponent_length, modulus_length to <= 1024 bytes each",
+        "failure_impact": "Without this, attacker-controlled uint256 length values can cause integer overflow in gas calculation"
+      },
+      {
+        "eip": "EIP-7883",
+        "role": "Pricing increase: multiplication_complexity = 2 * ceil(max_length/8)^2 for large operands, minimum gas = 500, iteration_count multiplier for exp > 32 bytes doubled from 8 to 16",
+        "failure_impact": "Without this, large operands are underpriced, enabling DoS even within EIP-7823 bounds"
+      },
+      {
+        "eip": "EIP-7825",
+        "role": "Transaction gas limit cap: max 2^24 gas per transaction",
+        "failure_impact": "Without this, attacker could use unlimited gas to invoke many expensive precompile calls"
+      }
+    ],
+    "attack_chain": "Attacker submits transaction -> contract CALLs ModExp precompile (addr 0x05) -> large base_length/modulus_length in calldata -> if EIP-7823 check is missing/after gas calc -> ceil(max_length/8)^2 overflows -> multiplication_complexity wraps to 0 -> gas cost = max(500, 0) = 500 -> expensive computation runs for nearly free -> block processing hangs -> network DoS"
+  }
+}

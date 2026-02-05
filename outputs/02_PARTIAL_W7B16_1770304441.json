@@ -1,0 +1,434 @@
+{
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0016",
+      "title": "Verify Trust Boundary Integrity: Does verify_data_column_sidecar reject sidecars where len(column) != len(kzg_commitments) or len(column) != len(kzg_proofs)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Gossip validation pipeline"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker can craft sidecar with mismatched array lengths."
+      },
+      "test_procedure": "1. Identify the verify_data_column_sidecar function implementation in the client codebase (the q_check_lengths state in the validation state machine). 2. Construct a DataColumnSidecar where len(sidecar.column) > len(sidecar.kzg_commitments) (e.g., column has 7 entries but kzg_commitments has 6). Verify the function returns False and the sidecar is REJECTED at the gossip layer. 3. Construct a DataColumnSidecar where len(sidecar.column) < len(sidecar.kzg_proofs) (e.g., column has 5 entries but kzg_proofs has 6). Verify rejection. 4. Construct a DataColumnSidecar where len(sidecar.kzg_commitments) != len(sidecar.kzg_proofs) but len(sidecar.column) == len(sidecar.kzg_commitments). Verify rejection since all three arrays must be equal in length. 5. Verify that a sidecar with len(column) == 0 is also rejected (covered by the q_check_empty state which requires len(kzg_commitments) > 0). 6. Verify that the length check occurs BEFORE the sidecar is passed to verify_data_column_sidecar_kzg_proofs, preventing out-of-bounds access during KZG batch verification. 7. Test with maximum valid length (max_blobs_per_block) and maximum+1 to confirm boundary behavior. 8. Send the crafted malformed sidecar via the P2P gossip network and confirm the node does not crash, panic, or exhibit undefined behavior.",
+      "bug_class": "Input Validation / Array Length Mismatch",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar",
+          "line_range": "q_check_lengths state"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation (step 1: verify_data_column_sidecar call)",
+          "line_range": "q_validate_sidecar state"
+        }
+      ],
+      "executable_checks": [
+        "Fuzz test: Generate DataColumnSidecar with random array lengths for column, kzg_commitments, and kzg_proofs where at least two arrays differ in length. Verify all are rejected.",
+        "Unit test: Create sidecars with specific mismatch patterns: (N, N-1, N), (N, N, N-1), (N-1, N, N), (N, N+1, N-1). Verify all rejected.",
+        "Integration test: Send malformed sidecar over gossip and confirm the receiving node rejects it without crashing and does not forward it to peers.",
+        "Boundary test: Test with len(column)=0, len(kzg_commitments)=0, len(kzg_proofs)=0 alongside the empty check (should be rejected by q_check_empty before reaching q_check_lengths)."
+      ],
+      "notes": "Source: PROP-0016, Source Invariant: p2p-SG-002-INV-004, Trust Boundary: tb-001. This is the first validation gate in verify_data_column_sidecar. If bypassed, subsequent KZG proof verification (verify_cell_kzg_proof_batch) would receive mismatched-length arrays, potentially causing out-of-bounds memory access, panics, or incorrect verification results. The state machine shows: q_check_lengths --> q_reject_lengths (if mismatch) or q_accept (if all equal)."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0016",
+      "title": "Verify Supporting Node: Does the gossip validation pipeline propagate verify_data_column_sidecar rejection correctly to prevent forwarding?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Gossip validation pipeline"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker can craft sidecar with mismatched array lengths."
+      },
+      "test_procedure": "1. Identify the gossip validation handler for data_column_sidecar_{subnet_id} topics. 2. Verify that when verify_data_column_sidecar returns False, the gossip handler returns REJECT (not IGNORE). 3. Confirm that a REJECT result prevents the sidecar from being forwarded to any peer. 4. Confirm that a REJECT result prevents the sidecar from being stored or processed further. 5. Check that error handling around verify_data_column_sidecar does not silently swallow failures (e.g., try/catch that converts exceptions to IGNORE instead of REJECT).",
+      "bug_class": "Error Handling / Validation Result Propagation",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "q_validate_sidecar --> q_reject_invalid transition"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Mock verify_data_column_sidecar to return False, confirm gossip handler returns REJECT.",
+        "Integration test: Send invalid sidecar to node A, verify node A does not forward it to node B."
+      ],
+      "notes": "Source: PROP-0016, Trust Boundary: tb-001. The gossip validation state machine shows q_validate_sidecar --> q_reject_invalid: not valid [REJECT]. This supporting check ensures the rejection is properly handled at the gossip layer, not just at the verify_data_column_sidecar level."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0017",
+      "title": "Verify Trust Boundary Integrity: Does verify_data_column_sidecar_kzg_proofs correctly construct cell_indices = [CellIndex(sidecar.index)] * len(sidecar.column)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "KZG proof verification"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Incorrect cell index assignment would cause KZG verification to pass for data at wrong positions."
+      },
+      "test_procedure": "1. Identify the verify_data_column_sidecar_kzg_proofs implementation. Locate where cell_indices is constructed. 2. Verify that all elements in cell_indices are set to CellIndex(sidecar.index), not to any other value (e.g., a loop counter, or the blob index). 3. Verify that the length of cell_indices equals len(sidecar.column). 4. Test with sidecar.index = 0 (first column) and verify cell_indices = [0, 0, ..., 0]. 5. Test with sidecar.index = NUMBER_OF_COLUMNS - 1 (last valid column) and verify cell_indices = [NUMBER_OF_COLUMNS-1, ...]. 6. Construct a scenario where a malicious proposer places data for column X in column Y's position. Verify that the KZG proof verification fails because cell_indices would not match the actual data positions. 7. Check for off-by-one errors in CellIndex conversion (e.g., CellIndex(sidecar.index) vs CellIndex(sidecar.index + 1)). 8. Verify the implementation handles the case where sidecar.column is empty (len == 0), which should have been caught by verify_data_column_sidecar but defense-in-depth applies.",
+      "bug_class": "Data Integrity / Cell Index Mapping",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar_kzg_proofs",
+          "line_range": "q_compute_indices state"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: For each valid column index (0 to NUMBER_OF_COLUMNS-1), verify cell_indices is correctly constructed as [CellIndex(index)] * len(column).",
+        "Property-based test: forall valid sidecars, all(idx == sidecar.index for idx in cell_indices) AND len(cell_indices) == len(sidecar.column).",
+        "Adversarial test: Create a sidecar with valid KZG proofs for column X but set sidecar.index = Y (Y != X). Verify KZG proof verification fails."
+      ],
+      "notes": "Source: PROP-0017, Source Invariant: p2p-SG-003-INV-001, Trust Boundary: tb-008. The state machine shows q_compute_indices --> q_verify. If cell_indices are constructed incorrectly, verify_cell_kzg_proof_batch would verify proofs against wrong positions, potentially accepting data placed at incorrect column positions. This breaks the fundamental data availability guarantee of PeerDAS."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0018",
+      "title": "Verify Trust Boundary Integrity: Does verify_cell_kzg_proof_batch receive consistent-length arrays (commitments_bytes, cell_indices, cells, proofs_bytes)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "KZG proof verification"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Inconsistent array lengths passed to KZG library could cause undefined behavior."
+      },
+      "test_procedure": "1. Identify where verify_cell_kzg_proof_batch is called within verify_data_column_sidecar_kzg_proofs. Map the argument construction: commitments_bytes = sidecar.kzg_commitments, cell_indices = [CellIndex(sidecar.index)] * len(sidecar.column), cells = sidecar.column, proofs_bytes = sidecar.kzg_proofs. 2. Verify that verify_data_column_sidecar (the structural check) is always called BEFORE verify_data_column_sidecar_kzg_proofs in the gossip validation pipeline. This ensures len(column) == len(kzg_commitments) == len(kzg_proofs) before KZG verification. 3. Verify that cell_indices is constructed as len(sidecar.column) elements, ensuring it matches the other arrays. 4. Check for race conditions or TOCTOU issues: could the sidecar be modified between the length check and the KZG verification call? 5. Test the KZG library's behavior when receiving mismatched-length arrays directly (bypassing the structural check). Verify it returns an error rather than crashing or exhibiting undefined behavior. 6. Verify that no code path can reach verify_cell_kzg_proof_batch without first passing through verify_data_column_sidecar.",
+      "bug_class": "Input Validation / Pre-condition Enforcement at Library Boundary",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar_kzg_proofs",
+          "line_range": "q_verify state"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "q_check_kzg_proofs state"
+        }
+      ],
+      "executable_checks": [
+        "Static analysis: Verify all call paths to verify_cell_kzg_proof_batch are preceded by verify_data_column_sidecar length checks.",
+        "Unit test: Directly call verify_cell_kzg_proof_batch with arrays of different lengths. Verify graceful error handling (no crash, panic, or undefined behavior).",
+        "Integration test: In the gossip validation pipeline, confirm verify_data_column_sidecar is called at q_validate_sidecar before q_check_kzg_proofs."
+      ],
+      "notes": "Source: PROP-0018, Source Invariant: p2p-SG-003-INV-002, Trust Boundary: tb-008. This pre-condition is critical because verify_cell_kzg_proof_batch is typically a C/Rust FFI call to a KZG library (c-kzg-4844 or similar). Passing inconsistent-length arrays across FFI boundaries can cause buffer overflows, segfaults, or memory corruption. The structural check in verify_data_column_sidecar is the primary defense, but the KZG library should also validate input lengths as defense-in-depth."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0019",
+      "title": "Is the KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH constant correctly set to 4 and consistently used across all Merkle proof operations?",
+      "severity": "Critical",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Merkle proof verification"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Incorrect proof depth would cause all inclusion proofs to fail or accept invalid proofs."
+      },
+      "test_procedure": "1. Locate the definition of KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH in the client codebase. Verify it equals 4. 2. Locate the generalized index for blob_kzg_commitments in BeaconBlockBody. Compute the expected depth from the SSZ tree structure. Verify it matches 4. The generalized index path from BeaconBlockBody root to blob_kzg_commitments field determines the Merkle branch depth. 3. In verify_data_column_sidecar_inclusion_proof, verify that the depth parameter passed to is_valid_merkle_branch equals KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH (= 4). 4. Attempt to falsify: Change the depth to 3 or 5 in a test environment. Verify that valid inclusion proofs are rejected (depth=3 or depth=5 should cause verification failure for proofs generated at depth=4). 5. Attempt to falsify: Generate a Merkle proof at depth 3 (truncated) and verify it is rejected when checked against depth 4. 6. Check for Fulu-specific changes: verify that the BeaconBlockBody SSZ layout in Fulu has not changed the generalized index of blob_kzg_commitments relative to Deneb/Electra. If new fields were added, the depth may need to change.",
+      "bug_class": "State Consistency / Cryptographic Parameter Correctness",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar_inclusion_proof",
+          "line_range": "q_verify state (depth parameter)"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "BeaconBlockBody SSZ definition",
+          "line_range": "KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH constant"
+        }
+      ],
+      "executable_checks": [
+        "Assertion test: assert KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH == 4",
+        "Structural test: Compute the generalized index of blob_kzg_commitments in BeaconBlockBody from the SSZ schema. Verify floor(log2(generalized_index)) == KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH.",
+        "Falsification test: Generate valid sidecar with correct inclusion proof. Modify the client to use depth=3 or depth=5. Verify verification fails."
+      ],
+      "notes": "Source: PROP-0019, Source Invariant: p2p-SG-004-INV-001, Source Assumption: asm-003. This invariant is critical because if the depth is wrong, ALL inclusion proofs would either fail (breaking liveness - no sidecars accepted) or be trivially forgeable (breaking safety - arbitrary data accepted). The Fulu fork adds new fields to BeaconBlockBody which could shift generalized indices, making this a fork-specific concern."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0020",
+      "title": "Verify Trust Boundary Integrity: Does verify_data_column_sidecar_inclusion_proof correctly verify the Merkle path from hash_tree_root(kzg_commitments) to body_root?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Merkle proof verification"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker could craft sidecar with forged inclusion proof."
+      },
+      "test_procedure": "1. Identify the verify_data_column_sidecar_inclusion_proof implementation. Map the arguments: leaf = hash_tree_root(sidecar.kzg_commitments), branch = sidecar.kzg_commitments_inclusion_proof, depth = KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH, index = get_subtree_index(get_generalized_index(BeaconBlockBody, 'blob_kzg_commitments')), root = sidecar.signed_block_header.message.body_root. 2. Verify the leaf is computed as hash_tree_root of sidecar.kzg_commitments (not a hash of individual commitments, not a different SSZ root). 3. Verify the index is derived from the correct generalized index for blob_kzg_commitments in the Fulu BeaconBlockBody SSZ layout (not a hardcoded value from a previous fork). 4. Verify the root is taken from the block header's body_root (not from a different source). 5. Construct a valid sidecar with correct inclusion proof. Modify one byte of the leaf (kzg_commitments). Verify the proof fails. 6. Construct a valid sidecar. Replace the branch with a random Merkle branch. Verify the proof fails. 7. Construct a valid sidecar. Replace body_root with a different block's body_root. Verify the proof fails. 8. Test the attack scenario: An attacker takes a valid signed block header and constructs a sidecar with different kzg_commitments and a forged inclusion proof. Verify this is rejected.",
+      "bug_class": "Cryptographic Verification / Merkle Proof Integrity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar_inclusion_proof",
+          "line_range": "q_compute_leaf, q_compute_index, q_verify states"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Generate valid block with known kzg_commitments. Extract correct inclusion proof. Verify verify_data_column_sidecar_inclusion_proof returns True.",
+        "Adversarial test: Modify kzg_commitments in sidecar while keeping original inclusion proof. Verify rejection.",
+        "Adversarial test: Generate inclusion proof against wrong BeaconBlockBody root. Verify rejection.",
+        "Regression test: Verify generalized index for blob_kzg_commitments matches Fulu SSZ layout (not Deneb/Electra layout)."
+      ],
+      "notes": "Source: PROP-0020, Source Invariant: p2p-SG-004-INV-002, Source Assumption: asm-003, Trust Boundary: tb-002. The inclusion proof is the critical link between a sidecar's kzg_commitments and the signed block header. If this verification is broken, an attacker can forge sidecars with arbitrary commitments that appear to be part of a valid block. This directly undermines data availability."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0021",
+      "title": "Verify Trust Boundary Integrity: Does compute_subnet_for_data_column_sidecar return a value in [0, DATA_COLUMN_SIDECAR_SUBNET_COUNT) for all valid column indices?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [
+          "Subnet routing"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Subnet miscalculation would fragment the gossip network."
+      },
+      "test_procedure": "1. Identify the compute_subnet_for_data_column_sidecar implementation. Verify it computes column_index % DATA_COLUMN_SIDECAR_SUBNET_COUNT. 2. Verify DATA_COLUMN_SIDECAR_SUBNET_COUNT == 128 in the client configuration. 3. Test all valid column_index values (0 to NUMBER_OF_COLUMNS - 1). For each, verify the result is in [0, 128). 4. Verify the modulo operation uses the correct constant (DATA_COLUMN_SIDECAR_SUBNET_COUNT, not NUMBER_OF_COLUMNS or any other constant). 5. Test edge cases: column_index = 0 (should return 0), column_index = 127 (should return 127), column_index = 128 (should return 0, wrapping), column_index = NUMBER_OF_COLUMNS - 1 (should be valid). 6. Verify the gossip validation checks compute_subnet_for_data_column_sidecar(sidecar.index) == subnet_id as a REJECT condition. 7. Check for integer overflow if column_index is very large (though verify_data_column_sidecar should bound it to < NUMBER_OF_COLUMNS).",
+      "bug_class": "Routing / Subnet Assignment Correctness",
+      "risk_category": "Information Disclosure / Denial of Service",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "compute_subnet_for_data_column_sidecar",
+          "line_range": "q_compute state"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "q_check_subnet state"
+        }
+      ],
+      "executable_checks": [
+        "Exhaustive test: For all column_index in [0, NUMBER_OF_COLUMNS), assert 0 <= compute_subnet_for_data_column_sidecar(column_index) < DATA_COLUMN_SIDECAR_SUBNET_COUNT.",
+        "Constant verification: assert DATA_COLUMN_SIDECAR_SUBNET_COUNT == 128.",
+        "Property-based test: forall valid column_index, result == column_index % 128."
+      ],
+      "notes": "Source: PROP-0021, Source Invariant: p2p-SG-005-INV-001,INV-002, Source Assumption: asm-010, Trust Boundary: tb-010. While not directly attacker-controlled, an incorrect subnet computation would cause nodes to publish and subscribe to wrong subnets, fragmenting the gossip network and breaking data availability. This is an internal-bug class vulnerability but has high network-wide impact."
+    },
+    {
+      "check_id": "CHK-0008",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Do ALL REJECT checks in the gossip validation pipeline execute before a sidecar is accepted and forwarded?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "13-step gossip validation pipeline"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker sends crafted sidecars via gossip. Any bypass of a REJECT check is a critical vulnerability."
+      },
+      "test_procedure": "1. Map all REJECT conditions in the data_column_sidecar gossip validation pipeline. Per the spec state machine, there are 9 REJECT conditions: (a) verify_data_column_sidecar fails, (b) wrong subnet, (c) invalid proposer signature, (d) parent fails validation, (e) slot not higher than parent, (f) finalized checkpoint not ancestor, (g) inclusion proof fails, (h) KZG proofs fail, (i) proposer_index not expected. 2. For each REJECT condition, verify the implementation correctly returns REJECT (not IGNORE, not accept). 3. For each REJECT condition, construct a sidecar that would fail ONLY that check (all other checks pass). Submit via gossip. Verify it is rejected. 4. Verify the ordering of checks: confirm that short-circuit evaluation does not skip later checks when earlier checks pass. Specifically, verify that the validation follows the sequential state machine: q_validate_sidecar -> q_check_subnet -> ... -> q_check_expected_proposer -> q_accept. 5. Check for error handling that could convert a REJECT into a different result (e.g., exception handlers that swallow errors). 6. Verify that no REJECT check can be bypassed via timing (e.g., sending sidecar before parent block arrives but after the IGNORE for parent-not-seen). 7. Check that each REJECT condition independently prevents forwarding.",
+      "bug_class": "Validation Pipeline Completeness",
+      "risk_category": "Tampering / Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "Full pipeline: q_validate_sidecar through q_accept"
+        }
+      ],
+      "executable_checks": [
+        "Per-check bypass test: For each of the 9 REJECT conditions, craft a sidecar that passes all checks EXCEPT the one being tested. Verify rejection.",
+        "Pipeline ordering test: Instrument the validation pipeline. Send valid sidecar. Verify all 9 REJECT checks are evaluated in order before acceptance.",
+        "Error handling audit: Review all try/catch, error recovery, and fallback paths in the gossip validation handler. Verify none can convert REJECT to IGNORE or accept.",
+        "Race condition test: Send sidecar concurrently with its parent block. Verify the IGNORE for parent-not-seen is returned (not accept), and the sidecar is re-evaluated when parent arrives."
+      ],
+      "notes": "Source: PROP-0022, Source Invariant: p2p-SG-006-INV-001, Source Assumption: asm-007, Trust Boundary: tb-001. This is the meta-property for the entire gossip validation pipeline. A bypass of ANY single REJECT check allows invalid sidecars to propagate across the network. The 13-step pipeline (including IGNORE conditions) must be implemented as a strict sequential state machine with no shortcuts."
+    },
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0023",
+      "title": "Is the IGNORE behavior correct: are IGNORED sidecars queued for re-processing and never permanently discarded or forwarded?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Gossip validation pipeline"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Incorrect IGNORE handling could cause data loss (permanent discard) or amplification (forwarding)."
+      },
+      "test_procedure": "1. Identify all IGNORE conditions in the gossip validation pipeline: (a) future slot beyond MAXIMUM_GOSSIP_CLOCK_DISPARITY, (b) slot at or before finalized checkpoint, (c) parent block not yet seen, (d) duplicate sidecar for (slot, proposer_index, index). 2. For IGNORE condition (a) - future slot: Send a sidecar with slot = current_slot + 2. Verify it is IGNORED (not rejected, not forwarded). Verify the node queues it and re-evaluates when the slot arrives. 3. For IGNORE condition (c) - parent not seen: Send a sidecar whose parent block has not been received. Verify IGNORED. Then send the parent block. Verify the sidecar is re-evaluated and (if valid) accepted. 4. For IGNORE condition (d) - duplicate: Send two valid sidecars with the same (slot, proposer_index, index). Verify the first is accepted and the second is IGNORED. Verify the second is NOT forwarded. 5. Attempt to falsify: Check if any IGNORE path leads to permanent discard (sidecar dropped from queue without re-evaluation). 6. Attempt to falsify: Check if any IGNORE path accidentally forwards the sidecar to peers before re-evaluation. 7. Verify the queuing mechanism has appropriate bounds (memory limits) to prevent an attacker from filling the queue with IGNORED sidecars (DoS via queue exhaustion).",
+      "bug_class": "State Management / Message Queue Correctness",
+      "risk_category": "Denial of Service / Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "q_ignore_future, q_ignore_old, q_ignore_no_parent, q_ignore_duplicate states"
+        }
+      ],
+      "executable_checks": [
+        "Queue behavior test: IGNORE a sidecar (parent not seen). Deliver parent. Verify sidecar is re-processed and accepted.",
+        "No-forward test: IGNORE a sidecar. Verify it is NOT forwarded to any peer during the IGNORE period.",
+        "No-discard test: IGNORE a sidecar. Wait for conditions to change. Verify it is re-evaluated (not silently dropped).",
+        "Queue exhaustion test: Send many sidecars that will be IGNORED. Verify memory bounds and that the node remains functional."
+      ],
+      "notes": "Source: PROP-0023, Source Invariant: p2p-SG-006-INV-002, Source Assumption: asm-007. IGNORE is semantically different from REJECT: IGNORED sidecars may become valid later (e.g., when their parent block arrives). Permanent discard of IGNORED sidecars degrades data availability. Forwarding them bypasses validation. Both failure modes are exploitable via crafted P2P messages."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0024",
+      "title": "Is the gossip validation pipeline deterministic: does the same sidecar always produce the same validation outcome?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Gossip validation pipeline"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Non-deterministic validation would cause different nodes to reach different conclusions about the same sidecar."
+      },
+      "test_procedure": "1. Identify all sources of non-determinism in the gossip validation pipeline: (a) Time-dependent checks (current_slot, MAXIMUM_GOSSIP_CLOCK_DISPARITY), (b) State-dependent checks (finalized checkpoint, parent block availability), (c) Cache-dependent checks (deduplication cache state). 2. For a given fixed state (same time, same chain state, same cache state), verify that the same sidecar always produces the same result across multiple invocations. 3. Attempt to falsify: Identify any code paths where the validation result depends on uninitialized memory, race conditions, or non-deterministic data structures (e.g., unsorted maps). 4. Verify that concurrent validation of the same sidecar by multiple goroutines/threads produces consistent results (no data races in shared state like the dedup cache). 5. Verify that the state machine has exactly one path from q_init to q_final for any given (sidecar, node_state) pair. 6. Check for floating-point operations or platform-dependent behavior in any validation step.",
+      "bug_class": "Non-Determinism / Consensus Divergence",
+      "risk_category": "Tampering / Consensus Failure",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "Full pipeline from [*] to q_accept"
+        }
+      ],
+      "executable_checks": [
+        "Determinism test: Run the same sidecar through the validation pipeline 1000 times with identical node state. Verify all produce the same result.",
+        "Concurrency test: Submit the same sidecar from multiple threads simultaneously. Verify no data races (use race detector tooling).",
+        "Cross-client test: Validate the same sidecar on multiple client implementations. Verify identical ACCEPT/REJECT/IGNORE outcomes.",
+        "State-fixed test: Fix node state (time, chain, cache). Verify pipeline output is a pure function of (sidecar, state)."
+      ],
+      "notes": "Source: PROP-0024, Source Invariant: p2p-SG-006-INV-003, Source Assumption: asm-007. Non-deterministic validation is a consensus-critical bug: if node A accepts a sidecar that node B rejects (given identical state), the nodes will diverge on data availability, potentially causing different fork-choice decisions. This is especially dangerous because gossip validation runs on untrusted P2P input that an attacker can craft to trigger edge cases."
+    },
+    {
+      "check_id": "CHK-0011",
+      "property_id": "PROP-0025",
+      "title": "Verify Trust Boundary Integrity: Is the deduplication key (slot, proposer_index, sidecar.index) correctly enforced, preventing equivocation?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Anti-equivocation cache"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker (equivocating proposer) sends conflicting sidecars for the same tuple."
+      },
+      "test_procedure": "1. Identify the deduplication cache implementation for data column sidecars. Verify the cache key is the tuple (slot, proposer_index, sidecar.index). 2. Verify that the FIRST valid sidecar for a given (slot, proposer_index, index) is accepted and stored. 3. Verify that a SECOND sidecar with the SAME (slot, proposer_index, index) but DIFFERENT content (different column data, different kzg_commitments) is IGNORED. 4. Verify that the second sidecar is NOT forwarded to peers. 5. Verify that the dedup check occurs AFTER signature verification (q_check_proposer_sig) but BEFORE q_accept in the pipeline. This ensures only signed sidecars consume dedup cache entries (preventing an attacker from poisoning the cache with unsigned sidecars). 6. Verify the cache key does NOT include content-dependent fields (e.g., hash of column data). The key must be exactly (slot, proposer_index, index) to prevent equivocation. 7. Test equivocation attack: As a malicious proposer, send two sidecars for (slot=N, proposer_index=P, index=C) with different column data. Verify only the first is accepted network-wide. 8. Verify cache eviction policy: sidecars for finalized slots should be evictable, but the cache must retain entries for recent slots to prevent late-arriving equivocations.",
+      "bug_class": "Anti-Equivocation / Deduplication",
+      "risk_category": "Tampering / Data Integrity",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar gossip validation",
+          "line_range": "q_check_first_sidecar state"
+        }
+      ],
+      "executable_checks": [
+        "Equivocation test: Send two valid but conflicting sidecars for the same (slot, proposer_index, index). Verify only the first is accepted.",
+        "Cache key test: Verify the dedup cache uses exactly (slot, proposer_index, index) as key, not (slot, proposer_index, index, content_hash).",
+        "Ordering test: Verify dedup check happens after signature verification to prevent unsigned cache poisoning.",
+        "Cache poisoning test: Attempt to fill the dedup cache with entries for all (slot, proposer_index, index) combinations using invalid signatures. Verify they do not consume cache entries.",
+        "Eviction test: Verify cache entries for finalized slots are properly evicted."
+      ],
+      "notes": "Source: PROP-0025, Source Invariant: p2p-SG-006-INV-004, Source Assumption: asm-006, Trust Boundary: tb-001. Equivocation is when a proposer sends conflicting data for the same slot/index. If the dedup check is wrong (e.g., includes content in the key, or checks before signature verification), an equivocating proposer can cause different nodes to accept different sidecars for the same (slot, proposer_index, index), breaking data availability consistency across the network."
+    }
+  ],
+  "metadata": {
+    "phase": "02",
+    "worker_id": 7,
+    "batch_index": 16,
+    "item_count": 11,
+    "timestamp": 1770304441,
+    "processed_ids": []
+  }
+}

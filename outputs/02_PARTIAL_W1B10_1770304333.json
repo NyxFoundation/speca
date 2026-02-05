@@ -1,0 +1,425 @@
+{
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0016",
+      "title": "Verify Trust Boundary Integrity: Does the P256VERIFY field element bounds check use the field modulus p instead of the subgroup order n?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify the field element validation function for public key coordinates (qx, qy) in the P256VERIFY precompile implementation. 2. Verify the comparison constant is the secp256r1 field modulus p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF, NOT the subgroup order n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551. 3. Generate a test public key where qx or qy falls in the range [n, p) -- this range contains values that are valid field elements but less than p and greater than or equal to n. 4. Submit a valid signature under this key to the precompile and verify it returns success (0x0000...0001). 5. If the implementation uses n for bounds checking, the key will be rejected, and this constitutes a consensus bug. 6. Cross-reference with NIST P-256 test vectors that have coordinates in [n, p).",
+      "bug_class": "Input Validation - Incorrect Bounds Check",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "EIP-7951 precompile implementation (client-specific)",
+          "function": "input_validation / validatePublicKey / checkFieldElement",
+          "line_range": "Locate field element comparison against constant"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: craft a valid P-256 public key with qx in range [n, p) and verify the precompile accepts it",
+        "Differential test: compare field bounds check across multiple client implementations (geth, nethermind, besu, reth, erigon)",
+        "Fuzz test: generate random field elements in [n, p) and verify they pass validation"
+      ],
+      "notes": "Source: PROP-0016, Trust Boundary: tb-001, Invariant: EIP7951-SG004-INV-001. On secp256r1, p and n differ. The gap [n, p) contains approximately 2^128 valid field elements. Using n for bounds checking is a subtle but critical error that would cause consensus divergence between correctly and incorrectly implemented clients."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0016",
+      "title": "Verify Supporting Node: Does the precompile correctly propagate the field element validation result to the verification logic?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Trace the flow from field element validation to the core ECDSA verification logic within the precompile. 2. Verify that a public key passing field bounds check is correctly forwarded to the curve point validation and then to signature verification. 3. Verify that values rejected by the field bounds check result in empty output (not revert). 4. Confirm no secondary validation re-checks field elements with a different constant.",
+      "bug_class": "Logic Error - Validation Chain",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "EIP-7951 precompile implementation (client-specific)",
+          "function": "actor-precompile / p256verify_main",
+          "line_range": "From validation to verification"
+        }
+      ],
+      "executable_checks": [
+        "Integration test: trace execution path for a public key with coordinates in [n, p) through the entire precompile pipeline"
+      ],
+      "notes": "Source: PROP-0016, Supporting node: actor-precompile. Ensures the validation result from SG-004 is correctly consumed by the main verification flow in SG-001."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0017",
+      "title": "Verify Trust Boundary Integrity: Does the P256VERIFY precompile reject inputs whose length is not exactly 160 bytes with empty output?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify the input length check in the precompile implementation. 2. Submit calldata of length 0 bytes and verify empty output is returned (no revert). 3. Submit calldata of length 159 bytes (one byte short) and verify empty output. 4. Submit calldata of length 161 bytes (one byte long) and verify empty output. 5. Submit calldata of length 32 bytes (single field) and verify empty output. 6. Submit calldata of length 320 bytes (double expected) and verify empty output. 7. For each test, confirm the precompile does NOT revert and does NOT read beyond input bounds. 8. Verify the implementation reads exactly five 32-byte fields from positions [0..32], [32..64], [64..96], [96..128], [128..160].",
+      "bug_class": "Input Validation - Length Check",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "EIP-7951 precompile implementation (client-specific)",
+          "function": "input_validation / decodeInput / Run",
+          "line_range": "Input length check and field decoding"
+        }
+      ],
+      "executable_checks": [
+        "Fuzz test: generate inputs of random lengths (0 to 1024 bytes) and verify all non-160 inputs return empty",
+        "Unit test: boundary values 0, 1, 31, 32, 159, 160, 161, 192, 256, 320 bytes",
+        "Crash test: submit 0-byte and maximum-size inputs to verify no panics or out-of-bounds reads"
+      ],
+      "notes": "Source: PROP-0017, Trust Boundary: tb-001, Invariant: EIP7951-SG005-INV-001, Threat: stride-018. Short inputs are particularly dangerous as they could cause out-of-bounds memory reads in unsafe languages (C, Rust unsafe blocks). Long inputs should be silently rejected."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0017",
+      "title": "Verify Supporting Node: Does the external caller interface correctly pass calldata to the precompile without truncation or padding?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify that the EVM CALL/STATICCALL/DELEGATECALL opcode handler passes the exact calldata bytes to the precompile without modification. 2. Check that zero-padded short calldata is NOT silently extended to 160 bytes by the precompile dispatcher. 3. Verify BigEndian decoding of each 32-byte field produces the correct integer values.",
+      "bug_class": "Input Validation - Data Integrity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "EVM precompile dispatcher (client-specific)",
+          "function": "precompile call handler / getData",
+          "line_range": "Calldata passing to precompile"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: verify calldata byte-for-byte integrity from EVM call to precompile input",
+        "Unit test: verify no implicit zero-padding for short inputs"
+      ],
+      "notes": "Source: PROP-0017, Supporting nodes: actor-external-caller, actor-precompile. Some EVM implementations may zero-pad calldata, which could mask the length check."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0018",
+      "title": "Verify Trust Boundary Integrity: Is the gas cost of 6900 sufficient to cover worst-case execution time for all input patterns?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "conditional"
+      },
+      "test_procedure": "1. Benchmark the P256VERIFY precompile with a range of input patterns: (a) edge-case values near 0 or n for the modular inverse step, (b) degenerate elliptic curve point operations (point near infinity, high-order bits), (c) inputs that pass all validations but fail at the final comparison step. 2. Measure wall-clock execution time for each pattern across multiple runs. 3. Compare worst-case execution time to average execution time. 4. Calculate the ratio: if worst_case / average > 3x, flag as potential computational DoS vector. 5. Compare the gas-to-time ratio (6900 gas per worst-case execution) against other precompiles to verify proportionality. 6. Test with inputs designed to maximize modular inverse iterations (values near n-1 for extended Euclidean algorithm).",
+      "bug_class": "Denial of Service - Computational Asymmetry",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "EIP-7951 precompile implementation (client-specific)",
+          "function": "modular_inverse / scalar_multiplication / point_addition",
+          "line_range": "Core arithmetic operations"
+        }
+      ],
+      "executable_checks": [
+        "Benchmark test: measure execution time for 1000 random valid inputs and 1000 crafted edge-case inputs",
+        "Worst-case analysis: identify the input that maximizes execution time and calculate time/gas ratio",
+        "Comparative benchmark: compare P256VERIFY execution cost ratio against ecrecover (precompile 0x01)"
+      ],
+      "notes": "Source: PROP-0018, Trust Boundaries: tb-001, tb-002, Invariant: EIP7951-SG006-INV-003, Threat: stride-003. CONDITIONAL SCOPE: Gas-based DoS requires demonstrating a significant computation time discrepancy. The fixed 6900 gas cost means an attacker pays the same regardless of how expensive the computation actually is. Requires further investigation to determine if the ratio is exploitable in practice."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0019",
+      "title": "Verify Trust Boundary Integrity: Are all modular inverse and elliptic curve operations in P256VERIFY implemented using constant-time algorithms?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review the cryptographic library used for P256 operations in the client implementation. 2. Check if the modular inverse uses a constant-time algorithm (e.g., Fermat's little theorem with constant-time exponentiation, NOT extended Euclidean algorithm which has variable-time branches). 3. Check if scalar multiplication uses a constant-time algorithm (e.g., Montgomery ladder, NOT double-and-add which leaks bit patterns). 4. Check if point addition uses complete addition formulas that handle all cases in constant time. 5. Measure execution time variance across 10,000 calls with different inputs and verify the standard deviation is within expected noise. 6. Review for any early-return optimizations that could leak information about input values.",
+      "bug_class": "Side Channel - Timing Attack",
+      "risk_category": "Information Disclosure",
+      "code_locations": [
+        {
+          "file": "P256 cryptographic library (client-specific)",
+          "function": "modular_inverse / scalarMult / pointAdd",
+          "line_range": "Core cryptographic operations"
+        }
+      ],
+      "executable_checks": [
+        "Timing test: measure execution time for inputs with different Hamming weights and verify no correlation",
+        "Code review: verify no conditional branches dependent on secret values in the hot path",
+        "Library audit: check if the underlying crypto library (e.g., gnark-crypto, blst, OpenSSL) advertises constant-time guarantees for P-256"
+      ],
+      "notes": "Source: PROP-0019, Trust Boundary: tb-001, Threat: stride-004. While EVM execution is deterministic, block producers observing execution traces could exploit timing side channels. Practical exploitability is very low in the EVM context, but constant-time implementation is still best practice for cryptographic operations."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0020",
+      "title": "Verify Trust Boundary Integrity: Does P256VERIFY return exactly 0x0000...0001 (32 bytes) for valid signatures and empty bytes for invalid signatures, with no other output possible?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Generate a valid P-256 key pair and compute a valid ECDSA signature over a known hash. 2. Call P256VERIFY with the valid (h, r, s, qx, qy) and verify the output is exactly 32 bytes: 0x0000000000000000000000000000000000000000000000000000000000000001. 3. Modify the hash by one bit and call P256VERIFY; verify the output is exactly 0 bytes (empty). 4. Modify r by one bit; verify empty output. 5. Modify s by one bit; verify empty output. 6. Use an invalid public key (off-curve point); verify empty output. 7. Use NIST FIPS 186-4 test vectors (both valid and invalid) and verify correct output for each. 8. Verify there is no third output type (e.g., 0x00 32-byte padding, error codes, or partial results). 9. Differential testing: compare outputs across at least two independent client implementations for the same inputs. 10. Test edge cases: r=1, s=1, r=n-1, s=n-1, hash=0, hash=max.",
+      "bug_class": "Functional Correctness - Output Integrity",
+      "risk_category": "Spoofing / Tampering",
+      "code_locations": [
+        {
+          "file": "EIP-7951 precompile implementation (client-specific)",
+          "function": "p256verify_main / Run / Execute",
+          "line_range": "Return value construction"
+        }
+      ],
+      "executable_checks": [
+        "Differential test: run NIST P-256 ECDSA test vectors across all major Ethereum clients and compare outputs byte-for-byte",
+        "Property-based test: for all valid (key, hash, sig) triples, output == 0x0000...0001",
+        "Property-based test: for all invalid inputs, output == empty bytes (length 0)",
+        "Fuzz test: random 160-byte inputs, verify output is always either 32 bytes (0x0000...0001) or 0 bytes"
+      ],
+      "notes": "Source: PROP-0020, Trust Boundaries: tb-001, tb-003, Invariant: EIP7951-SG001-INV-003, Threat: stride-001. This is the fundamental correctness property of the precompile. A violation means either valid signatures are rejected (availability) or invalid signatures are accepted (authentication bypass). Both are consensus-critical."
+    },
+    {
+      "check_id": "CHK-0008",
+      "property_id": "PROP-0020",
+      "title": "Verify Supporting Node: Does the EVM correctly interpret the precompile output when returning to the calling contract?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Deploy a test contract that calls P256VERIFY and checks the return value. 2. Verify that a successful verification (32-byte output) is correctly readable via RETURNDATASIZE and RETURNDATACOPY. 3. Verify that a failed verification (0-byte output) results in RETURNDATASIZE == 0. 4. Verify that the CALL opcode itself returns success (1) even for failed verifications (since the precompile does not revert). 5. Test via STATICCALL and DELEGATECALL to ensure consistent behavior across call types.",
+      "bug_class": "Interface Mismatch - Output Handling",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "EVM interpreter (client-specific)",
+          "function": "opCall / opStaticCall / precompile return handler",
+          "line_range": "Return data handling for precompile outputs"
+        }
+      ],
+      "executable_checks": [
+        "Integration test: Solidity contract that calls precompile and asserts RETURNDATASIZE values",
+        "Unit test: verify CALL returns 1 (success) even when precompile returns empty output"
+      ],
+      "notes": "Source: PROP-0020, Supporting nodes: actor-external-caller, actor-precompile, actor-evm. The boundary between the precompile and the EVM (tb-003) must preserve the semantic distinction between 'success with empty output' and 'revert'."
+    },
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0021",
+      "title": "Verify Trust Boundary Integrity: Does get_blob_parameters correctly sort BLOB_SCHEDULE by epoch descending and return the first matching entry?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the get_blob_parameters function in the consensus layer implementation. 2. Verify that BLOB_SCHEDULE entries are sorted in descending order by epoch before lookup. 3. Test with a schedule containing entries at epochs [10, 20, 30] and query epoch 25: expected result is the entry at epoch 20 (first entry with epoch <= 25 in descending order). 4. Test with query epoch exactly matching an entry (e.g., epoch 20): expected result is that entry. 5. Test with query epoch before all entries (e.g., epoch 5): expected result is ELECTRA default parameters. 6. Test with query epoch after all entries (e.g., epoch 100): expected result is the entry at epoch 30 (highest epoch). 7. Test with a single-entry schedule. 8. Test with an empty schedule: expected result is ELECTRA defaults. 9. Verify the fallback returns (ELECTRA_FORK_EPOCH, MAX_BLOBS_PER_BLOCK_ELECTRA) when no entry matches.",
+      "bug_class": "State Consistency - Parameter Resolution",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md (reference spec)",
+          "function": "get_blob_parameters",
+          "line_range": "BLOB_SCHEDULE lookup logic"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: verify correct parameter resolution for epochs before, between, at, and after schedule entries",
+        "Differential test: compare get_blob_parameters output across all consensus client implementations for the same schedule and query epoch",
+        "Property-based test: forall epochs e, get_blob_parameters(e) returns the entry with the highest epoch <= e, or defaults if none"
+      ],
+      "notes": "Source: PROP-0021, Trust Boundary: tb-008, Invariant: FULU-SG001-INV-004, Threat: stride-009. Incorrect parameter resolution would cause clients to disagree on blob limits, leading to consensus splits where some clients accept blocks others reject. See PR #4277 in ethereum/consensus-specs for the blob schedule introduction."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0021",
+      "title": "Verify Supporting Node: Does the consensus layer correctly apply blob parameters from get_blob_parameters to block validation?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify all call sites of get_blob_parameters in the consensus layer. 2. Verify each call site correctly uses the returned max_blobs_per_block to validate incoming blocks. 3. Submit a block with exactly max_blobs_per_block blobs at a specific epoch and verify acceptance. 4. Submit a block with max_blobs_per_block + 1 blobs and verify rejection. 5. Test at epoch boundaries where the blob limit changes.",
+      "bug_class": "Logic Error - Parameter Application",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md (reference spec)",
+          "function": "process_blob_kzg_commitments / gossip validation",
+          "line_range": "Blob count validation"
+        }
+      ],
+      "executable_checks": [
+        "Integration test: submit blocks with varying blob counts at epoch boundaries and verify correct acceptance/rejection"
+      ],
+      "notes": "Source: PROP-0021, Supporting nodes: actor-blob-schedule, actor-consensus-layer."
+    },
+    {
+      "check_id": "CHK-0011",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Are all epoch values in BLOB_SCHEDULE unique, ensuring deterministic sort order?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the BLOB_SCHEDULE configuration in each client implementation. 2. Verify that a uniqueness check exists, either at configuration load time or at schedule resolution time. 3. If no explicit uniqueness check exists, determine whether the sort algorithm used is stable: if unstable (e.g., quicksort), duplicate epochs would produce non-deterministic ordering across runs or across implementations. 4. Test by injecting a schedule with duplicate epochs (e.g., two entries with epoch=20 but different max_blobs) and verify that: (a) the client rejects the configuration, OR (b) the sort produces a deterministic, spec-compliant order. 5. Cross-compare: run the same duplicate-epoch schedule on multiple clients and verify they all produce the same result or all reject it. 6. Verify the spec or implementation has an explicit prohibition or validation against duplicate epochs.",
+      "bug_class": "State Consistency - Non-deterministic Ordering",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md (reference spec)",
+          "function": "BLOB_SCHEDULE configuration / get_blob_parameters",
+          "line_range": "Schedule definition and sort"
+        }
+      ],
+      "executable_checks": [
+        "Configuration validation test: inject duplicate epoch values and verify rejection",
+        "Differential test: if duplicates are not rejected, compare sort output across clients to detect non-determinism",
+        "Static analysis: check for uniqueness assertion or validation in schedule loading code"
+      ],
+      "notes": "Source: PROP-0022, Trust Boundary: tb-008, Invariant: FULU-SG001-INV-001, Threat: stride-009. Different programming languages and sort algorithm implementations handle duplicate keys differently. Python's sort is stable, but Go's sort.Slice is not guaranteed stable (sort.SliceStable must be used explicitly). Rust's sort_unstable is explicitly non-deterministic for equal elements. This is a subtle cross-client consensus risk."
+    },
+    {
+      "check_id": "CHK-0012",
+      "property_id": "PROP-0025",
+      "title": "Verify Trust Boundary Integrity: Does process_execution_payload reject blocks where payload.parent_hash != state.latest_execution_payload_header.block_hash?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Consensus"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the process_execution_payload function in the consensus layer implementation. 2. Verify the assertion: payload.parent_hash == state.latest_execution_payload_header.block_hash. 3. Construct a test block with a valid execution payload but an incorrect parent_hash (e.g., random 32 bytes). 4. Submit the block via P2P gossip and verify it is rejected during state transition. 5. Construct a block with parent_hash set to a valid but non-latest block hash (referencing an earlier execution payload). 6. Verify rejection. 7. Test with parent_hash = 0x00...00 (zero hash) and verify rejection. 8. Test during optimistic sync: verify that even optimistic nodes validate this assertion before importing the block. 9. Verify the error message or rejection reason is appropriate and does not leak internal state information.",
+      "bug_class": "Input Validation - Chain Integrity",
+      "risk_category": "Tampering / Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md (reference spec)",
+          "function": "process_execution_payload",
+          "line_range": "parent_hash assertion"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: submit block with incorrect parent_hash and verify AssertionError / rejection",
+        "Unit test: submit block with parent_hash referencing a non-latest valid block and verify rejection",
+        "Integration test: simulate P2P gossip of block with junk parent_hash and verify the node does not import it",
+        "Regression test: verify the optimistic sync attack vector (poisoned fork choice) from the Merge is mitigated"
+      ],
+      "notes": "Source: PROP-0025, Trust Boundaries: tb-005, tb-006, Invariant: FULU-SG002-INV-001. This check is critical for execution chain integrity. A missing parent_hash validation was a known attack vector during the Ethereum Merge transition, enabling poisoned fork choice attacks against optimistic nodes. A malicious proposer or P2P peer can submit blocks with arbitrary parent_hash values. See ethereum consensus specs documentation on optimistic sync for historical context."
+    },
+    {
+      "check_id": "CHK-0013",
+      "property_id": "PROP-0025",
+      "title": "Verify Supporting Node: Does the execution engine independently validate the parent hash chain when processing payloads from the consensus layer?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Consensus"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify the engine_newPayload API handler in the execution client. 2. Verify that the execution engine checks payload.parentHash against its own chain head. 3. Submit a payload via engine_newPayload with an incorrect parentHash and verify it returns INVALID status. 4. Verify that even if the consensus layer incorrectly passes a payload with a wrong parent_hash, the execution engine rejects it independently (defense in depth). 5. Test the trust boundary between CL and EL: can a compromised CL force the EL to accept a payload with an incorrect parent?",
+      "bug_class": "Trust Boundary - Defense in Depth",
+      "risk_category": "Tampering / Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "execution engine API (client-specific)",
+          "function": "engine_newPayload / validatePayload",
+          "line_range": "Parent hash validation in execution client"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: call engine_newPayload with mismatched parentHash and verify INVALID response",
+        "Integration test: simulate CL-EL interaction with crafted invalid payloads"
+      ],
+      "notes": "Source: PROP-0025, Supporting nodes: actor-proposer, actor-consensus-layer, actor-execution-engine. Defense in depth requires both CL and EL to validate the parent hash independently. If only one layer checks, a compromise of that layer enables chain forking."
+    }
+  ],
+  "metadata": {
+    "phase": "02",
+    "worker_id": 1,
+    "batch_index": 10,
+    "item_count": 13,
+    "timestamp": 1770304333,
+    "processed_ids": []
+  }
+}

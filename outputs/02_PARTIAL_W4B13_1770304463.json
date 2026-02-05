@@ -1,0 +1,497 @@
+{
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0046",
+      "title": "Verify Trust Boundary Integrity: Is the proposer lookahead computation fully deterministic across all client implementations for identical beacon state inputs?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Cross-client determinism is the fundamental requirement. The proposer lookahead uses hash-based randomness which should be deterministic, but implementation differences in integer handling or seed computation could introduce non-determinism."
+      },
+      "test_procedure": "1. Set up at least two different consensus client implementations (e.g., Lighthouse, Prysm, Teku, Lodestar, Nimbus, Grandine) with identical genesis states and configurations. 2. Advance both clients through multiple epochs using the same sequence of blocks and attestations. 3. At each epoch boundary, extract the full proposer_lookahead array from each client's beacon state. 4. Compare the proposer_lookahead arrays byte-for-byte. 5. Specifically test: (a) Epoch boundaries where effective balances change due to rewards/penalties, (b) Epochs following slashing events that modify effective balances, (c) Epochs following validator activations and exits, (d) The Fulu fork transition epoch (upgrade_to_fulu), (e) Edge cases with very large validator sets where integer overflow in compute_proposer_index could diverge. 6. Verify that compute_proposer_indices uses only deterministic operations: hash(seed + uint_to_bytes(Slot(start_slot + i))) must not depend on platform-specific integer sizes. 7. Verify that get_active_validator_indices returns an identically ordered list across clients (sort stability). 8. Verify that compute_proposer_index uses the same modular arithmetic and does not produce different results due to integer type differences (uint64 vs arbitrary precision).",
+      "bug_class": "Cross-Client Consensus Divergence",
+      "risk_category": "Non-Determinism / Consensus Split",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_proposer_lookahead",
+          "notes": "Shifts out first epoch, fills in last epoch with get_beacon_proposer_indices"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "compute_proposer_indices",
+          "notes": "Core determinism point: hash(seed + uint_to_bytes(Slot(start_slot + i))) per slot"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_beacon_proposer_indices",
+          "notes": "Calls get_active_validator_indices and get_seed; ordering must be consistent"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_beacon_proposer_index",
+          "notes": "Reads state.proposer_lookahead[state.slot % SLOTS_PER_EPOCH]"
+        },
+        {
+          "file": "consensus-specs/specs/phase0/beacon-chain.md",
+          "function": "compute_proposer_index",
+          "notes": "Uses modular arithmetic with effective_balance; must not overflow or truncate differently across implementations"
+        }
+      ],
+      "executable_checks": [
+        "Cross-client differential fuzz test: feed identical beacon states to multiple client implementations and compare proposer_lookahead arrays at every epoch boundary",
+        "Property-based test: forall (state1, state2) where state1 == state2, compute_proposer_indices(state1, epoch, seed, indices) == compute_proposer_indices(state2, epoch, seed, indices)",
+        "Regression test: verify proposer_lookahead consistency across the Fulu fork transition (upgrade_to_fulu function)",
+        "Integer boundary test: test compute_proposer_index with validators having effective_balance at MAX_EFFECTIVE_BALANCE boundaries",
+        "Sort stability test: verify get_active_validator_indices returns same order when validators have identical activation epochs"
+      ],
+      "notes": "Source: PROP-0046, Trust Boundary: tb-009, Source Assumption: asm-011, Source Threat: stride-010. Known related issue: Lighthouse previously had a multiplication overflow in compute_proposer_index (found via beacon-fuzz differential fuzzing). EIP-7917 specifically addresses effective balance non-determinism but implementation-level non-determinism remains a risk. The proposer_lookahead vector length is (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0046",
+      "title": "Verify supporting node: Does the consensus layer correctly execute the proposer_lookahead array shift operation at epoch boundaries without data corruption?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Cross-client determinism is the fundamental requirement. The proposer lookahead uses hash-based randomness which should be deterministic, but implementation differences in integer handling or seed computation could introduce non-determinism."
+      },
+      "test_procedure": "1. Inspect the process_proposer_lookahead implementation in target client code. 2. Verify that the array shift operation state.proposer_lookahead[:last_epoch_start] = state.proposer_lookahead[SLOTS_PER_EPOCH:] correctly preserves the proposer indices for the remaining epochs. 3. Test with a known beacon state where the proposer_lookahead is filled with distinct values. Execute process_proposer_lookahead and verify: (a) The first SLOTS_PER_EPOCH entries are removed, (b) The remaining entries shift left by SLOTS_PER_EPOCH positions, (c) The last SLOTS_PER_EPOCH entries are filled with newly computed proposer indices from get_beacon_proposer_indices. 4. Test edge case: verify behavior at the very first epoch after Fulu fork activation. 5. Verify that no off-by-one errors exist in the last_epoch_start calculation.",
+      "bug_class": "State Mutation Error",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_proposer_lookahead",
+          "notes": "Array shift and fill operation; off-by-one errors could corrupt the lookahead"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: verify process_proposer_lookahead correctly shifts and fills for a known state",
+        "Boundary test: verify behavior at first epoch after fork transition",
+        "Off-by-one test: verify last_epoch_start = len(state.proposer_lookahead) - SLOTS_PER_EPOCH is computed correctly"
+      ],
+      "notes": "Source: PROP-0046, Supporting node check for actor-consensus-layer. The shift operation modifies state in-place; any corruption would propagate to all subsequent proposer lookups."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0046",
+      "title": "Verify supporting node: Does the validator client correctly use the proposer_lookahead to determine its own proposal duties?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Cross-client determinism is the fundamental requirement. The proposer lookahead uses hash-based randomness which should be deterministic, but implementation differences in integer handling or seed computation could introduce non-determinism."
+      },
+      "test_procedure": "1. Verify that the validator client queries get_beacon_proposer_index(state) which reads state.proposer_lookahead[state.slot % SLOTS_PER_EPOCH]. 2. Confirm that the modular index (state.slot % SLOTS_PER_EPOCH) correctly maps to the intended slot within the lookahead vector. 3. Test with a validator that is assigned as proposer for a specific slot: verify the validator recognizes its duty. 4. Test with a validator that is NOT assigned: verify it does not incorrectly claim proposer duty. 5. Verify behavior when state.slot wraps around epoch boundaries (slot 0 of a new epoch). 6. Verify that the validator client does not cache stale proposer_lookahead data across epoch transitions.",
+      "bug_class": "Duty Assignment Error",
+      "risk_category": "Incorrect Proposer Identification",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_beacon_proposer_index",
+          "notes": "Returns state.proposer_lookahead[state.slot % SLOTS_PER_EPOCH]"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/validator.md",
+          "function": "Proposer duty lookup",
+          "notes": "Validator checks if it is the assigned proposer for the current slot"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: verify get_beacon_proposer_index returns correct index for each slot in an epoch",
+        "Integration test: verify validator client correctly identifies its proposal duty using the lookahead",
+        "Epoch transition test: verify validator does not use stale lookahead data after epoch boundary"
+      ],
+      "notes": "Source: PROP-0046, Supporting node check for actor-validator. Incorrect duty recognition could cause missed blocks or double proposals."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0048",
+      "title": "Verify Trust Boundary Integrity: Are versioned_hashes in NewPayloadRequest correctly computed from blob KZG commitments and validated by the EL?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Consensus"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "P2P gossip validation",
+          "Block signature verification",
+          "KZG commitment validation"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A malicious proposer could include commitments that do not correspond to real blob data. The versioned hash computation and EL-side validation must be correct to prevent this."
+      },
+      "test_procedure": "1. Identify the code path in the CL that constructs the NewPayloadRequest, specifically where versioned_hashes are computed via kzg_commitment_to_versioned_hash. 2. Verify that kzg_commitment_to_versioned_hash applies SHA256 to the commitment and prepends the correct version byte (VERSIONED_HASH_VERSION_KZG = 0x01). 3. Verify that the versioned_hashes array maintains the same ordering as blob_kzg_commitments in the block body. 4. Submit a block with intentionally reordered versioned_hashes (swapped indices) and verify rejection. 5. Submit a block with a versioned_hash that does not match its corresponding commitment and verify EL rejection. 6. Submit a block with a valid commitment but corrupted blob data and verify that KZG proof verification catches the mismatch. 7. Test with the maximum number of blobs per block (get_blob_parameters(epoch).max_blobs_per_block) to check for index handling issues. 8. Verify EL-side validation: the EL must independently verify that received versioned_hashes match the execution payload's blob references.",
+      "bug_class": "Cryptographic Validation Bypass",
+      "risk_category": "Tampering / Data Integrity",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/deneb/beacon-chain.md",
+          "function": "kzg_commitment_to_versioned_hash",
+          "notes": "SHA256(commitment)[1:] prefixed with VERSIONED_HASH_VERSION_KZG"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "notes": "Constructs NewPayloadRequest with versioned_hashes from block body"
+        },
+        {
+          "file": "execution-specs/osaka/fork.py",
+          "function": "apply_body / validate_header",
+          "notes": "EL-side validation of versioned hashes against execution payload"
+        }
+      ],
+      "executable_checks": [
+        "Fuzz test: generate random blob commitments and verify versioned_hash computation is consistent",
+        "Negative test: submit block with mismatched versioned_hashes ordering and verify rejection",
+        "Negative test: submit block with versioned_hash computed with wrong version byte",
+        "Integration test: verify CL-to-EL NewPayloadRequest contains correct versioned_hashes for blob-carrying blocks",
+        "Maximum blob count test: verify correct handling at max_blobs_per_block boundary"
+      ],
+      "notes": "Source: PROP-0048, Trust Boundary: tb-006, Source Threat: stride-012. Attacker-controlled input via P2P. Incorrect versioned hash computation could break data availability guarantees for rollups and L2 systems."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0049",
+      "title": "Falsification Check: Can process_execution_payload succeed without correctly updating state.latest_execution_payload_header?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If the cached header does not match the payload, subsequent parent_hash checks (PROP-0025) would use incorrect values, breaking execution payload chaining."
+      },
+      "test_procedure": "1. Identify the process_execution_payload function and locate where state.latest_execution_payload_header is updated. 2. Verify that ExecutionPayloadHeader is derived from ALL fields of the accepted execution payload (parent_hash, fee_recipient, state_root, receipts_root, logs_bloom, prev_randao, block_number, gas_limit, gas_used, timestamp, extra_data, base_fee_per_gas, block_hash, transactions_root, withdrawals_root, blob_gas_used, excess_blob_gas, requests_hash). 3. Attempt to falsify: construct a test where process_execution_payload succeeds but one field of the resulting header does not match the payload. 4. Specifically test: (a) All new Fusaka fields are correctly included in the header, (b) The transactions_root is computed correctly from the transactions list (Merkle root), (c) The withdrawals_root is computed correctly, (d) blob_gas_used and excess_blob_gas are correctly propagated. 5. Verify that the header update is atomic: if any part of process_execution_payload fails after partial header construction, the state is not corrupted. 6. Check for field truncation or type casting errors in header construction.",
+      "bug_class": "State Consistency",
+      "risk_category": "Tampering / State Corruption",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "notes": "Updates state.latest_execution_payload_header after EL validation succeeds"
+        },
+        {
+          "file": "consensus-specs/specs/deneb/beacon-chain.md",
+          "function": "ExecutionPayloadHeader",
+          "notes": "Header type definition; must mirror all ExecutionPayload fields"
+        }
+      ],
+      "executable_checks": [
+        "Post-condition test: after process_execution_payload, verify every field of state.latest_execution_payload_header matches the input payload",
+        "Property-based test: forall payloads P that pass validation, header_from_payload(P) == state.latest_execution_payload_header",
+        "Regression test: verify header includes all Fusaka-specific fields (requests_hash, etc.)",
+        "Atomicity test: verify state rollback if process_execution_payload fails mid-execution"
+      ],
+      "notes": "Source: PROP-0049. Internal post-condition. Incorrect header caching would break the parent_hash chain for future blocks (cascading failure affecting PROP-0025)."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0050",
+      "title": "Verify Trust Boundary Integrity: Does gossip validation reject P2P blocks with fork digests mismatched for the block's epoch?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "P2P gossip validation",
+          "Fork digest matching"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A P2P peer can send blocks with arbitrary fork digests. If fork digest validation is missing, blocks from different fork versions could be processed as if they belong to the current fork."
+      },
+      "test_procedure": "1. Identify the gossip validation logic for the beacon_block topic in each consensus client. 2. Verify that the client computes the expected fork digest for the block's slot/epoch using compute_fork_digest(fork_version, genesis_validators_root). 3. Submit a block over P2P with: (a) A fork digest from a previous fork (e.g., Electra fork digest for a Fulu-era block), (b) A fork digest from a future fork that does not yet exist, (c) A completely random fork digest value, (d) A fork digest that matches the current fork but the block slot is in a transition epoch. 4. Verify all cases are REJECTED at the gossip validation layer before any state transition processing. 5. Verify that the rejection happens at the topic subscription level (messages on wrong topics are not processed). 6. Test the transition epoch: verify correct fork digest at the exact FULU_FORK_EPOCH boundary slot. 7. Verify that peers sending blocks with wrong fork digests are scored down or disconnected.",
+      "bug_class": "Input Validation Bypass",
+      "risk_category": "Spoofing / Fork Confusion",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "beacon_block gossip validation",
+          "notes": "Topic format: /eth2/{ForkDigestValue}/beacon_block/ssz_snappy"
+        },
+        {
+          "file": "consensus-specs/specs/phase0/p2p-interface.md",
+          "function": "compute_fork_digest",
+          "notes": "Computes fork digest from fork_version and genesis_validators_root"
+        }
+      ],
+      "executable_checks": [
+        "Negative test: inject beacon_block gossip message with Electra fork digest on Fulu topic and verify rejection",
+        "Negative test: inject block with random fork digest bytes and verify immediate rejection",
+        "Boundary test: test fork digest validation at exact FULU_FORK_EPOCH transition slot",
+        "Peer scoring test: verify persistent wrong-fork-digest senders get peer score penalties"
+      ],
+      "notes": "Source: PROP-0050, Trust Boundaries: tb-004, tb-010, Source Threat: stride-020. Attacker-controlled P2P input. Defense-in-depth: even if fork digest validation is bypassed, subsequent block signature and state transition checks provide additional barriers."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0051",
+      "title": "Verify Trust Boundary Integrity: Does the CL implement timeout handling for Engine API calls when the EL returns prolonged SYNCING status?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "EngineAPI"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [
+          "JWT authentication",
+          "Engine API protocol"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented. Not directly attacker-controlled but could be triggered by triggering EL sync issues via P2P."
+      },
+      "test_procedure": "1. Identify the CL's Engine API client implementation, specifically newPayload, forkchoiceUpdated, and getPayload handlers. 2. Review each Engine API call for: (a) HTTP/RPC timeout configuration, (b) Retry logic with backoff, (c) Handling of SYNCING response status. 3. Simulate an EL that responds with SYNCING status indefinitely for newPayload calls. 4. Verify the CL: (a) Does not block indefinitely waiting for the EL response, (b) Continues to process attestations and other consensus duties, (c) Times out and retries or moves on within a reasonable period (< 1 slot time). 5. Test with an EL that alternates between SYNCING and VALID responses to verify state machine correctness. 6. Verify that Engine API TCP connections have appropriate socket timeouts. 7. Check for goroutine/thread leaks when Engine API calls timeout.",
+      "bug_class": "Denial of Service / Resource Exhaustion",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "notes": "Calls execution_engine.notify_new_payload; must handle SYNCING response"
+        },
+        {
+          "file": "Engine API specification",
+          "function": "engine_newPayloadV4 / engine_forkchoiceUpdatedV3",
+          "notes": "Can return SYNCING status when EL is not fully synced"
+        }
+      ],
+      "executable_checks": [
+        "Integration test: mock EL returning perpetual SYNCING; verify CL does not stall",
+        "Timeout test: verify CL Engine API calls have configurable timeouts with reasonable defaults",
+        "Liveness test: with EL in SYNCING state, verify CL still processes attestations and participates in gossip",
+        "Resource leak test: verify no goroutine/thread leaks after repeated Engine API timeouts"
+      ],
+      "notes": "Source: PROP-0051, Trust Boundaries: tb-006, tb-007, Source Threat: stride-014. Not directly attacker-controlled but could be indirectly triggered via P2P attacks that cause EL sync issues. Bug bounty eligibility is limited (not bug_bounty_eligible per property)."
+    },
+    {
+      "check_id": "CHK-0008",
+      "property_id": "PROP-0052",
+      "title": "Verify Trust Boundary Integrity: Is each slot's proposer deterministically identifiable via state.proposer_lookahead with non-repudiation through block signature?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal",
+          "Consensus"
+        ],
+        "attacker_controlled": false,
+        "validation_layers": [
+          "Proposer lookahead computation",
+          "Block signature verification"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+      },
+      "test_procedure": "1. Verify that for every slot in an epoch, get_beacon_proposer_index returns a valid, active validator index from the proposer_lookahead. 2. Verify that the block's proposer_index field matches the value from the proposer_lookahead for the block's slot. 3. Verify that the block signature is a valid BLS signature by the validator at the proposer_index. 4. Test non-repudiation: (a) Attempt to produce a valid block with a proposer_index that does not match the lookahead -- verify rejection, (b) Attempt to produce a block with a valid signature from a different validator -- verify rejection, (c) Verify that a validator cannot deny its proposer assignment by showing the deterministic derivation from the lookahead. 5. Test edge cases: (a) Slot 0 of an epoch, (b) The last slot of an epoch, (c) Slots during an epoch transition where the lookahead shifts.",
+      "bug_class": "Identity Verification / Non-Repudiation",
+      "risk_category": "Repudiation",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_beacon_proposer_index",
+          "notes": "Returns state.proposer_lookahead[state.slot % SLOTS_PER_EPOCH]"
+        },
+        {
+          "file": "consensus-specs/specs/phase0/beacon-chain.md",
+          "function": "process_block_header",
+          "notes": "Asserts block.proposer_index == get_beacon_proposer_index(state)"
+        }
+      ],
+      "executable_checks": [
+        "Negative test: submit block with proposer_index != proposer_lookahead value and verify rejection",
+        "Signature test: verify block signature matches the proposer identified by the lookahead",
+        "Determinism test: independently derive the proposer for each slot and compare with lookahead value"
+      ],
+      "notes": "Source: PROP-0052, Trust Boundaries: tb-005, tb-009, Source Threat: stride-013. Primarily a correctness issue. Not bug_bounty_eligible per the property. Incorrect proposer identification is covered more deeply by PROP-0046."
+    },
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0053",
+      "title": "Verify Trust Boundary Integrity: Does the MIN_SEED_LOOKAHEAD delay effectively prevent same-epoch manipulation of proposer assignments via RANDAO influence?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Consensus"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Consensus protocol",
+          "Randao contribution",
+          "MIN_SEED_LOOKAHEAD delay"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A validator controlling multiple slots could attempt to bias the randao mix to manipulate future proposer assignments. The MIN_SEED_LOOKAHEAD provides a time buffer, but the attack is theoretically possible with sufficient validator share."
+      },
+      "test_procedure": "1. Verify that the seed used for epoch N's proposer computation is derived from get_seed(state, N, DOMAIN_BEACON_PROPOSER), which incorporates the RANDAO mix from epoch N - MIN_SEED_LOOKAHEAD - 1. 2. Verify that a validator's RANDAO reveal in epoch N cannot influence proposer assignments for epoch N or epoch N+1 (only N+2 or later). 3. Simulate the 'last-revealer attack': (a) Set up a scenario where an attacker controls the last k consecutive proposer slots of an epoch, (b) Calculate the 2^k possible RANDAO outcomes by choosing to reveal or skip, (c) Verify that the MIN_SEED_LOOKAHEAD delay limits the attacker's ability to target specific future slots. 4. Quantify the bias: for an attacker with 5%, 10%, 20%, and 33% of stake, compute the maximum proposer assignment bias achievable within the MIN_SEED_LOOKAHEAD constraint. 5. Verify that effective balance changes from EIP-7917 cannot be used in conjunction with RANDAO manipulation (the EBs are now fixed at epoch N - MIN_SEED_LOOKAHEAD). 6. Review the proposer_lookahead computation to ensure it uses the correct epoch offset for seed retrieval.",
+      "bug_class": "RANDAO Manipulation / Proposer Grinding",
+      "risk_category": "Tampering / Privilege Escalation",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_beacon_proposer_indices",
+          "notes": "Calls get_seed(state, epoch, DOMAIN_BEACON_PROPOSER) for seed derivation"
+        },
+        {
+          "file": "consensus-specs/specs/phase0/beacon-chain.md",
+          "function": "get_seed",
+          "notes": "Uses RANDAO mix from epoch - MIN_SEED_LOOKAHEAD - 1"
+        },
+        {
+          "file": "consensus-specs/specs/phase0/beacon-chain.md",
+          "function": "process_randao",
+          "notes": "XORs proposer's RANDAO reveal into the epoch's RANDAO mix"
+        }
+      ],
+      "executable_checks": [
+        "Simulation: model last-revealer attack with varying attacker stake percentages and measure proposer assignment bias",
+        "Verification test: confirm seed for epoch N uses RANDAO mix from epoch N-MIN_SEED_LOOKAHEAD-1, not epoch N",
+        "Combined attack test: verify that RANDAO manipulation combined with effective balance changes (pre-EIP-7917) is no longer possible",
+        "Boundary test: verify MIN_SEED_LOOKAHEAD is correctly applied in the proposer_lookahead computation at fork transition"
+      ],
+      "notes": "Source: PROP-0053, Trust Boundary: tb-009, Source Threat: stride-017. Research reference: 'Optimal RANDAO Manipulation in Ethereum' (arXiv:2409.19883) quantifies the bias for various stake percentages. With 5% stake, bias is ~0.048 percentage points; with 33% stake, significantly higher. The MIN_SEED_LOOKAHEAD = 1 epoch provides limited but meaningful protection."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0054",
+      "title": "Verify Trust Boundary Integrity: Do receiving nodes resist resource exhaustion from repeated maximum-blob-count block submissions via P2P?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "P2P gossip validation",
+          "Rate limiting"
+        ],
+        "bug_bounty_scope": "conditional",
+        "notes": "A P2P peer can send blocks with maximum blob count. The dynamic limit from EIP-7892 could be higher than pre-Fusaka limits, stressing node resources. However, high-effort DoS attacks are out of scope."
+      },
+      "test_procedure": "1. Identify the gossip validation logic for beacon_block and data_column_sidecar topics. 2. Verify that per-proposer, per-slot rate limiting is enforced: at most one block per slot per proposer. 3. Test with a P2P peer sending: (a) Multiple valid blocks for the same slot from the same proposer -- verify only the first is processed, (b) Blocks from different proposers for the same slot -- verify only the correct proposer's block is accepted, (c) Blocks with maximum blob commitments (get_blob_parameters(epoch).max_blobs_per_block) at the Fusaka-era limit. 4. Measure resource consumption (memory, CPU, bandwidth) when processing blocks with maximum blob count under the dynamic EIP-7892 parameters. 5. Verify that gossip validation rejects blocks exceeding the blob limit BEFORE performing expensive operations (KZG verification, state transition). 6. Test with the maximum possible blob limit that EIP-7892 could configure and verify no OOM or excessive latency.",
+      "bug_class": "Denial of Service / Resource Exhaustion",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "beacon_block gossip validation",
+          "notes": "REJECT if len(blob_kzg_commitments) > get_blob_parameters(epoch).max_blobs_per_block"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_blob_parameters",
+          "notes": "Returns dynamic blob parameters based on BPO hardfork schedule"
+        }
+      ],
+      "executable_checks": [
+        "Rate limiting test: send multiple blocks from same proposer for same slot and verify only first is processed",
+        "Resource measurement: profile CPU/memory when processing max-blob blocks at Fusaka limits",
+        "Negative test: submit block with blob count > max_blobs_per_block and verify early rejection",
+        "Stress test: sustained maximum-blob-count block submissions to measure node degradation"
+      ],
+      "notes": "Source: PROP-0054, Trust Boundary: tb-004, Source Threat: stride-015. CONDITIONAL scope: high-effort DoS attacks may be out of scope per bug bounty program. Not bug_bounty_eligible per the property. EIP-7892 dynamic blob limits could increase resource requirements compared to pre-Fusaka."
+    },
+    {
+      "check_id": "CHK-0011",
+      "property_id": "PROP-0055",
+      "title": "Verify Trust Boundary Integrity: Does the CL reject blocks with invalid blob commitment counts before forwarding to the EL via Engine API?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Consensus"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "P2P gossip validation",
+          "Block signature verification"
+        ],
+        "bug_bounty_scope": "conditional",
+        "notes": "An attacker could submit blocks that pass early checks but fail blob count validation, wasting CL processing time. If the CL still forwards to the EL before checking blob count, it wastes additional EL resources."
+      },
+      "test_procedure": "1. Identify the ordered assertion chain in process_execution_payload: parent_hash check -> prev_randao check -> timestamp check -> blob count assertion. 2. Verify that the blob count assertion occurs BEFORE the CL calls execution_engine.notify_new_payload. 3. Submit a block that: (a) Has a valid parent_hash, (b) Has a valid prev_randao, (c) Has a valid timestamp, (d) Has blob_kzg_commitments count exceeding max_blobs_per_block. 4. Verify the block is rejected at the blob count assertion step. 5. Verify that NO Engine API call (newPayload) is made to the EL for this rejected block. 6. Instrument or log Engine API calls to confirm no unnecessary EL interaction. 7. Test with blob count = max_blobs_per_block + 1 (just over the limit) and blob count = 0 when expected > 0.",
+      "bug_class": "Validation Ordering / Defense in Depth",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "notes": "Ordered assertion chain: parent_hash -> prev_randao -> timestamp -> blob count -> EL call"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "beacon_block gossip validation",
+          "notes": "Gossip-level rejection should also check blob count"
+        }
+      ],
+      "executable_checks": [
+        "Assertion ordering test: verify blob count check occurs before Engine API newPayload call",
+        "Negative test: submit block with blob count = max + 1 passing all prior checks, verify rejection without EL call",
+        "Instrumentation test: add logging to Engine API calls and verify no call is made for blob-count-invalid blocks",
+        "Boundary test: test with blob count exactly at the limit (should pass) and one over (should fail)"
+      ],
+      "notes": "Source: PROP-0055, Trust Boundary: tb-005, Source Threat: stride-016. CONDITIONAL scope: minor DoS vector. Not bug_bounty_eligible per the property. The ordered assertion chain is a defense-in-depth measure to avoid wasting EL resources."
+    }
+  ],
+  "metadata": {
+    "phase": "02",
+    "worker_id": 4,
+    "batch_index": 13,
+    "item_count": 11,
+    "timestamp": 1770304463,
+    "processed_ids": []
+  }
+}

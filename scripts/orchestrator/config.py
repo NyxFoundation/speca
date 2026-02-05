@@ -160,7 +160,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         input_patterns=["outputs/01e_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=10,
-        item_id_field="property_id",
+        item_id_field="id",
         result_key="checklist",
         output_prefix="CHECKLIST",
     ),

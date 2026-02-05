@@ -1,0 +1,291 @@
+{
+  "source_files": [],
+  "source_properties": ["PROP-0026"],
+  "filtering_summary": {
+    "total_properties_input": 1,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 1
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0026",
+      "title": "Verify Trust Boundary Integrity: Is max_blobs_per_block correctly resolved via epoch-dependent get_blob_parameters at the P2P boundary for beacon block KZG commitment validation?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify every code path where blob_kzg_commitments length is validated against max_blobs_per_block. In the Fulu spec these occur in: (a) process_execution_payload where `len(body.blob_kzg_commitments) <= get_blob_parameters(get_current_epoch(state)).max_blobs_per_block` is asserted, (b) beacon_block gossip validation where the same check is applied, (c) verify_data_column_sidecar where `len(sidecar.kzg_commitments) > get_blob_parameters(epoch).max_blobs_per_block` is checked. 2. For each code path, verify that the epoch used to call get_blob_parameters is derived from the correct source: the beacon state's current epoch (for block processing) or the slot-derived epoch (for sidecar validation). 3. Attempt to submit a beacon block via P2P gossip that contains blob_kzg_commitments exceeding the OLD epoch's max but within the NEW epoch's max, timed at the exact epoch boundary transition. Verify the block is correctly accepted. 4. Attempt the inverse: submit a block with blob_kzg_commitments exceeding the NEW epoch's max but within the OLD epoch's max, timed just after a BPO fork epoch boundary where the limit decreases (hypothetical downgrade scenario). Verify rejection. 5. Verify that the epoch derivation uses the block's own slot context, not a cached or stale epoch value. 6. Cross-reference with real-world precedent: the Prysm Fusaka mainnet bug (December 2025) and the DevNet-4 BPO3 blob parameter mismatch that caused forks and stalled finality in Lighthouse and Nimbus (August 2025).",
+      "bug_class": "Input Validation / Parameter Desynchronization",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "description": "Assert len(body.blob_kzg_commitments) <= get_blob_parameters(get_current_epoch(state)).max_blobs_per_block"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_blob_parameters",
+          "description": "Epoch-dependent lookup into BLOB_SCHEDULE returning BlobParameters(epoch, max_blobs_per_block)"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "beacon_block gossip validation",
+          "description": "[REJECT] len(signed_beacon_block.message.body.blob_kzg_commitments) <= get_blob_parameters(get_current_epoch(state)).max_blobs_per_block"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar",
+          "description": "Check len(sidecar.kzg_commitments) > get_blob_parameters(epoch).max_blobs_per_block where epoch = compute_epoch_at_slot(sidecar.signed_block_header.message.slot)"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: At BPO epoch boundary, block with old-limit blob count is accepted in epoch N-1 and rejected in epoch N if it exceeds the new limit",
+        "Unit test: At BPO epoch boundary, block with new-limit blob count is rejected in epoch N-1 if it exceeds old limit and accepted in epoch N",
+        "Integration test: Submit beacon block via P2P gossip at exact epoch boundary slot with blob count between old and new limits; verify correct accept/reject behavior",
+        "Fuzz test: Randomize epoch values near BPO boundaries and blob_kzg_commitments counts to find edge cases where the wrong limit is applied",
+        "Static analysis: Verify all call sites of get_blob_parameters use the correct epoch source (not a cached, hardcoded, or stale value)"
+      ],
+      "notes": "Source: PROP-0026, Trust Boundary: tb-002, Source Invariant: p2p-SG-007-INV-001. This is a CRITICAL boundary property because an attacker on the P2P network can craft blocks with specific blob counts targeting the epoch boundary where max_blobs_per_block changes. Real-world precedent exists: DevNet-4 BPO3 parameter mismatch (Aug 2025) and Prysm Fusaka mainnet bug (Dec 2025) both involved consensus client disagreements at parameter transition points."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0026",
+      "title": "Verify get_blob_parameters returns correct BlobParameters for every epoch in the BLOB_SCHEDULE, including fallback to Electra defaults",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review the implementation of get_blob_parameters in each consensus client (Prysm, Lighthouse, Teku, Nimbus, Lodestar, Grandine). 2. Verify the function iterates through BLOB_SCHEDULE sorted by epoch in descending order and returns the first entry where epoch >= entry.EPOCH. 3. Test the fallback case: when the epoch is before any BLOB_SCHEDULE entry (or the schedule is empty), verify that BlobParameters(ELECTRA_FORK_EPOCH, MAX_BLOBS_PER_BLOCK_ELECTRA) is returned. 4. Test boundary epochs exactly: for each BLOB_SCHEDULE entry (epoch 412672 with max=15, epoch 419072 with max=21), verify that calling get_blob_parameters(entry_epoch) returns that entry's max_blobs_per_block, and get_blob_parameters(entry_epoch - 1) returns the previous entry's value. 5. Verify that BLOB_SCHEDULE entries satisfy the spec constraints: no duplicate epochs, all epochs >= FULU_FORK_EPOCH, all max_blobs_per_block <= MAX_BLOB_COMMITMENTS_PER_BLOCK. 6. Check for integer overflow or underflow in epoch arithmetic near boundary values.",
+      "bug_class": "Configuration / Lookup Logic Error",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "get_blob_parameters",
+          "description": "Core epoch-to-BlobParameters lookup function that iterates BLOB_SCHEDULE in reverse epoch order"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "BlobParameters",
+          "description": "Data class holding epoch and max_blobs_per_block"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: get_blob_parameters(FULU_FORK_EPOCH) returns correct initial BPO parameters",
+        "Unit test: get_blob_parameters(412672) returns max_blobs_per_block=15 and get_blob_parameters(412671) returns the previous value",
+        "Unit test: get_blob_parameters(419072) returns max_blobs_per_block=21 and get_blob_parameters(419071) returns max_blobs_per_block=15",
+        "Unit test: get_blob_parameters(0) returns Electra fallback (MAX_BLOBS_PER_BLOCK_ELECTRA)",
+        "Unit test: Verify BLOB_SCHEDULE invariants (no duplicate epochs, sorted, all <= MAX_BLOB_COMMITMENTS_PER_BLOCK)",
+        "Property-based test: forall epoch e, get_blob_parameters(e).max_blobs_per_block <= MAX_BLOB_COMMITMENTS_PER_BLOCK"
+      ],
+      "notes": "Source: PROP-0026, Trust Boundary: tb-002. The get_blob_parameters function is the single source of truth for blob limits. If this function returns incorrect values, all downstream validation (beacon block processing, gossip validation, data column sidecar validation) will enforce wrong limits. The sorted reverse iteration pattern is subtle and off-by-one errors here would silently accept oversize blocks."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0026",
+      "title": "Verify epoch derivation consistency: all validation paths use the same epoch source to resolve blob parameters",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Enumerate all validation entry points that check blob_kzg_commitments count: (a) process_execution_payload uses get_current_epoch(state), (b) beacon_block gossip validation uses get_current_epoch(state), (c) verify_data_column_sidecar uses compute_epoch_at_slot(sidecar.signed_block_header.message.slot). 2. Verify that in each consensus client implementation, the epoch derivation matches the spec exactly. A common implementation bug is using a different epoch source (e.g., wall-clock epoch vs. state epoch vs. slot-derived epoch). 3. Construct a scenario where state epoch and slot-derived epoch could differ (e.g., during state transition processing, or when validating blocks from slightly different slots). 4. Test: Create a data column sidecar whose signed_block_header.message.slot maps to an epoch with a different max_blobs_per_block than the processing node's current state epoch. Verify that verify_data_column_sidecar uses the sidecar's slot-derived epoch, not the node's state epoch. 5. Test: During the first slot of a new BPO epoch, verify that process_execution_payload uses the state's epoch (which should now reflect the new epoch) and not a pre-transition value. 6. Check for race conditions in implementations that cache the epoch or blob parameters and may serve stale values across epoch boundaries.",
+      "bug_class": "State Consistency / Epoch Desynchronization",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "description": "Uses get_current_epoch(state) to derive epoch for get_blob_parameters"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar",
+          "description": "Uses compute_epoch_at_slot(sidecar.signed_block_header.message.slot) to derive epoch"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "beacon_block gossip validation",
+          "description": "Uses get_current_epoch(state) for the blob commitment count check"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Verify process_execution_payload epoch matches get_current_epoch(state) at first slot of BPO epoch",
+        "Unit test: Verify verify_data_column_sidecar uses slot-derived epoch, not node state epoch",
+        "Integration test: Node processes sidecar from epoch N while node state is in epoch N+1; verify correct epoch is used",
+        "Integration test: At BPO boundary, verify all three validation paths (block processing, gossip, sidecar) resolve to the same max_blobs_per_block for blocks in the same epoch",
+        "Static analysis: Grep all client codebases for calls to get_blob_parameters and verify the epoch argument source"
+      ],
+      "notes": "Source: PROP-0026, Trust Boundary: tb-002. Epoch derivation inconsistency between validation paths is a high-risk attack vector. If process_execution_payload and the gossip validator use different epochs, an attacker could craft a block that passes gossip validation (and gets propagated) but fails block processing (causing a fork), or vice versa. The verify_data_column_sidecar function deliberately uses the sidecar's slot-derived epoch rather than node state, which is correct per spec but could be misimplemented."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0026",
+      "title": "Verify compute_fork_digest correctly incorporates blob parameters for P2P domain separation at BPO transitions",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review the modified compute_fork_digest implementation that XORs the base fork digest with the hash of blob parameters (epoch + max_blobs_per_block). 2. Verify that when blob parameters change at a BPO epoch, the fork digest changes accordingly, causing P2P domain separation. 3. Test: Compute fork_digest for epoch 412671 (pre-BPO1) and epoch 412672 (BPO1 with max=15). Verify they produce different fork digests. 4. Test: Compute fork_digest for epoch 419071 (pre-BPO2) and epoch 419072 (BPO2 with max=21). Verify they produce different fork digests. 5. Verify that the ENR eth2 field and nfd (next fork digest) field correctly reflect upcoming BPO transitions so peers can discover the divergence before the fork boundary. 6. Test: A malicious peer advertising the pre-BPO fork digest after BPO activation should be filtered out during peer discovery. 7. Check that next_fork_epoch in ENR is set to the next BPO epoch, not just the next regular fork epoch.",
+      "bug_class": "P2P Domain Separation / Fork Digest Mismatch",
+      "risk_category": "Spoofing / Information Disclosure",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "compute_fork_digest",
+          "description": "Modified to XOR base digest with hash(uint_to_bytes(blob_parameters.epoch) + uint_to_bytes(blob_parameters.max_blobs_per_block))"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "ENR eth2 field",
+          "description": "fork_digest uses compute_fork_digest which now depends on blob parameters"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "ENR nfd field",
+          "description": "Next fork digest field for BPO fork awareness"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: compute_fork_digest produces different values before and after each BPO epoch",
+        "Unit test: compute_fork_digest with same epoch but different blob parameters produces different digests",
+        "Integration test: Two nodes with different BLOB_SCHEDULE entries produce incompatible fork digests and cannot gossip to each other",
+        "Unit test: ENR next_fork_epoch is set to the next BPO epoch boundary"
+      ],
+      "notes": "Source: PROP-0026, Trust Boundary: tb-002. The fork digest change at BPO boundaries is critical for preventing network splits. If the fork digest does not change, nodes with different blob parameter configurations could remain on the same gossip network and disagree on block validity, leading to consensus failure. This was observed in practice during the DevNet-4 BPO3 testing (August 2025)."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0026",
+      "title": "Verify block proposer (actor-block-proposer) cannot create blocks exceeding the epoch-dependent max_blobs_per_block",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review the block proposal path in consensus clients to verify that the proposer enforces the epoch-dependent blob limit when constructing blocks. 2. Verify that the proposer queries get_blob_parameters with the correct epoch (the epoch of the slot being proposed) when deciding how many blobs to include. 3. Test: A validator proposing at the first slot of a BPO epoch where max increases from 9 to 15 should be able to include up to 15 blobs. 4. Test: A validator proposing at the last slot before a BPO epoch where max increases should be limited to the pre-BPO max. 5. Verify that MEV-boost and external block builder APIs correctly communicate the epoch-dependent blob limit to builders. 6. Test: Attempt to inject a block via the beacon API with blob_kzg_commitments exceeding the epoch-dependent limit. Verify rejection at the API level before gossip propagation. 7. Check that the execution layer's engine_getBlobsV2 response handling respects the consensus layer's epoch-dependent limit.",
+      "bug_class": "Block Construction Validation",
+      "risk_category": "Tampering / Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/validator.md",
+          "function": "Block proposal logic",
+          "description": "Validator must respect get_blob_parameters(epoch).max_blobs_per_block when selecting blobs to include"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/beacon-chain.md",
+          "function": "process_execution_payload",
+          "description": "Server-side validation that rejects blocks exceeding the limit"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Block proposer at BPO boundary slot includes correct max blobs",
+        "Integration test: MEV-boost relays respect epoch-dependent blob limit",
+        "API test: Beacon API rejects block submissions exceeding epoch-dependent limit",
+        "Fuzz test: Randomize proposal slot and blob count near BPO boundaries to find construction bugs"
+      ],
+      "notes": "Source: PROP-0026, Covered nodes: actor-block-proposer, actor-beacon-node. While the validation in process_execution_payload and gossip rules serves as a backstop, the proposer should also self-enforce the limit. A malicious proposer who bypasses local enforcement will have their blocks rejected at the network level, but the attempted propagation of an oversized block could still cause network churn. The Prysm Fusaka mainnet bug (December 2025) demonstrated how proposer/validator misbehavior at fork boundaries can cascade into network-wide issues."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0026",
+      "title": "Verify data column sidecar validation uses slot-derived epoch (not state epoch) for blob parameter lookup",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block validation", "Epoch-dependent blob parameters"],
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review verify_data_column_sidecar in each consensus client implementation. 2. Verify that the epoch is derived as compute_epoch_at_slot(sidecar.signed_block_header.message.slot), matching the spec. 3. Test: Craft a data column sidecar with a slot in epoch N (pre-BPO, max=9) but with kzg_commitments count = 12. When a node in epoch N validates this, it should be rejected. 4. Test: Craft a data column sidecar with a slot in epoch N+1 (post-BPO, max=15) with kzg_commitments count = 12. When a node in epoch N validates this sidecar (received slightly early), it should use the sidecar's slot-derived epoch (N+1), not the node's current epoch (N), and accept it. 5. Test: Verify that the kzg_commitments count check, the column length equality check (len(column) == len(kzg_commitments)), and the proofs length check all use the same validated bound. 6. Test: Craft a sidecar with 0 kzg_commitments. Verify it is rejected (spec: 'A sidecar for zero blobs is invalid'). 7. Verify the REJECT behavior propagates correctly in gossip validation for the data_column_sidecar_{subnet_id} topic.",
+      "bug_class": "Input Validation / Epoch Source Confusion",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "verify_data_column_sidecar",
+          "description": "epoch = compute_epoch_at_slot(sidecar.signed_block_header.message.slot); len(sidecar.kzg_commitments) > get_blob_parameters(epoch).max_blobs_per_block"
+        },
+        {
+          "file": "consensus-specs/specs/fulu/p2p-interface.md",
+          "function": "data_column_sidecar_{subnet_id} gossip validation",
+          "description": "[REJECT] The sidecar is valid as verified by verify_data_column_sidecar(sidecar)"
+        }
+      ],
+      "executable_checks": [
+        "Unit test: verify_data_column_sidecar with sidecar.slot in epoch N uses epoch N's max, not the node's current epoch",
+        "Unit test: Sidecar with 0 kzg_commitments is rejected",
+        "Unit test: Sidecar with kzg_commitments count exactly at max is accepted",
+        "Unit test: Sidecar with kzg_commitments count at max+1 is rejected",
+        "Fuzz test: Randomize sidecar slot and kzg_commitments length near BPO boundaries",
+        "Integration test: Gossip validation correctly REJECTs invalid sidecars and does not propagate them"
+      ],
+      "notes": "Source: PROP-0026, Trust Boundary: tb-002. The verify_data_column_sidecar function is a critical P2P boundary validator. It uses slot-derived epoch (correct per spec) rather than node state epoch. If an implementation incorrectly uses the node's state epoch, it could accept oversized sidecars from future BPO epochs or reject valid sidecars from the current BPO epoch during epoch transitions. This desynchronization between nodes would cause network fragmentation."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 6,
+    "by_severity": {
+      "Critical": 4,
+      "High": 2,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 6,
+      "Formal Verification Engineer": 0
+    },
+    "all_in_scope": true,
+    "real_world_precedent": [
+      {
+        "event": "Prysm Fusaka Mainnet Bug",
+        "date": "December 2025",
+        "description": "Within hours of Fusaka activation, Prysm consensus client experienced validation issues that slowed block finalization, requiring emergency workaround flag --disable-last-epoch-targets",
+        "relevance": "Demonstrates that parameter transitions at fork boundaries cause real consensus client failures"
+      },
+      {
+        "event": "DevNet-4 BPO3 Blob Parameter Mismatch",
+        "date": "August 2025",
+        "description": "During DevNet-4 testing at BPO3, a blob base-fee/parameter mismatch and CL sync problems occurred in Lighthouse and Nimbus, causing forks and stalled finality",
+        "relevance": "Directly demonstrates the risk of blob parameter desynchronization at BPO epoch boundaries"
+      }
+    ]
+  }
+}

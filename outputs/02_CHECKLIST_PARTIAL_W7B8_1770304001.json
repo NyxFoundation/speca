@@ -1,0 +1,178 @@
+{
+  "source_files": [
+    "inline-property-PROP-0002"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 1,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 1
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0002",
+      "title": "Verify Trust Boundary Integrity: Does the P256VERIFY precompile return exactly 32 bytes (0x0000...0001) on success and exactly 0 bytes on failure?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Signature verification"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Output format is observable by any calling contract. Incorrect encoding would cause authentication systems to misinterpret results."
+      },
+      "test_procedure": "1. LOCATE P256VERIFY OUTPUT ENCODING IN EACH CLIENT: (a) Reference specification (EIP-7951): On success the precompile MUST return exactly 32 bytes: 0x0000000000000000000000000000000000000000000000000000000000000001. On failure (invalid input OR failed verification), the precompile MUST return exactly 0 bytes (empty output). (b) go-ethereum: core/vm/contracts.go, p256Verify.Run method. The success path should return `true32Byte` (a predefined 32-byte constant with value 1 left-padded to 32 bytes). The failure path should return `nil, nil` (empty output, no error). Verify `true32Byte` is defined as `common.LeftPadBytes([]byte{1}, 32)` or equivalent. (c) reth: crates/precompile/src/secp256r1.rs or equivalent. CRITICAL: The paradigmxyz/alphanet reference implementation uses `B256::with_last_byte(result as u8)` which returns 32 bytes for BOTH success AND failure (32-byte 0x00...01 for success, 32-byte 0x00...00 for failure). This VIOLATES the EIP-7951 specification which mandates 0 bytes (empty) on failure, NOT 32 zero bytes. Verify whether the mainline reth has corrected this. (d) Nethermind: src/Nethermind/Nethermind.Evm/Precompiles/P256VerifyPrecompile.cs. Check the return value on the failure path -- it must return an empty byte array, not a 32-byte zero array. (e) Besu: evm/src/main/java/org/hyperledger/besu/evm/precompile/P256VerifyPrecompile.java. Check the Bytes object returned on failure -- it must be Bytes.EMPTY, not Bytes.ofUnsignedInt(0) padded to 32 bytes. 2. VERIFY SUCCESS OUTPUT IS EXACTLY 32 BYTES WITH VALUE 1: Construct a valid P256 signature: generate a secp256r1 key pair (qx, qy), compute hash h = SHA-256(message), sign to get (r, s), encode as 160 bytes [h(32) || r(32) || s(32) || qx(32) || qy(32)] in big-endian. Call the precompile at address 0x100 with >=6900 gas. Verify: (a) RETURNDATASIZE == 32. This is critical. Not 0, not 1, not 33, not 64 -- exactly 32 bytes. (b) RETURNDATACOPY the 32 bytes and verify they equal 0x0000000000000000000000000000000000000000000000000000000000000001. (c) The value is LEFT-PADDED with zeros: bytes[0..30] must all be 0x00, byte[31] must be 0x01. NOT right-padded (which would be 0x0100000000...00). (d) The CALL opcode returns 1 (success), confirming no revert. 3. VERIFY FAILURE OUTPUT IS EXACTLY 0 BYTES: For each failure case below, call the precompile and verify RETURNDATASIZE == 0 (not 32, not 1 -- exactly 0): (a) Invalid input length (< 160 bytes): submit 0, 1, 32, 64, 96, 128, 159 bytes. (b) Invalid input length (> 160 bytes): submit 161, 192, 256 bytes. (c) r = 0 (out of range: need 0 < r < n where n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551). (d) s = 0. (e) r = n (equals curve order). (f) s = n. (g) r = n + 1 (exceeds curve order). (h) qx >= p where p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF. (i) qy >= p. (j) (qx, qy) = (0, 0) -- point at infinity. (k) (qx, qy) not on the secp256r1 curve (valid coordinates but qy^2 != qx^3 + ax + b mod p). (l) Valid point, valid r/s, but wrong hash (verification should fail, not validation). (m) All-zero 160 bytes. (n) All-0xFF 160 bytes. For EACH of these cases: the CALL must return 1 (success, no revert) AND RETURNDATASIZE must be 0. 4. CRITICAL DISTINCTION: EMPTY vs ZERO-PADDED OUTPUT: This is the most dangerous encoding bug category. There are three possible incorrect failure outputs that must all be tested against: (a) WRONG: 32 bytes of 0x0000...0000 (this is what a naive `abi.encode(false)` would produce; a consuming contract using `abi.decode(returndata, (uint256))` would interpret this as `false/0`, which is correct semantically but violates the spec and would cause consensus divergence if another client returns empty). (b) WRONG: 1 byte 0x00 (partial output). (c) WRONG: 32 bytes of 0x0000...0001 (success output returned on failure -- catastrophic authentication bypass). (d) CORRECT: 0 bytes (empty output, RETURNDATASIZE == 0). Deploy a Solidity test contract that: (i) Calls P256VERIFY with invalid input using low-level CALL. (ii) Checks `returndatasize()` in assembly. (iii) Asserts `returndatasize() == 0`. If any client returns 32 zero bytes instead of empty, this will fail and indicate a consensus-critical bug. 5. CONSUMING CONTRACT IMPACT ANALYSIS: Audit common patterns for consuming P256VERIFY results: (a) Pattern A (safe): `(bool success, bytes memory data) = address(0x100).call(input); if (success && data.length == 32 && abi.decode(data, (uint256)) == 1) { ... }`. This correctly checks both success status AND output length AND output value. (b) Pattern B (VULNERABLE to 32-byte-zero-on-failure bug): `(bool success, bytes memory data) = address(0x100).call(input); if (success && data.length > 0) { return abi.decode(data, (bool)); }`. If a client returns 32 zero bytes on failure, data.length > 0 is true, and abi.decode would return false. This accidentally works but is a latent consensus bug. (c) Pattern C (VULNERABLE to wrong-success-on-failure): `(bool success,) = address(0x100).call(input); if (success) { ... }`. This ONLY checks the CALL success status. Since the precompile never reverts, `success` is always true. This pattern fails to distinguish success from failure at all. This is an application-level bug, not a precompile bug, but auditors should note it. (d) Pattern D (ERC-4337/passkey wallets): Account abstraction wallets using P256 for passkey-based authentication typically use: `(bool success, bytes memory result) = P256VERIFY.staticcall(input); return success && result.length == 32;`. If a client returns 32 zero bytes on failure, `result.length == 32` is true, and the wallet would ACCEPT an invalid signature. This is a CRITICAL authentication bypass. 6. CROSS-CLIENT DIFFERENTIAL TEST FOR OUTPUT ENCODING: Construct a single invalid input (e.g., 160 zero bytes) and call P256VERIFY on each client. For each client, record: (a) CALL return value (must be 1 for all). (b) RETURNDATASIZE (must be 0 for all). (c) If RETURNDATASIZE > 0, record the actual return data bytes. Any divergence in RETURNDATASIZE across clients is a CRITICAL consensus bug. Even if all clients agree on the wrong behavior (e.g., all return 32 zero bytes), it still violates the spec and should be reported. 7. CROSS-CLIENT DIFFERENTIAL TEST FOR SUCCESS OUTPUT: Construct a valid P256 signature and call P256VERIFY on each client. For each client, record: (a) CALL return value (must be 1 for all). (b) RETURNDATASIZE (must be 32 for all). (c) The 32-byte return data (must be identical: 0x0000...0001). Any divergence indicates a consensus-critical bug. Possible divergences: (i) Different padding (right-padded 0x01000...00 vs left-padded 0x0000...01). (ii) Different value (0x0000...0000 or 0x0000...0002). (iii) Different length (1 byte instead of 32). 8. ABI ENCODING CONSISTENCY CHECK: The success value 0x0000000000000000000000000000000000000000000000000000000000000001 is identical to `abi.encode(uint256(1))` and `abi.encode(true)` in Solidity. Verify that: (a) The precompile returns this exact encoding, not `abi.encodePacked(uint8(1))` which would be just 0x01 (1 byte). (b) The precompile returns this exact encoding, not `abi.encode(int256(1))` which is the same bytes but semantically different (should not matter in practice). (c) The encoding matches the ecrecover precompile (0x01) output format for consistency with existing precompile patterns. Note: ecrecover returns a 32-byte address on success and empty on failure, which is the same pattern (32 bytes on success, 0 bytes on failure). 9. GAS-BASED SIDE CHANNEL CHECK: Verify that the precompile consumes exactly 6900 gas regardless of whether the output is 32 bytes (success) or 0 bytes (failure). An attacker should not be able to distinguish success from failure by measuring gas consumption. Test: (a) Valid signature: measure gas consumed. Must be exactly 6900. (b) Invalid r value: measure gas consumed. Must be exactly 6900. (c) Failed verification (valid input but wrong hash): measure gas consumed. Must be exactly 6900. (d) Short input (< 160 bytes): measure gas consumed. Must be exactly 6900. If any path consumes different gas, this is an information leak that could be exploited in privacy-sensitive applications. 10. STATICCALL COMPATIBILITY: Verify that P256VERIFY works correctly under STATICCALL (not just CALL). Since the precompile is a pure function with no state modifications, STATICCALL should produce identical results. Test: (a) STATICCALL with valid signature: RETURNDATASIZE == 32, data == 0x0000...0001. (b) STATICCALL with invalid input: RETURNDATASIZE == 0. (c) DELEGATECALL with valid signature: same result (precompile has no storage). (d) CALLCODE with valid signature: same result. If any call type produces different output encoding, this is a bug.",
+      "bug_class": "Output Encoding Correctness / Authentication Bypass",
+      "risk_category": "Tampering / Spoofing",
+      "code_locations": [
+        {
+          "file": "go-ethereum/core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "P256VERIFY precompile Run method -- success returns true32Byte, failure returns nil",
+          "notes": "Verify true32Byte is exactly 32 bytes: 0x0000...0001. Verify failure path returns (nil, nil) not (make([]byte, 32), nil). The distinction between nil (0-length) and a 32-byte zero slice is critical for consensus."
+        },
+        {
+          "file": "reth/crates/precompile/src/secp256r1.rs",
+          "function": "p256_verify / run",
+          "line_range": "P256VERIFY precompile execution function",
+          "notes": "CRITICAL: The paradigmxyz/alphanet reference uses B256::with_last_byte(result as u8) which returns 32 bytes for both success (0x01) and failure (0x00). This VIOLATES the spec which requires empty output on failure. Check whether mainline reth corrects this by returning Bytes::new() (empty) on failure instead of B256::ZERO."
+        },
+        {
+          "file": "Nethermind/src/Nethermind/Nethermind.Evm/Precompiles/P256VerifyPrecompile.cs",
+          "function": "Run",
+          "line_range": "P256VERIFY precompile execution",
+          "notes": "Verify failure returns ReadOnlyMemory<byte>.Empty or Array.Empty<byte>(), not new byte[32]. In C#, the distinction between a zero-length array and a 32-byte zero array matters for RETURNDATASIZE."
+        },
+        {
+          "file": "besu/evm/src/main/java/org/hyperledger/besu/evm/precompile/P256VerifyPrecompile.java",
+          "function": "computePrecompile",
+          "line_range": "P256VERIFY precompile computation method",
+          "notes": "Verify failure returns Bytes.EMPTY, not Bytes.wrap(new byte[32]). The Bytes library distinction between empty and zero-filled is critical."
+        },
+        {
+          "file": "ethereum/execution-specs (reference spec)",
+          "function": "p256_verify (precompiled contract)",
+          "line_range": "Reference Python implementation for Osaka/Fusaka fork",
+          "notes": "The reference spec defines the canonical behavior. Success: Bytes(int.to_bytes(1, 32, 'big')). Failure: Bytes(b''). All client implementations must match this exactly."
+        }
+      ],
+      "executable_checks": [
+        "Deploy a Solidity contract that calls P256VERIFY(0x100) with a valid signature and asserts returndatasize() == 32 via inline assembly; run on all EL clients",
+        "Deploy a Solidity contract that calls P256VERIFY(0x100) with 160 zero bytes and asserts returndatasize() == 0 via inline assembly; any client returning returndatasize > 0 has a consensus bug",
+        "Deploy a Solidity contract that calls P256VERIFY with each of the 14 invalid-input categories and asserts returndatasize() == 0 for all of them",
+        "Cross-client differential test: submit identical valid and invalid P256VERIFY calls to geth, reth, Nethermind, Besu, and Erigon; compare RETURNDATASIZE and return data bytes; flag any divergence",
+        "Deploy an ERC-4337 passkey-verification contract that checks `result.length == 32` to authenticate; submit invalid signatures and verify the wallet correctly rejects them on all clients",
+        "Property-based test: forall inputs, (RETURNDATASIZE == 32 AND returndata == 0x0000...0001) XOR (RETURNDATASIZE == 0) -- there must be no third output state",
+        "Fuzz test P256VERIFY with random 0-1024 byte inputs and verify every output is either exactly 32 bytes (0x0000...0001) or exactly 0 bytes -- no other output length or value should ever occur",
+        "Verify gas consumption is exactly 6900 for both success (32-byte output) and failure (0-byte output) paths across all clients"
+      ],
+      "notes": "Source: PROP-0002, Trust Boundary: tb-003 (actor-precompile -> actor-evm), Source Invariant: EIP7951-SG001-INV-003. This is a CRITICAL boundary property because the output encoding is the interface contract between the precompile and all consuming smart contracts. The tb-003 trust boundary represents the data flowing FROM the precompile back TO the EVM/calling contract. The key insight is that there are TWO distinct failure semantics that must not be confused: (1) empty output (0 bytes) means 'verification failed or input invalid', and (2) 32-byte output with value 1 means 'verification succeeded'. A client that returns 32 zero bytes on failure (instead of empty) would violate the spec and create a consensus divergence risk. This is especially dangerous because many consuming contracts check `data.length == 32` to determine success -- if a client returns 32 zero bytes on failure, these contracts would enter a code path that was never intended, potentially treating a failed verification as if the precompile produced a result. The paradigmxyz/alphanet reference implementation was observed to use B256::with_last_byte(result as u8) which returns 32 bytes for both outcomes, meaning the success/failure distinction relies only on the VALUE (1 vs 0) rather than the LENGTH (32 vs 0). This is a known deviation from the EIP-7951 spec and must be verified as corrected in mainline reth. Historical precedent: the ecrecover precompile (0x01) follows the same pattern -- 32-byte address on success, empty on failure. Any P256VERIFY implementation that deviates from this established pattern is suspect."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0002",
+      "title": "Verify that consuming contracts (ERC-4337 passkey wallets, authentication systems) correctly interpret P256VERIFY output encoding without consensus-sensitive assumptions",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Signature verification"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Output format is observable by any calling contract. Incorrect encoding would cause authentication systems to misinterpret results."
+      },
+      "test_procedure": "1. IDENTIFY HIGH-VALUE CONSUMING CONTRACTS: The primary consumers of P256VERIFY are: (a) ERC-4337 Account Abstraction wallets using WebAuthn/passkey-based P256 signatures for user authentication. These wallets call P256VERIFY to validate the user's passkey signature before authorizing operations. If the output is misinterpreted, an attacker could bypass authentication and drain the wallet. (b) Multisig contracts using P256 as one of the signing algorithms. (c) Cross-chain bridge verifiers that validate P256 signatures from external chains. (d) Any contract that uses the precompile as an oracle for 'is this signature valid?'. 2. AUTHENTICATION BYPASS SCENARIO: The attack scenario for incorrect output encoding is as follows: (a) Attacker submits a transaction to an ERC-4337 wallet with an INVALID P256 signature. (b) The wallet calls P256VERIFY with the attacker's (hash, r, s, qx, qy) input. (c) The precompile SHOULD return empty (0 bytes) because the signature is invalid. (d) BUG: If the precompile returns 32 zero bytes (0x0000...0000) instead of empty, a wallet that checks `data.length == 32` would enter the 'precompile returned a result' branch. (e) The wallet then checks `abi.decode(data, (uint256)) == 1` or `abi.decode(data, (bool)) == true`. With 32 zero bytes, this decodes to 0/false, so the wallet correctly rejects. (f) HOWEVER: a wallet that ONLY checks `data.length == 32` (without checking the value) would ACCEPT the invalid signature. This is a realistic pattern because developers may reason 'the precompile only returns 32 bytes on success'. (g) This is exactly the pattern EIP-7951 is designed to support: if the spec guarantees empty on failure, then `data.length == 32` IS a valid success check. But if a client returns 32 bytes on failure, this assumption breaks. 3. VERIFY OUTPUT LENGTH IS THE CANONICAL SUCCESS INDICATOR: Per the EIP-7951 specification, the output LENGTH is the canonical way to distinguish success from failure: SUCCESS: length == 32. FAILURE: length == 0. The output VALUE (0x01 vs 0x00) is a SECONDARY indicator. Consuming contracts SHOULD be able to rely on length alone. If any client implementation breaks this invariant (by returning 32 bytes on failure), all contracts using the length-based check pattern are vulnerable to authentication bypass. 4. FORGE/FOUNDRY TEST FOR CONSUMING CONTRACT: Write a Foundry test that deploys a mock passkey wallet using the following verification logic: `function verifyPasskey(bytes32 hash, uint256 r, uint256 s, uint256 qx, uint256 qy) returns (bool) { (bool success, bytes memory data) = address(0x100).staticcall(abi.encodePacked(hash, r, s, qx, qy)); return success && data.length == 32; }`. Test this with: (a) Valid signature -> must return true. (b) Invalid signature (wrong hash) -> must return false. (c) Invalid input (r=0) -> must return false. (d) All-zero input -> must return false. Run this test on all major EL clients. Any client where invalid inputs cause `data.length == 32` (returning 32 zero bytes instead of empty) will cause this test to PASS when it should FAIL, indicating an authentication bypass vulnerability. 5. CROSS-CLIENT CONSENSUS SCENARIO: Consider the following scenario that leads to a chain split: (a) Client A (e.g., geth) correctly returns empty on P256VERIFY failure. (b) Client B (e.g., reth) incorrectly returns 32 zero bytes on failure. (c) A passkey wallet contract checks `data.length == 32` for success. (d) An attacker submits a transaction with an invalid signature to the wallet. (e) On Client A: wallet rejects (data.length == 0), transaction fails (or wallet reverts). (f) On Client B: wallet accepts (data.length == 32, and value is 0, but the wallet only checks length), transaction succeeds. (g) RESULT: Client A and Client B disagree on the transaction outcome. This is a consensus-critical fork. Nodes running Client B follow a different chain than nodes running Client A.",
+      "bug_class": "Authentication Bypass / Consensus Divergence",
+      "risk_category": "Spoofing / Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "go-ethereum/core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "Failure return path: must return (nil, nil) not ([]byte{}, nil) or (make([]byte, 32), nil)",
+          "notes": "In Go, nil and []byte{} have different lengths: nil has length 0, and []byte{} also has length 0, but make([]byte, 32) has length 32. The RETURNDATASIZE opcode reflects the length of the returned byte slice."
+        },
+        {
+          "file": "reth/crates/precompile/src/secp256r1.rs",
+          "function": "p256_verify / run",
+          "line_range": "Failure return path",
+          "notes": "Must return Bytes::new() on failure, not B256::ZERO.to_vec(). The alphanet reference implementation's use of B256::with_last_byte(result as u8) returns 32 bytes regardless, which if propagated to mainline reth would cause the consensus divergence scenario described above."
+        },
+        {
+          "file": "ERC-4337 wallet implementations (Safe, Biconomy, ZeroDev, Alchemy LightAccount)",
+          "function": "P256 signature validation callback",
+          "line_range": "The code path that calls P256VERIFY and interprets the result",
+          "notes": "Audit the top ERC-4337 wallet implementations to check whether they use the safe pattern (check length AND value) or the vulnerable pattern (check length only). Any wallet using length-only checks is safe IF AND ONLY IF all clients correctly return empty on failure."
+        }
+      ],
+      "executable_checks": [
+        "Deploy a mock ERC-4337 wallet that uses data.length == 32 as the success check; submit invalid P256 signatures; verify the wallet correctly rejects on ALL clients",
+        "Deploy a mock ERC-4337 wallet that uses abi.decode(data, (uint256)) == 1 as the success check; submit invalid P256 signatures; verify the wallet correctly rejects on ALL clients",
+        "Cross-client test: execute a transaction calling a passkey wallet with an invalid signature on geth and reth simultaneously; verify both clients produce the same transaction receipt status",
+        "Property-based test: forall invalid P256 inputs, calling P256VERIFY and checking data.length < 32 must return true on ALL clients"
+      ],
+      "notes": "Source: PROP-0002, Trust Boundary: tb-003 (actor-precompile -> actor-evm). This is a SUPPORTING check that examines the impact of incorrect output encoding on downstream consumers. The ERC-4337 (Account Abstraction) ecosystem is the highest-impact consumer because passkey-based wallets use P256 signatures for primary authentication. WebAuthn/FIDO2 authenticators (Apple Touch ID, Google Passkeys, YubiKey) use the secp256r1 curve, making P256VERIFY the critical verification primitive. An output encoding bug that causes authentication bypass would affect every passkey wallet on Ethereum. The severity is CRITICAL because: (1) the precompile is reachable from any transaction, (2) the attacker fully controls the input, (3) incorrect output encoding directly leads to signature forgery from the perspective of consuming contracts."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0002",
+      "title": "Verify that the P256VERIFY success output value is exactly 1 (left-padded to 32 bytes) and no other value can be returned on successful verification",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Signature verification"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Output format is observable by any calling contract. Incorrect encoding would cause authentication systems to misinterpret results."
+      },
+      "test_procedure": "1. INVARIANT TO FALSIFY: 'The success output is always exactly 0x0000000000000000000000000000000000000000000000000000000000000001'. Attempt to find ANY valid P256 signature that produces a different 32-byte output value on success. 2. ENDIANNESS TEST: The value 1 MUST be encoded as big-endian uint256, which means it is LEFT-padded with 31 zero bytes. Verify: (a) bytes[0] through bytes[30] are all 0x00. (b) bytes[31] is 0x01. An implementation bug could produce: (i) RIGHT-padded: 0x0100000000...00 (byte[0] = 0x01, rest = 0x00). This would decode to 2^248 in uint256, not 1. (ii) NATIVE-ENDIAN on little-endian systems: same as right-padded on x86/ARM. (iii) Just the byte 0x01 without padding: only 1 byte returned, RETURNDATASIZE = 1. 3. VALUE CORRECTNESS TEST: Verify the precompile returns the value 1, not: (a) 0 (zero): would indicate failure incorrectly. (b) 2 or higher: no valid reason for any other value. (c) The recovered public key or any key material: would be an information leak. (d) The message hash echoed back: would indicate incorrect logic. (e) A boolean true encoded as 0xFF: some languages encode true as 0xFF or -1 in signed representation. 4. MULTIPLE VALID SIGNATURES TEST: Generate 100+ valid P256 signatures with different key pairs, messages, and (r, s) values. For each, call P256VERIFY and verify: (a) RETURNDATASIZE == 32 for ALL of them. (b) Return data == 0x0000...0001 for ALL of them. (c) No signature produces a different success value. This rules out implementation bugs where the return value depends on input data (e.g., accidentally returning the result of an intermediate computation). 5. BOUNDARY R/S VALUES WITH VALID SIGNATURES: Generate valid signatures where: (a) r = 1 (minimum valid r). (b) s = 1 (minimum valid s). (c) r = n - 1 (maximum valid r). (d) s = n - 1 (maximum valid s for secp256r1; note: unlike secp256k1, EIP-7951 does NOT enforce low-s for P256). Verify all return 0x0000...0001 on success. 6. DETERMINISM CHECK: Call P256VERIFY with the same valid input twice in the same transaction (and in different transactions). Verify the output is identical both times. Non-determinism in the cryptographic library would produce different results, leading to state divergence.",
+      "bug_class": "Output Value Correctness / Determinism",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum/core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "Definition of true32Byte constant and its use in the success return path",
+          "notes": "Verify that true32Byte = common.LeftPadBytes([]byte{1}, 32) or equivalent. The constant must be exactly 32 bytes with value 1 in big-endian. Check that LeftPadBytes does not have an off-by-one error."
+        },
+        {
+          "file": "reth/crates/precompile/src/secp256r1.rs",
+          "function": "Success output construction",
+          "line_range": "B256::with_last_byte(1u8) or equivalent",
+          "notes": "B256::with_last_byte(1) produces a 32-byte value with 0x01 in the last byte. 'Last byte' must mean byte[31] (big-endian, rightmost). If the B256 type uses little-endian internal representation, with_last_byte might place 0x01 at the wrong position."
+        }
+      ],
+      "executable_checks": [
+        "Generate 100 valid P256 signatures with random key pairs and messages; call P256VERIFY for each; assert all return exactly 0x0000...0001",
+        "Call P256VERIFY with a valid signature and read the return data byte-by-byte in assembly; assert bytes[0..30] == 0x00 and bytes[31] == 0x01",
+        "Call P256VERIFY with the same valid input 10 times in a single transaction; assert all 10 calls return identical output (determinism check)",
+        "Cross-client: compare the exact 32-byte return data from geth, reth, Nethermind, Besu for the same valid signature; all must be bit-for-bit identical"
+      ],
+      "notes": "Source: PROP-0002, Source Invariant: EIP7951-SG001-INV-003. This check focuses on the Formal Verification aspect of the output invariant: the success value must be EXACTLY 1 (as a 256-bit big-endian integer) and nothing else. This is an internal correctness property covering the actor-precompile node. While less severe than the empty-vs-zero-on-failure distinction (CHK-0001), an incorrect success value could cause contracts using `abi.decode(data, (uint256)) == 1` to reject valid signatures, creating a denial-of-service condition for all P256-based authentication on Ethereum."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 3,
+    "by_severity": {
+      "Critical": 2,
+      "High": 1,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 2,
+      "Formal Verification Engineer": 1
+    },
+    "all_in_scope": true
+  }
+}

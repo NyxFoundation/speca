@@ -1,0 +1,826 @@
+{
+  "source_files": [
+    "inline-property-PROP-0022",
+    "inline-property-PROP-0023",
+    "inline-property-PROP-0024",
+    "inline-property-PROP-0025"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 4,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 4
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0022",
+      "title": "Verify Trust Boundary Integrity: Is calculate_total_blob_gas(tx) correctly enforced against blob_gas_available before any blob transaction is processed?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob gas calculation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker submits blob transactions to exceed the block blob gas limit. If the calculation has edge cases (e.g., overflow in total_blob_gas), the limit could be bypassed."
+      },
+      "test_procedure": "1. Identify all code paths in check_transaction (and equivalent functions in client implementations) where blob_gas_available is computed as MAX_BLOB_GAS_PER_BLOCK - block_output.blob_gas_used. 2. Verify that calculate_total_blob_gas(tx) is called BEFORE any state modifications (sender recovery, nonce check, balance deduction) and that tx_blob_gas_used > blob_gas_available raises BlobGasLimitExceededError. 3. Confirm the constant values: GAS_PER_BLOB = 131,072 (2^17), BLOB_SCHEDULE_MAX = 9, MAX_BLOB_GAS_PER_BLOCK = 1,179,648 (9 * 131,072). 4. Verify the comparison operator: must be strictly greater-than (>), not greater-than-or-equal (>=), matching the spec's 'tx_blob_gas_used > blob_gas_available'. A transaction whose blob gas exactly equals the remaining capacity IS valid. 5. Confirm that blob_gas_available cannot underflow: if block_output.blob_gas_used somehow exceeded MAX_BLOB_GAS_PER_BLOCK due to a prior bug, the subtraction MAX_BLOB_GAS_PER_BLOCK - block_output.blob_gas_used must not wrap around to a large positive value in languages with unsigned integer arithmetic (Rust, Go, C). 6. Verify that the check occurs for every transaction in a block sequentially, with block_output.blob_gas_used accumulating correctly between transactions. 7. Confirm that non-blob transactions return tx_blob_gas_used = 0 from calculate_total_blob_gas and do not affect blob_gas_available. 8. Verify that the per-transaction blob count limit (BLOB_COUNT_LIMIT = 6) is enforced in addition to the per-block blob gas limit, and understand the ordering: in the reference spec, the blob gas limit check runs BEFORE the blob count check (the count check is inside the isinstance(tx, BlobTransaction) block that comes later). Ensure both checks are present and complementary.",
+      "bug_class": "Resource Exhaustion / Limit Bypass",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "Lines computing blob_gas_available and the tx_blob_gas_used > blob_gas_available comparison",
+          "notes": "Reference implementation. MAX_BLOB_GAS_PER_BLOCK = BLOB_SCHEDULE_MAX * GAS_PER_BLOB. The check is: if tx_blob_gas_used > blob_gas_available: raise BlobGasLimitExceededError."
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/gas.py",
+          "function": "calculate_total_blob_gas",
+          "line_range": "Full function body",
+          "notes": "Returns GAS_PER_BLOB * len(tx.blob_versioned_hashes) for BlobTransaction, 0 otherwise."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "ValidateTransaction / validateBlobTx",
+          "line_range": "blob count check and blobless check",
+          "notes": "Geth validates blob count in validateBlobTx: len(hashes) == 0 and len(hashes) > params.BlobTxMaxBlobs. The MaxBlobCount is passed via ValidationOptions."
+        }
+      ],
+      "executable_checks": [
+        "Submit a blob transaction with blob_gas exactly equal to remaining blob_gas_available; verify acceptance",
+        "Submit a blob transaction with blob_gas = blob_gas_available + 1; verify rejection with BlobGasLimitExceededError",
+        "Submit multiple blob transactions in a single block that cumulatively exceed MAX_BLOB_GAS_PER_BLOCK; verify the last one is rejected",
+        "Verify that blob_gas_used accumulates correctly across transactions within a block"
+      ],
+      "notes": "Source: PROP-0022. Trust Boundary: tb-008. The blob gas limit is a Fusaka-critical parameter due to EIP-7594 (PeerDAS) increasing the effective blob capacity."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0022",
+      "title": "Supporting Node Check: Does the block proposer (actor-block-proposer) correctly aggregate blob gas usage across all transactions?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob gas calculation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Block proposer assembles the block. If blob gas accumulation is wrong, the block could include more blob gas than permitted."
+      },
+      "test_procedure": "1. Verify block_output.blob_gas_used is initialized to 0 at the start of block processing. 2. Verify it is incremented by tx_blob_gas_used after each transaction. 3. Verify that the final blob_gas_used matches block.header.blob_gas_used in state_transition. 4. Check for integer overflow when accumulating blob_gas_used across many transactions.",
+      "bug_class": "State Accumulation Error",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "process_transaction",
+          "line_range": "block_output.blob_gas_used += tx_blob_gas_used",
+          "notes": "Accumulation point. Verify tx_blob_gas_used is the value returned from check_transaction."
+        },
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "state_transition",
+          "line_range": "block_output.blob_gas_used != block.header.blob_gas_used",
+          "notes": "Final validation. If mismatch, block is rejected."
+        }
+      ],
+      "executable_checks": [
+        "Construct a block with 9 single-blob transactions (max blobs under Fusaka); verify blob_gas_used = 9 * 131,072 = 1,179,648",
+        "Construct a block with mixed blob and non-blob transactions; verify non-blob transactions contribute 0 to blob_gas_used"
+      ],
+      "notes": "Source: PROP-0022 (supporting node check for actor-block-proposer)."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0023",
+      "title": "Verify Trust Boundary Integrity: Are blob versioned hashes validated to use VERSIONED_HASH_VERSION_KZG (0x01) prefix?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob hash version check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker submits a blob transaction with versioned hashes using a non-0x01 prefix. If the version check is missing or uses wrong comparison, invalid blobs could be included."
+      },
+      "test_procedure": "1. Locate the version check in check_transaction: for each blob_versioned_hash, verify blob_versioned_hash[0:1] == VERSIONED_HASH_VERSION_KZG (b'\\x01'). 2. Test boundary: submit a blob tx with version byte 0x00; verify rejection with InvalidBlobVersionedHashError. 3. Test version byte 0x02; verify rejection. 4. Test version byte 0xFF; verify rejection. 5. Test version byte 0x01; verify acceptance. 6. Verify the check uses byte-slice comparison [0:1] not integer comparison [0], as the reference spec uses slice syntax. 7. Cross-client: verify geth (ValidateBlobCommitmentHashes), reth, nethermind, besu all check the version prefix identically.",
+      "bug_class": "Version Validation Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "for blob_versioned_hash in tx.blob_versioned_hashes: if blob_versioned_hash[0:1] != VERSIONED_HASH_VERSION_KZG",
+          "notes": "VERSIONED_HASH_VERSION_KZG = b'\\x01'. The check iterates ALL hashes."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "validateBlobTx / ValidateBlobCommitmentHashes",
+          "line_range": "Sidecar validation including commitment hash checks",
+          "notes": "Geth validates blob commitment hashes via sidecar.ValidateBlobCommitmentHashes(hashes)."
+        }
+      ],
+      "executable_checks": [
+        "Submit blob tx with one hash having version byte 0x00; verify rejection",
+        "Submit blob tx with all valid 0x01 hashes except the last one using 0x02; verify rejection",
+        "Submit blob tx with a hash that is all zeros (0x00...00); verify rejection",
+        "Cross-client test: run version byte boundary test across geth, reth, nethermind, besu, erigon"
+      ],
+      "notes": "Source: PROP-0023. Trust Boundary: tb-008."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0023",
+      "title": "Supporting Node Check: Does the block proposer verify ALL versioned hashes in a multi-blob transaction?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob hash version check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A subtle bug could check only the first hash and skip the rest."
+      },
+      "test_procedure": "1. Submit a blob transaction with 6 blobs where the first 5 hashes have version 0x01 and the 6th has version 0x02. 2. Verify the transaction is rejected. 3. Submit a blob transaction with 6 blobs where the 1st hash has version 0x02 and the rest have version 0x01. 4. Verify the transaction is rejected. 5. Ensure the loop checks EVERY hash, not just the first.",
+      "bug_class": "Incomplete Iteration",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "for blob_versioned_hash in tx.blob_versioned_hashes loop",
+          "notes": "Must iterate all hashes, not break early on success."
+        }
+      ],
+      "executable_checks": [
+        "Multi-blob tx with invalid version on last hash only; verify rejection",
+        "Multi-blob tx with invalid version on first hash only; verify rejection",
+        "Multi-blob tx with invalid version on middle hash only; verify rejection"
+      ],
+      "notes": "Source: PROP-0023 (supporting node check for actor-block-proposer)."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0024",
+      "title": "Verify Trust Boundary Integrity: Is the base fee sufficiency check (max_fee_per_gas >= base_fee_per_gas) enforced for all EIP-1559+ transaction types including SetCodeTransaction?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Base fee check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker submits a transaction with max_fee_per_gas < base_fee_per_gas. If accepted, the protocol burns less than expected."
+      },
+      "test_procedure": "1. For each of FeeMarketTransaction, BlobTransaction, SetCodeTransaction: submit a transaction with max_fee_per_gas = base_fee_per_gas - 1. 2. Verify rejection with InsufficientMaxFeePerGasError. 3. Submit with max_fee_per_gas = base_fee_per_gas (exact match). 4. Verify acceptance. 5. Verify the priority_fee_per_gas = min(max_priority_fee_per_gas, max_fee_per_gas - base_fee_per_gas) calculation does not underflow when max_fee_per_gas == base_fee_per_gas. 6. For legacy and AccessList types: verify gas_price < base_fee_per_gas raises InvalidBlock. 7. Cross-client differential: run all test vectors across geth, reth, nethermind, besu, erigon.",
+      "bug_class": "Fee Validation Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "isinstance(tx, (FeeMarketTransaction, BlobTransaction, SetCodeTransaction)) block with max_fee_per_gas < base_fee_per_gas check",
+          "notes": "Reference spec checks FeeMarket, Blob, and SetCode types together."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "ValidateTransaction",
+          "line_range": "GasFeeCapIntCmp(GasTipCap) and subsequent fee checks",
+          "notes": "Geth validates fee cap vs tip cap in the transaction pool."
+        }
+      ],
+      "executable_checks": [
+        "Run all 6 test vectors (3 types x 2 boundary values) against geth, reth, nethermind, besu, erigon; verify unanimous agree on accept/reject for each",
+        "Specifically for Type 4 (SetCodeTransaction): run the base fee test vectors against all clients; any client that does not reject max_fee < base_fee for Type 4 has a consensus-critical bug",
+        "Include the test vectors in Hive for automated cross-client testing",
+        "Verify that the ethereum/tests repository has test cases for base fee sufficiency post-Fusaka (including Type 4)",
+        "Test with dynamically changing base fees: construct a sequence of blocks with increasing base fee and verify that transactions that were valid in block N are correctly rejected in block N+1 when the base fee exceeds their max_fee"
+      ],
+      "notes": "Source: PROP-0024. Trust Boundary: tb-008. The addition of SetCodeTransaction (Type 4) in Fusaka creates fresh risk surface."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is effective_gas_price correctly computed for all transaction types, preventing underflow in priority_fee calculation?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Base fee check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If max_fee_per_gas == base_fee_per_gas, the subtraction max_fee_per_gas - base_fee_per_gas = 0, and priority_fee_per_gas = min(max_priority_fee_per_gas, 0) = 0. This is correct but must not underflow."
+      },
+      "test_procedure": "1. Submit FeeMarketTransaction with max_fee = base_fee, max_priority = 100; verify effective_gas_price = base_fee (priority capped to 0). 2. Submit with max_fee = base_fee + 50, max_priority = 100; verify effective_gas_price = base_fee + 50 (priority capped to 50). 3. Submit with max_fee = base_fee + 200, max_priority = 100; verify effective_gas_price = base_fee + 100 (priority = 100). 4. Verify the min() function correctly selects the lower value in each case.",
+      "bug_class": "Arithmetic Error / Underflow",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "priority_fee_per_gas = min(tx.max_priority_fee_per_gas, tx.max_fee_per_gas - block_env.base_fee_per_gas)",
+          "notes": "The subtraction is safe because max_fee >= base_fee is checked first. But in client implementations, ensure the check-then-compute is atomic."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: max_fee == base_fee => priority = 0",
+        "Unit test: max_fee > base_fee but < base_fee + max_priority => priority = max_fee - base_fee",
+        "Cross-client: verify effective_gas_price is identical across all clients for the same inputs"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for effective gas price computation)."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the priority fee greater-than max fee check (tx.max_fee_per_gas < tx.max_priority_fee_per_gas) enforced for all EIP-1559+ types?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Fee ordering check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If max_priority > max_fee, the effective_gas_price could be computed incorrectly."
+      },
+      "test_procedure": "1. For FeeMarket, Blob, SetCode types: submit with max_priority_fee = max_fee + 1. 2. Verify rejection with PriorityFeeGreaterThanMaxFeeError. 3. Submit with max_priority_fee = max_fee (exact match). 4. Verify acceptance (equal is NOT greater than). 5. Verify the check uses strict less-than (<) not less-than-or-equal (<=) on max_fee_per_gas < max_priority_fee_per_gas.",
+      "bug_class": "Fee Ordering Violation",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "if tx.max_fee_per_gas < tx.max_priority_fee_per_gas: raise PriorityFeeGreaterThanMaxFeeError",
+          "notes": "Strict less-than. max_fee == max_priority is valid."
+        }
+      ],
+      "executable_checks": [
+        "Boundary test: max_priority = max_fee => accept",
+        "Boundary test: max_priority = max_fee + 1 => reject",
+        "Cross-client: verify same boundary behavior across all clients"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for priority fee ordering)."
+    },
+    {
+      "check_id": "CHK-0008",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: For legacy and AccessList transactions, is gas_price >= base_fee enforced?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Gas price check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Legacy and AccessList types use gas_price instead of max_fee_per_gas. The check is different from EIP-1559 types."
+      },
+      "test_procedure": "1. For Legacy and AccessList types: submit with gas_price = base_fee - 1. 2. Verify rejection with InvalidBlock. 3. Submit with gas_price = base_fee. 4. Verify acceptance. 5. Note: the reference spec uses 'tx.gas_price < block_env.base_fee_per_gas' which is strict less-than, so gas_price == base_fee is valid.",
+      "bug_class": "Fee Validation Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "else block: if tx.gas_price < block_env.base_fee_per_gas: raise InvalidBlock",
+          "notes": "This is in the else branch for non-FeeMarket/Blob/SetCode transactions."
+        }
+      ],
+      "executable_checks": [
+        "Legacy tx with gas_price = base_fee - 1 => reject",
+        "Legacy tx with gas_price = base_fee => accept",
+        "AccessList tx with gas_price = base_fee - 1 => reject"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for legacy gas price validation)."
+    },
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the max_fee_per_blob_gas sufficiency check enforced for BlobTransactions?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob gas price check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker submits a blob transaction with max_fee_per_blob_gas below the calculated blob_gas_price. If accepted, the protocol does not charge the correct blob fee."
+      },
+      "test_procedure": "1. Calculate blob_gas_price from excess_blob_gas using calculate_blob_gas_price. 2. Submit a BlobTransaction with max_fee_per_blob_gas = blob_gas_price - 1. 3. Verify rejection with InsufficientMaxFeePerBlobGasError. 4. Submit with max_fee_per_blob_gas = blob_gas_price. 5. Verify acceptance. 6. Verify the comparison uses Uint(tx.max_fee_per_blob_gas) < blob_gas_price (strict less-than). 7. Test edge case: excess_blob_gas = 0, which yields minimum blob_gas_price. Verify the minimum is correctly computed per EIP-7918 (BLOB_BASE_COST = 2^13 * base_fee_per_gas).",
+      "bug_class": "Fee Validation Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "if Uint(tx.max_fee_per_blob_gas) < blob_gas_price: raise InsufficientMaxFeePerBlobGasError",
+          "notes": "blob_gas_price = calculate_blob_gas_price(block_env.excess_blob_gas)."
+        }
+      ],
+      "executable_checks": [
+        "Blob tx with max_fee_per_blob_gas = blob_gas_price - 1 => reject",
+        "Blob tx with max_fee_per_blob_gas = blob_gas_price => accept",
+        "Blob tx with max_fee_per_blob_gas = 0 and blob_gas_price > 0 => reject"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for blob gas price validation)."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is max_gas_fee correctly computed including blob gas costs for balance sufficiency check?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Balance check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "For blob transactions, max_gas_fee must include both execution gas cost and blob gas cost. If blob gas cost is omitted from the balance check, a sender with insufficient balance could have their transaction accepted."
+      },
+      "test_procedure": "1. For BlobTransaction: verify max_gas_fee = tx.gas * tx.max_fee_per_gas + calculate_total_blob_gas(tx) * tx.max_fee_per_blob_gas. 2. Submit a blob tx where sender balance covers execution gas but NOT blob gas. 3. Verify rejection with InsufficientBalanceError. 4. Submit a blob tx where sender balance = max_gas_fee + tx.value exactly. 5. Verify acceptance. 6. Submit with sender balance = max_gas_fee + tx.value - 1. 7. Verify rejection.",
+      "bug_class": "Balance Check Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "max_gas_fee += Uint(calculate_total_blob_gas(tx)) * Uint(tx.max_fee_per_blob_gas)",
+          "notes": "This addition happens inside the isinstance(tx, BlobTransaction) block. The final balance check is: Uint(sender_account.balance) < max_gas_fee + Uint(tx.value)."
+        }
+      ],
+      "executable_checks": [
+        "Blob tx with balance = execution_cost only (no blob cost) => reject",
+        "Blob tx with balance = execution_cost + blob_cost + value exactly => accept",
+        "Blob tx with balance = execution_cost + blob_cost + value - 1 => reject"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for balance sufficiency with blob gas costs)."
+    },
+    {
+      "check_id": "CHK-0011",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Does max_gas_fee computation overflow for large max_fee_per_gas * gas values?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Arithmetic overflow check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "max_gas_fee = tx.gas * tx.max_fee_per_gas. With tx.gas up to 2^24 (EIP-7825) and max_fee_per_gas up to 2^256-1, the multiplication could overflow in fixed-width integer implementations."
+      },
+      "test_procedure": "1. Submit a transaction with gas = TX_MAX_GAS_LIMIT (2^24) and max_fee_per_gas = 2^256 - 1. The product exceeds 2^256. 2. In the reference spec (Python), Uint is arbitrary precision so this does not overflow. But in Go (uint256), Rust (U256), Java (BigInteger), C# (UInt256), verify the multiplication is safe. 3. If an overflow occurs silently (wrapping to a small value), the balance check could pass for a sender with minimal balance. 4. Specifically check that geth's Cost() method handles this correctly using big.Int or uint256 overflow-safe operations.",
+      "bug_class": "Integer Overflow",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "max_gas_fee = tx.gas * tx.max_fee_per_gas (and the blob gas addition)",
+          "notes": "Python Uint is arbitrary precision. Client implementations must use overflow-safe arithmetic."
+        }
+      ],
+      "executable_checks": [
+        "Submit tx with max_fee_per_gas = 2^256 - 1 and gas = 2^24; verify rejection (balance insufficient) not acceptance due to overflow",
+        "Cross-client: verify all clients reject or handle overflow identically"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for arithmetic safety)."
+    },
+    {
+      "check_id": "CHK-0012",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the nonce check ordering correct (nonce checked AFTER balance check in spec, but behavior must be equivalent)?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Nonce check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "The reference spec checks nonce AFTER fee and balance checks. Some clients may reorder. The ordering must not affect the final accept/reject decision."
+      },
+      "test_procedure": "1. Submit a transaction with correct nonce but insufficient balance. 2. Verify rejection with InsufficientBalanceError (not NonceMismatchError). 3. Submit with wrong nonce but sufficient balance. 4. Verify rejection with NonceMismatchError. 5. Submit with wrong nonce AND insufficient balance. 6. Record which error takes precedence. 7. Cross-client: verify error precedence is consistent (consensus safety requires same accept/reject, but error message may differ).",
+      "bug_class": "Validation Ordering",
+      "risk_category": "Information Disclosure",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "Nonce and balance check blocks at the end of the function",
+          "notes": "In the reference spec: nonce check is before balance check. sender_account.nonce > tx.nonce or < tx.nonce raises NonceMismatchError, then balance check."
+        }
+      ],
+      "executable_checks": [
+        "Cross-client: submit tx with bad nonce + bad balance; verify all clients reject (regardless of which error they report)",
+        "Verify no client accepts a transaction that another client rejects due to ordering differences"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for validation ordering). This is more of a consensus safety check than a direct attack vector."
+    },
+    {
+      "check_id": "CHK-0013",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the sender code / EOA delegation check (is_valid_delegation) correctly enforced?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Sender code check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Post-EIP-7702, EOAs can have code via delegation. The check_transaction function must allow transactions from delegated EOAs but reject transactions from contract accounts without valid delegation."
+      },
+      "test_procedure": "1. Submit a transaction from an account with code that is NOT a valid delegation. 2. Verify rejection with InvalidSenderError('not EOA'). 3. Submit a transaction from an account with a valid delegation (is_valid_delegation returns true). 4. Verify acceptance. 5. Submit a transaction from a plain EOA (no code). 6. Verify acceptance. 7. Verify the check is: if sender_account.code and not is_valid_delegation(sender_account.code): raise InvalidSenderError.",
+      "bug_class": "Authorization Bypass",
+      "risk_category": "Elevation of Privilege",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "if sender_account.code and not is_valid_delegation(sender_account.code): raise InvalidSenderError",
+          "notes": "This is a Fusaka-specific check due to EIP-7702."
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/eoa_delegation.py",
+          "function": "is_valid_delegation",
+          "line_range": "Full function body",
+          "notes": "Defines what constitutes a valid delegation prefix."
+        }
+      ],
+      "executable_checks": [
+        "Submit tx from account with arbitrary code (not delegation) => reject with InvalidSenderError",
+        "Submit tx from account with valid EIP-7702 delegation prefix => accept",
+        "Submit tx from plain EOA (empty code) => accept"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for EIP-7702 sender validation)."
+    },
+    {
+      "check_id": "CHK-0014",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the empty authorization list check enforced for SetCodeTransaction?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Authorization list check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A SetCodeTransaction with an empty authorization list is meaningless and should be rejected."
+      },
+      "test_procedure": "1. Submit a SetCodeTransaction with authorizations = (). 2. Verify rejection with EmptyAuthorizationListError. 3. Submit with authorizations containing at least one valid entry. 4. Verify acceptance. 5. Note the spec uses 'if not any(tx.authorizations)' which checks truthiness. Verify this correctly rejects empty tuples and tuples of all-zero authorizations.",
+      "bug_class": "Validation Bypass",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "if not any(tx.authorizations): raise EmptyAuthorizationListError",
+          "notes": "The 'any()' check means a list of all-falsy authorizations would also be rejected. Verify what constitutes a falsy authorization."
+        }
+      ],
+      "executable_checks": [
+        "SetCode tx with empty authorizations => reject",
+        "SetCode tx with one valid authorization => accept",
+        "SetCode tx with authorizations that are all zero-valued => check if rejected (depends on Authorization truthiness)"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for SetCodeTransaction authorization list)."
+    },
+    {
+      "check_id": "CHK-0015",
+      "property_id": "PROP-0024",
+      "title": "Supporting Node Check: Is the contract creation prohibition enforced for BlobTransaction and SetCodeTransaction?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Contract creation check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "BlobTransaction and SetCodeTransaction must not create contracts (to must be an Address, not Bytes0)."
+      },
+      "test_procedure": "1. Construct a BlobTransaction with to = Bytes0(b'') (contract creation). 2. Verify rejection with TransactionTypeContractCreationError. 3. Construct a SetCodeTransaction with to = Bytes0(b''). 4. Verify rejection. 5. Construct both types with a valid to address. 6. Verify acceptance. 7. Note: in the BlobTransaction dataclass, to is already typed as Address (not Bytes0 | Address), so the RLP decoder should reject it. But verify the check is also in check_transaction as a defense-in-depth.",
+      "bug_class": "Type Constraint Bypass",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "if not isinstance(tx.to, Address): raise TransactionTypeContractCreationError",
+          "notes": "Checked for both BlobTransaction and SetCodeTransaction."
+        }
+      ],
+      "executable_checks": [
+        "Blob tx with to = empty (contract creation) => reject",
+        "SetCode tx with to = empty => reject",
+        "Both types with valid to address => accept"
+      ],
+      "notes": "Source: PROP-0024 (supporting node check for contract creation prohibition)."
+    },
+    {
+      "check_id": "CHK-0016",
+      "property_id": "PROP-0025",
+      "title": "Verify Trust Boundary Integrity: Is the blob count validated to be within [1, BLOB_COUNT_LIMIT] for all BlobTransactions entering check_transaction?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob count check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker submits a blob transaction with zero blobs or exceeding MAX_BLOB_COUNT. The check prevents empty blob transactions and limits data availability overhead."
+      },
+      "test_procedure": "1. LOCATE THE BLOB COUNT CHECK IN ALL IMPLEMENTATIONS: (a) Reference spec: ethereum/forks/osaka/fork.py, function check_transaction. Inside the isinstance(tx, BlobTransaction) block, there are two checks: (i) blob_count == 0 raises NoBlobDataError, (ii) blob_count > BLOB_COUNT_LIMIT raises BlobCountExceededError. BLOB_COUNT_LIMIT = 6 (defined at module level in fork.py). (b) go-ethereum: core/txpool/validation.go, function validateBlobTx. Checks: len(hashes) == 0 raises 'blobless blob transaction', len(hashes) > params.BlobTxMaxBlobs raises 'too many blobs in transaction'. params.BlobTxMaxBlobs = 6 (protocol_params.go). Additionally, the txpool ValidationOptions.MaxBlobCount is passed from the pool configuration. (c) reth: crates/transaction-pool or crates/consensus modules. Look for blob_count or num_blobs checks against a MAX_BLOBS_PER_BLOCK or similar constant. (d) Nethermind: TxValidator.cs or equivalent. Look for BlobVersionedHashes.Length checks. (e) Besu: MainnetTransactionValidator.java or equivalent. Look for blobVersionedHashes.size() checks. 2. VERIFY THE LOWER BOUND (ZERO BLOBS): The check must reject blob_count == 0. In the reference spec: if blob_count == 0: raise NoBlobDataError('no blob data in transaction'). CRITICAL: The check uses == 0, not < 1. In geth: len(hashes) == 0. Verify all clients use an equivalent check. A BlobTransaction with zero blobs has no data availability payload and wastes block capacity. It also breaks the invariant that every BlobTransaction carries at least one blob for the data availability layer (DAS/PeerDAS). 3. VERIFY THE UPPER BOUND (BLOB_COUNT_LIMIT): The check must reject blob_count > BLOB_COUNT_LIMIT. In the reference spec: if blob_count > BLOB_COUNT_LIMIT: raise BlobCountExceededError. CRITICAL: The comparison is strict greater-than (>), meaning blob_count == BLOB_COUNT_LIMIT (i.e., exactly 6 blobs) is VALID. This must be consistent across all clients. FUSAKA-SPECIFIC: Under EIP-7594 (PeerDAS), the blob count limit per transaction remains 6 (BLOB_COUNT_LIMIT in execution spec), but the per-block maximum is now 9 (BLOB_SCHEDULE_MAX = 9, MAX_BLOB_GAS_PER_BLOCK = 9 * GAS_PER_BLOB = 1,179,648). This means a single block can contain more blobs in total (across multiple transactions), but each individual transaction is still capped at 6. Verify that: (a) The per-transaction limit uses BLOB_COUNT_LIMIT = 6 (not the per-block max of 9). (b) geth's BlobTxMaxBlobs = 6 in protocol_params.go matches the spec's BLOB_COUNT_LIMIT. (c) The MaxBlobCount in geth's ValidationOptions is set to 6 (not 9) for the txpool. (d) Clients do not confuse the per-transaction limit (6) with the per-block limit (9 blobs / 1,179,648 gas). 4. BOUNDARY VALUE TESTS FOR BLOB COUNT: (a) blob_count = 0: MUST be rejected with NoBlobDataError (spec) or 'blobless blob transaction' (geth). (b) blob_count = 1: MUST be accepted (minimum valid count). (c) blob_count = 5: MUST be accepted. (d) blob_count = 6 (== BLOB_COUNT_LIMIT): MUST be accepted (maximum valid per-tx count). (e) blob_count = 7 (== BLOB_COUNT_LIMIT + 1): MUST be rejected with BlobCountExceededError. (f) blob_count = 9 (== BLOB_SCHEDULE_MAX, the per-block max): MUST be rejected at the per-transaction level. This is the most critical test: a client that uses the per-block limit (9) instead of the per-transaction limit (6) would accept this, causing a consensus split with clients using the correct limit. (g) blob_count = 100: MUST be rejected. (h) blob_count = 2^16 (large value): MUST be rejected. Verify no integer overflow in the count comparison. 5. ORDERING OF CHECKS: In the reference spec, the blob count checks (NoBlobDataError, BlobCountExceededError) occur INSIDE the isinstance(tx, BlobTransaction) block, AFTER the blob gas limit check but within the same conditional. Specifically: (i) blob_gas_available check (BlobGasLimitExceededError) -- happens at the TOP of check_transaction. (ii) sender recovery (recover_sender) -- happens after gas checks. (iii) fee checks (max_fee, priority fee) -- happens after sender recovery. (iv) blob_count == 0 check (NoBlobDataError) -- happens inside isinstance(tx, BlobTransaction) block. (v) blob_count > BLOB_COUNT_LIMIT check (BlobCountExceededError) -- immediately after. (vi) versioned hash version check -- after blob count. (vii) blob gas price check (InsufficientMaxFeePerBlobGasError) -- after version check. This means: A blob transaction with 0 blobs will first pass the blob gas limit check (because calculate_total_blob_gas returns 0 for 0 blobs, and 0 <= blob_gas_available), then pass sender recovery, then be caught by the blob_count == 0 check. This is fine for correctness but the ordering affects error messages. A blob transaction with 7 blobs will first be checked against the blob gas limit (7 * GAS_PER_BLOB = 917,504 which may or may not exceed blob_gas_available depending on prior transactions), then checked for blob_count > 6. Verify that both checks exist and are non-redundant. 6. INTERACTION WITH BLOB GAS LIMIT: The per-transaction blob count limit (6) and the per-block blob gas limit (MAX_BLOB_GAS_PER_BLOCK = 9 * GAS_PER_BLOB) are complementary but not redundant: (a) A block can contain up to 9 blobs total across multiple transactions (e.g., 6 + 3, or 3 + 3 + 3). (b) A single transaction can carry at most 6 blobs. (c) Without the per-transaction limit, a single transaction could carry all 9 blobs, which could have implications for: resource consumption during validation (KZG proof verification scales with blob count), mempool management, and network propagation fairness. (d) Verify that removing the per-transaction limit does not create a functional difference if the per-block gas limit is enforced. In theory, a 9-blob transaction would still be valid under the gas limit. The per-transaction limit is therefore an additional constraint that may serve network health rather than consensus safety. However, if the spec says 6, all clients MUST enforce 6 for consensus. 7. CROSS-CLIENT DIFFERENTIAL TEST: Generate the following test transactions and run them against all 5+ major clients (geth, reth, nethermind, besu, erigon): (a) BlobTx with blob_count = 0: ALL must reject. (b) BlobTx with blob_count = 1: ALL must accept (other fields valid). (c) BlobTx with blob_count = 6: ALL must accept. (d) BlobTx with blob_count = 7: ALL must reject. (e) BlobTx with blob_count = 9: ALL must reject. Any divergence is a consensus-critical bug. SPECIAL ATTENTION: Since BLOB_COUNT_LIMIT changed from pre-Fusaka (where per-block max was 6 and per-tx max was also 6) to Fusaka (per-block max is 9 but per-tx max remains 6), verify that clients correctly update only the per-block limit and NOT the per-tx limit during the Fusaka fork transition. A client that accidentally bumps BlobTxMaxBlobs from 6 to 9 would accept 7-blob transactions that other clients reject. 8. SIDECAR CONSISTENCY CHECK (GETH-SPECIFIC): In geth's validateBlobTx, after the blob count checks, the function verifies that len(sidecar.Blobs) == len(hashes). This ensures the sidecar carries exactly as many blobs as there are versioned hashes. Verify: (a) A sidecar with fewer blobs than hashes is rejected. (b) A sidecar with more blobs than hashes is rejected. (c) The sidecar version check (BlobSidecarVersion0 for pre-Osaka, BlobSidecarVersion1 for Osaka/Fusaka) is applied correctly. The Osaka/Fusaka sidecar uses cell KZG proofs (128 proofs per blob) instead of per-blob KZG proofs (1 proof per blob). A version mismatch could lead to proof verification failures or bypasses. 9. RLP DECODING BOUNDARY: Verify that the BlobTransaction's blob_versioned_hashes field, when decoded from RLP, cannot contain more than BLOB_COUNT_LIMIT entries without being caught. In Python, the tuple length is checked after decoding. In Go, verify the RLP decoder does not impose an independent length limit that differs from BLOB_COUNT_LIMIT. If the RLP layer has a different limit (or no limit), the transaction could be decoded but then rejected by check_transaction, which is correct. But if the RLP layer has a HIGHER limit than BLOB_COUNT_LIMIT, large blob-count transactions could consume excessive memory during decoding before being rejected. 10. MEMPOOL vs CONSENSUS PATH: Verify that the blob count limit is enforced in BOTH the transaction pool (mempool) validation path AND the consensus/block validation path. In geth: (a) Mempool: ValidateTransaction in core/txpool/validation.go checks blob count via validateBlobTx and MaxBlobCount from ValidationOptions. (b) Consensus: core/state_transition.go (or equivalent) performs block-level validation. If the consensus path does not independently check blob count (relying only on blob gas limit), then a block proposer could include a >6-blob transaction that passes gas checks but violates the per-tx blob count rule. This would cause a consensus split between clients that check count independently and those that do not.",
+      "bug_class": "Input Validation / Limit Bypass",
+      "risk_category": "Denial of Service / Consensus Split",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "isinstance(tx, BlobTransaction) block: blob_count = len(tx.blob_versioned_hashes); if blob_count == 0: raise NoBlobDataError; if blob_count > BLOB_COUNT_LIMIT: raise BlobCountExceededError",
+          "notes": "Reference implementation. BLOB_COUNT_LIMIT = 6. Two separate checks: lower bound (==0) and upper bound (>6). The upper bound uses strict greater-than, so exactly 6 is valid."
+        },
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "module-level constant",
+          "line_range": "BLOB_COUNT_LIMIT = 6",
+          "notes": "Defined at the top of fork.py. This is the per-transaction blob count limit for Fusaka. It is distinct from BLOB_SCHEDULE_MAX (the per-block max blob count used to compute MAX_BLOB_GAS_PER_BLOCK)."
+        },
+        {
+          "file": "ethereum/forks/osaka/exceptions.py",
+          "function": "NoBlobDataError, BlobCountExceededError",
+          "line_range": "Exception class definitions",
+          "notes": "Fork-specific exceptions for blob count violations."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "validateBlobTx",
+          "line_range": "if len(hashes) == 0 { ... } / if len(hashes) > params.BlobTxMaxBlobs { ... }",
+          "notes": "Geth implementation. params.BlobTxMaxBlobs = 6 in protocol_params.go. The txpool-level MaxBlobCount in ValidationOptions may be different from the consensus-level BlobTxMaxBlobs."
+        },
+        {
+          "file": "go-ethereum/params/protocol_params.go",
+          "function": "constant BlobTxMaxBlobs",
+          "line_range": "BlobTxMaxBlobs = 6",
+          "notes": "Geth protocol parameter. CRITICAL: Verify this constant matches the execution spec's BLOB_COUNT_LIMIT. For Fusaka, both should be 6."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "ValidateTransaction",
+          "line_range": "if blobCount := len(tx.BlobHashes()); blobCount > opts.MaxBlobCount { ... }",
+          "notes": "Geth txpool-level check. MaxBlobCount comes from the pool configuration, not directly from protocol_params. Verify the pool sets MaxBlobCount = BlobTxMaxBlobs = 6."
+        },
+        {
+          "file": "reth (Rust)",
+          "function": "validate_blob_tx or equivalent",
+          "line_range": "blob versioned hashes length check",
+          "notes": "Reth implementation. Look for MAX_BLOBS_PER_TX or similar constant. Verify it is 6 for Fusaka."
+        },
+        {
+          "file": "nethermind (C#)",
+          "function": "TxValidator or equivalent",
+          "line_range": "BlobVersionedHashes.Length check",
+          "notes": "Nethermind C# implementation. Verify MaxBlobsPerTransaction = 6."
+        },
+        {
+          "file": "besu (Java)",
+          "function": "MainnetTransactionValidator or equivalent",
+          "line_range": "blobVersionedHashes.size() check",
+          "notes": "Besu Java implementation. Verify max blobs per transaction = 6."
+        }
+      ],
+      "executable_checks": [
+        "Craft a BlobTransaction with blob_count = 0 (empty blob_versioned_hashes tuple) and submit via P2P; verify ALL clients reject with an error indicating no blob data",
+        "Craft a BlobTransaction with blob_count = 1 (minimum valid); verify ALL clients accept (given other fields are valid)",
+        "Craft a BlobTransaction with blob_count = 6 (== BLOB_COUNT_LIMIT, maximum valid per-tx); verify ALL clients accept",
+        "Craft a BlobTransaction with blob_count = 7 (== BLOB_COUNT_LIMIT + 1, first invalid); verify ALL clients reject with BlobCountExceededError or equivalent",
+        "Craft a BlobTransaction with blob_count = 9 (== BLOB_SCHEDULE_MAX, the per-block max); verify ALL clients reject at the per-tx level. THIS IS THE CRITICAL FUSAKA-SPECIFIC TEST: if any client uses 9 (per-block) instead of 6 (per-tx), it causes a consensus split",
+        "Cross-client differential: run all 5 boundary test vectors (0, 1, 6, 7, 9) against geth, reth, nethermind, besu, erigon; any divergence in accept/reject is a consensus-critical bug",
+        "Verify that during the Fusaka fork transition, the per-tx blob count limit remains 6 and is not accidentally updated to 9 (the per-block max)",
+        "Verify geth's ValidationOptions.MaxBlobCount is set to params.BlobTxMaxBlobs (6) in the blob pool initialization code",
+        "Include all blob count boundary test vectors in the Hive cross-client test framework",
+        "For geth specifically: verify sidecar blob count matches versioned hash count (len(sidecar.Blobs) == len(hashes)) to prevent sidecar/hash mismatch",
+        "Fuzz test: generate random blob counts from 0 to 2^16 and submit; verify consistent rejection for all counts outside [1, 6]"
+      ],
+      "notes": "Source: PROP-0025 (SG-006/INV-005). Trust Boundary: tb-008. This property is FUSAKA-CRITICAL because EIP-7594 (PeerDAS) changes the per-block blob capacity from 6 to 9 while keeping the per-transaction limit at 6. The risk is that client implementations confuse the two limits. Pre-Fusaka, both limits were effectively 6 (max 6 blobs per block, max 6 per tx), so there was no distinction. Post-Fusaka, the per-block limit is 9 and per-tx limit is 6, creating a new invariant that must be correctly implemented. Historical context: EIP-4844 (Cancun) introduced the original blob transaction type with a 6-blob limit. EIP-7594 (PeerDAS/Fusaka) increases the per-block limit but explicitly keeps the per-transaction limit at 6 via BLOB_COUNT_LIMIT. PoC requirement: per the bug bounty scope, a valid PoC must demonstrate a blob transaction accepted with 0 blobs or > 6 blobs (BLOB_COUNT_LIMIT), causing a consensus split between at least two client implementations."
+    },
+    {
+      "check_id": "CHK-0017",
+      "property_id": "PROP-0025",
+      "title": "Supporting Node Check: Does check_transaction enforce blob count BEFORE performing expensive operations (sender recovery, balance checks)?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob count check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If the blob count check occurs after expensive operations like sender recovery (ecrecover), an attacker could submit invalid blob transactions to waste CPU on ecrecover before rejection."
+      },
+      "test_procedure": "1. EXAMINE THE ORDER OF CHECKS IN check_transaction: In the reference spec: (a) Gas availability check -- cheap, first. (b) Blob gas availability check (calculate_total_blob_gas) -- cheap. (c) recover_sender -- EXPENSIVE (ecrecover). (d) Fee checks -- cheap arithmetic. (e) isinstance(tx, BlobTransaction) block with blob_count checks -- cheap. The blob count check (blob_count == 0, blob_count > BLOB_COUNT_LIMIT) happens AFTER ecrecover. This means a malicious 0-blob or >6-blob transaction will trigger ecrecover before being rejected. 2. VERIFY CLIENT ORDERING: (a) geth: ValidateTransaction checks blob count (validateBlobTx) BEFORE calling types.Sender (ecrecover). This is correct for DoS resistance. (b) reth: verify blob count check occurs before signature recovery. (c) Nethermind, Besu: verify similarly. 3. ASSESS DoS IMPACT: Ecrecover is ~3000 gas equivalent of CPU work. If the blob count check is after ecrecover in the consensus path (block validation), an attacker block proposer could craft a block full of invalid-blob-count transactions, forcing validators to run ecrecover on each before rejecting. However, the blob gas limit check at the top of check_transaction provides some protection: a 0-blob tx has 0 blob gas, which always passes; but a 100-blob tx has 100 * 131,072 = 13,107,200 blob gas, which exceeds MAX_BLOB_GAS_PER_BLOCK (1,179,648) and would be caught BEFORE ecrecover. So the DoS risk is primarily from 0-blob transactions (which pass the gas check but fail the count check after ecrecover). 4. VERIFY THAT THE TXPOOL PATH (mempool) checks blob count BEFORE ecrecover to prevent P2P-level DoS. 5. For the consensus path (block validation), the DoS impact is limited because block proposers are economically incentivized not to include invalid transactions. But verify that no amplification attack exists.",
+      "bug_class": "Denial of Service / Resource Exhaustion",
+      "risk_category": "Denial of Service",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "Order: gas check -> blob gas check -> recover_sender -> fee checks -> blob count checks",
+          "notes": "In the reference spec, blob count is checked AFTER recover_sender. This is acceptable for correctness but suboptimal for DoS resistance. Client implementations may (and should) reorder checks."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "ValidateTransaction",
+          "line_range": "blob count check at top, before Sender recovery",
+          "notes": "Geth correctly checks blob count before signature recovery in the txpool path."
+        }
+      ],
+      "executable_checks": [
+        "Measure CPU time for processing a blob tx with 0 blobs vs a blob tx with 1 valid blob; verify the 0-blob case does not trigger ecrecover in the mempool path",
+        "Flood the P2P network with 0-blob transactions; verify nodes do not consume excessive CPU on ecrecover before rejecting",
+        "Verify that geth's ValidateTransaction checks MaxBlobCount BEFORE calling types.Sender"
+      ],
+      "notes": "Source: PROP-0025 (supporting node check for validation ordering). While this is not a consensus-critical bug, it affects node resilience to DoS attacks via malformed blob transactions. The severity is Medium because the attack requires sustained flooding and is classified as 'high-effort DoS' which is out of scope for the bug bounty. However, a single-packet DoS (e.g., a block with many invalid-count blob txs that bypass the gas check) could be in scope."
+    },
+    {
+      "check_id": "CHK-0018",
+      "property_id": "PROP-0025",
+      "title": "Supporting Node Check: Is the per-transaction blob count limit (6) correctly distinguished from the per-block blob limit (9) in all client implementations?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob count check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "This is the highest-risk Fusaka-specific aspect: the per-block blob limit changed from 6 to 9, but the per-transaction limit stayed at 6. A client that uses the per-block limit for per-tx validation would accept 7-9 blob transactions, causing a consensus split."
+      },
+      "test_procedure": "1. VERIFY CONSTANT SEPARATION: (a) Reference spec: BLOB_COUNT_LIMIT = 6 (per-tx, in fork.py), BLOB_SCHEDULE_MAX = 9 (per-block, in vm/gas.py). These are defined in different modules. (b) geth: BlobTxMaxBlobs = 6 (per-tx, protocol_params.go). The per-block limit is derived from MaxBlobGasPerBlock / BlobTxBlobGasPerBlob. Verify BlobTxMaxBlobs is NOT derived from the per-block limit. (c) reth: look for separate per-tx and per-block constants. (d) Nethermind, Besu: same verification. 2. TRACE CONSTANT USAGE: (a) In geth, trace all usages of BlobTxMaxBlobs to verify it is only used for per-transaction validation (txpool and block processing), not for per-block validation. (b) In geth, trace all usages of MaxBlobGasPerBlock (or equivalent) to verify it is only used for per-block blob gas accounting. (c) Verify no code path uses MaxBlobGasPerBlock / BlobTxBlobGasPerBlob to derive a per-tx blob count limit (which would give 9, not 6). 3. FORK TRANSITION TEST: (a) At the exact Fusaka fork block/timestamp, verify the per-tx limit is 6 and the per-block limit transitions from 6 to 9. (b) Verify no race condition or off-by-one in the fork activation logic that could temporarily set the per-tx limit to 9. (c) In geth's ValidationOptions, verify MaxBlobCount is set from the correct constant (BlobTxMaxBlobs = 6) and does not change at fork activation. 4. CONFIGURATION AUDIT: (a) Verify that BlobTxMaxBlobs is a compile-time constant (not configurable at runtime) in all clients. If it is configurable, an operator could accidentally set it to 9, causing their node to fork from the network. (b) Verify that the per-block blob gas limit IS updated at fork activation (from 6 * GAS_PER_BLOB to 9 * GAS_PER_BLOB) via the consensus layer's blob parameters (EIP-7892).",
+      "bug_class": "Constant Confusion / Configuration Error",
+      "risk_category": "Consensus Split",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "module-level",
+          "line_range": "BLOB_COUNT_LIMIT = 6",
+          "notes": "Per-transaction limit. Used only in check_transaction."
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/gas.py",
+          "function": "module-level",
+          "line_range": "BLOB_SCHEDULE_MAX (per-block max blob count) and GAS_PER_BLOB",
+          "notes": "Per-block limit. BLOB_SCHEDULE_MAX * GAS_PER_BLOB = MAX_BLOB_GAS_PER_BLOCK."
+        },
+        {
+          "file": "go-ethereum/params/protocol_params.go",
+          "function": "BlobTxMaxBlobs constant",
+          "line_range": "BlobTxMaxBlobs = 6",
+          "notes": "Per-transaction limit in geth. Verify it is NOT dynamically derived from per-block parameters."
+        },
+        {
+          "file": "go-ethereum/core/txpool/validation.go",
+          "function": "ValidateTransaction / ValidationOptions",
+          "line_range": "MaxBlobCount field usage",
+          "notes": "Trace where MaxBlobCount is set. It should be BlobTxMaxBlobs (6), not derived from per-block gas."
+        }
+      ],
+      "executable_checks": [
+        "At Fusaka fork activation: submit a 7-blob transaction. ALL clients MUST reject. If any client accepts (confusing per-block 9 with per-tx 6), it is a consensus-critical bug",
+        "Before Fusaka fork: submit a 7-blob transaction. ALL clients MUST reject (pre-Fusaka limit is also 6). This establishes the baseline",
+        "After Fusaka fork: submit two transactions in the same block: one with 6 blobs, one with 3 blobs (total 9 = per-block max). ALL clients MUST accept the block. This verifies per-block limit is 9",
+        "After Fusaka fork: submit one transaction with 9 blobs in a block. ALL clients MUST reject the transaction (per-tx limit is 6, even though per-block limit is 9)",
+        "Grep all client codebases for any code path that derives per-tx blob limit from per-block parameters",
+        "Verify BlobTxMaxBlobs (geth) or equivalent constant is immutable at runtime and not affected by fork transitions"
+      ],
+      "notes": "Source: PROP-0025 (supporting node check for per-tx vs per-block limit distinction). This is the MOST CRITICAL Fusaka-specific risk for blob count validation. Pre-Fusaka, both limits were 6, so there was no way to confuse them. Post-Fusaka, a 7-blob transaction is the minimal test case that distinguishes correct (reject) from buggy (accept) implementations."
+    },
+    {
+      "check_id": "CHK-0019",
+      "property_id": "PROP-0025",
+      "title": "Supporting Node Check: Does the block-level validation independently verify that no transaction exceeds BLOB_COUNT_LIMIT?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob count check", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "The blob count check may exist in the txpool (mempool) but be absent from the block validation (consensus) path. A malicious block proposer could include a >6-blob transaction in a block, bypassing the txpool check."
+      },
+      "test_procedure": "1. IDENTIFY THE BLOCK VALIDATION PATH: (a) Reference spec: state_transition -> apply_body -> process_transaction -> check_transaction. The blob count check is inside check_transaction, which is called for every transaction during block processing. So the consensus path DOES include the blob count check. (b) geth: The block processing path may differ from the txpool validation path. Trace from core.Process or equivalent block execution function to verify check_transaction (or equivalent) is called and includes blob count validation. (c) If a client's block processing path skips blob count validation (relying on the txpool to have already validated), then a syncing node receiving a block from a peer could accept a >6-blob transaction. 2. CRAFT A MALICIOUS BLOCK: (a) Using a modified client, create a block containing a BlobTransaction with blob_count = 7. (b) Propagate this block to honest nodes. (c) Verify ALL honest nodes reject the block. (d) Verify the rejection is due to blob count (not blob gas, which for 7 blobs = 917,504 is within the per-block gas limit of 1,179,648). 3. VERIFY DEFENSE IN DEPTH: Even if the blob gas limit (check at the top of check_transaction) would catch most over-limit cases, verify the blob count check provides an independent defense. For example: a 7-blob tx has 917,504 blob gas, which fits in a fresh block (1,179,648 available). Without the blob count check, it would be accepted.",
+      "bug_class": "Missing Validation in Consensus Path",
+      "risk_category": "Consensus Split",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "apply_body -> process_transaction -> check_transaction",
+          "line_range": "Full call chain from block processing to blob count check",
+          "notes": "In the reference spec, the consensus path calls check_transaction which includes blob count checks. Verify client implementations follow the same pattern."
+        },
+        {
+          "file": "go-ethereum/core/state_processor.go or equivalent",
+          "function": "Process or ApplyTransaction",
+          "line_range": "Block-level transaction validation call chain",
+          "notes": "Trace whether geth's block processing path includes blob count validation independently of the txpool."
+        }
+      ],
+      "executable_checks": [
+        "Using a modified client, produce a block with a 7-blob transaction and attempt to sync it to honest nodes; verify rejection",
+        "Verify the rejection error specifically mentions blob count (not just blob gas)",
+        "Trace the code path from block receipt to blob count validation in at least 3 client implementations",
+        "If any client skips blob count validation during block processing (relying on gas limit alone), document this as a finding"
+      ],
+      "notes": "Source: PROP-0025 (supporting node check for consensus-path validation). A 7-blob transaction is the minimal case where the blob gas limit (917,504 < 1,179,648) does NOT catch the violation -- only the blob count check does. This makes the blob count check non-redundant and consensus-critical."
+    },
+    {
+      "check_id": "CHK-0020",
+      "property_id": "PROP-0025",
+      "title": "Supporting Node Check: Is the NoBlobDataError exception handling consistent across transaction types?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "Blob count check"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "The blob count check only applies to BlobTransaction (type 3). Verify that non-blob transaction types with a blob_versioned_hashes field (if any) are handled correctly."
+      },
+      "test_procedure": "1. Verify that only BlobTransaction has a blob_versioned_hashes field. In the reference spec, FeeMarketTransaction, LegacyTransaction, AccessListTransaction, and SetCodeTransaction do NOT have this field. The check isinstance(tx, BlobTransaction) correctly gates the blob-specific validation. 2. Verify that calculate_total_blob_gas returns 0 for non-blob transactions (does not access blob_versioned_hashes). 3. Verify that blob_versioned_hashes is initialized to empty tuple () for non-blob transactions in the return value of check_transaction. 4. Ensure no type confusion: a FeeMarketTransaction (type 2) cannot be cast to or confused with a BlobTransaction (type 3) in any client implementation.",
+      "bug_class": "Type Confusion",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "check_transaction",
+          "line_range": "isinstance(tx, BlobTransaction) check and else: blob_versioned_hashes = ()",
+          "notes": "Non-blob transactions get empty blob_versioned_hashes."
+        },
+        {
+          "file": "ethereum/forks/osaka/transactions.py",
+          "function": "BlobTransaction dataclass",
+          "line_range": "blob_versioned_hashes field definition",
+          "notes": "Only BlobTransaction has this field."
+        }
+      ],
+      "executable_checks": [
+        "Submit a FeeMarketTransaction (type 2) and verify blob_versioned_hashes is empty in the returned receipt/output",
+        "Verify calculate_total_blob_gas returns 0 for all non-blob transaction types",
+        "Verify no client allows attaching blob_versioned_hashes to a non-blob transaction type"
+      ],
+      "notes": "Source: PROP-0025 (supporting node check for type safety of blob count validation)."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T01:15:00Z",
+    "total_checks": 20,
+    "by_severity": {
+      "Critical": 6,
+      "High": 7,
+      "Medium": 7,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 13,
+      "Formal Verification Engineer": 7
+    },
+    "all_in_scope": true
+  }
+}

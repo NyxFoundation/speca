@@ -1,0 +1,120 @@
+{
+  "source_files": [
+    "outputs/01e_PARTIAL_W2B3_1770297247.json"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 1,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 1,
+    "filter_reasoning": {
+      "PROP-0005": {
+        "bug_bounty_scope": "in-scope (PASS)",
+        "exploitability": "internal-bug (PASS)",
+        "decision": "PROCESS - Property is in-scope. Fork version chain maintenance (post.fork.previous_version == pre.fork.current_version) is consensus-critical. A broken version chain would produce incorrect fork digests, causing P2P gossip topic mismatches and network partitions. The property directly tracks the integrity of the fork lineage embedded in the beacon state, which is used by compute_fork_digest to derive gossip topic identifiers and ENR eth2 field values.",
+        "detail": "The property covers primary element fork-SG-002 (upgrade_to_fulu subgraph). Internal-only reachability (triggered automatically at fork epoch via state transition pipeline). Not a boundary edge, so Formal Verification Engineer mindset applies. The post-condition verifies a single field assignment: previous_version=pre.fork.current_version in the Fork constructor within upgrade_to_fulu. Severity is HIGH due to downstream P2P network partition risk."
+      }
+    }
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0005",
+      "title": "Attempt to falsify: Can upgrade_to_fulu produce a post-state where fork.previous_version != pre.fork.current_version, breaking the fork version history chain?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": ["Internal state transition"],
+        "attacker_controlled": false,
+        "validation_layers": ["State transition pipeline"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Incorrect version chaining would cause P2P fork digest mismatches."
+      },
+      "test_procedure": "POST-CONDITION UNDER TEST: After upgrade_to_fulu(pre), the assertion post.fork.previous_version == pre.fork.current_version MUST hold. This ensures the fork version lineage is maintained: each fork's previous_version points back to the prior fork's current_version, forming a linked chain (GENESIS_FORK_VERSION -> ALTAIR_FORK_VERSION -> BELLATRIX_FORK_VERSION -> CAPELLA_FORK_VERSION -> DENEB_FORK_VERSION -> ELECTRA_FORK_VERSION -> FULU_FORK_VERSION). A violation would break compute_fork_digest, which derives P2P gossip topic identifiers from the current fork version and genesis_validators_root.\n\n1. DIRECT POST-CONDITION VERIFICATION: For each consensus client (Prysm, Lighthouse, Teku, Nimbus, Lodestar, Grandine), construct an Electra pre-state where pre.fork == Fork(previous_version=DENEB_FORK_VERSION, current_version=ELECTRA_FORK_VERSION, epoch=ELECTRA_FORK_EPOCH). Apply upgrade_to_fulu. Assert:\n   (a) post.fork.previous_version == ELECTRA_FORK_VERSION (which was pre.fork.current_version)\n   (b) post.fork.current_version == FULU_FORK_VERSION\n   (c) post.fork.epoch == get_current_epoch(pre) == FULU_FORK_EPOCH\n   If (a) fails, the version chain is broken.\n\n2. FALSIFICATION ATTEMPT - WRONG ASSIGNMENT SOURCE: The reference spec line is `previous_version=pre.fork.current_version`. A plausible implementation bug is to assign `previous_version=pre.fork.previous_version` (copying the wrong field). This would set previous_version to DENEB_FORK_VERSION instead of ELECTRA_FORK_VERSION, skipping one link in the version chain. To detect this:\n   (a) Construct a pre-state where pre.fork.previous_version != pre.fork.current_version (which is always true for any non-genesis fork).\n   (b) Apply upgrade_to_fulu.\n   (c) Assert post.fork.previous_version == pre.fork.current_version (NOT pre.fork.previous_version).\n   (d) This test only catches the bug if the two values are actually different, which they always are in production (DENEB_FORK_VERSION != ELECTRA_FORK_VERSION).\n\n3. FALSIFICATION ATTEMPT - HARDCODED VERSION: Another plausible bug is hardcoding the previous_version to ELECTRA_FORK_VERSION instead of reading from pre.fork.current_version. While this would produce the correct result on mainnet (where pre.fork.current_version IS ELECTRA_FORK_VERSION at the time of Fulu upgrade), it would fail on:\n   (a) Testnets that skip intermediate forks (e.g., a testnet that goes directly from Deneb to Fulu, where pre.fork.current_version would be DENEB_FORK_VERSION).\n   (b) Pure Fulu networks where upgrade_to_fulu is applied to a genesis state (pre.fork.current_version == GENESIS_FORK_VERSION).\n   FALSIFICATION TEST: Construct a pre-state with pre.fork.current_version set to a non-Electra value (e.g., DENEB_FORK_VERSION or a custom testnet version). Apply upgrade_to_fulu. Assert post.fork.previous_version == pre.fork.current_version (the actual pre-state value, NOT the hardcoded constant). If the implementation hardcodes ELECTRA_FORK_VERSION, this test will fail.\n\n4. FALSIFICATION ATTEMPT - UNINITIALIZED/DEFAULT VERSION: In some languages, a Fork constructor might leave previous_version uninitialized (defaulting to Bytes4(0x00000000)). This would create a zero-valued previous_version which does not match any valid fork version. To detect:\n   (a) Apply upgrade_to_fulu to a valid Electra pre-state.\n   (b) Assert post.fork.previous_version != Bytes4(0x00000000) (or whatever the language's default zero value is).\n   (c) Assert post.fork.previous_version == pre.fork.current_version.\n\n5. DOWNSTREAM IMPACT VERIFICATION - FORK DIGEST: The fork digest is computed as: compute_fork_digest(current_version, genesis_validators_root) = compute_fork_data_root(current_version, genesis_validators_root)[:4]. The fork version used in gossip topics is derived from the state's fork.current_version (for the current epoch) or fork.previous_version (for messages from the previous fork epoch during the transition). Verify:\n   (a) During the fork transition slot, nodes must subscribe to BOTH the old gossip topic (using ELECTRA_FORK_VERSION digest) and the new gossip topic (using FULU_FORK_VERSION digest).\n   (b) The ENR eth2 field contains: fork_digest (from current_version), next_fork_version, and next_fork_epoch.\n   (c) A broken previous_version would not directly affect current fork_digest (which uses current_version), but it WOULD affect:\n       - The compute_fork_version helper that uses the fork's previous_version and epoch to determine which version applies at a given epoch.\n       - Status message validation in req/resp, where peers exchange fork_digest and verify compatibility.\n       - Any logic that walks the version chain backwards (e.g., for historical state access or light client bootstrapping).\n   FALSIFICATION TEST: With a broken previous_version (e.g., set to DENEB_FORK_VERSION instead of ELECTRA_FORK_VERSION), call compute_fork_version(ELECTRA_FORK_EPOCH) using the post-state's fork. If the implementation uses the fork's previous_version to determine the version for epochs before the current fork epoch, it would return DENEB_FORK_VERSION instead of ELECTRA_FORK_VERSION. This would cause domain separation failures for any signatures created during the Electra epoch range.\n\n6. CROSS-CLIENT CONSISTENCY: Apply upgrade_to_fulu to an identical Electra pre-state across all 6 consensus clients. Extract post.fork from each and compare:\n   (a) post.fork.previous_version must be identical across all clients.\n   (b) post.fork.current_version must be identical across all clients.\n   (c) post.fork.epoch must be identical across all clients.\n   (d) Compute hash_tree_root(post.fork) for each client and assert equality.\n   A divergence in any field indicates an implementation bug in at least one client.\n\n7. VERSION CHAIN INTEGRITY - FULL WALK: After upgrade_to_fulu, verify the complete fork version chain is intact by walking backwards:\n   (a) post.fork.current_version == FULU_FORK_VERSION\n   (b) post.fork.previous_version == ELECTRA_FORK_VERSION (== pre.fork.current_version)\n   (c) pre.fork.previous_version == DENEB_FORK_VERSION (from the previous state's fork record)\n   This ensures that the Fulu upgrade did not corrupt only the latest link, but also that the prior link (Electra->Deneb) was preserved correctly through the upgrade (via the general field preservation invariant PROP-0004).\n\n8. HISTORICAL FORK UPGRADE REGRESSION: Review previous fork upgrade functions for bugs in previous_version assignment:\n   (a) upgrade_to_altair: Fork(previous_version=pre.fork.current_version, current_version=ALTAIR_FORK_VERSION, epoch=epoch)\n   (b) upgrade_to_bellatrix: Fork(previous_version=pre.fork.current_version, current_version=BELLATRIX_FORK_VERSION, epoch=epoch)\n   (c) upgrade_to_capella: Fork(previous_version=pre.fork.current_version, current_version=CAPELLA_FORK_VERSION, epoch=epoch)\n   (d) upgrade_to_deneb: Fork(previous_version=pre.fork.current_version, current_version=DENEB_FORK_VERSION, epoch=epoch)\n   (e) upgrade_to_electra: Fork(previous_version=pre.fork.current_version, current_version=ELECTRA_FORK_VERSION, epoch=epoch)\n   All follow the identical pattern. Check git history for any past bugs where previous_version was assigned incorrectly in any of these functions. If such bugs existed, verify upgrade_to_fulu does not repeat them.\n\n9. TYPE SAFETY VERIFICATION: The Fork container defines previous_version and current_version as Version (Bytes4). Verify that no client implementation:\n   (a) Accidentally swaps previous_version and current_version in the constructor arguments.\n   (b) Uses a uint32 representation that could have endianness issues (fork versions are Bytes4, not integers).\n   (c) Truncates or zero-extends the version bytes when copying from pre.fork.current_version.\n   In strongly-typed clients (Rust, Go), verify the types match. In weakly-typed clients (TypeScript, Python), verify no implicit coercion occurs.",
+      "bug_class": "State Consistency / Fork Version Chain Integrity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "consensus-specs/specs/fulu/fork/",
+          "function": "upgrade_to_fulu",
+          "line_range": "Line 8 (previous_version=pre.fork.current_version)",
+          "notes": "Reference specification. The critical assignment is on line 8 of the function body within the Fork() constructor: previous_version=pre.fork.current_version. The comment '[Modified in Fulu]' on line 9 refers to the current_version change, NOT the previous_version assignment, which follows the same pattern as all prior fork upgrades."
+        },
+        {
+          "file": "consensus-specs/specs/phase0/beacon-chain/",
+          "function": "Fork container definition",
+          "line_range": "Fork container",
+          "notes": "Fork is defined as: class Fork(Container): previous_version: Version, current_version: Version, epoch: Epoch. Version is Bytes4. The previous_version field stores the fork version that was active immediately before the current fork, creating a singly-linked version chain."
+        },
+        {
+          "file": "consensus-specs/specs/phase0/p2p-interface/",
+          "function": "compute_fork_version",
+          "line_range": "Helper function",
+          "notes": "compute_fork_version(epoch) returns the fork version applicable at the given epoch. It uses the state's fork.previous_version and fork.current_version along with fork.epoch to determine which version applies. A broken previous_version would cause incorrect version lookups for epochs in the previous fork's range."
+        },
+        {
+          "file": "consensus-specs/specs/phase0/p2p-interface/",
+          "function": "compute_fork_digest",
+          "line_range": "Helper function",
+          "notes": "compute_fork_digest(current_version, genesis_validators_root) = compute_fork_data_root(current_version, genesis_validators_root)[:4]. Used to derive gossip topic names and ENR eth2 field. While it takes current_version as input, the caller determines which version to use based on the fork state, which depends on previous_version for epoch-based version resolution."
+        },
+        {
+          "file": "(client-specific) prysm/beacon-chain/core/fulu/upgrade.go",
+          "function": "UpgradeToFulu",
+          "notes": "Prysm Go implementation. Verify the Fork struct literal uses pre.Fork().CurrentVersion() for PreviousVersion. Go struct fields are assigned by name, reducing swap risk, but verify the method call chain is correct."
+        },
+        {
+          "file": "(client-specific) lighthouse/consensus/state_processing/src/upgrade/fulu.rs",
+          "function": "upgrade_to_fulu",
+          "notes": "Lighthouse Rust implementation. Verify Fork { previous_version: pre.fork().current_version, ... }. Rust's strong typing of Version = [u8; 4] prevents many implicit conversion bugs."
+        },
+        {
+          "file": "(client-specific) nimbus/beacon_chain/spec/fulu/fulu_fork.nim",
+          "function": "upgrade_to_fulu",
+          "notes": "Nimbus Nim implementation. Verify Fork(previous_version: pre.fork.current_version, ...). Nim uses structural typing; verify the field name matches exactly."
+        },
+        {
+          "file": "(client-specific) teku/ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/SpecLogicFulu.java",
+          "function": "upgrade (or equivalent)",
+          "notes": "Teku Java implementation. Verify new Fork(state.getFork().getCurrentVersion(), FULU_FORK_VERSION, epoch) or equivalent. Java constructor argument order is critical since Java does not use named parameters for record types."
+        },
+        {
+          "file": "(client-specific) lodestar/packages/state-transition/src/slot/upgradeStateFulu.ts",
+          "function": "upgradeStateFulu",
+          "notes": "Lodestar TypeScript implementation. Verify {previousVersion: pre.fork.currentVersion, ...}. TypeScript's structural typing should catch misnamed fields, but verify the value source is correct."
+        }
+      ],
+      "executable_checks": [
+        "DIRECT POST-CONDITION: Construct an Electra pre-state with Fork(previous_version=DENEB_FORK_VERSION, current_version=ELECTRA_FORK_VERSION, epoch=ELECTRA_FORK_EPOCH). Apply upgrade_to_fulu. Assert post.fork.previous_version == ELECTRA_FORK_VERSION, post.fork.current_version == FULU_FORK_VERSION, post.fork.epoch == FULU_FORK_EPOCH. Run on all 6 consensus clients.",
+        "WRONG-FIELD FALSIFICATION: Construct a pre-state where pre.fork.previous_version (DENEB_FORK_VERSION) != pre.fork.current_version (ELECTRA_FORK_VERSION). Apply upgrade_to_fulu. Assert post.fork.previous_version == ELECTRA_FORK_VERSION (NOT DENEB_FORK_VERSION). This catches the bug where an implementation mistakenly copies previous_version from pre.fork.previous_version instead of pre.fork.current_version.",
+        "HARDCODED-VALUE FALSIFICATION: Construct a pre-state with a custom fork version (e.g., pre.fork.current_version = Bytes4(0xDEADBEEF)). Apply upgrade_to_fulu. Assert post.fork.previous_version == Bytes4(0xDEADBEEF). This catches implementations that hardcode ELECTRA_FORK_VERSION instead of reading from the pre-state.",
+        "PURE-FULU-NETWORK TEST: Construct a genesis-like pre-state with pre.fork.current_version == GENESIS_FORK_VERSION. Apply upgrade_to_fulu (simulating a pure Fulu network). Assert post.fork.previous_version == GENESIS_FORK_VERSION. This tests the edge case described in the spec note about pure Fulu networks.",
+        "CROSS-CLIENT FORK HASH: Apply upgrade_to_fulu to an identical Electra pre-state on Prysm, Lighthouse, Teku, Nimbus, Lodestar, and Grandine. Compute hash_tree_root(post.fork) for each. Assert all produce the identical hash. Any divergence indicates a version assignment bug.",
+        "FORK DIGEST DOWNSTREAM TEST: After upgrade_to_fulu, compute compute_fork_digest(post.fork.current_version, post.genesis_validators_root) and compute_fork_digest(post.fork.previous_version, post.genesis_validators_root). The first should match FULU fork digest. The second should match ELECTRA fork digest. If the second does not match, previous_version is wrong and P2P gossip topics during the transition will be incorrect.",
+        "VERSION CHAIN WALK: After upgrade_to_fulu, verify the chain: post.fork.current_version == FULU_FORK_VERSION, post.fork.previous_version == ELECTRA_FORK_VERSION. Then load the pre-state's fork and verify pre.fork.current_version == ELECTRA_FORK_VERSION, pre.fork.previous_version == DENEB_FORK_VERSION. This validates the full chain was not corrupted.",
+        "CONSTRUCTOR ARGUMENT ORDER AUDIT: For each client, manually inspect the Fork constructor call in the upgrade function. Verify previous_version and current_version are not swapped. In Java (Teku), where constructor arguments are positional, this is the highest-risk location.",
+        "PROPERTY-BASED TEST: forall pre-states S where S is a valid Electra BeaconState with arbitrary fork.current_version V: let post = upgrade_to_fulu(S); assert post.fork.previous_version == V. Run with random version bytes for 10K+ iterations."
+      ],
+      "notes": "Source: PROP-0005, Source Invariant: fork-SG-002-INV-002, Source Assumption: asm-009, Primary Element: fork-SG-002 (upgrade_to_fulu subgraph). This post-condition ensures the fork version history chain is maintained during the Fulu upgrade. The chain structure is: each fork's previous_version == prior fork's current_version. This forms a singly-linked list: GENESIS -> ALTAIR -> BELLATRIX -> CAPELLA -> DENEB -> ELECTRA -> FULU. If this chain is broken at the Fulu link (i.e., post.fork.previous_version != ELECTRA_FORK_VERSION on mainnet), the downstream effects are: (1) compute_fork_version(epoch) returns wrong version for Electra-epoch queries, (2) Domain separation for BLS signatures computed during the Electra epoch range becomes incorrect when verified in the Fulu epoch, (3) P2P gossip topic names for the transition period use wrong fork_digest, causing nodes to publish/subscribe to non-existent topics, (4) ENR eth2 field validation fails for peers that compute fork_digest from the correct version, (5) Status message handshake in req/resp fails, preventing peer connections. The practical impact is a network partition where nodes with correct version chaining cannot communicate with nodes that have broken version chaining. Unlike PROP-0004 (field preservation), this property focuses specifically on the Fork constructor's previous_version argument, which is a single-line assignment with a limited but high-impact failure mode. The most likely implementation bugs are: (a) copying from pre.fork.previous_version instead of pre.fork.current_version (wrong field), (b) hardcoding ELECTRA_FORK_VERSION instead of reading from pre-state (correct on mainnet, wrong on testnets), (c) swapping constructor arguments for previous_version and current_version (especially in Java where arguments are positional), (d) uninitialized Version field defaulting to zero bytes."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T12:00:00Z",
+    "total_checks": 1,
+    "by_severity": {
+      "Critical": 0,
+      "High": 1,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 0,
+      "Formal Verification Engineer": 1
+    },
+    "all_in_scope": true
+  }
+}

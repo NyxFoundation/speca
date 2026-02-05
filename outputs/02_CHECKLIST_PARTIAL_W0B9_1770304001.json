@@ -1,0 +1,378 @@
+{
+  "source_files": [
+    "outputs/01e_PARTIAL_W1B10_1770297331.json"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 2,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 2
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0009",
+      "property_id": "PROP-0009",
+      "title": "Verify Trust Boundary Integrity: Is public key y-coordinate qy strictly validated to satisfy 0 <= qy < p before processing by the P256VERIFY precompile?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Transaction validation"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Same rationale as qx bounds check. Both coordinates must be valid field elements. An attacker can supply arbitrary 256-bit values for qy via a CALL to the precompile at address 0x0100. The secp256r1 field modulus p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF is less than 2^256, so there are valid 256-bit encodings where qy >= p. If qy >= p is silently reduced modulo p, the resulting (qx, qy mod p) may or may not lie on secp256r1, enabling subtle attack scenarios."
+      },
+      "test_procedure": "1. Identify the precompile entry point for P256VERIFY (address 0x0100) in each target client implementation. In go-ethereum: `p256Verify.Run()` in `core/vm/contracts.go` extracts `y := new(big.Int).SetBytes(input[128:160])` and passes it to `secp256r1.Verify(hash, r, s, x, y)`. In Besu: `P256VerifyPrecompiledContract.computeDefault()` extracts `qy = pubKeyBytes.slice(32, 32).toUnsignedBigInteger()` and checks `qy.compareTo(P) >= 0`. In the Python execution-specs reference: `p256verify()` checks `if public_key_y >= SECP256R1P: return`. 2. Verify the implementation performs an EXPLICIT bounds check on qy BEFORE any modular arithmetic or curve equation check. The check must enforce `0 <= qy < p` where p is the secp256r1 field modulus (0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF). 3. CRITICAL IMPLEMENTATION ANALYSIS -- go-ethereum: The `p256Verify.Run()` function extracts y as `new(big.Int).SetBytes(input[128:160])` and passes it to `secp256r1.Verify(hash, r, s, x, y)`. The Verify function calls `elliptic.P256().IsOnCurve(x, y)` which calls `pointFromAffine(x, y)`. The `pointFromAffine` function checks `y.BitLen() > curve.params.BitSize` which rejects values >= 2^256 but does NOT reject values in the range [p, 2^256). However, the subsequent call chain goes through `nistCurve.SetBytes(buf)` -> `fiat.P256Element.SetBytes(...)` which performs an explicit check against `p-1` encoding and rejects values >= p. Therefore, go-ethereum correctly rejects qy >= p, but through an IMPLICIT validation buried deep in the Go standard library's FIPS cryptography implementation, not through an explicit check in the precompile code. This is fragile -- a Go standard library update could change this behavior. Note: the y-coordinate is encoded together with x into a 65-byte uncompressed point format (0x04 || x || y) before passing to nistec.NewP256Point().SetBytes(), so the bounds rejection for y occurs in the same SetBytes call that checks x, making the two coordinate validations interdependent. 4. CRITICAL IMPLEMENTATION ANALYSIS -- Besu: The `computeDefault()` method explicitly checks `if (qy.signum() < 0 || qy.compareTo(P) >= 0)` where `P = R1_PARAMS.getCurve().getField().getCharacteristic()`. This is a correct, explicit bounds check. HOWEVER, the `computeNative()` path delegates to BoringSSL via `BoringSSLPrecompiles.p256Verify()` which needs independent verification that it also rejects qy >= p. If the native path handles field reduction differently for y than for x, Besu's Java and native paths could diverge. 5. CRITICAL IMPLEMENTATION ANALYSIS -- Python reference: The reference implementation explicitly checks `if public_key_y >= SECP256R1P: return` BEFORE checking the on-curve condition and BEFORE checking the point at infinity. This is the canonical behavior per EIP-7951. 6. QY-SPECIFIC ATTACK VECTOR -- CURVE EQUATION BYPASS: Unlike qx, the y-coordinate appears on the LEFT side of the curve equation as qy^2 mod p. If qy >= p is NOT rejected and instead silently reduced to qy mod p, the curve equation check becomes (qy mod p)^2 == qx^3 + a*qx + b (mod p). For any valid on-curve point (qx, qy_valid), the value qy_forged = qy_valid + p would satisfy (qy_forged mod p)^2 == qy_valid^2 == qx^3 + a*qx + b (mod p). This means the curve equation check would PASS for the forged y-coordinate, and the subsequent ECDSA verification (u1*G + u2*Q) would also use the reduced value, potentially producing a correct result. This makes the qy bounds check MORE CRITICAL than might be apparent -- silent modular reduction of qy does not necessarily cause the curve check to fail. 7. Craft test transactions calling the precompile with the following qy values, using a valid qx on the secp256r1 curve for each test: (a) qy = p (exact field modulus) -- MUST return empty output; (b) qy = p + 1 -- MUST return empty output; (c) qy = qy_valid + p where (qx, qy_valid) is a known valid on-curve point with a valid signature -- THIS IS THE CRITICAL EDGE CASE: if modular reduction is applied silently, (qy_valid + p) mod p == qy_valid and the entire verification could succeed, returning 0x01 instead of empty output. THIS WOULD BE A CONSENSUS BUG; (d) qy = 2^256 - 1 (maximum uint256) -- MUST return empty output; (e) qy = p - 1 (maximum valid field element) -- MUST proceed to curve equation check (will likely fail the on-curve check, but should not be rejected at the bounds check stage); (f) qy = 0 with qx = 0 -- MUST return empty output (point at infinity rejection); (g) For a valid on-curve point (qx, qy_valid), also test (qx, p - qy_valid) which is the y-negation of the point -- this should be a DIFFERENT valid on-curve point (the inverse point), and MUST pass the bounds check. 8. CRITICAL DIFFERENTIAL TEST: Find or construct a valid signature tuple (h, r, s, qx, qy_valid) where verification succeeds (returns 0x01). Compute qy_forged = qy_valid + p. Submit (h, r, s, qx, qy_forged). Under modular reduction, qy_forged mod p == qy_valid, and since qy appears quadratically in the curve equation (qy^2 mod p), the reduction preserves the curve check. The ECDSA verification would also use the reduced point, so the ENTIRE verification could succeed. Under strict bounds checking, qy_forged >= p, so it returns empty output. This differential test directly detects whether the implementation uses modular reduction vs strict bounds checking for the y-coordinate. A POSITIVE RESULT (success with qy_forged) IS A HIGH-SEVERITY BUG because it means two different 256-bit encodings of the same public key produce the same verification result, which violates the canonical encoding requirement and could cause consensus issues if clients differ in their treatment. 9. Cross-client verification: Run identical boundary-qy inputs against geth, reth, Nethermind, Besu, and Erigon and confirm consensus on all boundary qy values. Any divergence in accept/reject behavior for qy >= p indicates a consensus-level bug that could cause chain splits. 10. Y-COORDINATE SYMMETRY TEST: For secp256r1, if (qx, qy) is on the curve, then (qx, p - qy) is also on the curve (the point negation). Verify that for a valid signature under (qx, qy), the precompile returns FAILURE (empty) for (qx, p - qy) since this is a different public key. This tests that the precompile does not confuse point negation with bounds validation. 11. Verify the behavior when qy is exactly p: in some implementations, field element constructors treat p as the zero element (since p mod p = 0). If qy = p is accepted and treated as qy = 0, the point becomes (qx, 0). For secp256r1, a point with y = 0 is a point of order 2 (if it exists on the curve), which could have special properties in ECDSA verification. Verify this does not bypass any validation checks.",
+      "bug_class": "Input Validation / Cryptographic Field Element Bounds",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "N/A (go-ethereum)",
+          "notes": "Extraction: `y := new(big.Int).SetBytes(input[128:160])`. big.Int.SetBytes interprets as unsigned big-endian. No explicit bounds check against the field modulus p. The value is passed directly to secp256r1.Verify() and then to elliptic.P256().IsOnCurve(x, y). The bounds rejection happens implicitly inside Go's fiat.P256Element.SetBytes, which compares against p-1 encoding using constant-time comparison. This implicit check is correct but fragile."
+        },
+        {
+          "file": "crypto/secp256r1/verifier.go",
+          "function": "Verify",
+          "line_range": "N/A (go-ethereum)",
+          "notes": "Thin wrapper: `func Verify(hash []byte, r, s, x, y *big.Int) bool { ... if !elliptic.P256().IsOnCurve(x, y) { return false } ... }`. The IsOnCurve call validates both x and y simultaneously. The y-coordinate is packed into the uncompressed point format (0x04 || x_bytes || y_bytes) before passing to nistec.NewP256Point().SetBytes()."
+        },
+        {
+          "file": "golang/go: src/crypto/internal/fips140/nistec/fiat/p256.go",
+          "function": "P256Element.SetBytes",
+          "line_range": "N/A (Go standard library FIPS module)",
+          "notes": "ACTUAL BOUNDS CHECK for both x and y: Compares input against the encoding of p-1 using `subtle.ConstantTimeLessOrEqBytes(v, minusOneEncoding)`. Returns error for values > p-1 (i.e., values >= p). Both x and y are validated through this same code path when the 65-byte uncompressed point is parsed."
+        },
+        {
+          "file": "evm/src/main/java/org/hyperledger/besu/evm/precompile/P256VerifyPrecompiledContract.java",
+          "function": "computeDefault",
+          "line_range": "N/A (Besu)",
+          "notes": "EXPLICIT BOUNDS CHECK: `if (qy.signum() < 0 || qy.compareTo(P) >= 0)` where `P = R1_PARAMS.getCurve().getField().getCharacteristic()`. This correctly enforces 0 <= qy < p. However, the `computeNative()` path delegates entirely to BoringSSL which must be independently verified."
+        },
+        {
+          "file": "src/ethereum/forks/osaka/vm/precompiled_contracts/p256verify.py",
+          "function": "p256verify",
+          "line_range": "N/A (execution-specs reference)",
+          "notes": "CANONICAL REFERENCE: `if public_key_y >= SECP256R1P: return`. SECP256R1P is the field modulus. This is the canonical behavior per EIP-7951 specification. The check occurs BEFORE the on-curve check and the infinity check, establishing the correct validation order."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Submit (h_valid, r_valid, s_valid, qx_valid, qy=p) and assert empty output -- tests exact field modulus rejection for y-coordinate",
+        "Unit test: Submit (h_valid, r_valid, s_valid, qx_valid, qy=p+1) and assert empty output -- tests field modulus + 1",
+        "Unit test: Submit (h_valid, r_valid, s_valid, qx_valid, qy=2^256-1) and assert empty output -- tests maximum uint256",
+        "Unit test: Submit (h_valid, r_valid, s_valid, qx_valid, qy=p-1) and assert NOT rejected at bounds check (may fail at curve equation check, but that is a different failure mode)",
+        "CRITICAL Differential test: Start with a valid (h, r, s, qx, qy_valid) tuple that returns 0x01 success. Compute qy_forged = qy_valid + p. Submit (h, r, s, qx, qy_forged). MUST return empty output. If it returns 0x01, the implementation uses modular reduction instead of strict bounds checking -- THIS IS A CONSENSUS BUG because (qy_valid + p) mod p == qy_valid means the curve equation and ECDSA verification would both pass under modular reduction",
+        "Cross-client differential test: Run identical boundary-qy inputs against geth, reth, Nethermind, Besu, and Erigon; assert identical accept/reject behavior -- any divergence is a consensus bug",
+        "Property-based test: forall qy >= p, the precompile must return empty output regardless of other input values",
+        "Fuzz test: Generate random 256-bit values for qy including values in [p, 2^256) and verify the precompile consistently returns empty output for all out-of-range values",
+        "Y-symmetry test: For valid on-curve point (qx, qy), verify that (qx, p - qy) is a different valid point but produces FAILURE for the same signature (since p - qy is a different public key)",
+        "Edge case test: Submit qy = p (which equals 0 mod p) with qx such that (qx, 0) could be a point of order 2 -- verify this is rejected at the bounds check, not at the curve equation check",
+        "Native vs Java test (Besu-specific): Run boundary qy values through both computeDefault() and computeNative() paths and verify they return identical results -- divergence between BoringSSL and Bouncy Castle handling of qy >= p is a client-internal consensus risk"
+      ],
+      "notes": "Source: PROP-0009, Trust Boundary: tb-001, Source Invariant: EIP7951-SG002-INV-003. KEY FINDING: The qy bounds check shares the same implementation fragility as the qx bounds check (see CHK-0008). In go-ethereum, both coordinates are validated implicitly through Go's FIPS P256 field element parsing, not through explicit precompile-level checks. However, the qy case has a DISTINCT AND MORE DANGEROUS attack surface than qx: because qy appears quadratically in the curve equation (qy^2 mod p), silent modular reduction of an out-of-range qy preserves the curve equation validity. Specifically, if qy_forged = qy_valid + p, then (qy_forged mod p)^2 = qy_valid^2, so the on-curve check passes. In contrast, for qx, silent reduction would change the RHS (qx^3 + a*qx + b mod p) which might or might not match the LHS, making it less likely to silently pass. This asymmetry means qy bounds validation failures are more likely to be exploitable than qx bounds validation failures. Bug bounty note: Requires PoC with qy >= p that either passes the full verification (indicating silent modular reduction), causes unexpected behavior, or demonstrates cross-client divergence. The most impactful PoC would use qy_forged = qy_valid + p with a valid signature that succeeds."
+    },
+    {
+      "check_id": "CHK-0009a",
+      "property_id": "PROP-0009",
+      "title": "Supporting Node Check: Does the external caller's transaction deliver the attacker-controlled qy value to the precompile unmodified?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Transaction validation"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Verifies that the data flow from external caller (actor-external-caller) to precompile (actor-precompile) does not inadvertently sanitize, truncate, or reduce the qy value before the bounds check."
+      },
+      "test_procedure": "1. Trace the data flow from transaction calldata to the precompile's input buffer. Verify that the 32-byte qy field (bytes 128-159 of the 160-byte input) is extracted without truncation, padding modification, or implicit modular reduction at any intermediate step. 2. In go-ethereum, qy is extracted via `new(big.Int).SetBytes(input[128:160])`. Verify that `big.Int.SetBytes` interprets the bytes as unsigned big-endian without any modular reduction -- this is correct by definition of big.Int, but verify no wrapper function modifies the value before it reaches the Verify function. 3. In Besu, qy is extracted via `pubKeyBytes.slice(32, 32).toUnsignedBigInteger()` where `pubKeyBytes = input.slice(96, 64)`. Verify that `toUnsignedBigInteger()` preserves all 256 bits without reduction. Note the two-level slicing: first extracting 64 bytes for the public key from offset 96, then extracting the second 32 bytes for qy. Verify no off-by-one error exists in this slicing chain. 4. Verify that EVM-level preprocessing (CALLDATALOAD, memory copy operations) does not alter the qy bytes before they reach the precompile. The qy field occupies bytes 128-159 of the input, which spans EVM words 4 and 5 (bytes 128-159). Verify that the precompile receives the raw calldata bytes without EVM word-alignment padding that could truncate or shift the qy value. 5. Test with qy values that have specific bit patterns: (a) all-ones (0xFF...FF = 2^256-1), (b) qy = p with exact byte encoding, (c) qy = p+1 with exact byte encoding, (d) qy = 0 (zero-padded 32 bytes). Verify the extracted BigInteger/big.Int matches the expected value in each case. 6. Verify that the precompile returns empty output for inputs with length != 160 bytes, ensuring no partial qy extraction occurs. Specifically test 159 bytes (qy truncated by 1 byte) and 128 bytes (qy field entirely missing). 7. CALLDATA EDGE CASE: When the P256VERIFY precompile is invoked via CALL/STATICCALL/DELEGATECALL, the EVM passes the input data as a memory range. Verify that if the caller provides exactly 160 bytes of calldata, the precompile receives exactly 160 bytes. If the caller provides fewer bytes, the precompile should receive zero-padded input -- verify that zero-padding for a short qy field does not accidentally create a valid qy value.",
+      "bug_class": "Data Flow Integrity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "N/A (go-ethereum)",
+          "notes": "Extraction: `y := new(big.Int).SetBytes(input[128:160])`. The precompile checks `len(input) != p256VerifyInputLength` (160) first. If input is not exactly 160 bytes, returns nil. So the [128:160] slice is only accessed for exactly-160-byte inputs."
+        },
+        {
+          "file": "evm/src/main/java/org/hyperledger/besu/evm/precompile/P256VerifyPrecompiledContract.java",
+          "function": "computeDefault",
+          "line_range": "N/A (Besu)",
+          "notes": "Extraction: `final Bytes pubKeyBytes = input.slice(96, 64); final BigInteger qy = pubKeyBytes.slice(32, 32).toUnsignedBigInteger()`. Two-level slicing to get qy from bytes 128-159."
+        }
+      ],
+      "executable_checks": [
+        "Unit test: Verify that input[128:160] = encoding(p) yields qy = p as a BigInteger/big.Int (not qy = 0 after silent reduction)",
+        "Unit test: Verify that input[128:160] = encoding(p+1) yields qy = p+1",
+        "Unit test: Verify that 159-byte input returns empty output without any qy processing",
+        "Unit test: Verify that 128-byte input (qy field entirely missing) returns empty output without panic or out-of-bounds access",
+        "Unit test: Verify that 161-byte input returns empty output (strict length check)",
+        "Unit test: Verify zero-padded short input (e.g., 140 bytes) is not silently extended to 160 bytes with a qy of 0"
+      ],
+      "notes": "Source: PROP-0009, Supporting check for node actor-external-caller -> actor-precompile data path integrity for the qy field. This check ensures the qy value arrives at the bounds-checking logic unmodified, so that the bounds check (CHK-0009) can function correctly. The qy field is the LAST 32 bytes of the 160-byte input, making it the most vulnerable to truncation if the input length check is incorrect or if the precompile pads short inputs."
+    },
+    {
+      "check_id": "CHK-0009b",
+      "property_id": "PROP-0009",
+      "title": "Verify qy >= p combined with valid qx does not enable silent curve equation bypass via modular reduction asymmetry",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "validation_layers": [
+          "Transaction validation"
+        ],
+        "bug_bounty_scope": "in-scope",
+        "notes": "This check targets a qy-specific attack that does NOT apply to qx. Because qy appears as qy^2 in the curve equation, silent modular reduction of qy preserves the curve equation: (qy + p)^2 mod p == qy^2 mod p. This means an out-of-range qy that undergoes silent modular reduction would PASS the on-curve check, unlike out-of-range qx which changes the RHS of the curve equation and may fail."
+      },
+      "test_procedure": "1. CONSTRUCT THE ATTACK: Start with a known valid secp256r1 key pair (private_key, (qx, qy)) and a valid signature (h, r, s) that the precompile accepts (returns 0x01). 2. Compute qy_attack_1 = qy + p. This value satisfies: (a) qy_attack_1 >= p (should be rejected by bounds check); (b) qy_attack_1 mod p == qy (curve equation would pass under modular reduction); (c) The ECDSA verification uses the public key point for scalar multiplication. If the implementation constructs the point from reduced coordinates, the verification would also pass. 3. Compute qy_attack_2 = qy + 2*p. Same logic: qy_attack_2 mod p == qy. Test whether the implementation handles values > 2*p differently from values in [p, 2*p). 4. Compute qy_attack_3 = (p - qy). This is the y-coordinate of the NEGATED point (-Q). Submit (h, r, s, qx, p - qy). This MUST return empty output (failure) because -Q is a different public key. If it returns 0x01, the implementation has a point negation confusion bug. Note: (p - qy) < p, so this should pass the bounds check and reach the ECDSA verification step, which should fail because -Q != Q. 5. Submit all attack vectors (qy_attack_1, qy_attack_2, qy_attack_3) to each client implementation. 6. MATHEMATICAL PROOF OF ATTACK VIABILITY: For secp256r1 with field modulus p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF and subgroup order n < p, valid qy values are in [0, p). The value qy + p fits in 257 bits if qy >= 1, which means it fits in a 33-byte encoding. However, the precompile input uses 32-byte big-endian encoding. For qy values where qy + p < 2^256, the 32-byte encoding of qy + p is valid. Since p < 2^256, we need qy + p < 2^256, which means qy < 2^256 - p. Since all valid qy satisfy qy < p < 2^256, and p + p = 2p which may exceed 2^256 for some values -- specifically, 2p > 2^256 is false because p < 2^255. So qy + p < 2^256 for ALL valid qy, and the attack value always fits in 32 bytes. 7. DIFFERENTIAL EXECUTION: For each client, run the following test matrix and record the output: | Input | Expected | Actual (geth) | Actual (reth) | Actual (nethermind) | Actual (besu) | Actual (erigon) | |-------|----------|---------------|---------------|---------------------|---------------|-----------------| | (h, r, s, qx, qy_valid) | 0x01 (success) | | | | | | | (h, r, s, qx, qy_valid + p) | empty (fail) | | | | | | | (h, r, s, qx, qy_valid + 2*p) | empty (fail) | | | | | | | (h, r, s, qx, p - qy_valid) | empty (fail) | | | | | | Any cell showing 0x01 for qy >= p inputs is a CRITICAL consensus bug. Any cross-client divergence for ANY input is a HIGH consensus bug.",
+      "bug_class": "Cryptographic Validation Bypass / Modular Reduction Asymmetry",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "N/A (go-ethereum)",
+          "notes": "The code `y := new(big.Int).SetBytes(input[128:160])` creates a big.Int from the raw bytes. If this big.Int value >= p, the subsequent call chain must reject it. The critical question is whether Go's P256 implementation performs modular reduction (accepting qy + p as qy) or strict rejection (returning an error for qy >= p)."
+        },
+        {
+          "file": "golang/go: src/crypto/internal/fips140/nistec/p256.go",
+          "function": "P256Point.SetBytes",
+          "line_range": "N/A (Go standard library)",
+          "notes": "Parses the 65-byte uncompressed point format (0x04 || x || y). Both x and y are validated through fiat.P256Element.SetBytes which performs constant-time comparison against p-1 encoding. The y-coordinate is the second 32-byte field in the serialized point."
+        },
+        {
+          "file": "evm/src/main/java/org/hyperledger/besu/evm/precompile/P256VerifyPrecompiledContract.java",
+          "function": "computeDefault",
+          "line_range": "N/A (Besu)",
+          "notes": "Explicit check: `qy.compareTo(P) >= 0` catches qy >= p before any crypto operations. The computeNative() path needs separate verification."
+        },
+        {
+          "file": "src/ethereum/forks/osaka/vm/precompiled_contracts/p256verify.py",
+          "function": "p256verify",
+          "line_range": "N/A (execution-specs reference)",
+          "notes": "Reference: `if public_key_y >= SECP256R1P: return`. This explicit check is the canonical behavior."
+        }
+      ],
+      "executable_checks": [
+        "CRITICAL: Generate a valid NIST P-256 signature (h, r, s) for a known key pair (privkey, (qx, qy)). Submit (h, r, s, qx, qy+p) to each EL client. Assert ALL return empty output",
+        "Generate a second valid signature for the same key pair. Submit (h2, r2, s2, qx, qy+p). Assert empty output. This tests that the rejection is based on qy value, not on signature validity",
+        "Submit (h, r, s, qx, qy+2*p) to each client. Assert empty output even for larger multiples of p",
+        "Y-negation test: Submit (h, r, s, qx, p-qy) where (qx,qy) is the signing key. Assert empty output (p-qy < p so it passes bounds, but -Q != Q so ECDSA verification must fail)",
+        "Property-based test: forall valid_qy in [0, p), forall k in [1, 10], the precompile must return empty output for qy = valid_qy + k*p (when representable in 256 bits)",
+        "Besu native path test: Run qy = qy_valid + p through both computeDefault() and computeNative() and verify both return empty output",
+        "Gas consumption test: Verify that the precompile charges 6900 gas regardless of whether qy >= p (reject at bounds) or qy < p (full verification). Any gas difference could leak information about the validation path"
+      ],
+      "notes": "Source: PROP-0009, Trust Boundary: tb-001, Source Invariant: EIP7951-SG002-INV-003. THIS CHECK ADDRESSES THE MOST DANGEROUS QY-SPECIFIC ATTACK VECTOR. Unlike the qx bounds check (PROP-0008/CHK-0008), a qy bounds check failure is DIRECTLY EXPLOITABLE because the curve equation y^2 = x^3 + ax + b (mod p) is invariant under qy -> qy + k*p for any integer k. This means an implementation that performs silent modular reduction on qy (but correctly validates the curve equation and ECDSA math) would accept signatures with out-of-range qy values, creating two distinct 256-bit encodings for the same public key. While this might seem benign, it violates the canonical encoding requirement and could cause consensus failures if different clients handle the encoding differently. Furthermore, in systems that use qy as part of address derivation or key comparison (e.g., ERC-4337 account abstraction with P256 keys), two encodings of the same key could lead to authorization bypasses. Historical precedent: The Windows CryptoAPI CVE-2020-0601 (CurveBall) vulnerability was caused by inadequate validation of elliptic curve parameters, allowing an attacker to spoof any certificate. While the specific attack differs, the root cause -- insufficient validation of curve parameters at trust boundaries -- is identical."
+    },
+    {
+      "check_id": "CHK-0010",
+      "property_id": "PROP-0010",
+      "title": "Verify Trust Boundary Integrity: Can an off-curve public key point bypass P256VERIFY validation and cause the precompile to return success (0x01)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Attacker can supply arbitrary (qx, qy) values. Missing curve check enables invalid curve attacks where scalar multiplication on a weak curve leaks private key information or produces forged verification results."
+      },
+      "test_procedure": "1. LOCATE P256VERIFY IMPLEMENTATIONS AND ON-CURVE CHECK: (a) Reference spec: ethereum/osaka/vm/precompiled_contracts/p256verify.py. The specification mandates five sequential checks: input length == 160 bytes, 0 < r < n AND 0 < s < n, 0 <= qx < p AND 0 <= qy < p, qy^2 == qx^3 + a*qx + b (mod p), and (qx, qy) != (0, 0). The curve equation check is the FOURTH validation step (after field range checks, before infinity check). (b) go-ethereum: core/vm/contracts.go (p256Verify struct, Run method) delegates to crypto/secp256r1.Verify(hash, r, s, x, y). The critical question is whether the underlying secp256r1.Verify function performs the on-curve check BEFORE performing scalar multiplication. Go's standard library crypto/elliptic/p256.go (P256 curve) performs on-curve validation in Unmarshal() but NOT in all code paths if coordinates are passed as raw big.Int values. The geth wrapper calls elliptic.P256().IsOnCurve(x, y) which goes through pointFromAffine(x, y) -> nistCurve.SetBytes(buf) -> nistec.NewP256Point().SetBytes(uncompressed), which validates the curve equation internally. However, this check is IMPLICIT in the library -- it is not an explicit check in the precompile code. (c) reth: revm::precompile::secp256r1 module. Rust's p256 crate (RustCrypto) performs on-curve validation during AffinePoint deserialization. Verify whether reth constructs the point via the checked deserialization path (AffinePoint::from_encoded_point) or an unchecked constructor. (d) Nethermind: Uses .NET cryptographic libraries or a custom implementation. Nethermind v1.31.5 fixed sync failures related to invalid SecP256r1 precompile parameters, which strongly suggests prior issues with input validation -- this historical bug is directly relevant. (e) Besu: Uses the besu-native secp256r1 library. The Java computeDefault() path constructs an ECPoint and calls isValid(). The computeNative() path delegates to BoringSSL via JNI -- verify that the native C code also performs the on-curve check. 2. SECP256R1 CURVE EQUATION VERIFICATION: The curve equation is y^2 = x^3 + ax + b (mod p) where: p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF, a = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC (note: a = p - 3), b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B. For each implementation, verify that the EXACT same values of a, b, and p are used in the curve check. An incorrect constant would silently accept off-curve points or reject on-curve points. CRITICAL: Many P-256 implementations use the optimization a = -3 (i.e., a = p - 3). Verify that this optimization computes the curve equation correctly: y^2 = x^3 - 3x + b (mod p) is equivalent to y^2 = x^3 + (p-3)x + b (mod p). 3. CONSTRUCT OFF-CURVE TEST POINTS -- SYSTEMATIC ATTACK VECTORS: (a) VALID-RANGE OFF-CURVE (off-by-one): Choose any valid qx (0 <= qx < p). Compute rhs = qx^3 + a*qx + b (mod p). If rhs is a quadratic residue mod p, compute qy_valid = sqrt(rhs) mod p. Then use (qx, qy_valid + 1 mod p) which is off-curve but has valid field element coordinates. Submit with arbitrary (h, r, s). EXPECTED: empty output. (b) TWIST-CURVE POINT: For secp256r1, the quadratic twist is defined by the equation y^2 = x^3 + ax + b' where b' = b * d^(-1) for some non-residue d, or equivalently, for any x where x^3 + ax + b is a quadratic non-residue mod p. Choose such an x (roughly half of all x values give non-residues). Compute y on the twist. This point (x, y_twist) satisfies y_twist^2 = x^3 + ax + b (mod p) is FALSE, so it is NOT on secp256r1. Submit (x, y_twist) as the public key. EXPECTED: empty output. If accepted, the implementation performs scalar multiplication on a point that does not satisfy the curve equation, producing UNDEFINED behavior. (c) LOW-ORDER POINT ON DIFFERENT CURVE (Invalid Curve Attack): Choose b_weak != b such that the curve E': y^2 = x^3 + ax + b_weak (mod p) has a group order with small prime factors. For example, search for b_weak such that #E'(Fp) is smooth (has only small prime factors). Find a point P_weak of small order k on E'. Submit P_weak as (qx, qy) to P256VERIFY. If the implementation performs scalar multiplication WITHOUT the on-curve check, the multiplication effectively operates on E' (since the formula x^3 + ax + b_weak is never evaluated -- the scalar multiplication only uses point addition and doubling which depend on a but NOT on b). This is the CLASSIC invalid curve attack. (d) RANDOM OFF-CURVE FUZZ: Generate 1000 random (qx, qy) pairs where 0 <= qx < p and 0 <= qy < p but qy^2 != qx^3 + a*qx + b (mod p). Submit each with crafted (h, r, s) tuples. ALL must return empty output. 4. INVALID CURVE ATTACK -- DETAILED PoC CONSTRUCTION FOR P256VERIFY: The classic invalid curve attack (Jager et al. 2015, used against TLS-ECDH) works differently for signature verification vs. key exchange. For P256VERIFY, the verification algorithm computes R' = u1*G + u2*Q where G is the secp256r1 generator and Q is the attacker-supplied public key. CRITICAL OBSERVATION: The addition formula for Weierstrass curves uses ONLY the curve coefficient 'a' (not 'b') in the doubling formula: lambda = (3*x^2 + a) / (2*y). The coefficient 'b' only appears in the curve equation check. This means: (i) If the on-curve check is missing, scalar multiplication of an off-curve point Q' that lies on a different curve E' with the SAME 'a' coefficient but DIFFERENT 'b' coefficient will produce a mathematically valid result ON E' (not on secp256r1). (ii) The generator G is on secp256r1, so u1*G produces a point on secp256r1. (iii) Adding u1*G (on secp256r1) and u2*Q' (on E') produces a point that is on NEITHER curve -- the result is algebraically meaningless. (iv) HOWEVER, the final check only compares the x-coordinate of R' against r (mod n). If the meaningless addition accidentally produces an x-coordinate that equals r (mod n), the verification succeeds. The probability of this is approximately 1/n (negligible for a single attempt), but with repeated queries using different b' values, the probability increases. More importantly, some implementations may crash, revert, or enter undefined behavior when computing point addition on mixed-curve points. To construct a concrete PoC: (a) Choose b' such that E': y^2 = x^3 + ax + b' (mod p) has a smooth group order. (b) Find a point Q' of order k on E' (where k is small, e.g., k < 1000). (c) Compute the discrete log of Q' on E' (trivial since k is small). (d) Generate a message hash h. (e) Craft r and s values such that the verification equation would hold on E' with Q' as the public key. Specifically: compute u1 = h * s^(-1) mod n, u2 = r * s^(-1) mod n, then R'_on_E' = u1*G_E' + u2*Q' on E'. Set r = R'_on_E'.x mod n. (f) Submit (h, r, s, Q'.x, Q'.y) to P256VERIFY. (g) If the precompile returns 0x01, the on-curve check is MISSING and the invalid curve attack succeeds. 5. BOUNDARY VALUE TESTS FOR THE CURVE CHECK: (a) qy^2 = qx^3 + a*qx + b + 1 (mod p): off-curve by exactly 1 in the curve equation. MUST be rejected. (b) qy^2 = qx^3 + a*qx + b - 1 (mod p): off-curve by exactly 1 in the other direction. MUST be rejected. (c) (qx, 0) where qx^3 + a*qx + b != 0 (mod p): off-curve point with y=0. MUST be rejected at the curve check (not at the infinity check, since (qx, 0) with qx != 0 is not the point at infinity). (d) (qx, 0) where qx^3 + a*qx + b == 0 (mod p): if such an x exists, this IS a valid on-curve point of order 2. It should pass the curve check but may fail the infinity check or produce unexpected behavior in ECDSA verification. (e) (0, sqrt(b) mod p): if sqrt(b) exists in Fp, this is a valid on-curve point (x=0 is just another x-coordinate, not the point at infinity). It should pass all validation checks. 6. TIMING AND ORDERING OF CHECKS: The EIP-7951 spec mandates the on-curve check (step 4) occurs AFTER field range checks (step 3) but BEFORE the point-at-infinity check (step 5). Verify implementations follow this EXACT order. If the curve check is accidentally placed AFTER the verification computation (as a post-condition instead of a pre-condition), off-curve points will be used in scalar multiplication before being caught, potentially causing: (a) Side-channel leakage of intermediate scalar values through timing or memory access patterns. (b) Crashes or panics in optimized assembly implementations (P-256 assembly in Go, BoringSSL, etc.) that assume on-curve points for correctness of internal invariants (e.g., projective coordinate normalization assumes the point satisfies the curve equation). (c) Incorrect results that happen to pass the late check for specific inputs (false negatives in the on-curve rejection). Specific concern for execution-specs PR #1410: This PR moved the point-at-infinity check BEFORE the curve check. Verify that no implementation accidentally moved the curve check to a post-verification position during this reordering. 7. LIBRARY-LEVEL CURVE CHECK AUDIT: Many implementations delegate to a cryptographic library. For each: (a) Go: crypto/ecdsa.Verify() in Go's standard library. The geth wrapper explicitly calls elliptic.P256().IsOnCurve(x, y) before calling ecdsa.Verify. But IsOnCurve goes through pointFromAffine which constructs a 65-byte uncompressed encoding and calls nistec.NewP256Point().SetBytes(). The SetBytes function validates both field element ranges AND the curve equation. This is the CORRECT code path. BUT: if a future Go version changes the internal implementation of IsOnCurve (e.g., to use a faster but less thorough check), the on-curve validation could break. Verify the exact Go version used by each geth release. (b) Rust (p256 crate): AffinePoint::from_encoded_point performs on-curve validation. Verify that reth does NOT use AffinePoint::from_uncompressed_unchecked or any other unchecked constructor. Grep for 'unchecked' in the reth P256 precompile code. (c) Java (BouncyCastle in Besu): ECPoint.isValid() performs the curve check. Verify that Besu's computeDefault() calls isValid() or that the ECPoint constructor validates automatically. (d) .NET (Nethermind): Verify whether the cryptographic provider performs implicit on-curve validation during ECPoint construction, or if Nethermind must call a separate validation method. The v1.31.5 fix for SecP256r1 precompile parameter handling is DIRECTLY RELEVANT -- determine exactly what was fixed and whether on-curve validation was part of the fix. 8. CROSS-CLIENT DIFFERENTIAL TEST: Generate a comprehensive test suite and run P256VERIFY on each across all 5 major clients. ANY client returning non-empty output for an off-curve point is a consensus-critical bug that could cause chain splits. Specifically: (a) Generate 100 off-curve points with valid field coordinates (0 <= qx < p, 0 <= qy < p, qy^2 != qx^3 + a*qx + b mod p). (b) For 20 of these, craft (h, r, s) values that constitute a valid signature on a DIFFERENT curve E' with the same field and coefficient 'a' but different 'b'. (c) Submit all 100 inputs to P256VERIFY on geth, reth, Nethermind, Besu, and Erigon. (d) All must return empty output. Any divergence indicates a missing or incorrect on-curve check. (e) Additionally, submit the 20 crafted invalid-curve-attack inputs. If ANY client returns 0x01, that client is missing the on-curve check entirely.",
+      "bug_class": "Invalid Curve Attack / Cryptographic Input Validation",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/osaka/vm/precompiled_contracts/p256verify.py",
+          "function": "p256verify (precompile entry point)",
+          "line_range": "The curve equation check: qy^2 == qx^3 + a*qx + b (mod p). This is validation step 4 of 5 in the specification.",
+          "notes": "Reference implementation. The spec mandates the curve check occurs AFTER field range validation (0 <= qx < p, 0 <= qy < p) and BEFORE the point-at-infinity check ((qx, qy) != (0,0)). The curve parameters a, b, p must be the exact NIST P-256 values. SG-004 in the state diagram represents the on-curve validation node. PR #1410 in execution-specs reordered the infinity check to occur before the curve check -- verify no implementation confused this with moving the curve check itself."
+        },
+        {
+          "file": "go-ethereum/core/vm/contracts.go",
+          "function": "p256Verify.Run",
+          "line_range": "The call to secp256r1.Verify(hash, r, s, x, y)",
+          "notes": "geth implementation. The Run method extracts raw big.Int coordinates and delegates to secp256r1.Verify. The on-curve check occurs inside the Verify function via elliptic.P256().IsOnCurve(x, y), which ultimately calls nistec.NewP256Point().SetBytes() which validates the curve equation. This check is IMPLICIT -- it depends on Go's standard library internals, not on an explicit curve equation computation in geth code."
+        },
+        {
+          "file": "go-ethereum/crypto/secp256r1/verifier.go",
+          "function": "Verify",
+          "line_range": "Full function body",
+          "notes": "geth secp256r1 wrapper. Calls elliptic.P256().IsOnCurve(x, y) BEFORE calling ecdsa.Verify. This is the primary on-curve check point. If IsOnCurve returns false, Verify returns false immediately without performing any cryptographic operations on the input point."
+        },
+        {
+          "file": "reth (revm::precompile::secp256r1)",
+          "function": "p256_verify / verify_impl",
+          "line_range": "Point deserialization and verification",
+          "notes": "Rust implementation. The p256 crate's AffinePoint type enforces on-curve during deserialization. Verify the exact construction path: from_encoded_point (checked) vs from_uncompressed_unchecked (UNCHECKED -- would bypass curve validation). Grep for 'unchecked' in the reth P256 implementation."
+        },
+        {
+          "file": "Nethermind (Nethermind.Evm/Precompiles/P256VerifyPrecompile.cs)",
+          "function": "Run or Execute",
+          "line_range": "Point construction and verification",
+          "notes": "Nethermind fixed sync failures with invalid P256 parameters in v1.31.5. The fix is DIRECTLY RELEVANT to PROP-0010 -- determine exactly what validation was added or corrected. If the fix added the on-curve check that was previously missing, this is evidence that the property was previously violated in production."
+        },
+        {
+          "file": "Besu (besu-native secp256r1 library / P256VerifyPrecompiledContract.java)",
+          "function": "computeDefault and computeNative",
+          "line_range": "Point construction and validation",
+          "notes": "Besu has two code paths: Java (computeDefault using BouncyCastle) and native (computeNative using BoringSSL via JNI). BOTH paths must independently validate the on-curve condition. A discrepancy between the two paths would be a consensus bug within a single client."
+        }
+      ],
+      "executable_checks": [
+        "Craft a P256VERIFY input with (qx=1, qy=2) -- a trivially off-curve point -- and verify all clients return empty output (0 bytes)",
+        "Craft a point on the secp256r1 twist curve (where x^3 + ax + b is a quadratic non-residue mod p) and submit as public key to P256VERIFY; verify rejection with empty output across all clients",
+        "Generate 100 random off-curve points with 0 <= qx < p, 0 <= qy < p, qy^2 != qx^3 + a*qx + b (mod p); submit each with crafted (h,r,s); verify ALL return empty output across ALL clients",
+        "Construct a point on a weak curve E': y^2 = x^3 + ax + b' (mod p) with small group order, compute a valid signature under E', submit to P256VERIFY as the full invalid curve attack PoC; verify rejection",
+        "Test boundary: find (qx, qy) where qy^2 = qx^3 + a*qx + b + 1 (mod p) -- off by exactly one in the curve equation; verify rejection",
+        "Test boundary: find (qx, qy) where qy^2 = qx^3 + a*qx + b - 1 (mod p) -- off by exactly one in the other direction; verify rejection",
+        "Cross-client differential: submit identical off-curve inputs to geth, reth, Nethermind, Besu, Erigon; any non-empty return from any client is a Critical consensus bug",
+        "Verify that the on-curve check uses the correct secp256r1 constants (a = p - 3 = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC, b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B) and NOT secp256k1 constants (a=0, b=7)",
+        "Verify check ordering: instrument or trace the code path to confirm the curve equation check occurs BEFORE any scalar multiplication operation on the input point",
+        "Property-based test: forall (qx, qy) not on secp256r1 curve AND forall (h, r, s), P256VERIFY(h, r, s, qx, qy) == empty output"
+      ],
+      "notes": "Source: PROP-0010, Invariant: EIP7951-SG002-INV-004, Threat: stride-002, Trust Boundary: tb-001 (actor-external-caller -> actor-precompile). This is a CRITICAL boundary property. Invalid curve attacks are a well-documented class of cryptographic vulnerabilities. Historical precedents include: (1) CVE-2020-0601 (Windows CryptoAPI CurveBall) -- inadequate ECC parameter validation allowed certificate spoofing; (2) Jager et al. 2015 -- practical TLS-ECDH invalid curve attacks on Java SunEC (~3300 queries) and BouncyCastle (~17000 queries) to recover the server's private secp256r1 key; (3) Nethermind v1.31.5 -- fixed sync failures caused by invalid SecP256r1 precompile parameters (directly relevant to this property). For P256VERIFY, the attack surface differs from ECDH key exchange. The attacker's goal is to find an off-curve point (qx, qy) and signature (h, r, s) such that verification returns 0x01. If successful, the attacker can forge signatures for P256-based smart contract wallets (e.g., WebAuthn/passkey wallets using Apple Secure Enclave or Android Keystore), enabling complete account takeover. The secp256r1 curve has coefficient a = p - 3 (not a = 0 like secp256k1). The Weierstrass point doubling formula uses 'a' but NOT 'b', which means scalar multiplication of an off-curve point on a different curve with the same 'a' produces algebraically valid (but semantically wrong) results. This makes the on-curve check the SOLE defense against invalid curve attacks -- there is no secondary check in the scalar multiplication that would catch off-curve points. EIP-7951 supersedes RIP-7212 which had known vulnerabilities. Bug bounty: Requires PoC with an off-curve point that causes the precompile to return success (0x01)."
+    },
+    {
+      "check_id": "CHK-0010a",
+      "property_id": "PROP-0010",
+      "title": "Verify that internal scalar multiplication and point addition in P256VERIFY produce correct rejection behavior when given off-curve input points that bypass the initial check",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Even if the high-level on-curve check exists, the underlying cryptographic library's scalar multiplication may behave unexpectedly with off-curve points if there is a TOCTOU race, a check-order bug, or an optimization that skips the check for certain inputs."
+      },
+      "test_procedure": "1. IDENTIFY SCALAR MULTIPLICATION CODE PATHS: In the P256VERIFY verification algorithm, after input validation, the implementation computes: s_inv = s^(-1) mod n, u1 = h * s_inv mod n, u2 = r * s_inv mod n, R' = u1 * G + u2 * Q (where Q = (qx, qy)). The scalar multiplication u2 * Q is the operation that directly uses the attacker-supplied public key point. If Q is off-curve but the check was bypassed, this multiplication operates on the wrong algebraic structure. CRITICAL: The Weierstrass point doubling formula lambda = (3*x^2 + a) / (2*y) uses coefficient 'a' but NOT 'b'. The addition formula lambda = (y2 - y1) / (x2 - x1) uses neither 'a' nor 'b'. This means scalar multiplication of an off-curve point will produce a MATHEMATICALLY CONSISTENT (but semantically wrong) result on whatever curve the point actually lies on, as long as that curve has the same 'a' coefficient. 2. AUDIT SCALAR MULTIPLICATION IMPLEMENTATIONS FOR SAFETY PROPERTIES: (a) Go: If using crypto/elliptic.P256().ScalarMult(x, y, scalar), the P-256 assembly implementation (p256OrdMul, p256PointAddAsm, etc.) assumes the input point is on the curve. Off-curve points cause UNDEFINED behavior in the Montgomery ladder or wNAF multiplication. The assembly code does NOT check on-curve internally -- it relies on the caller to have validated the point. Verify that geth's IsOnCurve() call occurs BEFORE any ScalarMult() invocation. (b) Rust p256 crate: ProjectivePoint::mul uses a constant-time ladder that assumes the input is a valid curve point. If constructed via unsafe means (e.g., from_uncompressed_unchecked, transmute, or MaybeUninit), off-curve inputs produce garbage results without any error. (c) Java BouncyCastle: ECPoint.multiply() has an internal validation flag configurable at construction time. If the ECPoint is constructed with checkOrder=false (the default for raw coordinate construction), the multiply operation will proceed without curve validation. (d) C libraries: OpenSSL's EC_POINT_mul does NOT call EC_POINT_is_on_curve internally. The caller must explicitly validate. BoringSSL (used by Besu native) may behave differently -- verify independently. 3. TEST FOR CRASH AND UNDEFINED BEHAVIOR: Submit off-curve points designed to trigger edge cases in optimized assembly: (a) Point (qx, 0) where qx^3 + a*qx + b != 0 mod p: an off-curve point with y=0. Point doubling involves division by 2*y = 0, which causes division-by-zero in the doubling formula. If the implementation doesn't check for y=0 explicitly, this could cause a crash, panic, or infinite loop. (b) Point (0, 0): the conventional representation of the point at infinity. If the infinity check is placed AFTER the on-curve check (per original EIP-7951 ordering) and the on-curve check fails, (0,0) should be caught at the curve check first. But if check ordering is different, (0,0) might reach scalar multiplication and cause division-by-zero or identity-element confusion. (c) A point where both coordinates are large values near p (e.g., qx = p-1, qy = p-1): tests whether the implementation handles large field elements correctly in the scalar multiplication without overflow or wrap-around. (d) A point that is the additive inverse of the generator: (Gx, p - Gy). This IS on the curve (it's -G) and should pass the on-curve check. But test that scalar multiplication handles it correctly (u2 * (-G) = -(u2 * G)). 4. VERIFY ERROR PROPAGATION FOR SPEC COMPLIANCE: The P256VERIFY specification requires NO REVERT for any input (PROP-0001). If the on-curve check is missing and scalar multiplication encounters undefined behavior (crash, panic, or infinite loop), this violates the no-revert property. Test that ALL off-curve inputs result in either empty output or 0x01 -- NEVER a revert, NEVER a panic, NEVER hanging execution. Specific tests: (a) Submit 1000 random off-curve inputs. Assert none cause EVM-level exceptions (revert, out-of-gas due to infinite loop, etc.). (b) Monitor gas consumption for off-curve inputs -- if gas usage varies significantly compared to on-curve inputs, it indicates the code path is different (possible timing side-channel). 5. CHECK FOR TOCTOU VULNERABILITIES: In multi-threaded implementations (particularly in client transaction pool processing), verify that the (qx, qy) values used in the on-curve check are the SAME values used in the subsequent scalar multiplication. In EVM precompile execution, the input data is copied from EVM memory (which is immutable during the CALL), so a TOCTOU race is unlikely. However, verify: (a) The input bytes are copied into the precompile function's local scope (not accessed via a pointer to shared EVM memory). (b) No intermediate function modifies the big.Int or AffinePoint values between the on-curve check and the scalar multiplication. (c) In Besu, verify that the Java objects (BigInteger for qx, qy) are not mutated between computeDefault validation and the actual verification call.",
+      "bug_class": "Cryptographic Implementation Error / Undefined Behavior in Scalar Multiplication",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum/crypto/secp256r1/verifier.go",
+          "function": "Verify",
+          "line_range": "The call chain from Verify -> IsOnCurve -> ecdsa.Verify -> P256().ScalarMult",
+          "notes": "The Go standard library's P-256 assembly implementation assumes on-curve input for correctness. If geth's secp256r1.Verify skips IsOnCurve, the assembly code operates on invalid points with undefined behavior. The current code calls IsOnCurve before ecdsa.Verify, but verify this call is not accidentally removed in future refactors."
+        },
+        {
+          "file": "reth (p256 crate, src/ecdsa.rs or src/arithmetic/scalar.rs)",
+          "function": "AffinePoint/ProjectivePoint scalar multiplication",
+          "line_range": "The mul implementation and point construction",
+          "notes": "Rust's p256 crate uses constant-time scalar multiplication that assumes valid curve points. If constructed via 'unchecked' paths, off-curve inputs produce garbage results. Verify the exact AffinePoint construction method used in reth."
+        },
+        {
+          "file": "Besu (besu-native/secp256r1 library)",
+          "function": "Native scalar multiplication via JNI",
+          "line_range": "C/C++ implementation of point multiplication",
+          "notes": "Besu's native code (BoringSSL or similar) may perform the on-curve check at the C level, or it may rely on the Java caller. If neither checks, off-curve points reach unprotected C code where undefined behavior could cause memory corruption, segfaults, or worse."
+        }
+      ],
+      "executable_checks": [
+        "Submit off-curve point (qx, 0) where qx is NOT a root of x^3 + ax + b mod p; verify no crash, panic, or infinite loop -- must return empty output",
+        "Submit (0, 0) to all clients; verify it returns empty output via the infinity check (this tests check ordering: if curve check is before infinity check per original spec, (0,0) fails curve equation first since b != 0 for secp256r1)",
+        "Fuzz test: generate 10000 random 160-byte inputs and submit to P256VERIFY; verify none cause crashes, panics, reverts, or out-of-gas (all must return either empty output or 0x01)",
+        "Gas measurement test: compare gas consumed by on-curve valid inputs vs off-curve invalid inputs; both should consume exactly 6900 gas -- any difference indicates implementation branches that could be exploited as timing oracles",
+        "Submit a point with coordinates near the field modulus (qx = p-1, qy = p-1) -- verify no overflow in scalar multiplication even though these are large field elements",
+        "Submit the negation of a valid on-curve point (-G = (Gx, p-Gy)) with a signature valid under G; verify it returns empty output (since -G is a different public key) without any unexpected behavior",
+        "In reth, grep for 'unchecked' or 'from_uncompressed_unchecked' in the P256VERIFY implementation to verify no unchecked point construction is used"
+      ],
+      "notes": "Source: PROP-0010, Supporting check for the scalar multiplication layer. This check provides defense-in-depth: even if the primary on-curve validation (CHK-0010) is somehow bypassed, the internal operations must not produce dangerous results. The key insight is that Weierstrass curve point operations (addition and doubling) use only the 'a' coefficient, NOT 'b'. This means an off-curve point on a curve with the same 'a' but different 'b' will undergo mathematically valid scalar multiplication -- just on the WRONG curve. The on-curve check is therefore the ONLY barrier, and this supporting check verifies that the barrier is correctly positioned (before scalar multiplication, not after). Historical precedent: Java SunEC and BouncyCastle TLS implementations were vulnerable to invalid curve attacks (~3300 and ~17000 queries respectively to recover a private secp256r1 key) precisely because the on-curve check was missing at the scalar multiplication boundary."
+    },
+    {
+      "check_id": "CHK-0010b",
+      "property_id": "PROP-0010",
+      "title": "Verify that curve constants (a, b, p) used in the on-curve equation check are the exact NIST P-256 values and are not confused with secp256k1 constants",
+      "severity": "Critical",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "A constant mix-up between secp256r1 (a=p-3, b=0x5AC6...604B) and secp256k1 (a=0, b=7) would cause the on-curve check to validate against the wrong curve. Points on secp256k1 would pass the (wrong) curve check, and legitimate secp256r1 points could fail."
+      },
+      "test_procedure": "1. EXTRACT AND VERIFY CURVE CONSTANTS: For each client implementation, locate the exact constants used in the on-curve validation. The correct NIST P-256 (secp256r1) values are: p = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF (field modulus, 256 bits), a = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC (equivalently, a = p - 3), b = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B, n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551 (subgroup order), Gx = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296 (generator x), Gy = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5 (generator y). For comparison, secp256k1 constants: p_k1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F, a_k1 = 0, b_k1 = 7, n_k1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141. 2. VERIFY CONSTANTS IN EACH IMPLEMENTATION: (a) Go: Check that the geth secp256r1 package references elliptic.P256() and NOT secp256k1.S256(). Both are available in the geth codebase. A copy-paste error or import aliasing mistake would be catastrophic. Verify: import path contains 'elliptic' or 'nistec' (for P-256), NOT 'secp256k1'. (b) Rust: Check the reth Cargo.toml dependency. The correct crate is 'p256' (NIST P-256, from the RustCrypto project). The WRONG crate would be 'k256' (secp256k1, also from RustCrypto) -- both have identical API structures (AffinePoint, ProjectivePoint, etc.) making confusion easy. (c) Java (Besu): Check BouncyCastle's named curve selection. The correct curve name is 'secp256r1' or 'P-256' or OID 1.2.840.10045.3.1.7. The wrong curve would be 'secp256k1' or OID 1.3.132.0.10. (d) .NET (Nethermind): Check the curve OID or named curve string. Same correct/incorrect values as Java. 3. FALSIFICATION TEST WITH KNOWN-VALID INPUTS: Submit the secp256r1 generator point G = (Gx, Gy) as the public key with a KNOWN-VALID signature computed under G. If the implementation uses the correct curve constants, verification succeeds (returns 0x01). If any constant is wrong, verification fails. This is a positive test that validates the end-to-end correctness of the curve parameter configuration. 4. NEGATIVE TEST WITH SECP256K1 GENERATOR: Submit the secp256k1 generator G_k1 = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798, 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8) as the public key. This point is on secp256k1 but NOT on secp256r1. EXPECTED: empty output (the on-curve check fails because qy^2 != qx^3 + a_r1*qx + b_r1 mod p_r1). If the implementation returns success with ANY (h, r, s), it is using secp256k1 curve parameters instead of secp256r1. Note: the field moduli are different (p_r1 != p_k1), so the point coordinates may also fail the field range check (0 <= qx < p_r1). Verify whether the secp256k1 generator coordinates are less than the secp256r1 field modulus. 5. VERIFY a = p - 3 OPTIMIZATION: Many P-256 implementations simplify the curve equation using a = p - 3 = -3 mod p. This gives y^2 = x^3 - 3x + b (mod p). Verify: (a) The subtraction 3x is computed in modular arithmetic (not plain integer subtraction, which could underflow for small x). (b) The -3 constant is correctly computed as p - 3, not as some other negative representation. (c) The optimization is mathematically equivalent: x^3 + (p-3)*x + b = x^3 - 3x + b (mod p).",
+      "bug_class": "Cryptographic Constant Confusion / Wrong Curve Parameters",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "go-ethereum/crypto/secp256r1/verifier.go",
+          "function": "Verify (or package-level curve initialization)",
+          "line_range": "Where elliptic.P256() or equivalent is referenced",
+          "notes": "geth has both secp256k1 (in crypto/secp256k1/) and secp256r1 (in crypto/secp256r1/) packages. The secp256r1 package should reference elliptic.P256() exclusively. Verify no cross-import."
+        },
+        {
+          "file": "reth (Cargo.toml / p256 dependency)",
+          "function": "Crate selection",
+          "line_range": "N/A",
+          "notes": "Verify the dependency is 'p256' (NIST P-256) not 'k256' (secp256k1). Both are RustCrypto crates with near-identical APIs."
+        },
+        {
+          "file": "ethereum/osaka/vm/precompiled_contracts/p256verify.py",
+          "function": "Curve parameter constants",
+          "line_range": "SECP256R1P, SECP256R1A, SECP256R1B, SECP256R1N, SECP256R1GX, SECP256R1GY definitions",
+          "notes": "Reference implementation. These constants must match the NIST FIPS 186-4 standard exactly."
+        },
+        {
+          "file": "Besu (P256VerifyPrecompiledContract.java)",
+          "function": "R1_PARAMS initialization or curve selection",
+          "line_range": "N/A",
+          "notes": "Verify the named curve used is 'secp256r1' (or 'P-256'), not 'secp256k1'."
+        }
+      ],
+      "executable_checks": [
+        "Submit the secp256r1 generator (Gx, Gy) as public key with a known-valid signature; verify P256VERIFY returns 0x01 on all clients (positive test of correct constants)",
+        "Submit the secp256k1 generator (0x79BE66..., 0x483ADA...) as public key; verify P256VERIFY returns empty output on all clients (negative test -- not on secp256r1)",
+        "Extract and compare the curve constants from each client implementation against the NIST FIPS 186-4 standard values (p, a, b, n, Gx, Gy)",
+        "Verify that geth imports crypto/elliptic.P256() and NOT crypto/secp256k1.S256() in the secp256r1 package (check import statements)",
+        "Verify that reth depends on the 'p256' crate (not 'k256') for P256VERIFY (check Cargo.toml and Cargo.lock)",
+        "Compute a*Gx + b (mod p) for the secp256r1 generator and verify it equals Gy^2 - Gx^3 (mod p) -- this validates the constants are self-consistent"
+      ],
+      "notes": "Source: PROP-0010, Formal verification of curve constants. This is a pre-condition falsification check: the property states qy^2 == qx^3 + a*qx + b (mod p). This equation is only correct if a, b, and p have the exact NIST P-256 values. Using wrong constants means the curve equation check validates against a different curve, allowing off-curve (for secp256r1) points to pass if they happen to be on the wrong curve. Ethereum clients already have secp256k1 deeply integrated (for transaction signing via ecrecover at address 0x01). The P256VERIFY precompile (address 0x100) adds secp256r1 as a SECOND curve. The risk of constant confusion is non-trivial: both curves are in the 'secp256' family with 256-bit parameters, similar API shapes, and similar crate/package names (p256 vs k256, elliptic.P256() vs secp256k1.S256()). Historical context: RIP-7212 (superseded by EIP-7951) had security vulnerabilities including incorrect signature comparison. Constant confusion would be an even more fundamental error."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:35:00.000000+00:00",
+    "total_checks": 6,
+    "by_severity": {
+      "Critical": 3,
+      "High": 3,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 5,
+      "Formal Verification Engineer": 1
+    },
+    "all_in_scope": true,
+    "filtered_properties": []
+  }
+}

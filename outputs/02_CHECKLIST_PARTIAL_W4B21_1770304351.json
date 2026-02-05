@@ -1,0 +1,407 @@
+{
+  "source_files": [
+    "inline-property-PROP-0004"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 1,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 1
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0004",
+      "title": "Verify Trust Boundary Integrity: Does the block validator reject blocks containing ANY transaction with gasLimit > 16777216 when received via P2P from an untrusted peer?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker can craft and propagate a block via P2P with transactions whose gasLimit exceeds the cap."
+      },
+      "test_procedure": "1. IDENTIFY BLOCK VALIDATION ENTRY POINTS: Locate where P2P-received blocks enter the validation pipeline in each client. (a) geth: eth/handler.go -> handleBlockBroadcast -> core/blockchain.go InsertChain -> core/state_processor.go Process -> ApplyTransaction -> core/state_transition.go TransitionDb -> preCheck. (b) Reference spec: ethereum/forks/osaka/fork.py state_transition -> apply_body -> for each tx: check_transaction -> validate_transaction -> `if tx.gas > TX_MAX_GAS_LIMIT: raise TransactionGasLimitExceededError`. (c) Nethermind: Nethermind.Consensus/Processing/BlockProcessor.cs -> Nethermind.Consensus/Validators/TxValidator.cs checks IsEip7825Enabled -> Eip7825Constants.DefaultTxGasLimitCap. (d) Besu: MainnetProtocolSpecs.java registers EIP-7825 gas limit cap validator -> MainnetTransactionValidator validates each tx.gasLimit <= cap. (e) Reth: Locate the block validation pipeline and EIP-7825 enforcement point. 2. VERIFY THE PER-TRANSACTION ITERATION: The block validator MUST iterate over ALL transactions in the block and check EACH one's gasLimit against the cap (16777216). Confirm: (a) The iteration covers every transaction in B.transactions from index 0 to len(B.transactions)-1. (b) There is no early-exit optimization that stops iteration after the first valid transaction, potentially skipping a later invalid one. (c) There is no filtering or skipping based on transaction type (all 5 types: Legacy, AccessList, FeeMarket, Blob, SetCode must be checked). (d) The check uses strict greater-than: `tx.gasLimit > 16777216` (not `>=`). gasLimit == 16777216 is valid. 3. CONSTRUCT A MALICIOUS BLOCK: Craft a syntactically valid block that contains a single transaction with gasLimit = 16777217. The block must be otherwise valid: correct parent hash, valid state root, correct gas_used, valid difficulty/proof-of-work or proof-of-stake signature. Submit via P2P NewBlock message. 4. VERIFY BLOCK REJECTION: The target node MUST reject the entire block. Check: (a) The block does NOT appear in the canonical chain. (b) The block's transactions are NOT executed (no state changes applied). (c) An appropriate error is logged referencing the gas limit cap violation. (d) The peer that sent the invalid block is penalized (reputation decrease) or disconnected. 5. TEST WITH MULTIPLE INVALID TRANSACTIONS: Craft a block with 3 transactions: tx[0] with gasLimit = 16777216 (valid), tx[1] with gasLimit = 16777217 (invalid), tx[2] with gasLimit = 16777216 (valid). Verify the ENTIRE block is rejected, not just tx[1]. The block-level invariant requires ALL transactions to pass. 6. TEST WITH INVALID TRANSACTION AT DIFFERENT POSITIONS: Place the over-cap transaction at position 0 (first), at the last position, and in the middle. Verify rejection in all cases. This catches early-exit bugs where only the first or last transaction is checked. 7. VERIFY INDEPENDENCE FROM BLOCK GAS LIMIT: The per-transaction gas cap (16777216) is independent of the block gas limit. Even if block.gasLimit is 60,000,000 (current recommended default per EIP-7935), no individual transaction may exceed 16777216. Craft a block with block.gasLimit = 60,000,000 and a single tx with gasLimit = 16,777,217 and verify rejection. This distinguishes the EIP-7825 per-transaction cap from the block-level gas limit check. 8. VERIFY NO STATE POLLUTION ON REJECTION: After rejecting an invalid block, verify: (a) The state trie is unchanged (no partial execution). (b) The block is not added to any pending/future block cache. (c) No receipts are generated for the invalid block's transactions. (d) The gas cap check happens BEFORE transaction execution (preCheck in geth, validate_transaction in reference spec), preventing any gas consumption or state mutation. 9. CROSS-CLIENT DIFFERENTIAL TEST: Submit the identical invalid block (containing tx with gasLimit = 16777217) to all 5 major clients (geth, reth, Nethermind, Besu, Erigon). All MUST reject with equivalent semantics. Any divergence (one client accepts, others reject) is a consensus-critical bug causing a chain split. This is the EXACT PoC described in the bug bounty notes: 'Construct a block containing a transaction with gasLimit = 16777217 and show that a node accepts it.' 10. VERIFY REJECTION DURING ALL SYNC MODES: The gas cap check must apply regardless of how the block is received: (a) Full sync (block-by-block import with full execution). (b) Snap sync (fast sync with state download). (c) Light sync (header-only verification). (d) Beacon sync (Engine API newPayload). For each sync mode, import a chain containing a block with an over-cap transaction and verify rejection.",
+      "bug_class": "Block Validation Bypass / Consensus Divergence",
+      "risk_category": "Tampering / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "ethereum/execution-specs: src/ethereum/forks/osaka/fork.py",
+          "function": "apply_body",
+          "notes": "Reference implementation. Iterates over block.transactions, calls check_transaction for each. check_transaction calls validate_transaction which enforces `tx.gas > TX_MAX_GAS_LIMIT`. The state diagram SG-002 shows: for i in range(len(txs)): if txs[i].gasLimit > 16777216 then reject block."
+        },
+        {
+          "file": "ethereum/execution-specs: src/ethereum/forks/osaka/transactions.py",
+          "function": "validate_transaction",
+          "notes": "Contains the gas cap check: `TX_MAX_GAS_LIMIT = Uint(16_777_216)` and `if tx.gas > TX_MAX_GAS_LIMIT: raise TransactionGasLimitExceededError`. This is called for EVERY transaction in the block during apply_body."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_transition.go",
+          "function": "preCheck",
+          "line_range": "gas cap check section",
+          "notes": "geth block-level enforcement: `if isOsaka && msg.GasLimit > params.MaxTxGas { return fmt.Errorf(\"%w (cap: %d, tx: %d)\", ErrGasLimitTooHigh, params.MaxTxGas, msg.GasLimit) }`. CRITICAL: This check is guarded by `!msg.SkipTransactionChecks`. For P2P-received blocks, SkipTransactionChecks MUST be false."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_processor.go",
+          "function": "Process / ApplyTransaction",
+          "notes": "Block processing loop that calls TransitionDb for each transaction. preCheck runs inside TransitionDb before execution. The iteration must cover all transactions without skipping."
+        },
+        {
+          "file": "ethereum/go-ethereum: params/protocol_params.go",
+          "function": "MaxTxGas constant",
+          "notes": "MaxTxGas uint64 = 1 << 24 (16,777,216). This is the consensus constant used in block validation."
+        },
+        {
+          "file": "NethermindEth/nethermind: src/Nethermind/Nethermind.Core/Eip7825Constants.cs",
+          "function": "Eip7825Constants",
+          "notes": "Nethermind constant class. DefaultTxGasLimitCap is used when IsEip7825Enabled is true. Verify the constant value matches 16777216."
+        },
+        {
+          "file": "hyperledger/besu: ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/MainnetProtocolSpecs.java",
+          "function": "EIP-7825 tx gas limit cap registration",
+          "notes": "Besu registers the EIP-7825 gas limit cap in the protocol spec. Verify MainnetTransactionValidator enforces the cap during block processing."
+        }
+      ],
+      "executable_checks": [
+        "Construct a block with a single transaction where gasLimit = 16777217 and submit via P2P to each client (geth, reth, Nethermind, Besu, Erigon); verify ALL reject the block",
+        "Construct a block with multiple transactions where only the LAST transaction has gasLimit > 16777216; verify the entire block is rejected (no early-exit bug)",
+        "Construct a block with block.gasLimit = 60000000 and tx.gasLimit = 16777217; verify block rejection (per-tx cap is independent of block gas limit)",
+        "Verify no state changes are applied when an invalid block is rejected (check state root before and after)",
+        "Cross-client differential test: submit identical invalid block to all clients and verify unanimous rejection",
+        "Test block import via snap sync with an over-cap block in the chain segment; verify rejection",
+        "Test block import via Engine API newPayload with an over-cap block; verify rejection"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003, Invariant: INV-004, Threat: stride-003. This is the CRITICAL boundary check for EIP-7825 at the block validation layer. The block validator is the LAST LINE OF DEFENSE -- if the txpool fails to filter an over-cap transaction, or if a malicious block builder intentionally includes one, the block validator MUST reject the block. Failure to enforce this check directly breaks consensus: nodes that accept the block will fork away from nodes that reject it. The PoC is straightforward: construct a block with gasLimit = 16777217 and show a node accepts it."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0004",
+      "title": "Verify SkipTransactionChecks Flag Safety: Is the preCheck gas cap bypass flag (SkipTransactionChecks) provably never set for externally-received blocks?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If SkipTransactionChecks is set to true for externally-received blocks, the entire EIP-7825 gas cap check in state_transition.go preCheck is bypassed."
+      },
+      "test_procedure": "1. LOCATE THE FLAG DEFINITION: In geth, the `SkipTransactionChecks` field is defined in core/state_transition.go on the Message struct. It controls whether preCheck skips consensus-critical transaction validation including the EIP-7825 gas cap check. 2. ENUMERATE ALL CALL SITES: Search the entire geth codebase for every location that sets `SkipTransactionChecks = true`. As of the current codebase, the known call site is: (a) internal/ethapi/transaction_args.go: sets SkipTransactionChecks = true for eth_call, eth_estimateGas, and debug_traceCall simulations. These are RPC-only paths that do not affect consensus. 3. VERIFY BLOCK PROCESSING PATH: Trace the block processing call chain: (a) core/blockchain.go InsertChain -> validateBlock -> Process. (b) core/state_processor.go Process creates a Message from each transaction using core/types/tx_msg.go TransactionToMessage. (c) Verify TransactionToMessage sets SkipTransactionChecks = false (the default). (d) Verify no code between TransactionToMessage and preCheck modifies this field. 4. CHECK ENGINE API PATH: For blocks received via Engine API (engine_newPayloadV4), verify the same TransactionToMessage path is used and SkipTransactionChecks is never set to true. The Engine API is semi-trusted (JWT authenticated) but the block contents come from potentially untrusted CL peers. 5. CHECK SNAP SYNC PATH: During snap sync, blocks may be imported via a different code path. Verify SkipTransactionChecks is false in this path as well. 6. SEARCH FOR INDIRECT FLAG MANIPULATION: Search for any code that modifies Message fields between construction and preCheck execution. Look for: (a) Direct field assignment: `msg.SkipTransactionChecks = true`. (b) Struct copying or pointer manipulation that could overwrite the field. (c) Reflection-based or unsafe pointer manipulation. 7. VERIFY NO NEW CALL SITES: Run a codebase-wide grep for 'SkipTransactionChecks' and confirm only the known simulation path sets it to true. Any new call site must be audited. 8. EQUIVALENT CHECKS IN OTHER CLIENTS: (a) Nethermind: Check if TxValidator.cs has a similar skip flag that could bypass IsEip7825Enabled checks. (b) Besu: Check if MainnetTransactionValidator has a bypass mechanism for simulations that could leak to block processing. (c) Reth: Check for any equivalent skip-validation flag in block processing. (d) Erigon: Erigon forked from geth; verify it handles the SkipTransactionChecks flag identically.",
+      "bug_class": "Validation Bypass / Flag Manipulation",
+      "risk_category": "Elevation of Privilege / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "ethereum/go-ethereum: core/state_transition.go",
+          "function": "preCheck",
+          "notes": "The gas cap check is guarded by `if !msg.SkipTransactionChecks`. If this flag is true, the ENTIRE preCheck validation is skipped, including gas cap, nonce, balance, and signature checks."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_transition.go",
+          "function": "Message struct",
+          "notes": "SkipTransactionChecks bool field on the Message struct. Default is false. Must remain false for all consensus-critical block processing."
+        },
+        {
+          "file": "ethereum/go-ethereum: internal/ethapi/transaction_args.go",
+          "function": "ToMessage",
+          "notes": "Known call site that sets SkipTransactionChecks = true. This is the simulation path for eth_call/eth_estimateGas/debug_traceCall. NOT consensus-critical. But verify this code path cannot be reached during block import."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/types/tx_msg.go",
+          "function": "TransactionToMessage",
+          "notes": "The function used to convert transactions in blocks to Message structs. Must NOT set SkipTransactionChecks = true. This is the critical enforcement point."
+        }
+      ],
+      "executable_checks": [
+        "Grep the entire geth codebase for 'SkipTransactionChecks' and enumerate every location where it is set to true; verify none are in block processing paths",
+        "Add a runtime assertion in preCheck that panics if SkipTransactionChecks is true during block import (test harness); run a full sync and verify no panic",
+        "Craft a block with an over-cap transaction and import it; set a breakpoint on preCheck and verify SkipTransactionChecks is false",
+        "Audit TransactionToMessage in core/types/tx_msg.go and verify it never sets SkipTransactionChecks = true",
+        "Check for equivalent bypass flags in Nethermind (TxValidator), Besu (MainnetTransactionValidator), Reth, and Erigon"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003. The SkipTransactionChecks flag is the single most dangerous mechanism in geth's block validation pipeline for EIP-7825. If this flag is ever set to true during processing of an externally-received block, the ENTIRE gas cap check is bypassed. The flag exists for legitimate simulation purposes (eth_call), but a code path confusion or regression that sets it to true during block import would be a CRITICAL consensus vulnerability. This check focuses specifically on the flag's safety properties as they relate to the block validation boundary (tb-003)."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0004",
+      "title": "Verify Block Validation Completeness: Does the gas cap check iterate over ALL transactions in the block with no early-exit, no type-based filtering, and no index-based skipping?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker could hide an over-cap transaction at a specific index or of a specific type to exploit incomplete iteration in the block validator."
+      },
+      "test_procedure": "1. REFERENCE SPEC VERIFICATION: In ethereum/execution-specs osaka/fork.py apply_body, confirm the iteration loop processes every transaction: `for i, tx in enumerate(map(decode_transaction, transactions)):` followed by `check_transaction(tx, ...)` which calls `validate_transaction(tx)` which includes the gas cap check. The loop must visit indices 0 through len(transactions)-1 without breaks or continues that skip the gas cap check. 2. GETH VERIFICATION: In core/state_processor.go Process function, confirm the loop `for i, tx := range block.Transactions()` processes every transaction and calls ApplyTransaction which invokes state_transition.TransitionDb -> preCheck including the gas cap check. Verify: (a) No `continue` statement skips transactions before the gas cap check. (b) No error handling swallows gas cap errors and continues to the next transaction. (c) No `break` statement exits the loop early on the first valid transaction. 3. TRANSACTION TYPE COVERAGE: The gas cap must apply to ALL 5 transaction types: (a) Type 0: LegacyTransaction. (b) Type 1: AccessListTransaction (EIP-2930). (c) Type 2: FeeMarketTransaction (EIP-1559). (d) Type 3: BlobTransaction (EIP-4844). (e) Type 4: SetCodeTransaction (EIP-7702). For each type, construct a block with a single transaction of that type with gasLimit = 16777217 and verify block rejection. There must be no type-based switch or conditional that exempts any type from the gas cap check. 4. BLOB TRANSACTION SPECIAL CASE: Blob transactions (Type 3) have both an execution gasLimit and blob-related costs. Verify the gas cap check applies to the execution gasLimit field, not to some other gas metric. Construct a blob transaction with execution gasLimit = 16777217 and zero blobs; verify rejection based on gas cap, not blob count. 5. SETCODE TRANSACTION SPECIAL CASE: SetCode transactions (Type 4, EIP-7702) include an authorization list that may have additional gas implications. Verify the gas cap applies to the transaction's gasLimit field regardless of authorization list size. 6. EMPTY BLOCK TEST: Verify that a block with zero transactions passes the gas cap check (trivially, there are no transactions to check). 7. MAXIMUM TRANSACTION COUNT TEST: Construct a block with the maximum feasible number of transactions (e.g., all with gasLimit = 21000), each valid. Then insert one over-cap transaction at different positions and verify rejection. This tests that the iteration is complete even for large blocks. 8. NEGATIVE TEST -- ORDERING ATTACK: An attacker might hope that placing the invalid transaction after a sequence of valid ones causes the validator to skip it (due to a bug where validation short-circuits on success). Construct a block with 100 valid transactions followed by 1 invalid (gasLimit = 16777217) transaction. Verify rejection.",
+      "bug_class": "Incomplete Validation / Iteration Error",
+      "risk_category": "Tampering / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "ethereum/execution-specs: src/ethereum/forks/osaka/fork.py",
+          "function": "apply_body",
+          "notes": "Main block processing loop. Iterates over all transactions via enumerate(map(decode_transaction, transactions)). check_transaction is called inside the loop for each transaction."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_processor.go",
+          "function": "Process",
+          "notes": "Main block processing loop in geth: `for i, tx := range block.Transactions()`. Calls ApplyTransaction for each tx which invokes preCheck with the gas cap validation."
+        },
+        {
+          "file": "ethereum/execution-specs: src/ethereum/forks/osaka/transactions.py",
+          "function": "validate_transaction",
+          "notes": "The gas cap check is inside validate_transaction which is called for EVERY transaction type. No type-based exemption."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_transition.go",
+          "function": "preCheck",
+          "notes": "Gas cap check in preCheck applies after reading msg.GasLimit regardless of transaction type. The transaction type is not checked before the gas cap comparison."
+        }
+      ],
+      "executable_checks": [
+        "Construct blocks with over-cap transactions for each of the 5 transaction types (Legacy, AccessList, FeeMarket, Blob, SetCode); verify all are rejected",
+        "Construct a block with 100 valid transactions + 1 invalid (last position); verify block rejection",
+        "Construct a block with invalid tx at position 0 (first) and verify rejection",
+        "Construct a block with invalid tx in the middle (e.g., position 50 of 100) and verify rejection",
+        "Construct a block with a Blob transaction whose execution gasLimit = 16777217 but 0 blobs; verify rejection is for gas cap violation",
+        "Construct a block with a SetCode transaction (EIP-7702) whose gasLimit = 16777217; verify rejection",
+        "Code review: in each client's block processing loop, verify no `continue`, `break`, or error-swallowing pattern exists that could skip the gas cap check for some transactions"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003, Invariant: INV-004. The property states: 'for all transactions tx in a valid block B: tx.gasLimit <= 16777216. Equivalently, for all blocks B: if there exists any transaction tx in B.transactions such that tx.gasLimit > 16777216, then B MUST be rejected as invalid.' The 'for all' quantifier is critical -- the check must be exhaustive across ALL transactions. A block with 1000 valid transactions and 1 invalid one must still be rejected."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0004",
+      "title": "Verify Engine API Block Validation: Does the Engine API newPayload path enforce the per-transaction gas cap identically to the P2P block import path?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Blocks arrive at the EL via two paths: direct P2P and via the CL through Engine API. Both must enforce the gas cap. A compromised or buggy CL could forward blocks with over-cap transactions."
+      },
+      "test_procedure": "1. IDENTIFY ENGINE API BLOCK IMPORT PATH: In geth: eth/catalyst/api.go engine_newPayloadV4 -> InsertBlockWithoutSyncState or similar. Trace this path through to state_processor.Process to confirm it uses the same preCheck as P2P-received blocks. 2. VERIFY IDENTICAL VALIDATION: The Engine API path must invoke the same state_transition.preCheck function with SkipTransactionChecks = false. Confirm no special Engine API optimization bypasses per-transaction validation. 3. TEST VIA ENGINE API: Call engine_newPayloadV4 with a block containing a transaction with gasLimit = 16777217. Verify the EL returns INVALID status (not VALID or SYNCING). 4. VERIFY ENGINE API ERROR PROPAGATION: When the EL rejects a block via Engine API due to gas cap violation, it must return an appropriate error. The CL uses this response to reject the block from its fork choice. If the EL returns VALID for an invalid block, the CL will build on it, causing a consensus split between that CL-EL pair and the rest of the network. 5. CHECK FOR OPTIMISTIC ACCEPTANCE: Some EL implementations may optimistically accept blocks from the Engine API during sync and validate later. Verify that even in optimistic mode, the gas cap check is eventually performed and invalid blocks are retroactively rejected. 6. CHECK TRUSTED PEER EXEMPTIONS: The Engine API is authenticated via JWT. Verify this authentication does NOT cause the EL to skip transaction validation for Engine API-received blocks. The JWT authenticates the CL, but the block contents may still originate from an untrusted P2P peer via the CL. 7. CROSS-CLIENT: (a) Nethermind: Check EngineRpcModule handles over-cap blocks correctly. (b) Besu: Check JsonRpcProcessor / EngineNewPayload handles over-cap blocks. (c) Reth: Check Engine API implementation rejects over-cap blocks. (d) Erigon: Check Engine API implementation.",
+      "bug_class": "Engine API Validation Bypass / Trust Boundary Confusion",
+      "risk_category": "Tampering / Consensus Divergence",
+      "code_locations": [
+        {
+          "file": "ethereum/go-ethereum: eth/catalyst/api.go",
+          "function": "newPayloadV4 / newPayload",
+          "notes": "Engine API entry point for block validation. Must ultimately invoke state_processor.Process with full transaction validation including gas cap check."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/blockchain.go",
+          "function": "InsertBlock / insertChain",
+          "notes": "Core block insertion logic shared between P2P and Engine API paths. Verify both paths converge on the same validation."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/state_processor.go",
+          "function": "Process",
+          "notes": "Block processing function invoked by both P2P and Engine API paths. Must iterate all transactions and apply preCheck including gas cap."
+        }
+      ],
+      "executable_checks": [
+        "Call engine_newPayloadV4 with a block containing tx.gasLimit = 16777217; verify response status is INVALID",
+        "Call engine_newPayloadV4 with a valid block (all tx.gasLimit <= 16777216); verify response status is VALID",
+        "Verify Engine API and P2P block import paths share identical state_processor.Process invocation",
+        "Check for any Engine API-specific optimization that skips per-transaction validation",
+        "Cross-client test: call engine_newPayloadV4 on all clients with identical over-cap block; verify unanimous INVALID response"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003. The Engine API is a critical boundary because it bridges the CL and EL. Even though it is JWT-authenticated (semi-trusted), the block contents originate from the P2P network via the CL's gossip. A CL receiving a malicious block from P2P will forward it to the EL via Engine API. The EL MUST validate the block independently. If the EL trusts the CL's forwarding without re-validating transactions, a chain split occurs when some EL-CL pairs accept the block and others reject it."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0004",
+      "title": "Verify Block Builder Defense-in-Depth: Does the block builder (miner/worker) enforce or rely on the gas cap during block assembly, preventing over-cap transactions from being included?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "The block builder selects transactions from the txpool. If the txpool has a bug allowing over-cap transactions, the builder may include them in a block."
+      },
+      "test_procedure": "1. IDENTIFY BLOCK BUILDER VALIDATION: In geth miner/worker.go commitTransactions, the builder selects transactions from the txpool for inclusion in a new block. Check whether the builder independently validates the gas cap before including a transaction. 2. CHECK GASLIDCAP FILTER: In geth, the miner uses a TransactionFilter with GasLimitCap field: `filter.GasLimitCap = params.MaxTxGas`. This filter is applied to the txpool's Pending() call. Verify: (a) The GasLimitCap filter is set to params.MaxTxGas (16777216) -- confirmed by search results. (b) The filter is applied BEFORE transactions are selected for inclusion. (c) In blobpool.go: `if filter.GasLimitCap != 0 { if tx.execGas > filter.GasLimitCap { skip } }`. Verify this filters out over-cap transactions. (d) In legacypool.go: `if filter.GasLimitCap != 0 { if tx.Gas() > filter.GasLimitCap { skip } }`. Verify this filters out over-cap transactions. 3. DEFENSE-IN-DEPTH ANALYSIS: Even with the txpool filter and builder filter, the block validator's gas cap check in preCheck is still needed because: (a) A malicious builder could bypass local filtering and construct blocks directly. (b) A block received from P2P was built by a remote builder, not the local one. (c) The builder filter is an optimization, not a consensus check. 4. VERIFY FILTER CONSISTENCY: The GasLimitCap in the builder filter MUST use the same constant (params.MaxTxGas = 1 << 24) as the preCheck validation. If these diverge, the builder might filter at a different threshold than the validator, causing blocks to be built but rejected. 5. TEST BUILDER BEHAVIOR: Force-insert an over-cap transaction into the txpool (via test harness bypassing validation) and trigger block building. Verify the GasLimitCap filter excludes it from the candidate block.",
+      "bug_class": "Defense-in-Depth / Filter Consistency",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/go-ethereum: miner/worker.go",
+          "function": "commitTransactions / generateWork",
+          "notes": "Block assembly logic. Sets filter.GasLimitCap = params.MaxTxGas before querying the txpool. This is a pre-filtering optimization, NOT a consensus check."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/txpool/legacypool/legacypool.go",
+          "function": "Pending (with filter)",
+          "notes": "Legacy pool's Pending function applies the GasLimitCap filter: `if tx.Gas() > filter.GasLimitCap { skip }`. Verify the filter is applied correctly."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/txpool/blobpool/blobpool.go",
+          "function": "Pending (with filter)",
+          "notes": "Blob pool's Pending function applies the GasLimitCap filter: `if tx.execGas > filter.GasLimitCap { skip }`. Verify the filter is applied correctly."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/txpool/subpool.go",
+          "function": "TransactionFilter struct",
+          "notes": "Defines GasLimitCap uint64 field: 'Maximum gas can be used for a single transaction execution (0 means no limit)'. Verify the semantics match EIP-7825."
+        }
+      ],
+      "executable_checks": [
+        "Verify miner/worker.go sets filter.GasLimitCap = params.MaxTxGas (same constant as preCheck)",
+        "Test: force-insert over-cap tx into txpool, trigger block assembly, verify the tx is NOT included in the candidate block",
+        "Verify legacypool and blobpool Pending functions correctly apply the GasLimitCap filter",
+        "Verify the filter comparison operator is consistent (> not >=) with the block validation check"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003, Supporting node: actor-block-validator. The block builder's GasLimitCap filter provides an additional layer of defense. However, the critical enforcement point is the block validator's preCheck, which must reject blocks regardless of who built them. The builder filter prevents local nodes from accidentally creating invalid blocks, but remote malicious builders are only stopped by the block validator."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0004",
+      "title": "Verify RLP/SSZ Deserialization Boundary: Can a maliciously encoded block bypass the gas cap check by exploiting integer overflow, truncation, or encoding ambiguity in the gasLimit field during deserialization?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker controls the raw bytes of the block sent via P2P. If deserialization of the gasLimit field has bugs, the in-memory representation may differ from the encoded value."
+      },
+      "test_procedure": "1. RLP ENCODING OF GASLIMIT: In Ethereum's execution layer, transaction gasLimit is RLP-encoded as a big-endian integer. The gasLimit field is typically a uint64 in client implementations. Verify: (a) The RLP decoder correctly handles gasLimit values that exceed uint64 max (2^64-1). An RLP-encoded integer can be arbitrarily large. If a client truncates it to uint64 during decoding, a value like 2^64 + 16777215 would truncate to 16777215 and pass the gas cap check despite being intended as an over-cap value. (b) The RLP decoder rejects leading zeros in the gasLimit encoding (per RLP spec, integers must be minimally encoded). An attacker could encode gasLimit = 16777216 with leading zeros (e.g., 0x0001000000) which should be rejected. 2. INTEGER WIDTH VERIFICATION: Verify the gasLimit field is stored as uint64 in all clients: (a) geth: Transaction.Gas() returns uint64. (b) reth: Verify the Rust type (u64 or U256). If U256, verify the comparison against MaxTxGas handles the full range. (c) Nethermind: Verify the C# type (long, ulong, or BigInteger). A signed long (max ~9.2 * 10^18) can hold 16777216, but verify no signed/unsigned confusion. (d) Besu: Verify the Java type (long, BigInteger). Java's long is signed; verify the comparison handles this correctly. 3. SSZ ENCODING (CONSENSUS LAYER): On the consensus layer, blocks are SSZ-encoded. Verify the SSZ-to-RLP conversion for execution payloads preserves the gasLimit value exactly. If there is a type mismatch between SSZ uint64 and RLP integer, the gas cap check could be applied to a different value. 4. TEST EDGE CASES: (a) gasLimit = 0: Valid encoding, should be accepted (but will likely fail intrinsic gas check). (b) gasLimit = 2^24 = 16777216: Boundary value, must be accepted. (c) gasLimit = 2^24 + 1 = 16777217: Must be rejected. (d) gasLimit = 2^32 - 1 = 4294967295: Must be rejected (tests 32-bit overflow). (e) gasLimit = 2^64 - 1: Must be rejected (max uint64). (f) gasLimit encoded as 9+ byte RLP integer (exceeding uint64): Must be rejected during decoding. 5. DIFFERENTIAL DESERIALIZATION TEST: Encode a transaction with gasLimit = 16777217 in raw RLP bytes. Decode with all 5 clients and compare the resulting gasLimit values. Any divergence indicates a deserialization bug.",
+      "bug_class": "Deserialization / Integer Overflow / Encoding Ambiguity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/go-ethereum: rlp/decode.go",
+          "function": "Uint64 / BigInt decoder",
+          "notes": "RLP decoder for uint64 fields. Verify it rejects values exceeding uint64 range and rejects leading zeros."
+        },
+        {
+          "file": "ethereum/go-ethereum: core/types/transaction.go",
+          "function": "Transaction deserialization",
+          "notes": "Transaction RLP decoding. The gasLimit field must be decoded as uint64 without truncation."
+        },
+        {
+          "file": "ethereum/execution-specs: src/ethereum/forks/osaka/transactions.py",
+          "function": "decode_transaction",
+          "notes": "Reference implementation's transaction decoding. Uses Uint type which can represent arbitrarily large integers."
+        }
+      ],
+      "executable_checks": [
+        "Craft a raw RLP-encoded transaction with gasLimit = 16777217 encoded as a standard RLP integer; decode with all clients and verify consistent rejection",
+        "Craft a raw RLP-encoded transaction with gasLimit field encoded as a 9-byte integer (exceeding uint64); verify all clients reject during decoding",
+        "Craft a raw RLP-encoded transaction with gasLimit = 16777216 encoded with leading zero byte; verify rejection for non-canonical RLP encoding",
+        "Craft a raw RLP-encoded transaction with gasLimit = 2^64 - 1; verify rejection",
+        "Cross-client differential deserialization: encode same transaction, decode on all clients, compare gasLimit values"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003. Deserialization is the first step in block validation. If an attacker can craft a block where the gasLimit field decodes to different values across clients, or where a large value truncates to a valid range, they can bypass the gas cap check on some clients while others reject the block. This is a classic attack surface for consensus divergence. The RLP encoding format allows arbitrary-length integers, but client implementations typically use fixed-width types (uint64). The mismatch between encoding flexibility and implementation constraints is the attack surface."
+    },
+    {
+      "check_id": "CHK-0007",
+      "property_id": "PROP-0004",
+      "title": "Verify Cross-Client Consensus: Do all 5 major Ethereum execution clients produce identical accept/reject decisions for blocks at the gas cap boundary?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "boundary_edges": ["tb-003"],
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Block deserialization", "Block validation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Any disagreement between clients on block validity causes a network split. The gas cap boundary (16777216/16777217) is the most likely value to expose cross-client divergence."
+      },
+      "test_procedure": "1. CONSTANT VERIFICATION: For each client, locate the gas cap constant and verify it equals exactly 16777216 (2^24): (a) geth: `params.MaxTxGas uint64 = 1 << 24` in params/protocol_params.go. (b) reth: Locate the equivalent constant (possibly in a Fusaka/Osaka spec module). (c) Nethermind: `Eip7825Constants.DefaultTxGasLimitCap` in Nethermind.Core/Eip7825Constants.cs. (d) Besu: Located in MainnetProtocolSpecs.java under 'tx gas limit cap EIP-7825'. (e) Erigon: As a geth fork, likely uses the same `params.MaxTxGas` constant. Verify independently. 2. COMPARISON OPERATOR VERIFICATION: For each client, verify the comparison operator is strictly greater-than (>): (a) geth: `msg.GasLimit > params.MaxTxGas` -- confirmed. (b) reth: Locate the comparison operator. (c) Nethermind: Check the comparison in TxValidator or equivalent. If Nethermind uses `>=` instead of `>`, transactions with gasLimit == 16777216 would be rejected by Nethermind but accepted by geth, causing a consensus split. (d) Besu: Check the comparison in MainnetTransactionValidator. (e) Erigon: Verify independently. 3. FORK ACTIVATION VERIFICATION: For each client, verify the fork activation condition (Osaka/Fusaka) triggers at the same timestamp: (a) All clients must activate EIP-7825 at the same block/timestamp on mainnet, Sepolia, and Holesky. (b) Any divergence in activation timing creates a window where some clients enforce the cap and others do not. 4. BOUNDARY VALUE CROSS-CLIENT TEST: Construct a set of test blocks, each containing a single transaction, with gasLimit values: 16777215, 16777216, 16777217, 16777218, 0, 1, 21000, 2^32-1, 2^64-1. Import each block into all 5 clients. For each block, record accept/reject. Compare results across all clients. ANY divergence is a consensus-critical bug. 5. ALL TRANSACTION TYPES CROSS-CLIENT: For each of the 5 transaction types, construct a block with a transaction of that type with gasLimit = 16777217. Import into all clients. Verify unanimous rejection. 6. HIVE TEST SUITE: If available, run the official Ethereum Hive test suite for EIP-7825 against all clients. The Hive framework provides standardized cross-client testing for Ethereum protocol changes.",
+      "bug_class": "Cross-Client Consensus Divergence",
+      "risk_category": "Consensus Divergence / Network Split",
+      "code_locations": [
+        {
+          "file": "ethereum/go-ethereum: params/protocol_params.go",
+          "function": "MaxTxGas",
+          "notes": "geth: MaxTxGas uint64 = 1 << 24 (16,777,216)"
+        },
+        {
+          "file": "NethermindEth/nethermind: src/Nethermind/Nethermind.Core/Eip7825Constants.cs",
+          "function": "Eip7825Constants / DefaultTxGasLimitCap",
+          "notes": "Nethermind: EIP-7825 constant class. Verify DefaultTxGasLimitCap == 16777216."
+        },
+        {
+          "file": "hyperledger/besu: ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/MainnetProtocolSpecs.java",
+          "function": "EIP-7825 registration",
+          "notes": "Besu: Registers the gas limit cap in the protocol spec. Also has test: shouldSupportTransactionGasLimitCap_EIP_7825."
+        },
+        {
+          "file": "hyperledger/besu: ethereum/core/src/test/java/org/hyperledger/besu/ethereum/mainnet/MainnetTransactionValidatorTest.java",
+          "function": "shouldSupportTransactionGasLimitCap_EIP_7825",
+          "notes": "Besu test for EIP-7825. Verify the test covers boundary values and matches expected behavior."
+        }
+      ],
+      "executable_checks": [
+        "Import block with tx.gasLimit=16777215 on all 5 clients; verify ALL accept",
+        "Import block with tx.gasLimit=16777216 on all 5 clients; verify ALL accept (boundary inclusive)",
+        "Import block with tx.gasLimit=16777217 on all 5 clients; verify ALL reject (first invalid value)",
+        "Import block with tx.gasLimit=16777218 on all 5 clients; verify ALL reject",
+        "Verify each client's gas cap constant equals exactly 16777216",
+        "Verify each client's comparison operator is strictly greater-than (not greater-than-or-equal)",
+        "Verify each client activates EIP-7825 at the same fork timestamp for mainnet",
+        "Run Hive EIP-7825 test suite across all clients and verify 100% pass rate"
+      ],
+      "notes": "Source: PROP-0004, Trust Boundary: tb-003, Invariant: INV-004. This is the ultimate consensus safety check. If even one client out of five disagrees on the validity of a block at the gas cap boundary, the network splits. The most likely failure mode is an off-by-one error: one client uses `>` while another uses `>=`, or one client uses 16777215 as the cap while another uses 16777216. Historical precedent: Ethereum has experienced consensus splits from similar off-by-one or constant-mismatch bugs in fork implementations (e.g., the 2016 Shanghai DoS attacks, the 2021 Berlin/London gas changes). The PoC described in the bug bounty notes ('Construct a block containing a transaction with gasLimit = 16777217 and show that a node accepts it') directly tests this property."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 7,
+    "by_severity": {
+      "Critical": 5,
+      "High": 2,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 7,
+      "Formal Verification Engineer": 0
+    },
+    "all_in_scope": true,
+    "research_sources": [
+      "https://eips.ethereum.org/EIPS/eip-7825",
+      "https://github.com/ethereum/execution-specs/blob/forks/osaka/src/ethereum/forks/osaka/transactions.py",
+      "https://github.com/ethereum/execution-specs/blob/forks/osaka/src/ethereum/forks/osaka/fork.py",
+      "https://github.com/ethereum/go-ethereum/blob/master/core/state_transition.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/core/state_processor.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/params/protocol_params.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/miner/worker.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/core/txpool/subpool.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/eth/catalyst/api.go",
+      "https://github.com/ethereum/go-ethereum/blob/master/internal/ethapi/transaction_args.go",
+      "https://github.com/NethermindEth/nethermind/blob/master/src/Nethermind/Nethermind.Core/Eip7825Constants.cs",
+      "https://github.com/hyperledger/besu/blob/main/ethereum/core/src/main/java/org/hyperledger/besu/ethereum/mainnet/MainnetProtocolSpecs.java",
+      "https://github.com/hyperledger/besu/blob/main/ethereum/core/src/test/java/org/hyperledger/besu/ethereum/mainnet/MainnetTransactionValidatorTest.java"
+    ]
+  }
+}

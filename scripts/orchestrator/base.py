@@ -305,7 +305,7 @@ class Phase02Orchestrator(BaseOrchestrator):
         import glob
         
         items = []
-        for filepath in sorted(glob.glob("outputs/01e_PROP_PARTIAL_*.json")):
+        for filepath in sorted(glob.glob("outputs/01e_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)

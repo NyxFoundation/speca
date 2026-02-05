@@ -1,0 +1,204 @@
+{
+  "source_files": [
+    "inline-property-PROP-0016"
+  ],
+  "filtering_summary": {
+    "total_properties_input": 1,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 1
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0016",
+      "title": "Verify Trust Boundary Integrity: Is the gas refund cap correctly enforced at gas_used // 5 (EIP-3529) in process_transaction, preventing excess refunds from attacker-crafted transactions?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "EVM execution", "Refund calculation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker crafts a transaction with operations that generate large refund counters (e.g., SSTORE clearing). If the cap calculation is incorrect, excess refunds allow the attacker to receive more gas back than expected."
+      },
+      "test_procedure": "1. LOCATE REFUND CAP IMPLEMENTATIONS: (a) Reference spec: ethereum/forks/osaka/fork.py, function process_transaction. The critical lines are: tx_gas_used_before_refund = tx.gas - tx_output.gas_left; tx_gas_refund = min(tx_gas_used_before_refund // Uint(5), Uint(tx_output.refund_counter)); tx_gas_used_after_refund = tx_gas_used_before_refund - tx_gas_refund. The invariant is: tx_gas_refund <= tx_gas_used_before_refund // 5, i.e., refund MUST NOT exceed 20% of gas consumed. (b) go-ethereum: core/state_transition.go, method calcRefund(). After London (EIP-3529): refund = st.gasUsed() / params.RefundQuotientEIP3529, then capped to min(refund, st.state.GetRefund()). The constant RefundQuotientEIP3529 is defined in params/protocol_params.go as 5. (c) reth: crates/evm/src/execute.rs or crates/revm/src/handler.rs -- locate the refund calculation using REFUND_QUOTIENT or similar constant. (d) Nethermind: Nethermind.Evm/TransactionProcessor.cs -- locate the refund cap logic. (e) Besu: org.hyperledger.besu.evm.MainnetTransactionProcessor or similar -- locate calculateGasRefund. 2. VERIFY REFUND QUOTIENT CONSTANT: For each implementation, confirm that the EIP-3529 refund quotient is exactly 5 (not 2, which was the pre-London value). A misconfigured constant would allow 50% refunds instead of 20%. CRITICAL: Verify this constant is activated at the correct fork boundary (London for mainnet). If the fork activation check is wrong, a block processed under the old rules might apply the 50% cap or vice versa. 3. VERIFY INTEGER DIVISION DIRECTION: The formula is gas_used // 5 (integer floor division). Confirm all implementations use floor division, not ceiling. For example, gas_used=9 should yield max_refund=1 (floor(9/5)=1), not 2 (ceil(9/5)=2). In Go, integer division truncates toward zero, which is correct for non-negative values. In Rust, integer division also truncates. In Python, // is floor division. Verify no implementation accidentally uses floating-point division or rounding. 4. VERIFY THE MIN() OPERATION: The refund is min(gas_used // 5, refund_counter). Verify that: (a) If refund_counter > gas_used // 5, the cap is applied (refund = gas_used // 5). (b) If refund_counter <= gas_used // 5, the actual refund equals refund_counter. (c) The min() uses the correct operands -- not min(gas_used, refund_counter // 5) or any other permutation. 5. VERIFY GAS_USED CALCULATION: gas_used = tx.gas - gas_left. Verify that: (a) gas_left is the gas remaining AFTER EVM execution (not before). (b) gas_used includes intrinsic gas (the gas consumed for transaction overhead). (c) In the reference spec, tx_gas_used_before_refund = tx.gas - tx_output.gas_left, where tx.gas is the original gas limit and tx_output.gas_left is returned by process_message_call. (d) In go-ethereum, gasUsed() = st.initialGas - st.gasRemaining, where initialGas is set in buyGas() and gasRemaining is updated during execution. 6. REFUND COUNTER ACCUMULATION TEST: The refund_counter is accumulated during EVM execution primarily through SSTORE operations (EIP-2200/EIP-3529). Verify: (a) SSTORE clearing (current_value != 0, new_value == 0): adds GAS_STORAGE_CLEAR_REFUND (4800) to refund counter. (b) SSTORE restoring (new_value == original_value, original_value != 0): adds GAS_STORAGE_UPDATE - GAS_COLD_SLOAD - GAS_WARM_ACCESS (5000 - 2100 - 100 = 2800). (c) SSTORE restoring from zero (new_value == original_value == 0): adds GAS_STORAGE_SET - GAS_WARM_ACCESS (20000 - 100 = 19900). (d) Refund counter CAN be negative during intermediate steps (e.g., re-dirtying a cleared slot subtracts 4800). Verify that the implementation handles negative refund counters correctly and that the final value passed to process_transaction is non-negative or clamped to zero. In go-ethereum, this was historically a crash bug (issue #22904: 'Refund counter below zero (gas: 15000 > refund: 0)'). 7. BOUNDARY VALUE TESTS FOR REFUND CAP: (a) gas_used = 0: max_refund = 0 // 5 = 0. No refund should be issued even if refund_counter > 0. This can happen if the transaction consumes only intrinsic gas and the EVM execution uses zero gas. (b) gas_used = 1: max_refund = 1 // 5 = 0. No refund. (c) gas_used = 4: max_refund = 4 // 5 = 0. No refund. (d) gas_used = 5: max_refund = 5 // 5 = 1. First value where refund is possible. (e) gas_used = 100000, refund_counter = 100000: max_refund = 100000 // 5 = 20000. The refund should be 20000, not 100000. (f) gas_used = 100001: max_refund = 100001 // 5 = 20000 (floor division). Verify the extra 1 gas does not produce 20001. (g) gas_used = UINT64_MAX (2^64 - 1): Verify no overflow in gas_used // 5. Result should be 3689348814741910323. 8. EIP-7623 FLOOR GAS INTERACTION TEST: The reference spec applies a floor gas cost AFTER the refund: tx_gas_used_after_refund = max(tx_gas_used_after_refund, calldata_floor_gas_cost). Verify: (a) The refund is computed based on gas_used BEFORE the floor is applied (tx_gas_used_before_refund), NOT after the floor adjustment. This is critical: if the refund were computed after the floor, it would be based on a larger gas_used, potentially allowing a bigger refund. (b) If calldata_floor_gas_cost > tx_gas_used_after_refund, the final gas used is set to calldata_floor_gas_cost. The sender does NOT get additional refund in this case. (c) In go-ethereum, this is handled in execute(): first calcRefund() is called (which caps based on actual gas used), then the floor check adjusts gasRemaining downward if needed. Verify the ordering is correct. 9. REFUND ECONOMIC EXPLOIT TEST: Construct a transaction that maximizes the refund counter relative to gas used: (a) Deploy a contract that has many storage slots set to non-zero values. (b) In a single transaction, clear N storage slots (SSTORE to 0). Each clearing generates 4800 refund. (c) Calculate: for N clearings, refund_counter = N * 4800. Each SSTORE-clear costs approximately GAS_COLD_SLOAD (2100) + GAS_WARM_ACCESS (100) = 2200 gas (assuming cold access). So gas_used ~ 21000 (intrinsic) + N * 2200. (d) Max refund = (21000 + N * 2200) // 5. (e) Actual refund = min(max_refund, N * 4800). (f) For N = 100: gas_used ~ 241000, max_refund = 48200, actual_refund = min(48200, 480000) = 48200. Effective gas = 241000 - 48200 = 192800. This is 80% of 241000, confirming the 20% cap works. (g) CRITICAL: If the cap is bypassed, the attacker gets refund = 480000, making effective gas = 241000 - 480000 < 0, which would cause an underflow. Verify the implementation prevents this. 10. CROSS-CLIENT DIFFERENTIAL TEST: Generate a test suite of transactions with varying refund_counter values and gas_used values. Include edge cases: (a) Transactions where refund_counter == gas_used // 5 exactly (boundary). (b) Transactions where refund_counter == gas_used // 5 + 1 (just over cap). (c) Transactions where refund_counter == gas_used // 5 - 1 (just under cap). (d) Transactions with gas_used == 0 and refund_counter > 0. (e) Transactions hitting EIP-7623 floor gas after refund. Run across all 5 major clients (geth, reth, Nethermind, Besu, Erigon). Any divergence in final gas_used or sender balance after refund indicates a consensus-critical bug. 11. SELF-DESTRUCT REFUND REMOVAL VERIFICATION (EIP-3529): EIP-3529 removed the SELFDESTRUCT refund entirely (it was 24000 gas pre-London). Verify: (a) No client implementation still adds a SELFDESTRUCT refund post-London. (b) The only source of refund_counter accumulation post-London is SSTORE operations and EIP-7702 authorization delegation (which adds CallNewAccountGas - TxAuthTupleGas for existing accounts). (c) If any client still credits SELFDESTRUCT refunds, the refund_counter could be much larger than expected, potentially exceeding the 20% cap by a larger margin and masking calculation errors. 12. NEGATIVE REFUND COUNTER HANDLING: In the reference spec, evm.refund_counter is a plain int that CAN go negative during SSTORE operations (e.g., re-dirtying a cleared slot). Verify: (a) In the reference spec, the refund_counter is passed to process_transaction as tx_output.refund_counter. The min() operation in the spec is: min(gas_used // 5, Uint(tx_output.refund_counter)). If refund_counter is negative, Uint() conversion MUST clamp it to 0 or raise an error. Verify this behavior. (b) In go-ethereum, StateDB.SubRefund() panics if the refund goes below zero (this was the bug in issue #22904). After the fix, the implementation should handle this edge case correctly. Verify the panic is still present as a safety check. (c) In reth, verify the refund counter is stored as i64 or equivalent and properly clamped before the cap calculation. 13. POST-REFUND BALANCE ACCOUNTING: After computing the refund, verify the balance update is correct: (a) gas_refund_amount = tx_gas_left * effective_gas_price. (b) tx_gas_left = tx.gas - tx_gas_used_after_refund (NOT tx.gas - gas_used_before_refund). (c) The sender receives gas_refund_amount back to their balance. (d) The coinbase receives transaction_fee = tx_gas_used_after_refund * priority_fee_per_gas. (e) Verify: gas_refund_amount + transaction_fee + base_fee_burned == effective_gas_fee originally deducted. If this conservation equation does not hold, ETH is being created or destroyed. (f) CRITICAL: Verify the base_fee_burned component is implicit (it is not transferred to anyone, just burned). The equation should be: effective_gas_fee = tx_gas_used_after_refund * base_fee_per_gas + tx_gas_used_after_refund * priority_fee_per_gas + tx_gas_left * effective_gas_price. Simplifying: tx.gas * effective_gas_price = tx_gas_used_after_refund * effective_gas_price + tx_gas_left * effective_gas_price. This holds by definition since tx_gas_used_after_refund + tx_gas_left = tx.gas. 14. REFUND COUNTER TYPE WIDTH: Verify the data type used for refund_counter across implementations: (a) In the reference spec (Python): it is a plain int (arbitrary precision). No overflow possible. (b) In go-ethereum: StateDB stores refund as uint64. The SubRefund panic guards against underflow. But verify AddRefund checks for overflow (uint64 max). (c) In reth/revm: Check if refund is i64 or u64. If i64, max positive value is 2^63 - 1. With GAS_STORAGE_CLEAR_REFUND = 4800, this allows up to ~1.9 * 10^15 SSTORE clearings before overflow, which is impractical. But verify the type is signed if negative intermediate values are possible. (d) In Besu (Java): long is 64-bit signed. Verify similar constraints.",
+      "bug_class": "Gas Accounting / Economic Exploit",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "process_transaction",
+          "line_range": "Lines containing: tx_gas_used_before_refund = tx.gas - tx_output.gas_left; tx_gas_refund = min(tx_gas_used_before_refund // Uint(5), Uint(tx_output.refund_counter)); tx_gas_used_after_refund = tx_gas_used_before_refund - tx_gas_refund; tx_gas_used_after_refund = max(tx_gas_used_after_refund, calldata_floor_gas_cost)",
+          "notes": "Reference implementation. SG-013 in the osaka-fork graph. The invariant INV-001 (EIP-3529): tx_gas_refund <= gas_used // 5. The boundary edge tb-006 crosses from actor-tx-sender to actor-state-db. The attacker controls the transaction content which determines refund_counter through SSTORE operations.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/fork.py"
+        },
+        {
+          "file": "go-ethereum: core/state_transition.go",
+          "function": "calcRefund",
+          "line_range": "Method calcRefund() -- computes: refund = st.gasUsed() / params.RefundQuotientEIP3529; if refund > st.state.GetRefund() { refund = st.state.GetRefund() }",
+          "notes": "go-ethereum implementation. Uses params.RefundQuotientEIP3529 (value 5) after London fork. The result is added to st.gasRemaining in execute(). Historical bug: issue #22904 panic on negative refund counter.",
+          "spec_url": "https://github.com/ethereum/go-ethereum/blob/master/core/state_transition.go"
+        },
+        {
+          "file": "go-ethereum: core/state_transition.go",
+          "function": "execute",
+          "line_range": "Lines: st.gasRemaining += st.calcRefund(); followed by EIP-7623 floor gas check: if st.gasUsed() < floorDataGas { st.gasRemaining = st.initialGas - floorDataGas }",
+          "notes": "The ordering of refund application vs EIP-7623 floor gas check is consensus-critical. The refund is applied first (adding to gasRemaining), then the floor check may reduce gasRemaining. The refund cap is based on gas_used BEFORE the floor adjustment.",
+          "spec_url": "https://github.com/ethereum/go-ethereum/blob/master/core/state_transition.go"
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/instructions/storage.py",
+          "function": "sstore",
+          "line_range": "Refund counter calculation section: evm.refund_counter += int(GAS_STORAGE_CLEAR_REFUND) for clearing; evm.refund_counter -= int(GAS_STORAGE_CLEAR_REFUND) for re-dirtying; evm.refund_counter += int(GAS_STORAGE_UPDATE - GAS_COLD_SLOAD - GAS_WARM_ACCESS) for restoring",
+          "notes": "Source of refund_counter accumulation. GAS_STORAGE_CLEAR_REFUND = 4800. The refund counter can go negative during intermediate SSTORE operations. This was the root cause of go-ethereum issue #22904.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/vm/instructions/storage.py"
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/interpreter.py",
+          "function": "process_message_call",
+          "line_range": "Refund aggregation: refund_counter = U256(0); if tx_env.authorizations: refund_counter += set_delegation(message); if not evm.error: refund_counter += U256(evm.refund_counter)",
+          "notes": "The MessageCallOutput.refund_counter aggregates: (1) EIP-7702 delegation refund (always added), (2) EVM execution refund (only added on success, zeroed on error). Both sources feed into the cap calculation in process_transaction.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/vm/interpreter.py"
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/gas.py",
+          "function": "GAS_STORAGE_CLEAR_REFUND constant",
+          "line_range": "GAS_STORAGE_CLEAR_REFUND = Uint(4800)",
+          "notes": "The EIP-3529 refund constant for clearing storage. Pre-EIP-3529, this was 15000 (= GAS_STORAGE_SET - GAS_SLOAD, where GAS_STORAGE_SET was 20000 and GAS_SLOAD was 5000). The reduction from 15000 to 4800 was part of the same EIP that reduced the refund cap from 50% to 20%.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/vm/gas.py"
+        }
+      ],
+      "executable_checks": [
+        "Fuzz test: Generate transactions with random SSTORE sequences and verify tx_gas_refund <= gas_used // 5 in all cases",
+        "Property-based test: forall transactions, refund_amount <= (tx.gas - gas_left) // 5",
+        "Boundary test: Craft transaction where refund_counter == gas_used // 5 exactly, verify refund equals the cap",
+        "Boundary test: Craft transaction where refund_counter == gas_used // 5 + 1, verify refund is capped at gas_used // 5",
+        "Regression test: Replay go-ethereum issue #22904 scenario (refund counter below zero) on current implementations",
+        "Economic test: Clear 100+ storage slots in one transaction, verify effective gas cost is exactly 80% of pre-refund cost",
+        "Cross-client test: Run identical refund-heavy transactions across geth, reth, Nethermind, Besu, Erigon and compare gas_used"
+      ],
+      "notes": "Source: PROP-0016, Invariant: SG-013/INV-001, Trust Boundary: tb-006, Threat: stride-010. Historical precedent: go-ethereum issue #22904 (panic on negative refund counter). EIP-3529 reduced the refund cap from 50% to 20% as part of London hard fork. The interaction with EIP-7623 (floor data gas) adds complexity: the refund is computed on pre-floor gas_used but the final gas_used may be overridden by the floor."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0016",
+      "title": "Verify Refund Counter Integrity: Can SSTORE refund_counter accumulation produce values that cause the cap calculation to underflow, overflow, or return incorrect results?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "EVM execution", "Refund calculation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "The refund_counter is accumulated during EVM execution through SSTORE operations. An attacker controls which SSTORE patterns are executed, directly influencing the refund_counter value passed to the cap calculation."
+      },
+      "test_procedure": "1. IDENTIFY REFUND COUNTER MODIFICATION POINTS: All locations where evm.refund_counter is modified: (a) SSTORE clearing (non-zero to zero): +4800 (GAS_STORAGE_CLEAR_REFUND). (b) SSTORE re-dirtying a cleared slot: -4800. (c) SSTORE restoring original non-zero value: +2800 (GAS_STORAGE_UPDATE - GAS_COLD_SLOAD - GAS_WARM_ACCESS = 5000 - 2100 - 100). (d) SSTORE restoring original zero value: +19900 (GAS_STORAGE_SET - GAS_WARM_ACCESS = 20000 - 100). (e) EIP-7702 delegation authorization for existing accounts: +(CallNewAccountGas - TxAuthTupleGas) = +(25000 - 12500) = +12500 in go-ethereum; in the reference spec this is handled via set_delegation in process_message_call. 2. NEGATIVE INTERMEDIATE VALUE TEST: Construct a sequence of SSTORE operations that drives refund_counter negative: (a) Set slot S to value V (non-zero). (b) Clear slot S (set to 0) -> refund_counter += 4800. (c) Set slot S back to V (re-dirty) -> refund_counter -= 4800. Now refund_counter = 0. (d) Clear slot S again -> refund_counter += 4800. (e) Set slot S back to V again -> refund_counter -= 4800. Now refund_counter = 0. This cycle should never make refund_counter go below the value it had before the sequence started. But verify: if the initial refund_counter is 0, step (c) produces refund_counter = 0, not -4800, because step (b) added 4800 first. However, consider a more complex scenario involving multiple slots and sub-calls with reverts. If a sub-call clears a slot (+4800), then the sub-call reverts (state rolled back but refund_counter may or may not be rolled back depending on implementation). Then the parent call re-dirties that same slot (-4800 from a counter that was NOT incremented). VERIFY that refund_counter rollback on revert is correctly implemented. 3. SUB-CALL REVERT REFUND ROLLBACK: In the reference spec (process_message in interpreter.py): if evm.error, rollback_transaction is called. But the evm.refund_counter is part of the EVM state, NOT the state database snapshot. Verify: (a) When a sub-call (CALL, DELEGATECALL, etc.) reverts, the sub-call's refund_counter changes are discarded. (b) The parent call's refund_counter is NOT affected by the reverted sub-call. (c) In go-ethereum, StateDB.SubRefund panic in issue #22904 occurred because the refund counter was not properly isolated between call frames. Verify the fix ensures proper isolation. 4. TYPE SAFETY VERIFICATION: (a) In the reference spec, evm.refund_counter is initialized to 0 (integer). The += and -= operations use int(). Python integers have arbitrary precision. No overflow possible. (b) In go-ethereum, StateDB.refund is uint64. AddRefund adds to it; SubRefund checks if the subtraction would underflow and panics. Verify this panic is a safety net that should never be triggered in correct execution. (c) In reth/revm, check if the refund counter is signed or unsigned. If unsigned, verify SubRefund has similar underflow protection. 5. MAXIMUM REFUND COUNTER TEST: Calculate the theoretical maximum refund_counter for a single transaction: (a) Gas limit: TX_MAX_GAS_LIMIT = 16,777,216 (EIP-7825). (b) Each SSTORE-clear sequence: costs ~2200 gas (cold SLOAD + warm access), generates 4800 refund. (c) Maximum clearings: (16,777,216 - 21000) / 2200 ~ 7616 clearings. (d) Maximum refund_counter: 7616 * 4800 = 36,556,800. (e) Max cap: 16,777,216 // 5 = 3,355,443. (f) Actual refund: min(3,355,443, 36,556,800) = 3,355,443. (g) Verify this value fits in uint64 (yes, easily). (h) Verify no intermediate calculation overflows. 6. PROCESS_MESSAGE_CALL REFUND AGGREGATION: Verify that process_message_call correctly aggregates refund_counter: (a) In the reference spec: refund_counter starts at U256(0), then += set_delegation refund (from EIP-7702), then += U256(evm.refund_counter) only if NO error occurred. (b) CRITICAL: If the EVM execution errors (reverts or halts), the refund_counter from evm is NOT added. Verify all implementations correctly zero out refund on error. (c) However, the set_delegation refund (EIP-7702) IS added regardless of EVM execution outcome. Verify this is intentional and consistent across clients.",
+      "bug_class": "Integer Arithmetic / State Consistency",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/vm/instructions/storage.py",
+          "function": "sstore",
+          "line_range": "Refund counter modification section: all += and -= operations on evm.refund_counter",
+          "notes": "All refund_counter modifications from SSTORE follow EIP-2200 and EIP-3529. The logic branches on original_value, current_value, and new_value.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/vm/instructions/storage.py"
+        },
+        {
+          "file": "ethereum/forks/osaka/vm/interpreter.py",
+          "function": "process_message_call",
+          "line_range": "Refund aggregation: refund_counter = U256(0); conditional addition of evm.refund_counter based on error state",
+          "notes": "Refund counter aggregation point. Error path (evm.error set) must NOT include evm.refund_counter from the failed execution.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/vm/interpreter.py"
+        },
+        {
+          "file": "go-ethereum: core/state/statedb.go",
+          "function": "AddRefund / SubRefund",
+          "line_range": "SubRefund contains panic guard: 'Refund counter below zero'",
+          "notes": "SubRefund was triggered in production (issue #22904). This is both a safety check and historical bug evidence. The panic indicates a logic error in the SSTORE gas calculation, not a legitimate negative refund.",
+          "spec_url": "https://github.com/ethereum/go-ethereum/blob/master/core/state/statedb.go"
+        }
+      ],
+      "executable_checks": [
+        "Construct SSTORE sequences that alternate between clearing and re-dirtying the same slot across multiple call depths with reverts; verify refund_counter consistency",
+        "Test transaction with maximum possible SSTORE clearings (limited by EIP-7825 gas cap of 16,777,216); verify refund_counter and cap are computed correctly",
+        "Test reverted sub-calls: verify refund_counter changes within a reverted CALL are discarded and do not affect parent frame",
+        "Test reverted top-level transactions: verify refund_counter from EVM execution is discarded but EIP-7702 delegation refund is preserved",
+        "Regression test: Reproduce go-ethereum #22904 panic conditions on current codebase to verify the fix holds"
+      ],
+      "notes": "Source: PROP-0016 (supporting node check for actor-state-db). The refund_counter flows from SSTORE operations through the EVM state into process_transaction's cap calculation. Any corruption of this value propagates directly into the gas accounting boundary. Historical evidence (go-ethereum #22904) proves this is a real attack surface."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0016",
+      "title": "Verify EIP-7623 Floor Gas Interaction: Does the calldata floor gas cost correctly interact with the EIP-3529 refund cap without allowing double-benefit or cap bypass?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["Transaction"],
+        "attacker_controlled": true,
+        "validation_layers": ["Transaction validation", "EVM execution", "Refund calculation"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "EIP-7623 introduces a floor gas cost for data-heavy transactions. The interaction between the refund cap (20% of gas_used) and the floor gas cost creates a complex calculation where ordering matters. An attacker could craft a transaction with both high calldata and refund-generating SSTORE operations to exploit incorrect ordering."
+      },
+      "test_procedure": "1. VERIFY CALCULATION ORDERING IN REFERENCE SPEC: In process_transaction (fork.py): (a) Step 1: tx_gas_used_before_refund = tx.gas - tx_output.gas_left. (b) Step 2: tx_gas_refund = min(tx_gas_used_before_refund // 5, refund_counter). (c) Step 3: tx_gas_used_after_refund = tx_gas_used_before_refund - tx_gas_refund. (d) Step 4: tx_gas_used_after_refund = max(tx_gas_used_after_refund, calldata_floor_gas_cost). The CRITICAL ordering is: refund cap is computed on pre-floor gas_used (step 2 uses tx_gas_used_before_refund), then floor is applied after refund (step 4). VERIFY this ordering is identical in all client implementations. 2. VERIFY ORDERING IN GO-ETHEREUM: In execute() of state_transition.go: (a) peakGasUsed = st.gasUsed() -- pre-refund gas used. (b) st.gasRemaining += st.calcRefund() -- refund applied based on pre-refund gasUsed(). (c) Then: if st.gasUsed() < floorDataGas, st.gasRemaining = st.initialGas - floorDataGas. This correctly applies the floor AFTER the refund, potentially overriding the refund benefit. VERIFY this matches the spec. 3. INCORRECT ORDERING ATTACK: If an implementation incorrectly computes the refund cap AFTER the floor adjustment: (a) floor_gas = 200000, gas_used = 150000 (before refund), refund_counter = 100000. (b) CORRECT: max_refund = 150000 // 5 = 30000. gas_used_after_refund = 150000 - 30000 = 120000. Then max(120000, 200000) = 200000. (c) INCORRECT (refund on floored value): floor applied first -> gas_used = 200000. max_refund = 200000 // 5 = 40000. gas_used_after_refund = 200000 - 40000 = 160000. The attacker saves an extra 10000 gas. (d) Verify no client follows the incorrect ordering. 4. EDGE CASE: FLOOR > GAS_USED_BEFORE_REFUND: (a) Construct transaction: gas_used_before_refund = 100000, floor = 150000, refund_counter = 50000. (b) max_refund = 100000 // 5 = 20000. gas_used_after_refund = 80000. Then max(80000, 150000) = 150000. (c) Effective refund is ZERO (sender pays floor), even though refund_counter was 50000. Verify this behavior. 5. EDGE CASE: FLOOR == GAS_USED_AFTER_REFUND: (a) Construct transaction: gas_used = 125000, floor = 100000, refund_counter = 25000. (b) max_refund = 125000 // 5 = 25000. gas_used_after_refund = 100000. max(100000, 100000) = 100000. (c) The floor exactly equals the refunded amount. This is the boundary case. Verify correctness. 6. CROSS-CLIENT ORDERING TEST: Generate 10 test cases with varying ratios of calldata cost to execution gas and refund_counter. Run on all 5 major clients. Verify all produce identical final gas_used values. Any divergence indicates incorrect ordering.",
+      "bug_class": "Gas Accounting / Logic Error",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "file": "ethereum/forks/osaka/fork.py",
+          "function": "process_transaction",
+          "line_range": "Four-step calculation: (1) tx_gas_used_before_refund, (2) tx_gas_refund with min/cap, (3) tx_gas_used_after_refund = before - refund, (4) tx_gas_used_after_refund = max(after, floor)",
+          "notes": "The ordering of these four lines is the core of this check. Any reordering would change the semantics and create a consensus bug.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/fork.py"
+        },
+        {
+          "file": "go-ethereum: core/state_transition.go",
+          "function": "execute",
+          "line_range": "Lines: peakGasUsed = st.gasUsed(); st.gasRemaining += st.calcRefund(); if rules.IsPrague { if st.gasUsed() < floorDataGas { st.gasRemaining = st.initialGas - floorDataGas } }",
+          "notes": "The go-ethereum implementation applies refund first, then floor. The floor check uses st.gasUsed() which reflects the post-refund gas used. If this is less than floorDataGas, gasRemaining is forcibly set to match the floor.",
+          "spec_url": "https://github.com/ethereum/go-ethereum/blob/master/core/state_transition.go"
+        },
+        {
+          "file": "ethereum/forks/osaka/transactions.py",
+          "function": "validate_transaction",
+          "line_range": "Return: (intrinsic_gas, calldata_floor_gas_cost)",
+          "notes": "The calldata_floor_gas_cost is computed per EIP-7623: TX_BASE_COST + total_tokens * FLOOR_CALLDATA_COST. This value is passed into process_transaction for the floor check.",
+          "spec_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/transactions.py"
+        }
+      ],
+      "executable_checks": [
+        "Test: Transaction with high calldata and zero SSTORE ops (floor dominates, no refund benefit)",
+        "Test: Transaction with low calldata and many SSTORE clearings (refund dominates, capped at 20%)",
+        "Test: Transaction where floor exactly equals gas_used_after_refund (boundary)",
+        "Test: Transaction where floor > gas_used_before_refund (floor overrides everything)",
+        "Attack simulation: Transaction with both high calldata and SSTORE clearings to maximize attacker benefit under both mechanisms",
+        "Cross-client differential test with 10 floor-vs-refund edge cases across geth, reth, Nethermind, Besu, Erigon"
+      ],
+      "notes": "Source: PROP-0016 (supporting check for EIP-7623 interaction). The EIP-7623 floor gas was introduced in Prague/Osaka. Its interaction with the EIP-3529 refund cap is specified in the reference implementation but the ordering is subtle and consensus-critical. A client that applies the floor before computing the refund cap would allow a larger refund than intended."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 3,
+    "by_severity": {
+      "Critical": 1,
+      "High": 2,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 3,
+      "Formal Verification Engineer": 0
+    },
+    "all_in_scope": true
+  }
+}
