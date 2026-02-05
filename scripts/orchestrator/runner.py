@@ -166,12 +166,15 @@ class ClaudeRunner:
         if not results:
             results = self._parse_results_from_log(log_file)
             if results:
-                # Save extracted results to the expected output path for downstream
-                self._save_json(output_path, results)
                 print(
                     f"[W{worker_id}] Batch {batch_index}: recovered {len(results)} result(s) from inline response",
                     file=sys.stderr,
                 )
+        
+        # Clean up intermediate output file (collector.save_partial writes the final version)
+        if output_path.exists():
+            output_path.unlink()
+        
         return results
     
     def _build_queue_payload(
