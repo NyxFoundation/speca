@@ -29,10 +29,11 @@ class PhaseConfig:
     depends_on: list[str] = field(default_factory=list)
     input_patterns: list[str] = field(default_factory=list)
     
-    # Batching configuration - ALL phases use token-based strategy
+    # Batching configuration
     batch_strategy: str = "token"
     max_context_tokens: int = 190_000
     base_prompt_tokens: int = 5_000
+    max_batch_size: int = 10
     
     # Execution configuration
     workdir: str | None = None
@@ -63,9 +64,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         queue_pattern="",  # No queue - initial phase
         output_pattern="outputs/01a_STATE.json",
         depends_on=[],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=1,
         item_id_field="url",
     ),
     
@@ -79,9 +79,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/01b_SUBGRAPHS/spec_*.json",
         depends_on=["01a"],
         input_patterns=["outputs/01a_STATE.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=2,
         item_id_field="url",
         result_key="sub_graphs",
         output_prefix="SUBGRAPHS",
@@ -97,9 +96,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/01b_SUBGRAPHS/spec_*_verified_*.json",
         depends_on=["01b"],
         input_patterns=["outputs/01b_SUBGRAPHS/spec_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=10,
         item_id_field="file_path",
         output_prefix="VERIFIED",
     ),
@@ -114,9 +112,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/01d_TRUSTMODEL_PARTIAL_*.json",
         depends_on=["01c"],
         input_patterns=["outputs/01b_SUBGRAPHS/spec_*_verified_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=10,
         item_id_field="file_path",
         result_key="trust_model",
         output_prefix="TRUSTMODEL",
@@ -132,9 +129,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/01e_PROP_PARTIAL_*.json",
         depends_on=["01d"],
         input_patterns=["outputs/01d_TRUSTMODEL_PARTIAL_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=10,
         item_id_field="property_id",
         result_key="properties",
         output_prefix="PROP",
@@ -150,9 +146,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/02_CHECKLIST_PARTIAL_*.json",
         depends_on=["01e"],
         input_patterns=["outputs/01e_PROP_PARTIAL_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=10,
         item_id_field="property_id",
         result_key="checklist",
         output_prefix="CHECKLIST",
@@ -168,9 +163,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/03_AUDITMAP_PARTIAL_*.json",
         depends_on=["02"],
         input_patterns=["outputs/02_CHECKLIST_PARTIAL_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=25,
         item_id_field="check_id",
         result_key="audit_items",
         workdir="target_workspace",
@@ -187,9 +181,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_pattern="outputs/04_REVIEW_PARTIAL_*.json",
         depends_on=["03"],
         input_patterns=["outputs/03_AUDITMAP_PARTIAL_*.json"],
-        batch_strategy="token",
-        max_context_tokens=190_000,
-        base_prompt_tokens=5_000,
+        batch_strategy="count",
+        max_batch_size=2,
         item_id_field="check_id",
         result_key="reviewed_items",
         workdir="target_workspace",

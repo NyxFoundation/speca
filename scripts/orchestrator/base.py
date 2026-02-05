@@ -108,22 +108,19 @@ class BaseOrchestrator(ABC):
         if batches:
             await self.execute_batches(batches)
         
-        # Step 6: Check for failures
+        duration = time.time() - start_time
+        total_results = len(early_exit_results) + len(self.results)
+        
+        # Step 6: Report failures
         if self.failed_batches:
-            print(f"\n❌ {len(self.failed_batches)} batch(es) failed", file=sys.stderr)
+            print(f"\n⚠️  {len(self.failed_batches)} batch(es) failed (successful results saved as partials)", file=sys.stderr)
             for worker_id, batch_index in self.failed_batches:
                 print(f"  - Worker {worker_id}, Batch {batch_index}", file=sys.stderr)
+            print(f"   Saved results: {total_results}")
             sys.exit(1)
         
-        # Step 7: Combine results
-        final_results = early_exit_results + self.results
-        
-        # Step 8: Save results
-        self.save_results(final_results)
-        
-        duration = time.time() - start_time
         print(f"\n✅ Phase {self.config.phase_id} completed in {duration:.1f}s")
-        print(f"   Total results: {len(final_results)}")
+        print(f"   Total results: {total_results}")
     
     def load_items(self) -> list[dict[str, Any]]:
         """Load items from input sources. Override for custom loading logic."""
@@ -165,38 +162,42 @@ class BaseOrchestrator(ABC):
         """Execute all batches in parallel with progress tracking."""
         tasks = []
         task_sizes: dict[asyncio.Task, int] = {}
+        task_meta: dict[asyncio.Task, tuple[int, int]] = {}
         
         for batch in batches:
             worker_id = self._batch_counter % self.num_workers
             self._batch_counter += 1
+            batch_index = self._batch_counter
             
             task = asyncio.create_task(
-                self.runner.run_batch(batch, worker_id, self._batch_counter)
+                self.runner.run_batch(batch, worker_id, batch_index)
             )
             tasks.append(task)
             task_sizes[task] = len(batch)
+            task_meta[task] = (worker_id, batch_index)
         
         total_items = sum(len(b) for b in batches)
         
         with tqdm(total=total_items, desc=f"Processing {self.config.name}", unit="item") as pbar:
             for task in asyncio.as_completed(tasks):
+                worker_id, batch_index = task_meta.get(task, (0, 0))
                 try:
                     result = await task
                     if result is None:
-                        # Task failed
-                        self.failed_batches.append(
-                            (task_sizes.get(task, 0), self._batch_counter)
-                        )
+                        # Task failed after retries
+                        self.failed_batches.append((worker_id, batch_index))
                     else:
                         self.results.extend(result)
+                        # Persist partial results to disk immediately
+                        if result:
+                            self.collector.save_partial(result, worker_id, batch_index)
                 except Exception as e:
                     print(f"Task failed with error: {e}", file=sys.stderr)
+                    self.failed_batches.append((worker_id, batch_index))
                 finally:
                     pbar.update(task_sizes.get(task, 0))
     
-    def save_results(self, results: list[dict[str, Any]]) -> None:
-        """Save results to output file."""
-        self.collector.save(results)
+
 
 
 class Phase01Orchestrator(BaseOrchestrator):
