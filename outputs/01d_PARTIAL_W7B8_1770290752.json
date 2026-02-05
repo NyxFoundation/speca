@@ -1,0 +1,537 @@
+{
+  "trust_model": [
+    {
+      "source_files": [
+        "outputs/01b_PARTIAL_W5B14_1770273237.json"
+      ],
+      "spec_source": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/trie.py",
+      "spec_title": "Osaka Fork: State Trie (Merkle Patricia Trie)",
+      "bug_bounty_scope": {
+        "program_name": "Ethereum Fusaka Audit Contest",
+        "program_url": "https://audits.sherlock.xyz/contests/1140",
+        "in_scope_components": [
+          "Consensus Layer (CL)",
+          "Execution Layer (EL)",
+          "P2P Network",
+          "Transaction Pool",
+          "Block Validation",
+          "State Transition",
+          "Engine API",
+          "Consensus Logic",
+          "Fork Choice",
+          "Data Availability Sampling (PeerDAS)",
+          "Validator Slashing",
+          "Network Splits"
+        ],
+        "out_of_scope_components": [
+          "JSON-RPC API",
+          "Beacon API",
+          "Infrastructure bugs",
+          "ERC-20 contract bugs",
+          "ENS bugs",
+          "Typographical errors",
+          "Tests and scripts",
+          "Non-Fusaka vulnerabilities",
+          "High-effort DoS attacks",
+          "Known issues"
+        ],
+        "scope_notes": [
+          "Only Fusaka-specific code is in scope. Pre-existing trie logic that is unchanged from prior forks may be considered out-of-scope unless a Fusaka-specific change introduces a new vulnerability.",
+          "The Osaka fork trie module is part of the Execution Layer state transition logic and is in-scope for state correctness issues.",
+          "High-effort DoS (sustained, CPU or bandwidth intensive, requires more than 1 packet or on-chain transaction) is out-of-scope.",
+          "Vulnerabilities requiring publicly exposed APIs (JSON-RPC, Beacon API) are out-of-scope.",
+          "POC is required for all submissions except informational.",
+          "Severity is measured by impact on the entire Ethereum network."
+        ]
+      },
+      "trust_model": {
+        "actors": [
+          {
+            "id": "actor-transaction-sender",
+            "name": "Transaction Sender",
+            "description": "External user or contract that submits transactions which cause state trie modifications (account creation, balance changes, storage updates). Data from transaction senders flows into trie_set and _prepare_trie via state transition execution.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-p2p-peer",
+            "name": "P2P Network Peer",
+            "description": "Remote node that provides blocks, state proofs, or trie data over the P2P network. Peers may provide blocks containing transactions that trigger state trie modifications, or serve trie nodes during state sync.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-block-producer",
+            "name": "Block Producer / Proposer",
+            "description": "Validator or miner that constructs blocks. The block producer determines transaction ordering and inclusion, which directly affects the state trie root computation via the root() function.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-execution-engine",
+            "name": "Execution Engine (EL)",
+            "description": "The execution layer client that processes blocks and manages the state trie. It invokes trie operations (trie_set, trie_get, root) during block processing. This is the primary consumer of all subgraphs in this specification.",
+            "trust_level": "trusted"
+          },
+          {
+            "id": "actor-consensus-client",
+            "name": "Consensus Client (CL)",
+            "description": "The consensus layer client that communicates with the execution engine via Engine API. It requests state roots from the EL for block validation and finalization. The CL trusts the EL to compute correct state roots.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-state-sync-provider",
+            "name": "State Sync Provider",
+            "description": "A remote peer providing state trie data during fast/snap sync. The receiving node must verify all trie proofs against known state roots. Malicious providers could supply invalid trie nodes.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-previous-fork-trie",
+            "name": "Previous Fork Trie (previous_trie)",
+            "description": "The trie implementation from the previous fork, referenced in encode_node (SG-002) as a fallback for unrecognized types. This is an internal dependency that introduces cross-fork trust assumptions.",
+            "trust_level": "trusted"
+          },
+          {
+            "id": "actor-storage-root-callback",
+            "name": "Storage Root Callback (get_storage_root)",
+            "description": "A callback function provided to _prepare_trie (SG-009) and root (SG-010) that computes storage roots for Account nodes. This is an internal interface but represents a critical dependency.",
+            "trust_level": "trusted"
+          }
+        ],
+        "trust_boundaries": [
+          {
+            "id": "tb-001",
+            "from_actor": "actor-transaction-sender",
+            "to_actor": "actor-execution-engine",
+            "description": "Transaction data flows from untrusted senders into the execution engine, which processes state changes by invoking trie_set (SG-004) to update account balances, nonces, storage values, and contract code. The transaction payload determines the keys and values written to the trie.",
+            "entry_point_type": "Transaction",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Transaction payload (to, value, data, nonce, signatures) -> state trie keys and values via trie_set"
+          },
+          {
+            "id": "tb-002",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-engine",
+            "description": "P2P peers deliver blocks containing transactions that cause state trie modifications. The EL must fully validate each block's transactions and verify the resulting state root matches the block header's state root (computed via root() in SG-010). A malicious peer could send blocks with crafted transactions designed to trigger edge cases in trie construction.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Block data (header, transactions, receipts) -> block processing -> trie operations (trie_set, root)"
+          },
+          {
+            "id": "tb-003",
+            "from_actor": "actor-consensus-client",
+            "to_actor": "actor-execution-engine",
+            "description": "The CL requests the EL to execute payloads and return state roots via Engine API (e.g., engine_newPayloadV4, engine_forkchoiceUpdatedV3). The EL computes state roots using root() (SG-010) which depends on _prepare_trie (SG-009), patricialize (SG-011), and encode_internal_node (SG-001). If the EL computes an incorrect state root, it could cause consensus failures.",
+            "entry_point_type": "EngineAPI",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Engine API payload execution request -> state trie root computation -> state root response"
+          },
+          {
+            "id": "tb-004",
+            "from_actor": "actor-state-sync-provider",
+            "to_actor": "actor-execution-engine",
+            "description": "During state sync (snap sync), remote peers provide trie node data. The receiving node reconstructs the trie using the provided nodes, which must be verified against known state roots using encode_internal_node (SG-001) and keccak256 hashing. Malicious providers could supply invalid trie nodes to corrupt local state.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Trie node data (leaf, extension, branch nodes) -> trie reconstruction -> verification against state root"
+          },
+          {
+            "id": "tb-005",
+            "from_actor": "actor-execution-engine",
+            "to_actor": "actor-previous-fork-trie",
+            "description": "The Osaka fork's encode_node (SG-002) falls back to previous_trie.encode_node() for unrecognized node types. This cross-fork boundary means that any bug in the previous fork's encoding could propagate through Osaka. The fallback path is triggered when a node is not an Account, LegacyTransaction, Receipt, Withdrawal, U256, or Bytes.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "conditional",
+            "attacker_controlled": false,
+            "data_flow": "Unrecognized node type -> previous_trie.encode_node(node, storage_root)"
+          },
+          {
+            "id": "tb-006",
+            "from_actor": "actor-execution-engine",
+            "to_actor": "actor-storage-root-callback",
+            "description": "The _prepare_trie function (SG-009) invokes the get_storage_root callback for Account nodes. This callback must return the correct storage trie root for each account. If it returns an incorrect root, the resulting state trie root will be wrong, potentially causing consensus splits.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Account preimage -> get_storage_root(Address(preimage)) -> storage_root for encode_account"
+          },
+          {
+            "id": "tb-007",
+            "from_actor": "actor-block-producer",
+            "to_actor": "actor-execution-engine",
+            "description": "Block producers determine transaction ordering and inclusion, which affects the order of trie_set operations and thus the intermediate trie states. While the final state root should be deterministic regardless of execution order, implementation bugs in trie_set (SG-004) or copy_trie (SG-003) could cause ordering-dependent results.",
+            "entry_point_type": "Transaction",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Ordered transaction list -> sequential trie_set operations -> state root via root()"
+          },
+          {
+            "id": "tb-008",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-engine",
+            "description": "State proof verification boundary. When a remote peer provides a Merkle proof for a trie value, the verifier uses encode_internal_node (SG-001), nibble_list_to_compact (SG-007), and bytes_to_nibble_list (SG-008) to verify the proof path. Crafted proofs could exploit edge cases in compact encoding or node type dispatch.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Merkle proof (node hashes, key path) -> proof verification using encode_internal_node and compact encoding"
+          },
+          {
+            "id": "tb-009",
+            "from_actor": "actor-transaction-sender",
+            "to_actor": "actor-execution-engine",
+            "description": "JSON-RPC API boundary for state queries. Users query trie state via eth_getStorageAt, eth_getBalance, etc., which invoke trie_get (SG-005). This is explicitly out-of-scope per the bug bounty program.",
+            "entry_point_type": "JSON-RPC",
+            "bug_bounty_scope": "out-of-scope",
+            "attacker_controlled": true,
+            "data_flow": "JSON-RPC query (address, storage key) -> trie_get(trie, key) -> value response"
+          },
+          {
+            "id": "tb-010",
+            "from_actor": "actor-transaction-sender",
+            "to_actor": "actor-execution-engine",
+            "description": "Beacon API boundary for state queries. Consensus layer state queries that reach into execution layer trie data are out-of-scope per the bug bounty program.",
+            "entry_point_type": "BeaconAPI",
+            "bug_bounty_scope": "out-of-scope",
+            "attacker_controlled": true,
+            "data_flow": "Beacon API state query -> EL state trie access -> response"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "asm-001",
+            "text": "The keccak256 hash function is collision-resistant and preimage-resistant. The entire trie security model relies on keccak256 for both key hashing (in secured tries, SG-009) and node identification (in encode_internal_node, SG-001). A keccak256 collision would allow two different trie states to produce the same root hash.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002",
+              "tb-004",
+              "tb-008"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-002",
+            "text": "RLP encoding is deterministic and canonical. The encode_internal_node function (SG-001) relies on rlp.encode producing a unique byte representation for each distinct node. Non-canonical RLP encoding could allow trie nodes with different content to have the same hash, breaking state verification.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002",
+              "tb-004",
+              "tb-008"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-003",
+            "text": "The previous_trie.encode_node fallback in SG-002 correctly handles all node types from prior forks. If the previous fork's implementation has bugs in encoding, those bugs propagate into the Osaka fork for any node types that reach the fallback path.",
+            "related_boundary_ids": [
+              "tb-005"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-004",
+            "text": "The get_storage_root callback always returns a correct, consistent storage root for each Account. If this callback returns an incorrect root, the resulting state root will be wrong, potentially causing a consensus split between nodes with different get_storage_root implementations.",
+            "related_boundary_ids": [
+              "tb-006"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-005",
+            "text": "Trie operations (trie_set, trie_get) are deterministic and order-independent for the final state. Given the same set of key-value pairs, the trie root (SG-010) must produce the same hash regardless of insertion order. The shallow copy in copy_trie (SG-003) must not introduce aliasing bugs that cause non-deterministic state.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-007"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-006",
+            "text": "All nibble values are in the range [0, 15] (INV-011). The nibble_list_to_compact (SG-007) and bytes_to_nibble_list (SG-008) functions assume valid nibble inputs. Out-of-range nibbles could produce overlapping compact encodings, creating ambiguous trie paths.",
+            "related_boundary_ids": [
+              "tb-002",
+              "tb-004",
+              "tb-008"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-007",
+            "text": "The patricialize function (SG-011) terminates for all inputs because recursive calls strictly increase the level parameter (INV-028). If crafted input data could violate this invariant, the function could enter infinite recursion, causing a denial of service.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-008",
+            "text": "Account, Receipt, and Uint types cannot appear at internal BranchNode value positions (INV-027 from SG-011). This type constraint is enforced at runtime with an assertion. If a transaction or block could cause these types to appear at branch value positions, the assertion would crash the node.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-009",
+            "text": "The shallow copy in copy_trie (SG-003, INV-005) is safe because trie data objects are frozen/immutable. If a mutable object were stored in the trie, the shallow copy would create aliasing between the original and copied trie, potentially causing state corruption across block boundaries.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-007"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-010",
+            "text": "The 32-byte threshold in encode_internal_node (SG-001, INV-002) correctly distinguishes between inline nodes and hash references. If a crafted node produces an RLP encoding of exactly 32 bytes, the boundary condition must be handled consistently across all client implementations to avoid consensus splits.",
+            "related_boundary_ids": [
+              "tb-002",
+              "tb-004"
+            ],
+            "criticality": "HIGH"
+          }
+        ],
+        "stride_analysis": [
+          {
+            "id": "stride-001",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Tampering",
+            "description": "A malicious P2P peer could craft a block containing transactions that produce specific key-value patterns in the state trie, designed to exploit edge cases in the patricialize function (SG-011). For example, keys that maximize the depth of recursive calls or create degenerate branch structures could alter the expected trie shape, potentially producing different state roots across different client implementations if there are subtle differences in how they handle edge cases like empty branches or prefix computation.",
+            "mitigation": "The state root in the block header is verified against the locally computed root. Any tampering that changes the trie structure would result in a state root mismatch, causing the block to be rejected. All clients must implement the exact same patricialize algorithm.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-002",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "A transaction sender could craft transactions that maximize the computational cost of trie operations. Specifically: (1) Creating many accounts with keys that share long common prefixes, causing patricialize (SG-011) to create deeply nested ExtensionNode chains. (2) Creating key patterns that maximize BranchNode creation, each requiring 16 recursive calls to encode_internal_node (SG-001). (3) Triggering excessive keccak256 computations in _prepare_trie (SG-009) for secured tries with many keys. The gas cost of these operations may not adequately reflect the computational cost of trie construction.",
+            "mitigation": "Gas metering should account for trie operation costs. The EIP-7825 gas limit cap limits total computation per block. However, a gap between EVM gas costs and trie construction costs could be exploitable.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-003",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Spoofing",
+            "description": "During state sync, a malicious state sync provider could attempt to supply fake trie nodes that appear valid when verified individually but form an inconsistent state. This targets the encode_internal_node function (SG-001) which determines whether nodes are referenced by their raw content (< 32 bytes) or by hash (>= 32 bytes). A carefully crafted set of nodes at the 32-byte boundary could exploit inconsistencies in how different clients handle this threshold during sync verification.",
+            "mitigation": "State sync verifies trie nodes against known state roots. The keccak256 hash of each node must match the reference in its parent. However, the 32-byte inline/hash boundary (INV-002) must be implemented identically across all clients. Cross-client testing of boundary-case nodes is essential.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-004",
+            "trust_boundary_id": "tb-005",
+            "threat_type": "Tampering",
+            "description": "The encode_node function (SG-002) falls back to previous_trie.encode_node() for unrecognized types. If the Osaka fork introduces new transaction or receipt types not handled by the explicit type checks (Account, LegacyTransaction, Receipt, Withdrawal, U256, Bytes), these would silently fall through to the previous fork's encoder. If the previous fork encodes them differently (or fails), this could cause inconsistent state roots between nodes running different versions of the previous fork code.",
+            "mitigation": "The type dispatch in SG-002 should be exhaustive for all types valid in the Osaka fork. Code review should verify that no new types introduced in Fusaka/Osaka can reach the fallback path. The fallback should ideally be replaced with an explicit error for unknown types.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "conditional",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-005",
+            "trust_boundary_id": "tb-006",
+            "threat_type": "Tampering",
+            "description": "The _prepare_trie function (SG-009) relies on the get_storage_root callback to provide correct storage roots for Account nodes. If the storage root computation has a bug (e.g., incorrect handling of a new storage layout introduced in Fusaka), the resulting state trie root would be incorrect. Since the callback is invoked for every Account in the trie, a bug here would affect all accounts and likely cause a network-wide consensus split.",
+            "mitigation": "The get_storage_root callback must be thoroughly tested against the Fusaka specification. Storage root computation should be covered by consensus test vectors. Cross-client testing of storage root computation is critical.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-006",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "The assertion in _prepare_trie (SG-009) that encoded values must be non-empty (INV-017) will crash the node if triggered. Similarly, the assertion in patricialize (SG-011) for Account/Receipt/Uint types at branch value positions (INV-027) will crash the node. If a crafted transaction could cause encode_node (SG-002) to return an empty byte string for a valid value, or cause an Account to appear at a branch value position, the node would crash during block processing, causing a denial of service.",
+            "mitigation": "These assertions should never trigger for valid state transitions. However, if a new type introduced in Fusaka can produce an empty encoding, or if a state migration changes how values map to trie positions, these assertions could become reachable. Assertions should be replaced with proper error handling that rejects invalid blocks rather than crashing.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-007",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Information Disclosure",
+            "description": "In secured tries, _prepare_trie (SG-009) hashes keys with keccak256 before inserting into the trie (INV-018). This prevents observers from deducing the original key (account address) from the trie structure. If a bug causes the secured flag to be incorrectly set to False for the state trie, account addresses would be stored as raw keys in the trie, potentially leaking information about account ordering and relationships through trie structure analysis.",
+            "mitigation": "The trie.secured flag must be correctly initialized for the state trie. This is typically set during trie construction and should not be modifiable after creation.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-008",
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Spoofing",
+            "description": "Merkle proof verification relies on nibble_list_to_compact (SG-007) and bytes_to_nibble_list (SG-008) for key encoding/decoding. If there is an inconsistency between how keys are encoded during trie construction (in _prepare_trie, SG-009) versus how they are verified during proof checking, a malicious peer could craft a proof that passes verification but references a different key than intended. The compact encoding format (INV-012) encodes the is_leaf flag and parity in the first byte; if this is parsed incorrectly during verification, leaf and extension nodes could be confused.",
+            "mitigation": "The nibble_list_to_compact function must be the exact inverse of the compact-to-nibble decoding used during proof verification. Cross-client consensus tests should cover all combinations of even/odd nibble lengths with leaf/extension flags.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-009",
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Tampering",
+            "description": "The copy_trie function (SG-003) performs a shallow copy of trie._data (INV-005). If a block producer constructs a block that causes state to be read from a copied trie while the original trie is being modified (e.g., during speculative execution or re-org handling), the shallow copy could expose shared mutable state. This could lead to non-deterministic state roots depending on execution timing or order.",
+            "mitigation": "Trie values should be immutable/frozen objects. The copy.copy() call in SG-003 creates a new dictionary but shares the value objects. If all values are immutable (Bytes, integers, frozen dataclasses), this is safe. Mutable values would break this assumption.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-010",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Denial of Service",
+            "description": "The common_prefix_length function (SG-006) is called iteratively in patricialize (SG-011) for every key in the trie to find the shared prefix. For a trie with N keys, each of length L, this has O(N*L) complexity per level of recursion. A malicious block could create a state with many keys sharing long prefixes, causing quadratic or worse computation in the patricialize function. Since patricialize is recursive and processes all 16 branches at each BranchNode, pathological key distributions could cause excessive computation.",
+            "mitigation": "Gas costs for state operations should account for trie restructuring costs. The EIP-7934 RLP execution block size limit indirectly constrains the number of state changes per block. However, the relationship between gas cost and trie computation cost may not be linear.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-011",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Elevation of Privilege",
+            "description": "The trie_set function (SG-004) implements the critical invariant that setting a key to the default value deletes it (INV-007). If an attacker could craft a transaction that causes a non-default value to compare equal to the default value (e.g., through type confusion or encoding ambiguity), the value would be deleted instead of stored. This could effectively wipe an account's balance or storage, constituting unauthorized state modification.",
+            "mitigation": "The equality check (value == trie.default) must use type-safe comparison. The default value for the state trie is typically b'' or 0, and all stored values must have types that compare correctly against the default. New types introduced in Fusaka must be verified to not have pathological equality behavior.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-012",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Repudiation",
+            "description": "The root function (SG-010) computes the state root hash that commits to the entire state. If the root function has a non-deterministic behavior (e.g., dictionary iteration order in _prepare_trie affecting the result), different nodes could compute different state roots for the same state. This makes it impossible to definitively prove which state is correct, as the same input produces different outputs.",
+            "mitigation": "The patricialize function (SG-011) constructs the trie deterministically from a key-value map. Dictionary iteration order should not affect the result because patricialize processes all keys at each level. However, Python dictionary ordering guarantees (insertion order since Python 3.7) should not be relied upon for correctness.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-013",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Tampering",
+            "description": "The encode_internal_node function (SG-001) uses a 32-byte threshold to decide between returning the unencoded node or its keccak256 hash (INV-002). If a client implementation uses a different comparison operator (< vs <=) or calculates the encoded length differently, nodes at exactly 32 bytes would be treated differently, causing a consensus split. This is particularly relevant for Fusaka if new node types change the typical RLP encoding sizes.",
+            "mitigation": "The specification clearly states < 32 (strict less-than). All client implementations must use the same threshold. Consensus test vectors should include nodes with RLP encodings of exactly 31, 32, and 33 bytes.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-014",
+            "trust_boundary_id": "tb-009",
+            "threat_type": "Information Disclosure",
+            "description": "JSON-RPC API queries (eth_getStorageAt, eth_getBalance, eth_getProof) invoke trie_get (SG-005) to read state values. Timing differences in trie_get for different keys could leak information about trie structure, potentially revealing whether accounts exist or what their storage patterns look like. However, this is explicitly out-of-scope per the bug bounty program.",
+            "mitigation": "JSON-RPC endpoints should implement rate limiting and access control. This boundary is out-of-scope.",
+            "exploitability": "api-only",
+            "bug_bounty_scope": "out-of-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-015",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Denial of Service",
+            "description": "During state sync, a malicious provider could send trie nodes that are individually valid but structured to maximize memory consumption or processing time on the receiving node. For example, sending many branch nodes with all 16 children populated would require the receiver to allocate memory for tracking all subnodes. The encode_internal_node function (SG-001) processes each subnode recursively, and deep nesting combined with wide branching could cause stack overflows or excessive memory allocation.",
+            "mitigation": "State sync implementations should limit the depth and breadth of trie traversal. Memory allocation limits and recursion depth checks should be applied. The keccak256-based verification ensures that only nodes consistent with the state root are accepted.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-016",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "The encode_node function (SG-002) requires that Account nodes have a non-None storage_root (INV-003). If a transaction creates a new account with storage but the storage_root is not yet computed (race condition or ordering issue), the assertion could fail or an incorrect storage_root could be used. This is especially relevant for contract creation transactions that set both code and initial storage in the same transaction.",
+            "mitigation": "The _prepare_trie function (SG-009) ensures get_storage_root is called for every Account before encoding. The specification requires storage roots to be computed before account encoding. Implementation must ensure storage trie updates are flushed before computing the state trie root.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-017",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Spoofing",
+            "description": "The root function (SG-010) has a branch for small root nodes: if len(rlp.encode(root_node)) < 32, it returns keccak256(rlp.encode(root_node)) which hashes the small node, while for >= 32 bytes it returns Root(root_node) directly (since root_node is already a hash from encode_internal_node). However, INV-021 states the root should always be 32 bytes. If a trie with very few entries produces a root_node that is neither a hash nor properly handled, the state root could be malformed. A malicious block with exactly the right number of trie entries to trigger this edge case could cause clients to disagree on the root format.",
+            "mitigation": "The root function handles both cases by always producing a 32-byte output (either a keccak256 hash or a hash from encode_internal_node). Empty tries return EMPTY_TRIE_ROOT (INV-020). All edge cases (empty trie, single-entry trie, trie at the 32-byte boundary) should be covered by consensus tests.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-018",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Elevation of Privilege",
+            "description": "The trie_set function (SG-004) does not validate the type or content of values being stored. If a transaction execution produces a value with an unexpected type that later causes encode_node (SG-002) to take the wrong encoding path, the resulting trie could encode the value differently than intended. For example, if a value that should be encoded as RLP is instead treated as raw Bytes (or vice versa), the state root would differ from other clients that handle the type correctly.",
+            "mitigation": "Type checking in encode_node (SG-002) provides runtime type dispatch. However, the isinstance checks must be complete and correctly ordered. If new value types are introduced in Fusaka, they must be added to the appropriate isinstance check.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      "metadata": {
+        "timestamp": "2026-02-05T11:21:13Z",
+        "analyzed_subgraphs": [
+          "SG-001: encode_internal_node",
+          "SG-002: encode_node",
+          "SG-003: copy_trie",
+          "SG-004: trie_set",
+          "SG-005: trie_get",
+          "SG-006: common_prefix_length",
+          "SG-007: nibble_list_to_compact",
+          "SG-008: bytes_to_nibble_list",
+          "SG-009: _prepare_trie",
+          "SG-010: root",
+          "SG-011: patricialize"
+        ],
+        "invariants_analyzed": [
+          "INV-001 through INV-028"
+        ],
+        "scope_summary": {
+          "total_boundaries": 10,
+          "in_scope_boundaries": 7,
+          "out_of_scope_boundaries": 2,
+          "conditional_boundaries": 1,
+          "total_stride_threats": 18,
+          "in_scope_threats": 16,
+          "out_of_scope_threats": 1,
+          "conditional_threats": 1,
+          "threats_by_severity": {
+            "CRITICAL": 2,
+            "HIGH": 9,
+            "MEDIUM": 5,
+            "LOW": 2
+          },
+          "threats_by_type": {
+            "Spoofing": 3,
+            "Tampering": 6,
+            "Repudiation": 1,
+            "Information Disclosure": 2,
+            "Denial of Service": 4,
+            "Elevation of Privilege": 2
+          },
+          "threats_by_exploitability": {
+            "external-attack": 10,
+            "internal-bug": 7,
+            "api-only": 1,
+            "configuration-error": 0
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "01d",
+    "worker_id": 7,
+    "batch_index": 8,
+    "item_count": 1,
+    "timestamp": 1770290752,
+    "processed_ids": []
+  }
+}

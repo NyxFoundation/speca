@@ -1,0 +1,675 @@
+{
+  "trust_model": [
+    {
+      "source_files": [
+        "outputs/01b_PARTIAL_W1B2_1770279048.json"
+      ],
+      "bug_bounty_scope": {
+        "program_name": "Ethereum Fusaka Audit Contest",
+        "program_url": "https://audits.sherlock.xyz/contests/1140",
+        "in_scope_components": [
+          "Consensus Layer (CL)",
+          "Execution Layer (EL)",
+          "P2P Network",
+          "Transaction Pool",
+          "Block Validation",
+          "State Transition",
+          "Engine API",
+          "Consensus Logic",
+          "Fork Choice",
+          "Data Availability Sampling (PeerDAS)",
+          "Validator Slashing",
+          "Network Splits"
+        ],
+        "out_of_scope_components": [
+          "JSON-RPC API",
+          "Beacon API",
+          "Infrastructure bugs",
+          "ERC-20 contract bugs",
+          "ENS bugs",
+          "Typographical errors",
+          "Tests and scripts",
+          "Non-Fusaka vulnerabilities",
+          "High-effort DoS attacks",
+          "Publicly known issues"
+        ],
+        "scope_notes": [
+          "Only Fusaka-specific code is in scope of this competition.",
+          "Vulnerabilities requiring the user to have publicly exposed an API (JSON-RPC, Beacon API) are explicitly out-of-scope.",
+          "High-effort (sustained, CPU or bandwidth intensive, and/or requires more than 1 packet or on-chain transaction) single-peer DoS attacks are out-of-scope.",
+          "All submissions (except informational) must include an executable coded proof of concept at the time of submission.",
+          "Severity is measured by the finding's impact on the entire Ethereum network.",
+          "EIP-7594 PeerDAS and EIP-7917 deterministic proposer lookahead are key Fusaka in-scope EIPs relevant to these subgraphs."
+        ]
+      },
+      "trust_model": {
+        "actors": [
+          {
+            "id": "actor-p2p-peer",
+            "name": "P2P Peer",
+            "description": "Remote network peer communicating via libp2p/devp2p. Any node can join the network and send arbitrary protocol messages. P2P peers are unauthenticated and considered untrusted.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-beacon-node",
+            "name": "Local Beacon Node (CL)",
+            "description": "The local consensus layer node processing incoming messages, performing gossip validation, managing fork state, and serving P2P requests. Acts as the primary trust boundary enforcer.",
+            "trust_level": "trusted"
+          },
+          {
+            "id": "actor-execution-layer",
+            "name": "Execution Layer (EL)",
+            "description": "Co-located execution layer client accessed via Engine API (JWT-authenticated). Provides blob data via engine_getBlobsV2. Semi-trusted because EL data may be used without full re-verification by CL.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-proposer",
+            "name": "Block Proposer",
+            "description": "Validator selected to propose a block for a given slot. Responsible for constructing blocks with valid KZG commitments and publishing data columns. Semi-trusted because proposer identity is verified via signature but proposer behavior may be adversarial.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-validator-set",
+            "name": "Validator Set",
+            "description": "The set of active validators determining consensus, finality, and the shuffling used for proposer selection. Trusted collectively but individual validators may be adversarial.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-gossip-subscriber",
+            "name": "Gossip Subscriber",
+            "description": "Any node subscribed to data_column_sidecar gossip subnets, receiving and forwarding validated sidecars. Untrusted as any peer can subscribe to any subnet.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-req-resp-client",
+            "name": "Req/Resp Client",
+            "description": "Remote peer requesting data columns by range or by root via the P2P req/resp protocol. Untrusted as any peer can make arbitrary requests.",
+            "trust_level": "untrusted"
+          }
+        ],
+        "trust_boundaries": [
+          {
+            "id": "tb-001",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-beacon-node",
+            "description": "Data column sidecar received via gossip validation pipeline. Untrusted P2P peer submits a DataColumnSidecar message on a data_column_sidecar_subnet topic. The beacon node must validate index bounds, KZG commitments, inclusion proofs, KZG proofs, proposer signature, parent block validity, slot ordering, finalized ancestry, and deduplication before accepting and forwarding.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "DataColumnSidecar (index, column cells, kzg_commitments, kzg_proofs, signed_block_header, kzg_commitments_inclusion_proof)"
+          },
+          {
+            "id": "tb-002",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-beacon-node",
+            "description": "Beacon block received via gossip containing blob_kzg_commitments. The beacon node validates the number of KZG commitments does not exceed the epoch-dependent max_blobs_per_block parameter.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "BeaconBlock with blob_kzg_commitments field"
+          },
+          {
+            "id": "tb-003",
+            "from_actor": "actor-req-resp-client",
+            "to_actor": "actor-beacon-node",
+            "description": "DataColumnSidecarsByRange P2P request. Remote peer requests data columns for a range of slots and specific column indices. Server validates the requested range is within the data_column_serve_range, enforces MAX_REQUEST_DATA_COLUMN_SIDECARS limit, and only serves from the current fork choice chain.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Request: (start_slot, count, columns); Response: stream of DataColumnSidecar chunks"
+          },
+          {
+            "id": "tb-004",
+            "from_actor": "actor-req-resp-client",
+            "to_actor": "actor-beacon-node",
+            "description": "DataColumnSidecarsByRoot P2P request. Remote peer requests data columns by block root and column indices. Server validates epoch bounds, total request size against MAX_REQUEST_DATA_COLUMN_SIDECARS, and gossip validity of the referenced block.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Request: List[DataColumnsByRootIdentifier]; Response: stream of DataColumnSidecar chunks"
+          },
+          {
+            "id": "tb-005",
+            "from_actor": "actor-req-resp-client",
+            "to_actor": "actor-beacon-node",
+            "description": "BlobSidecarsByRange deprecated P2P request. During the transition period after Fulu fork, nodes may still receive requests for pre-Fulu blob sidecars. Server must handle deprecated protocol gracefully without crashing or leaking state.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Request: (start_slot, count); Response: BlobSidecars or empty list"
+          },
+          {
+            "id": "tb-006",
+            "from_actor": "actor-req-resp-client",
+            "to_actor": "actor-beacon-node",
+            "description": "BlobSidecarsByRoot deprecated P2P request. During the transition period, nodes may receive requests for pre-Fulu blob sidecars by block root. Server handles deprecated protocol during transition.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Request: List[BlobIdentifier]; Response: BlobSidecars or empty list"
+          },
+          {
+            "id": "tb-007",
+            "from_actor": "actor-execution-layer",
+            "to_actor": "actor-beacon-node",
+            "description": "Engine API blob retrieval via engine_getBlobsV2. CL queries EL for blob data matching KZG commitments. EL is JWT-authenticated but blob data from local EL skips KZG verification. If EL is compromised or buggy, corrupted blobs may be converted to data columns and published to the network.",
+            "entry_point_type": "EngineAPI",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Blob data matching kzg_commitments from execution payload"
+          },
+          {
+            "id": "tb-008",
+            "from_actor": "actor-beacon-node",
+            "to_actor": "actor-gossip-subscriber",
+            "description": "Distributed blob publishing: after receiving a valid beacon block or data column sidecar from gossip, the CL node queries EL for blobs, converts them to data columns, and publishes on subscribed subnets. Publishing only occurs on subnets the node is subscribed to (custody or sampling).",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "DataColumnSidecar published on data_column_sidecar_subnet topics"
+          },
+          {
+            "id": "tb-009",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-beacon-node",
+            "description": "ENR eth2 field exchange during peer discovery. Peers advertise their fork digest, next fork version, and next fork epoch via ENR records. Incorrect or maliciously crafted ENR eth2 fields could cause peer isolation or version mismatch. The ENR includes fork_digest computed from genesis_validators_root and wall-clock epoch.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "ENRForkID (fork_digest, next_fork_version, next_fork_epoch) SSZ-encoded"
+          },
+          {
+            "id": "tb-010",
+            "from_actor": "actor-beacon-node",
+            "to_actor": "actor-beacon-node",
+            "description": "Fork state transition: internal boundary where the beacon node upgrades its BeaconState from Electra to Fulu at FULU_FORK_EPOCH. The upgrade copies all existing state fields and initializes the new proposer_lookahead field (EIP-7917). This is an irreversible, one-time state transition.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "electra.BeaconState -> fulu.BeaconState (all fields copied, fork version updated, proposer_lookahead initialized)"
+          },
+          {
+            "id": "tb-011",
+            "from_actor": "actor-proposer",
+            "to_actor": "actor-beacon-node",
+            "description": "Proposer identity verification during gossip validation. The beacon node checks that the proposer_index in the data column sidecar header matches the expected proposer for the slot, based on the deterministic proposer lookahead (EIP-7917). If shuffling is not yet computed, validation may be deferred (IGNORE) rather than rejected.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "proposer_index, proposer signature in signed_block_header"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "asm-001",
+            "text": "Fork epoch constants are strictly ordered (GENESIS < ALTAIR < BELLATRIX < CAPELLA < DENEB < ELECTRA < FULU) and immutable after deployment. If this ordering is violated, fork version resolution will return incorrect versions, potentially causing network splits.",
+            "related_boundary_ids": [
+              "tb-009",
+              "tb-010"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-002",
+            "text": "The Fulu fork trigger fires exactly once at FULU_FORK_EPOCH and is irreversible. The upgrade_to_fulu function is pure (no side effects on pre-state). Any re-execution at the same epoch must produce identical results. If the fork triggers multiple times or at the wrong epoch, state corruption would occur.",
+            "related_boundary_ids": [
+              "tb-010"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-003",
+            "text": "All fields from the pre-fork Electra BeaconState are faithfully preserved during the Fulu upgrade, except the fork field and the newly initialized proposer_lookahead. If any field is dropped, zeroed, or miscopied during the state transition, it could lead to consensus failure or loss of validator data.",
+            "related_boundary_ids": [
+              "tb-010"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-004",
+            "text": "KZG commitment validation, inclusion proof verification, and KZG proof batch verification are cryptographically sound and correctly implemented. If any of these cryptographic operations contain bugs, invalid data columns could be accepted and propagated, undermining data availability.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-005",
+            "text": "The max_blobs_per_block parameter returned by get_blob_parameters(epoch) is correctly computed for each epoch and consistently applied across all clients. If different clients compute different values, they will disagree on block validity, causing a network split.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-002"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-006",
+            "text": "Blob data retrieved from the local EL via engine_getBlobsV2 is assumed to be correct and skips KZG verification. If the EL returns corrupted or malicious blob data, the CL will convert it to data columns and publish invalid data to the P2P network. This trust assumption is documented in the bug bounty scope as semi-trusted.",
+            "related_boundary_ids": [
+              "tb-007",
+              "tb-008"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-007",
+            "text": "The anti-equivocation cache is always updated when data columns are imported, regardless of whether they are published to gossip. If the cache update is skipped or inconsistent, equivocating proposers (publishing different blocks for the same slot) may not be detected, allowing double-voting without slashing.",
+            "related_boundary_ids": [
+              "tb-008"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-008",
+            "text": "The data_column_serve_range is correctly computed as [max(current_epoch - MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS, FULU_FORK_EPOCH), current_epoch]. If a node serves data outside this range, it may serve stale or incorrect data. If it refuses valid requests within this range, it may cause data availability failures for syncing peers.",
+            "related_boundary_ids": [
+              "tb-003",
+              "tb-004"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-009",
+            "text": "The proposer lookahead (EIP-7917) is deterministic and consistently computed across all clients using the same beacon state. If implementations diverge on proposer assignments, some nodes will reject valid blocks while others accept them, causing consensus failure.",
+            "related_boundary_ids": [
+              "tb-010",
+              "tb-011"
+            ],
+            "criticality": "CRITICAL"
+          },
+          {
+            "id": "asm-010",
+            "text": "The deprecated BlobSidecarsByRange and BlobSidecarsByRoot protocols are handled gracefully during the transition period. Peers should not be penalized for requesting blob sidecars from FULU_FORK_EPOCH. If implementations incorrectly penalize peers during the transition, it could cause peer disconnections and network fragmentation.",
+            "related_boundary_ids": [
+              "tb-005",
+              "tb-006"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-011",
+            "text": "ENR eth2 field computation uses wall-clock time for epoch determination, not sync state. If a node uses its sync state (which may be behind), it will advertise incorrect fork digests, leading to peer isolation and inability to find compatible peers.",
+            "related_boundary_ids": [
+              "tb-009"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-012",
+            "text": "BPO (Blob Parameter Only) forks do NOT change the fork version, only the fork epoch. The ENR computation must handle BPO forks by setting next_fork_version equal to current_fork_version with a non-FAR_FUTURE_EPOCH. If this distinction is not handled, peers may fail to discover each other across BPO fork boundaries.",
+            "related_boundary_ids": [
+              "tb-009"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-013",
+            "text": "Gossip validation deduplication uses the key (slot, proposer_index, sidecar.index). If this deduplication is not implemented or uses a different key, the same sidecar could be processed multiple times, wasting resources, or different valid sidecars for the same key could be incorrectly rejected.",
+            "related_boundary_ids": [
+              "tb-001"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-014",
+            "text": "Sidecars sent via DataColumnSidecarsByRange must be in (slot, column_index) order and from the current fork choice chain. If the ordering invariant is violated, receiving nodes may reject the response. If sidecars from a non-canonical chain are served, it could confuse syncing nodes.",
+            "related_boundary_ids": [
+              "tb-003"
+            ],
+            "criticality": "MEDIUM"
+          }
+        ],
+        "stride_analysis": [
+          {
+            "id": "stride-001",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Spoofing",
+            "description": "An attacker crafts a data column sidecar with a forged proposer signature, attempting to impersonate a legitimate block proposer. The gossip validation pipeline verifies the proposer signature, but if signature verification is bypassable or the wrong public key is used, spoofed sidecars could be accepted.",
+            "mitigation": "Proposer signature verification is mandatory in the gossip validation pipeline (q_check_proposer_sig). The signature must be valid against the expected proposer's public key for the given slot.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-002",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker modifies data column cells, KZG commitments, or KZG proofs within a sidecar to inject invalid data while maintaining structural validity (correct array lengths, valid index). If KZG proof verification has implementation bugs, tampered data could pass validation and corrupt data availability.",
+            "mitigation": "KZG proof batch verification (verify_cell_kzg_proof_batch) and Merkle inclusion proof verification are performed during gossip validation. Both must pass for the sidecar to be accepted.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-003",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "An attacker floods the gossip network with structurally valid but semantically invalid data column sidecars that require expensive KZG proof verification before rejection. Each sidecar triggers verify_cell_kzg_proof_batch which is computationally expensive. If rate limiting is insufficient, this could exhaust CPU resources on receiving nodes.",
+            "mitigation": "Early rejection checks (index bounds, empty commitments, max blobs limit, length consistency) are performed before expensive KZG verification. Deduplication by (slot, proposer_index, index) prevents re-processing. Signature verification before KZG acts as a cost gate.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-004",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a data column sidecar with sidecar.index >= NUMBER_OF_COLUMNS (out of bounds). If the index validation is missing or uses incorrect bounds (e.g., off-by-one with <= instead of <), the attacker could cause array out-of-bounds access, buffer overflows, or undefined behavior in downstream processing.",
+            "mitigation": "First validation check in verify_data_column_sidecar rejects if sidecar.index >= NUMBER_OF_COLUMNS.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-005",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a sidecar with mismatched array lengths: column, kzg_commitments, and kzg_proofs arrays have different lengths. If the length consistency check is bypassed or missing, downstream KZG verification could access out-of-bounds memory or produce incorrect results.",
+            "mitigation": "verify_data_column_sidecar explicitly checks len(column) == len(kzg_commitments) == len(kzg_proofs) before proceeding to KZG verification.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-006",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a sidecar with kzg_commitments count exceeding max_blobs_per_block for the epoch. Since max_blobs_per_block is epoch-dependent via get_blob_parameters (EIP-7892), if the epoch computation or parameter lookup is incorrect, oversized commitment lists could be accepted, violating consensus rules.",
+            "mitigation": "verify_data_column_sidecar computes epoch from the sidecar's slot and checks len(kzg_commitments) <= get_blob_parameters(epoch).max_blobs_per_block.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-007",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Elevation of Privilege",
+            "description": "An attacker submits a sidecar with a proposer_index that does not match the expected proposer for the slot. If the proposer lookup uses an incorrect shuffling, outdated state, or the deferred validation (IGNORE path) is exploitable, an attacker could inject blocks from non-assigned proposers, effectively gaining proposer privileges.",
+            "mitigation": "Gossip validation checks proposer_index matches expected proposer for the slot. Deferred validation (IGNORE) is used only when shuffling is not yet computed, with the expectation that the sidecar will be re-validated later.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-008",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Denial of Service",
+            "description": "An attacker submits a beacon block with blob_kzg_commitments count exceeding max_blobs_per_block for the epoch. If different clients compute different max_blobs_per_block values for the same epoch (due to EIP-7892 implementation differences), it could cause a consensus split where some clients accept and others reject the block.",
+            "mitigation": "Beacon block validation checks len(blob_kzg_commitments) <= get_blob_parameters(epoch).max_blobs_per_block. Consistent implementation of get_blob_parameters across clients is critical.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-009",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Denial of Service",
+            "description": "An attacker sends DataColumnSidecarsByRange requests with large count values or targeting many column indices, attempting to exhaust the server's bandwidth, disk I/O, or memory. Even with MAX_REQUEST_DATA_COLUMN_SIDECARS limit, repeated requests from multiple peers could overwhelm the node.",
+            "mitigation": "MAX_REQUEST_DATA_COLUMN_SIDECARS limits the total number of sidecars per request. Data column serve range limits the time window. Fork choice changes abort in-progress responses.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-010",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Information Disclosure",
+            "description": "An attacker requests data columns outside the data_column_serve_range to probe whether a node has historical data it should have pruned. Responses to out-of-range requests could reveal information about the node's storage policies or sync state.",
+            "mitigation": "Server checks requested range against data_column_serve_range and returns ResourceUnavailable(3) for out-of-range requests, providing no information about stored data.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-011",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Tampering",
+            "description": "A malicious server responds to DataColumnSidecarsByRange with sidecars from a non-canonical fork chain. Syncing nodes relying on this data could build on an invalid chain, wasting resources or accepting invalid state.",
+            "mitigation": "Sidecars must be from the current fork choice chain. If fork choice changes during response, the server aborts. Requesting nodes should independently verify received sidecars.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-012",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Denial of Service",
+            "description": "An attacker sends DataColumnSidecarsByRoot requests with requested_columns_count exceeding MAX_REQUEST_DATA_COLUMN_SIDECARS. If the total count check is missing or computed incorrectly (e.g., not summing across all identifiers), the server could process an unbounded number of columns.",
+            "mitigation": "Server computes requested_columns_count = sum(len(r.columns) for r in request) and rejects if > MAX_REQUEST_DATA_COLUMN_SIDECARS.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-013",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Spoofing",
+            "description": "An attacker requests data columns by root for blocks that fail gossip validation. If the server serves sidecars for invalid blocks, the attacker could use the server as an oracle to determine which blocks exist in the server's database, or obtain data that should not be distributed.",
+            "mitigation": "Server checks gossip validation status of referenced blocks. Sidecars are only served for blocks passing gossip validation.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-014",
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Tampering",
+            "description": "If the local EL is compromised or buggy, it could return corrupted blob data via engine_getBlobsV2. Since blobs from local EL skip KZG verification (INV-001 of distributed_blob_publishing), corrupted blobs would be converted to data columns and published to the P2P network, potentially corrupting data availability for the entire network.",
+            "mitigation": "Engine API is JWT-authenticated, limiting access to co-located components. However, there is no KZG verification of EL-provided blobs. If EL is compromised, this is a significant attack vector. The trust assumption is documented but the lack of verification is a design choice that could be exploited.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-015",
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Denial of Service",
+            "description": "If engine_getBlobsV2 returns incomplete blob data (not ALL blobs matching kzg_commitments), the CL aborts the distributed blob publishing flow. An adversary with access to the EL could selectively withhold blobs, preventing the CL from participating in data column distribution for specific blocks.",
+            "mitigation": "The CL checks if ALL blobs matching kzg_commitments are retrieved. If not all are available, the flow aborts without publishing. This is a fail-safe but means a compromised EL can suppress blob distribution.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-016",
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Repudiation",
+            "description": "A proposer publishes different data columns for the same (slot, proposer_index, index) on different subnets, attempting equivocation. If the anti-equivocation cache is not updated atomically or consistently, some nodes may not detect the equivocation, allowing the proposer to deny publishing conflicting data.",
+            "mitigation": "Anti-equivocation cache MUST be updated regardless of whether publishing occurs (INV-003). Deduplication key (slot, proposer_index, sidecar.index) ensures only the first valid sidecar is accepted per slot per proposer per column index.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-017",
+            "trust_boundary_id": "tb-009",
+            "threat_type": "Spoofing",
+            "description": "An attacker crafts ENR records with incorrect fork_digest, next_fork_version, or next_fork_epoch to cause peer discovery issues. Nodes relying on ENR eth2 field for peer compatibility may fail to connect to legitimate peers or connect to malicious ones.",
+            "mitigation": "Nodes should verify ENR eth2 fields against their own computed values and reject peers with incompatible fork digests. The compute_fork_version function provides deterministic version resolution.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-018",
+            "trust_boundary_id": "tb-009",
+            "threat_type": "Denial of Service",
+            "description": "An attacker exploits the BPO fork ENR handling by advertising a BPO fork with next_fork_version equal to current_fork_version but a different next_fork_epoch. If implementations do not properly handle BPO vs regular forks, nodes may incorrectly partition the network or fail to discover peers across BPO fork boundaries.",
+            "mitigation": "ENR computation explicitly handles BPO forks differently from regular forks (SG-012). When no fork is planned, next_fork_epoch = FAR_FUTURE_EPOCH. BPO forks set next_fork_epoch to the planned epoch while keeping next_fork_version unchanged.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-019",
+            "trust_boundary_id": "tb-010",
+            "threat_type": "Tampering",
+            "description": "During the Fulu state upgrade, if any BeaconState field is incorrectly copied (dropped, zeroed, or assigned wrong value), the post-fork state would diverge from the expected state. Since different client implementations independently implement upgrade_to_fulu, subtle field copying bugs could cause consensus splits where some clients produce different post-fork states.",
+            "mitigation": "The upgrade function is specified as a pure function copying all fields explicitly. The proposer_lookahead is freshly initialized via initialize_proposer_lookahead(pre). Invariants INV-001 through INV-006 specify the expected behavior. Cross-client testing is essential.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-020",
+            "trust_boundary_id": "tb-010",
+            "threat_type": "Elevation of Privilege",
+            "description": "If initialize_proposer_lookahead(pre) produces incorrect or manipulable results during the fork upgrade, an attacker who knows the post-fork proposer assignments could front-run or manipulate the proposer schedule. Since proposer lookahead is a new Fulu feature (EIP-7917), implementation bugs could grant proposer privileges to wrong validators.",
+            "mitigation": "Proposer lookahead initialization uses the pre-fork state as input. The function must be deterministic and produce consistent results across all clients. Cross-client testing and formal verification of the proposer assignment algorithm are recommended.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-021",
+            "trust_boundary_id": "tb-010",
+            "threat_type": "Denial of Service",
+            "description": "The fork trigger only fires at epoch boundaries (slot % SLOTS_PER_EPOCH == 0). If the epoch boundary check has an off-by-one error, the fork could trigger at the wrong slot, causing nodes with the bug to fork on a different slot than correct nodes, leading to a network split.",
+            "mitigation": "INV-001 specifies the fork trigger only fires at epoch boundaries. INV-002 specifies it fires exactly once at FULU_FORK_EPOCH. These invariants must be verified across all client implementations.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "CRITICAL"
+          },
+          {
+            "id": "stride-022",
+            "trust_boundary_id": "tb-011",
+            "threat_type": "Spoofing",
+            "description": "An attacker publishes a data column sidecar with a valid signature but incorrect proposer_index for the slot. If the deterministic proposer lookahead (EIP-7917) is not correctly implemented or the beacon node uses stale shuffling data, the wrong proposer could be accepted. The IGNORE path for deferred validation (when shuffling is not yet computed) could be exploited to temporarily accept invalid proposers.",
+            "mitigation": "Proposer verification checks proposer_index against the expected proposer for the slot. Deferred validation (IGNORE) queues the sidecar for later re-validation rather than accepting it. This provides eventual consistency but introduces a window where invalid proposers are not immediately rejected.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-023",
+            "trust_boundary_id": "tb-005",
+            "threat_type": "Denial of Service",
+            "description": "During the Fulu transition period, an attacker repeatedly requests blob sidecars via the deprecated BlobSidecarsByRange protocol with ranges spanning the FULU_FORK_EPOCH boundary. Improper handling of the transition boundary could cause crashes, infinite loops, or excessive resource consumption in the serve_range computation.",
+            "mitigation": "The serve_range is explicitly bounded: [min(current_epoch - MIN_EPOCHS, FULU_FORK_EPOCH), FULU_FORK_EPOCH). Requests entirely at or after FULU_FORK_EPOCH return an empty list. Peers should not be penalized for these requests during the transition.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-024",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a data column sidecar on a gossip subnet that does not match the computed subnet for the sidecar's index. If compute_subnet_for_data_column_sidecar validation is missing or uses a different modulus than DATA_COLUMN_SIDECAR_SUBNET_COUNT (128), the sidecar could be processed on the wrong subnet, bypassing subnet-level isolation.",
+            "mitigation": "Gossip validation checks compute_subnet_for_data_column_sidecar(sidecar.index) == subnet_id and rejects mismatches.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-025",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a data column sidecar with an inclusion proof that does not correctly link kzg_commitments to the block body_root. If is_valid_merkle_branch uses incorrect depth (KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH must be 4) or incorrect generalized index, invalid inclusion proofs could be accepted, allowing sidecars that do not correspond to any actual block.",
+            "mitigation": "verify_data_column_sidecar_inclusion_proof computes the leaf as hash_tree_root(sidecar.kzg_commitments), the index from the generalized index of blob_kzg_commitments in BeaconBlockBody, and verifies against the block body_root via is_valid_merkle_branch.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-026",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "An attacker sends data column sidecars referencing a parent block that has not yet been seen by the receiving node. The gossip validation responds with IGNORE, queuing the sidecar for later re-validation. An attacker could flood a node with sidecars referencing many different unseen parent blocks, exhausting the re-validation queue and memory.",
+            "mitigation": "The IGNORE response allows re-processing later but does not immediately accept the sidecar. Implementations should bound the size of the pending validation queue. Rate limiting on incoming gossip messages provides additional protection.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-027",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a data column sidecar with a slot that is not higher than its parent block's slot. This violates the slot ordering invariant. If this check is missing or uses >= instead of >, a sidecar could reference a parent at the same slot, potentially causing fork choice confusion or chain stalling.",
+            "mitigation": "Gossip validation checks that the sidecar's slot is strictly higher than the parent slot and rejects otherwise.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-028",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker sends a data column sidecar whose parent block does not have the finalized checkpoint as an ancestor. This could be an attempt to introduce a sidecar from an alternative (non-canonical) chain. If the finalized ancestry check is missing or incorrect, nodes could process sidecars that belong to an invalid fork.",
+            "mitigation": "Gossip validation verifies that the finalized checkpoint is an ancestor of the sidecar's parent block and rejects if not.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          }
+        ]
+      },
+      "metadata": {
+        "timestamp": "2026-02-05T11:21:18Z",
+        "scope_summary": {
+          "total_boundaries": 11,
+          "in_scope_boundaries": 11,
+          "out_of_scope_boundaries": 0,
+          "total_stride_threats": 28,
+          "in_scope_threats": 28,
+          "threats_by_severity": {
+            "CRITICAL": 4,
+            "HIGH": 10,
+            "MEDIUM": 12,
+            "LOW": 2
+          },
+          "threats_by_exploitability": {
+            "external-attack": 22,
+            "internal-bug": 6
+          },
+          "threats_by_type": {
+            "Spoofing": 4,
+            "Tampering": 13,
+            "Repudiation": 1,
+            "Information Disclosure": 1,
+            "Denial of Service": 7,
+            "Elevation of Privilege": 2
+          }
+        },
+        "analyzed_specs": [
+          {
+            "title": "Fulu Fork",
+            "source_url": "https://ethereum.github.io/consensus-specs/specs/fulu/fork/",
+            "subgraph_count": 2,
+            "subgraph_ids": [
+              "SG-001",
+              "SG-002"
+            ]
+          },
+          {
+            "title": "Fulu -- Networking (P2P Interface)",
+            "source_url": "https://ethereum.github.io/consensus-specs/specs/fulu/p2p-interface/",
+            "subgraph_count": 13,
+            "subgraph_ids": [
+              "SG-001",
+              "SG-002",
+              "SG-003",
+              "SG-004",
+              "SG-005",
+              "SG-006",
+              "SG-007",
+              "SG-008",
+              "SG-009",
+              "SG-010",
+              "SG-011",
+              "SG-012",
+              "SG-013"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "01d",
+    "worker_id": 2,
+    "batch_index": 3,
+    "item_count": 1,
+    "timestamp": 1770290733,
+    "processed_ids": []
+  }
+}

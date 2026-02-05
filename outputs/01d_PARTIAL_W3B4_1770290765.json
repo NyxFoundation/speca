@@ -1,0 +1,636 @@
+{
+  "trust_model": [
+    {
+      "item": {
+        "file_path": "outputs/01b_PARTIAL_W2B3_1770279561.json"
+      },
+      "status": "success",
+      "trust_model": {
+        "source_files": [
+          "outputs/01b_PARTIAL_W2B3_1770279561.json"
+        ],
+        "bug_bounty_scope": {
+          "program_name": "Ethereum Fusaka Audit Contest",
+          "program_url": "https://audits.sherlock.xyz/contests/1140",
+          "in_scope_components": [
+            "P2P Network",
+            "Data Availability Sampling (PeerDAS)",
+            "Consensus Layer (CL)",
+            "Execution Layer (EL)",
+            "Engine API",
+            "Block Validation",
+            "State Transition",
+            "Consensus Logic",
+            "Fork Choice",
+            "Validator Slashing",
+            "Network Splits",
+            "Transaction Pool"
+          ],
+          "out_of_scope_components": [
+            "JSON-RPC API",
+            "Beacon API",
+            "Infrastructure bugs",
+            "ERC-20 contract bugs",
+            "ENS bugs",
+            "Tests and scripts",
+            "Typographical errors",
+            "Non-Fusaka vulnerabilities",
+            "High-effort DoS attacks"
+          ],
+          "scope_notes": [
+            "Only Fusaka-specific code is in scope of this competition.",
+            "EIP-7594 (PeerDAS) is explicitly in-scope as a Fusaka EIP.",
+            "Polynomial commitments sampling is the core cryptographic layer for PeerDAS and is fully in-scope.",
+            "Validator data column sidecar construction and publishing is in-scope as Fusaka consensus behavior.",
+            "High-effort (sustained, CPU or bandwidth intensive, and/or requires more than 1 packet or on-chain transaction) single-peer DoS attacks are out-of-scope.",
+            "Vulnerabilities requiring the user to have publicly exposed an API (JSON-RPC, Beacon API) are explicitly out-of-scope.",
+            "All submissions (except informational) must include an executable coded proof of concept at the time of submission."
+          ]
+        },
+        "trust_model": {
+          "actors": [
+            {
+              "id": "actor-block-proposer",
+              "name": "Block Proposer",
+              "description": "Validator selected to propose a beacon block containing blob KZG commitments. Responsible for computing cells, KZG proofs, and data column sidecars from blobs, and publishing them to the P2P network.",
+              "trust_level": "semi-trusted"
+            },
+            {
+              "id": "actor-p2p-peer",
+              "name": "P2P Peer",
+              "description": "Any node on the Ethereum P2P gossip network. Peers are unauthenticated and can send arbitrary data column sidecars, cells, and proofs. All P2P input must be fully validated.",
+              "trust_level": "untrusted"
+            },
+            {
+              "id": "actor-validator-node",
+              "name": "Validator Node",
+              "description": "A consensus-layer node operated by a validator. Receives data column sidecars via P2P, verifies KZG proofs, stores sidecars for the retention period, and serves them to requesting peers. Custody requirements are determined by staked balance.",
+              "trust_level": "semi-trusted"
+            },
+            {
+              "id": "actor-execution-layer",
+              "name": "Execution Layer (EL)",
+              "description": "Co-located execution client that provides blob data to the consensus layer via Engine API. Authenticated via JWT but data from EL may not always be fully re-verified by CL.",
+              "trust_level": "semi-trusted"
+            },
+            {
+              "id": "actor-kzg-trusted-setup",
+              "name": "KZG Trusted Setup",
+              "description": "The precomputed structured reference string (SRS) used for KZG polynomial commitments: KZG_SETUP_G1_MONOMIAL and KZG_SETUP_G2_MONOMIAL. Its integrity is assumed by the protocol; compromise would break all KZG proofs.",
+              "trust_level": "trusted"
+            },
+            {
+              "id": "actor-blob-submitter",
+              "name": "Blob Submitter",
+              "description": "External entity (rollup, user, application) that submits blobs as part of type-3 transactions on the execution layer. Blob data is untrusted and must be validated (size, field element validity) before polynomial operations.",
+              "trust_level": "untrusted"
+            },
+            {
+              "id": "actor-data-column-requester",
+              "name": "Data Column Requester",
+              "description": "Any peer requesting data column sidecars for data availability verification or cell recovery. Requests arrive over the P2P network and are unauthenticated.",
+              "trust_level": "untrusted"
+            }
+          ],
+          "trust_boundaries": [
+            {
+              "id": "tb-001",
+              "from_actor": "actor-blob-submitter",
+              "to_actor": "actor-block-proposer",
+              "description": "Raw blob bytes enter the polynomial commitment pipeline via compute_cells_and_kzg_proofs (SG-020). Blob data is deserialized into BLS field elements via blob_to_polynomial and bytes_to_bls_field. Malformed or adversarial blob data could cause field element parsing failures, out-of-range values, or incorrect polynomial representations.",
+              "entry_point_type": "Transaction",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "Blob bytes (BYTES_PER_BLOB) -> polynomial evaluation -> polynomial coefficients -> cells + KZG proofs"
+            },
+            {
+              "id": "tb-002",
+              "from_actor": "actor-p2p-peer",
+              "to_actor": "actor-validator-node",
+              "description": "Data column sidecars received over the P2P gossip network undergo batch KZG verification via verify_cell_kzg_proof_batch (SG-021). An untrusted peer sends commitment_bytes, cell_indices, cells, and proof_bytes. All four arrays must be validated for length consistency, byte-length correctness, and range bounds before cryptographic verification.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "commitment_bytes, cell_indices, cells, proofs_bytes -> deserialization -> coset evaluation conversion -> batch pairing check"
+            },
+            {
+              "id": "tb-003",
+              "from_actor": "actor-p2p-peer",
+              "to_actor": "actor-validator-node",
+              "description": "Cell recovery via recover_cells_and_kzg_proofs (SG-024) accepts cell_indices and cells from peers. These inputs drive polynomial recovery (Reed-Solomon erasure coding). Adversarial cell indices or corrupted cells could cause incorrect polynomial reconstruction, division by zero during coset FFT operations, or resource exhaustion.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "cell_indices, cells -> coset_evals conversion -> recover_polynomialcoeff -> recompute all cells and proofs"
+            },
+            {
+              "id": "tb-004",
+              "from_actor": "actor-execution-layer",
+              "to_actor": "actor-block-proposer",
+              "description": "Blobs and proofs are received from the EL via Engine API (engine_getBlobsV2). The EL is authenticated via JWT, but per the scope document, blob data from EL may be used without KZG verification. If the EL is compromised, corrupted blob data would propagate into the polynomial commitment pipeline.",
+              "entry_point_type": "EngineAPI",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": false,
+              "data_flow": "blobs_bundle (blobs, proofs) -> cells_and_kzg_proofs_construction (SG-002) -> get_data_column_sidecars"
+            },
+            {
+              "id": "tb-005",
+              "from_actor": "actor-block-proposer",
+              "to_actor": "actor-p2p-peer",
+              "description": "Data column sidecars are published to P2P gossip subnets via sidecar_publishing (SG-006). Each sidecar is published to a subnet determined by compute_subnet_for_data_column_sidecar(column_index). A malicious proposer could publish invalid sidecars, missing sidecars, or sidecars to wrong subnets.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "DataColumnSidecar (index, cells, proofs, commitments, inclusion_proof) -> gossip subnet data_column_sidecar_{subnet_id}"
+            },
+            {
+              "id": "tb-006",
+              "from_actor": "actor-data-column-requester",
+              "to_actor": "actor-validator-node",
+              "description": "Peers request stored data column sidecars during the retention period (SG-007). The validator node must serve sidecars for MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS epochs. Excessive or adversarial requests could cause resource exhaustion.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "Request for data column sidecar by epoch/index -> stored sidecar retrieval -> response"
+            },
+            {
+              "id": "tb-007",
+              "from_actor": "actor-kzg-trusted-setup",
+              "to_actor": "actor-validator-node",
+              "description": "KZG_SETUP_G1_MONOMIAL and KZG_SETUP_G2_MONOMIAL are loaded from the trusted setup and used in proof generation (g1_lincomb in SG-014) and verification (pairing_check in SG-015). Compromise of the trusted setup would allow forging proofs that pass verification, breaking data availability guarantees.",
+              "entry_point_type": "Internal",
+              "bug_bounty_scope": "out-of-scope",
+              "attacker_controlled": false,
+              "data_flow": "KZG_SETUP_G1_MONOMIAL, KZG_SETUP_G2_MONOMIAL -> proof computation and pairing verification"
+            },
+            {
+              "id": "tb-008",
+              "from_actor": "actor-p2p-peer",
+              "to_actor": "actor-validator-node",
+              "description": "Fiat-Shamir challenge computation in compute_verify_cell_kzg_proof_batch_challenge (SG-006 of polynomial-commitments-sampling). All verifier-relevant data (commitments, cell_indices, coset evaluations, proofs) is hashed to produce a random challenge. If any input is manipulated or omitted from the hash, the Fiat-Shamir binding is broken, potentially allowing proof forgery.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "Commitments, cell_indices, cosets_evals, proofs -> hash_to_bls_field -> random challenge r -> verification equation"
+            },
+            {
+              "id": "tb-009",
+              "from_actor": "actor-validator-node",
+              "to_actor": "actor-validator-node",
+              "description": "Internal computation boundary: custody requirement calculation via get_validators_custody_requirement (Validator SG-001). The custody requirement is derived from validator effective balances using integer division and clamping. Incorrect computation could cause a validator to custody too few or too many data column groups, affecting data availability guarantees.",
+              "entry_point_type": "Internal",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": false,
+              "data_flow": "validator_indices -> effective_balance sum -> integer division by BALANCE_PER_ADDITIONAL_CUSTODY_GROUP -> clamp to [VALIDATOR_CUSTODY_REQUIREMENT, NUMBER_OF_CUSTODY_GROUPS]"
+            },
+            {
+              "id": "tb-010",
+              "from_actor": "actor-p2p-peer",
+              "to_actor": "actor-validator-node",
+              "description": "Data column sidecar reconstruction from an existing sidecar via get_data_column_sidecars_from_column_sidecar (Validator SG-005). An attacker could provide a sidecar with manipulated signed_block_header, kzg_commitments, or kzg_commitments_inclusion_proof fields, which are reused without re-verification in the reconstruction path.",
+              "entry_point_type": "P2P",
+              "bug_bounty_scope": "in-scope",
+              "attacker_controlled": true,
+              "data_flow": "Existing DataColumnSidecar fields (header, commitments, inclusion_proof) + new cells_and_kzg_proofs -> reconstructed sidecars"
+            }
+          ],
+          "assumptions": [
+            {
+              "id": "asm-001",
+              "text": "The KZG trusted setup ceremony was performed correctly and at least one participant was honest, ensuring the trapdoor tau is unknown to any party. If this assumption is violated, an attacker can forge KZG proofs, breaking all data availability guarantees in PeerDAS.",
+              "related_boundary_ids": [
+                "tb-007"
+              ],
+              "criticality": "CRITICAL"
+            },
+            {
+              "id": "asm-002",
+              "text": "All BLS field elements deserialized via bytes_to_bls_field are valid elements of the BLS12-381 scalar field (i.e., less than BLS_MODULUS). If deserialization accepts out-of-range values, polynomial arithmetic would produce incorrect results, leading to invalid cells and proofs that might still pass verification.",
+              "related_boundary_ids": [
+                "tb-001",
+                "tb-002",
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-003",
+              "text": "The Fiat-Shamir challenge in compute_verify_cell_kzg_proof_batch_challenge includes ALL verifier-relevant data in the hash input in a canonical, deterministic order. The domain separator RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN prevents cross-protocol attacks. If any verifier-relevant data is omitted or the ordering is non-deterministic, an attacker can find inputs that produce favorable challenges and forge batch proofs.",
+              "related_boundary_ids": [
+                "tb-008"
+              ],
+              "criticality": "CRITICAL"
+            },
+            {
+              "id": "asm-004",
+              "text": "At least 50% of cells (CELLS_PER_EXT_BLOB / 2) are available for polynomial recovery via recover_polynomialcoeff. This threshold derives from the Reed-Solomon erasure coding rate-2 expansion. If fewer cells are available, recovery is mathematically impossible and the function should reject the input. If the threshold check is bypassed, recovery would produce an incorrect polynomial.",
+              "related_boundary_ids": [
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-005",
+              "text": "The bit-reversal permutation applied in polynomial_eval_to_coeff, coset_for_cell, and coset_shift_for_cell correctly maps between evaluation-domain ordering and the canonical ordering expected by FFT. An incorrect permutation would produce wrong polynomial coefficients, leading to invalid proofs and cells.",
+              "related_boundary_ids": [
+                "tb-001",
+                "tb-002",
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-006",
+              "text": "The co-located Execution Layer communicates via JWT-authenticated Engine API and is assumed to provide correct blob data. However, per the scope document, some data from EL may be used without full verification by CL. A compromised EL could inject corrupted blobs into the PeerDAS pipeline.",
+              "related_boundary_ids": [
+                "tb-004"
+              ],
+              "criticality": "MEDIUM"
+            },
+            {
+              "id": "asm-007",
+              "text": "The division operations in divide_polynomialcoeff assume a non-zero divisor polynomial (leading coefficient b[bpos] != 0). If the vanishing polynomial is zero or has a zero leading coefficient, division produces undefined results. The vanishing polynomial is constructed from missing cell roots; if all cells are present (no missing roots), the vanishing polynomial is the constant 1, which is valid.",
+              "related_boundary_ids": [
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-008",
+              "text": "The coset FFT division in recover_polynomialcoeff avoids division by zero by performing the division on a coset shifted by PRIMITIVE_ROOT_OF_UNITY. This works because the vanishing polynomial Z(x) evaluates to zero on the FFT domain but not on the coset. If the coset shift is incorrect or coincides with a root of Z(x), division by zero would occur.",
+              "related_boundary_ids": [
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-009",
+              "text": "Validators correctly compute and honor their custody requirements (get_validators_custody_requirement). If validators custody fewer groups than required, the network's data availability sampling security guarantees are weakened. The min/max clamping ensures the requirement stays within [VALIDATOR_CUSTODY_REQUIREMENT, NUMBER_OF_CUSTODY_GROUPS].",
+              "related_boundary_ids": [
+                "tb-009"
+              ],
+              "criticality": "MEDIUM"
+            },
+            {
+              "id": "asm-010",
+              "text": "Polynomial multiplication in multiply_polynomialcoeff enforces that len(a) + len(b) <= FIELD_ELEMENTS_PER_EXT_BLOB. This prevents the product polynomial from exceeding the extended evaluation domain. If this assertion is bypassed, subsequent FFT operations would produce incorrect results or buffer overflows.",
+              "related_boundary_ids": [
+                "tb-001",
+                "tb-003"
+              ],
+              "criticality": "MEDIUM"
+            },
+            {
+              "id": "asm-011",
+              "text": "The Lagrange interpolation in interpolate_polynomialcoeff requires all xs values to be distinct. If duplicate xs values are provided (e.g., duplicate coset points), the weight_adjustment computation (xs[i] - xs[j]).inverse() would attempt to invert zero, causing a crash or undefined behavior.",
+              "related_boundary_ids": [
+                "tb-002",
+                "tb-003"
+              ],
+              "criticality": "HIGH"
+            },
+            {
+              "id": "asm-012",
+              "text": "Data column sidecars MUST be retained for MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS epochs and served when requested. If nodes prune sidecars prematurely, peers performing data availability sampling or cell recovery cannot obtain the required data, potentially causing incorrect finality assessments.",
+              "related_boundary_ids": [
+                "tb-006"
+              ],
+              "criticality": "MEDIUM"
+            },
+            {
+              "id": "asm-013",
+              "text": "The commitment deduplication in verify_cell_kzg_proof_batch (SG-021) correctly preserves semantic equivalence. If the deduplication logic or commitment_indices mapping is incorrect, the batch verification equation would aggregate weights incorrectly, potentially causing valid proofs to be rejected or invalid proofs to be accepted.",
+              "related_boundary_ids": [
+                "tb-002"
+              ],
+              "criticality": "HIGH"
+            }
+          ],
+          "stride_analysis": [
+            {
+              "id": "stride-001",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Spoofing",
+              "description": "A P2P peer could forge data column sidecars with fabricated KZG commitments and cells. The peer impersonates a legitimate block proposer by constructing sidecars with valid-looking but cryptographically invalid data. The batch KZG verification (verify_cell_kzg_proof_batch) must detect this.",
+              "mitigation": "Batch KZG proof verification via pairing check (SG-015). The verification equation e(LL, LR) == e(RL, [1]) ensures that cells are consistent with the claimed commitments. Additionally, the signed_block_header in the sidecar should be verified against a known valid block.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-002",
+              "trust_boundary_id": "tb-001",
+              "threat_type": "Tampering",
+              "description": "A blob submitter could craft blob data containing field elements at or above BLS_MODULUS. If bytes_to_bls_field does not reject out-of-range values, the resulting polynomial would contain invalid field elements. All subsequent operations (FFT, evaluation, proof generation) would produce incorrect but potentially valid-looking results.",
+              "mitigation": "bytes_to_bls_field must validate that the deserialized integer is strictly less than BLS_MODULUS. This validation is specified in the Ethereum consensus specs. Implementations that use modular reduction instead of rejection would silently corrupt data.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-003",
+              "trust_boundary_id": "tb-008",
+              "threat_type": "Tampering",
+              "description": "If the Fiat-Shamir challenge computation omits any verifier-relevant data (e.g., a commitment, a cell_index, or a coset evaluation), an attacker could manipulate the omitted field while keeping the challenge unchanged. This would break the soundness of the batch verification, allowing invalid proofs to pass the pairing check.",
+              "mitigation": "INV-001 of SG-006 (polynomial-commitments-sampling) states that all verifier-relevant data must be included in the hash input. The domain separator RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN (INV-002) prevents cross-protocol attacks. Implementors must ensure canonical ordering (INV-003) and include length prefixes to prevent length-extension attacks.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "CRITICAL"
+            },
+            {
+              "id": "stride-004",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Tampering",
+              "description": "During cell recovery, an attacker provides corrupted cells for valid cell_indices. The recover_polynomialcoeff function (SG-023) would produce an incorrect polynomial. After recovery, the recomputed cells and proofs would differ from the original. If the caller does not verify the recovered polynomial against the original KZG commitment, the corrupted data propagates.",
+              "mitigation": "After recovery via recover_cells_and_kzg_proofs (SG-024), the caller should verify the recovered cells against the known KZG commitment. The recovery itself does not perform this verification internally; it relies on subsequent commitment checking.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-005",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Tampering",
+              "description": "Incorrect commitment deduplication in verify_cell_kzg_proof_batch (SG-021) could cause weight aggregation errors. If two semantically different commitments are treated as duplicates (hash collision in deduplication), or if the commitment_indices mapping is off by one, the random linear combination in the verification equation would be wrong, potentially accepting invalid proofs.",
+              "mitigation": "Commitment deduplication must use byte-exact comparison (not hash-based). The commitment_indices mapping must be tested against known valid and invalid proof batches. INV-003 of SG-021 states that commitment deduplication preserves semantic equivalence.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-006",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Denial of Service",
+              "description": "The recover_polynomialcoeff function (SG-023) involves multiple FFT operations, inverse FFT, coset FFT, and element-wise division over arrays of size FIELD_ELEMENTS_PER_EXT_BLOB. An attacker could trigger recovery with carefully chosen inputs that maximize computational cost. Additionally, if missing_cell_indices results in a very large vanishing polynomial, the multiply_polynomialcoeff calls during construct_vanishing_polynomial could be expensive.",
+              "mitigation": "The 50% availability threshold (CELLS_PER_EXT_BLOB / 2) limits the maximum number of missing cells. The assertion in SG-024 ensures cell_indices count is within bounds. However, the computational cost is inherently O(n log n) for FFT operations and O(n^2) for the vanishing polynomial construction via repeated multiplication.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "conditional",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-007",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Denial of Service",
+              "description": "The batch verification in verify_cell_kzg_proof_batch_impl (SG-015) performs multi-scalar multiplications (g1_lincomb), polynomial interpolations, and a final pairing check. An attacker could send a large batch of invalid data column sidecars, each requiring full cryptographic verification before being rejected. This could exhaust CPU resources on the verifying node.",
+              "mitigation": "Rate limiting on P2P gossip validation. The specification uses batch verification to amortize the pairing cost across multiple cells. Implementations should limit the batch size and apply cheap pre-checks (length validation, range checks on cell_indices) before expensive cryptographic operations.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-008",
+              "trust_boundary_id": "tb-006",
+              "threat_type": "Denial of Service",
+              "description": "Excessive data column sidecar requests during the retention period (SG-007) could exhaust storage I/O and network bandwidth. An attacker floods a validator node with requests for different epochs and column indices.",
+              "mitigation": "P2P request rate limiting. Validators MAY implement request throttling per peer. The retention period is bounded by MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS, limiting the historical range of valid requests.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "conditional",
+              "severity": "LOW"
+            },
+            {
+              "id": "stride-009",
+              "trust_boundary_id": "tb-005",
+              "threat_type": "Repudiation",
+              "description": "A block proposer publishes data column sidecars to some subnets but not others (selective withholding). Peers on the missing subnets cannot verify data availability. The proposer can deny having withheld the data, claiming network issues.",
+              "mitigation": "PeerDAS provides data availability sampling: validators sample random columns and the 50% redundancy from Reed-Solomon coding allows recovery from up to 50% missing columns. However, if the proposer withholds more than 50% of columns, recovery is impossible and the block should not be finalized.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-010",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Information Disclosure",
+              "description": "Timing side channels in KZG batch verification could leak information about the validator's internal state, such as which commitments are cached, which cell_indices are locally available, or the structure of the verification batch. This information could help an attacker target specific validators.",
+              "mitigation": "Constant-time cryptographic operations for BLS field arithmetic and pairing computation. In practice, most BLS12-381 libraries implement constant-time operations, but the batch verification logic (weight accumulation, interpolation) may not be constant-time.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "conditional",
+              "severity": "LOW"
+            },
+            {
+              "id": "stride-011",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Elevation of Privilege",
+              "description": "If recover_polynomialcoeff produces an incorrect polynomial (due to corrupted inputs that pass validation), and the node uses this polynomial to reconstruct and propagate cells and proofs without re-verifying against the original KZG commitment, the node effectively becomes a vector for distributing invalid data. Other nodes trusting this node's reconstructed data would accept invalid cells.",
+              "mitigation": "After recovery, verify reconstructed cells against the original KZG commitment. The specification delegates this verification to the caller of recover_cells_and_kzg_proofs. Implementations must not skip this step.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-012",
+              "trust_boundary_id": "tb-009",
+              "threat_type": "Elevation of Privilege",
+              "description": "Integer arithmetic in get_validators_custody_requirement (Validator SG-001) uses integer division (total_node_balance // BALANCE_PER_ADDITIONAL_CUSTODY_GROUP). If BALANCE_PER_ADDITIONAL_CUSTODY_GROUP is zero or if the division result overflows, a validator could end up with an incorrect custody requirement, potentially custodying all groups or zero groups.",
+              "mitigation": "BALANCE_PER_ADDITIONAL_CUSTODY_GROUP is a protocol constant and should never be zero. The min/max clamping (min(max(count, VALIDATOR_CUSTODY_REQUIREMENT), NUMBER_OF_CUSTODY_GROUPS)) bounds the result. However, implementations should validate constants at startup.",
+              "exploitability": "internal-bug",
+              "bug_bounty_scope": "in-scope",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-013",
+              "trust_boundary_id": "tb-010",
+              "threat_type": "Spoofing",
+              "description": "When reconstructing sidecars from an existing sidecar via get_data_column_sidecars_from_column_sidecar (Validator SG-005), the signed_block_header, kzg_commitments, and kzg_commitments_inclusion_proof are reused from the input sidecar without re-verification. An attacker could provide a sidecar with a valid-looking but forged block header, causing the node to produce and distribute sidecars linked to a non-existent or malicious block.",
+              "mitigation": "The caller must verify the input sidecar's signed_block_header and inclusion_proof against the canonical chain before using this function. The specification assumes this verification happens at a higher layer (gossip validation).",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-014",
+              "trust_boundary_id": "tb-001",
+              "threat_type": "Denial of Service",
+              "description": "The compute_cells_and_kzg_proofs (SG-020) function processes a full blob through polynomial conversion, CELLS_PER_EXT_BLOB evaluations, and KZG proof computations. INV-003 of SG-019 notes O(n^2) complexity. A large number of blobs per block could cause significant computational delays during block processing.",
+              "mitigation": "The protocol limits the number of blobs per block (MAX_BLOBS_PER_BLOCK). The specification notes (SG-019 INV-003) that FK20 algorithm is preferred for production to achieve O(n log n) complexity. Implementations using the naive O(n^2) algorithm from the specification may be vulnerable to DoS during periods of high blob throughput.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-015",
+              "trust_boundary_id": "tb-005",
+              "threat_type": "Tampering",
+              "description": "A malicious block proposer computes valid cells and proofs but then modifies the data column sidecars before publishing. For example, swapping cells between columns or providing mismatched column_index and actual data. The receiving validators must verify each sidecar independently against the block's KZG commitments.",
+              "mitigation": "Receiving validators verify each sidecar via verify_cell_kzg_proof_batch and verify the kzg_commitments_inclusion_proof against the block's Merkle root. The sidecar.index must match the expected column_index in the verification.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-016",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Tampering",
+              "description": "The coset FFT division in recover_polynomialcoeff (SG-023) computes reconstructed = [a / b for a, b in zip(ez_over_coset, zp_over_coset)]. If any element of zp_over_coset is zero (which should not happen on the coset but could occur if the coset shift PRIMITIVE_ROOT_OF_UNITY is incorrectly chosen), division by zero would crash the node or produce undefined results.",
+              "mitigation": "INV-002 of SG-023 states that division by Z(x) is done over a coset to avoid division by zero. The coset shift ensures Z(x) has no roots on the coset. Implementations must verify the coset shift is correct (INV-001 of SG-005 polynomial-commitments-sampling: shift_factor = PRIMITIVE_ROOT_OF_UNITY).",
+              "exploitability": "internal-bug",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-017",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Tampering",
+              "description": "In verify_cell_kzg_proof_batch (SG-021), cell_indices that are out of range (>= CELLS_PER_EXT_BLOB) would cause coset_for_cell and coset_shift_for_cell to access out-of-bounds elements in the roots_brp array. The specification includes assertions (cell_index < CELLS_PER_EXT_BLOB), but if implementations do not enforce these, out-of-bounds array access could cause crashes or memory corruption.",
+              "mitigation": "Explicit bounds checking: assert cell_index < CELLS_PER_EXT_BLOB in coset_shift_for_cell (SG-016) and coset_for_cell (SG-017). Implementations must not skip these assertions, especially when processing untrusted P2P input.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-018",
+              "trust_boundary_id": "tb-004",
+              "threat_type": "Tampering",
+              "description": "In cells_and_kzg_proofs_construction (Validator SG-002), proofs are sliced from blobs_bundle.proofs[start:end] where start = i * CELLS_PER_EXT_BLOB. If the proofs array from the EL is shorter than expected (len < CELLS_PER_EXT_BLOB * len(blobs)), the slicing would silently return fewer proofs, leading to mismatched cells and proofs in the resulting sidecars.",
+              "mitigation": "INV-002 of Validator SG-002 requires blobs_bundle.proofs has length CELLS_PER_EXT_BLOB * len(blobs_bundle.blobs). This should be asserted before processing. INV-003 requires proof slicing indices are always in bounds.",
+              "exploitability": "internal-bug",
+              "bug_bounty_scope": "in-scope",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-019",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Spoofing",
+              "description": "In recover_cells_and_kzg_proofs (SG-024), duplicate cell_indices would violate the uniqueness assertion. If the assertion is not enforced, two different cells for the same index would cause the polynomial interpolation to either fail silently or produce incorrect results. An attacker providing duplicate indices with conflicting cell data could trick the recovery into producing a polynomial different from the original.",
+              "mitigation": "SG-024 INV-003 requires cell_indices to be unique and in ascending order. The assertions in q_assert_unique and q_assert_sorted must be enforced. Additionally, implementations should verify that cell_indices are sorted before processing.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-020",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Elevation of Privilege",
+              "description": "The universal verification equation in verify_cell_kzg_proof_batch_impl (SG-015) aggregates multiple cell proofs into a single pairing check using random linear combination. If the random challenge r has insufficient entropy (e.g., due to hash collisions or weak hash function), an attacker could find inputs where the aggregated equation holds despite individual proofs being invalid. This would allow invalid cells to pass verification.",
+              "mitigation": "The challenge r is computed via hash_to_bls_field which should produce a uniformly random BLS field element. The probability of a false acceptance is negligible (1/p where p is the BLS scalar field order). INV-002 of SG-015 states that random challenge r binds all inputs via Fiat-Shamir.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "CRITICAL"
+            },
+            {
+              "id": "stride-021",
+              "trust_boundary_id": "tb-005",
+              "threat_type": "Denial of Service",
+              "description": "A block proposer could compute valid sidecars but delay publishing to some subnets (delayed withholding). Validators on the delayed subnets would see the block but fail data availability sampling, potentially causing unnecessary reorgs or delayed finality.",
+              "mitigation": "Attestation deadlines and fork choice rules account for delayed data availability. However, strategic delay within the attestation window is hard to distinguish from network latency. The 50% Reed-Solomon redundancy allows partial availability to be sufficient.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "MEDIUM"
+            },
+            {
+              "id": "stride-022",
+              "trust_boundary_id": "tb-001",
+              "threat_type": "Information Disclosure",
+              "description": "Blob data is encoded into polynomial evaluations and expanded into CELLS_PER_EXT_BLOB cells. The Reed-Solomon expansion means that any CELLS_PER_EXT_BLOB/2 cells are sufficient to reconstruct the original blob. If data availability sampling reveals cell contents to more peers than intended, sensitive blob data could be more widely disclosed than expected by the submitter.",
+              "mitigation": "Blobs are inherently public data once included in a block. The blob submitter should not expect confidentiality from the data availability layer. This is a design property, not a vulnerability.",
+              "exploitability": "api-only",
+              "bug_bounty_scope": "out-of-scope",
+              "severity": "LOW"
+            },
+            {
+              "id": "stride-023",
+              "trust_boundary_id": "tb-008",
+              "threat_type": "Spoofing",
+              "description": "If the RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN separator is reused across different protocols or if it collides with another domain, an attacker could construct cross-protocol attacks where a valid proof for one context is accepted in another context.",
+              "mitigation": "INV-002 of SG-006 (polynomial-commitments-sampling) specifies that RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN prevents cross-protocol attacks. The domain separator must be unique to this specific batch verification context.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "HIGH"
+            },
+            {
+              "id": "stride-024",
+              "trust_boundary_id": "tb-002",
+              "threat_type": "Tampering",
+              "description": "In verify_cell_kzg_proof_batch (SG-021), the commitment_bytes are checked for length (BYTES_PER_COMMITMENT) but the deserialized points must also lie on the correct elliptic curve subgroup. If bytes_to_kzg_commitment or bytes_to_kzg_proof does not perform subgroup checks, an attacker could provide points not on the BLS12-381 G1 curve, potentially causing the pairing check to produce incorrect results.",
+              "mitigation": "BLS12-381 implementations must perform subgroup checks during deserialization. Points not on the correct subgroup must be rejected. This is a well-known requirement for pairing-based cryptography.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "in-scope",
+              "severity": "CRITICAL"
+            },
+            {
+              "id": "stride-025",
+              "trust_boundary_id": "tb-003",
+              "threat_type": "Denial of Service",
+              "description": "The construct_vanishing_polynomial (SG-022) builds the vanishing polynomial by iteratively multiplying linear factors. With k missing cells, this requires k polynomial multiplications. If an attacker can control the number of missing cells (by withholding specific columns), they can maximize the computational cost of recovery for targeted validators.",
+              "mitigation": "The maximum number of missing cells is bounded by CELLS_PER_EXT_BLOB / 2 (the 50% threshold). The computational cost of the vanishing polynomial construction is O(k^2) where k is the number of missing cells. This is bounded and deterministic but could be significant for large k values.",
+              "exploitability": "external-attack",
+              "bug_bounty_scope": "conditional",
+              "severity": "MEDIUM"
+            }
+          ]
+        },
+        "metadata": {
+          "timestamp": "2026-02-05T00:00:00Z",
+          "analyzed_specs": [
+            {
+              "title": "Fulu -- Polynomial Commitments Sampling",
+              "source_url": "https://ethereum.github.io/consensus-specs/specs/fulu/polynomial-commitments-sampling/",
+              "subgraph_count": 24,
+              "subgraph_ids": [
+                "SG-001",
+                "SG-002",
+                "SG-003",
+                "SG-004",
+                "SG-005",
+                "SG-006",
+                "SG-007",
+                "SG-008",
+                "SG-009",
+                "SG-010",
+                "SG-011",
+                "SG-012",
+                "SG-013",
+                "SG-014",
+                "SG-015",
+                "SG-016",
+                "SG-017",
+                "SG-018",
+                "SG-019",
+                "SG-020",
+                "SG-021",
+                "SG-022",
+                "SG-023",
+                "SG-024"
+              ]
+            },
+            {
+              "title": "Fulu -- Honest Validator",
+              "source_url": "https://ethereum.github.io/consensus-specs/specs/fulu/validator/",
+              "subgraph_count": 7,
+              "subgraph_ids": [
+                "SG-001",
+                "SG-002",
+                "SG-003",
+                "SG-004",
+                "SG-005",
+                "SG-006",
+                "SG-007"
+              ]
+            }
+          ],
+          "scope_summary": {
+            "total_boundaries": 10,
+            "in_scope_boundaries": 9,
+            "out_of_scope_boundaries": 1,
+            "total_stride_threats": 25,
+            "in_scope_threats": 20,
+            "out_of_scope_threats": 1,
+            "conditional_threats": 4,
+            "critical_threats": 3,
+            "high_threats": 12,
+            "medium_threats": 7,
+            "low_threats": 3
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "01d",
+    "worker_id": 3,
+    "batch_index": 4,
+    "item_count": 1,
+    "timestamp": 1770290765,
+    "processed_ids": []
+  }
+}

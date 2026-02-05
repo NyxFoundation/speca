@@ -1,0 +1,504 @@
+{
+  "trust_model": [
+    {
+      "source_files": [
+        "outputs/01b_PARTIAL_W3B4_1770278926.json"
+      ],
+      "bug_bounty_scope": {
+        "program_name": "Ethereum Fusaka Audit Contest",
+        "program_url": "https://audits.sherlock.xyz/contests/1140",
+        "in_scope_components": [
+          "Consensus Layer (CL)",
+          "Execution Layer (EL)",
+          "P2P Network",
+          "Transaction Pool",
+          "Block Validation",
+          "State Transition",
+          "Engine API",
+          "Consensus Logic",
+          "Fork Choice",
+          "Data Availability Sampling (PeerDAS)",
+          "Validator Slashing",
+          "Network Splits"
+        ],
+        "out_of_scope_components": [
+          "JSON-RPC API",
+          "Beacon API",
+          "Infrastructure bugs",
+          "ERC-20 contract bugs",
+          "ENS bugs",
+          "Tests and scripts",
+          "High-effort DoS attacks",
+          "Publicly known issues",
+          "Non-Fusaka vulnerabilities"
+        ],
+        "scope_notes": [
+          "Only Fusaka-specific code is in scope of this competition.",
+          "Severity is measured by the finding's impact on the entire Ethereum network.",
+          "All submissions (except informational) must include an executable coded proof of concept at the time of submission.",
+          "High-effort DoS (sustained, CPU or bandwidth intensive, requires more than 1 packet or on-chain transaction) is out-of-scope.",
+          "Vulnerabilities requiring publicly exposed APIs (JSON-RPC, Beacon API) are explicitly out-of-scope.",
+          "Vulnerabilities not specific to Fusaka should be submitted via the Ethereum Foundation's Bug Bounty Program."
+        ]
+      },
+      "trust_model": {
+        "actors": [
+          {
+            "id": "actor-tx-sender",
+            "name": "Transaction Sender",
+            "description": "External user or contract that submits transactions to the network. Transactions include Legacy, AccessList, FeeMarket, Blob, and SetCode types. The sender controls the transaction payload, type, and signature.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-p2p-peer",
+            "name": "P2P Network Peer",
+            "description": "Any node on the P2P network that can send blocks, transactions, and receipts. Peers are unauthenticated and can join the network freely. They propagate blocks containing headers, transactions, withdrawals, and receipts.",
+            "trust_level": "untrusted"
+          },
+          {
+            "id": "actor-block-proposer",
+            "name": "Block Proposer (Validator)",
+            "description": "Validator responsible for constructing and proposing blocks. The proposer assembles the block header (21 fields), transaction list, ommer list (empty post-merge), and withdrawal list. The proposer determines which transactions to include and in what order.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-consensus-layer",
+            "name": "Consensus Layer (CL)",
+            "description": "The beacon chain client that provides consensus-related data to the execution layer, including parent_beacon_block_root, withdrawal instructions, and prev_randao via the Engine API.",
+            "trust_level": "semi-trusted"
+          },
+          {
+            "id": "actor-execution-engine",
+            "name": "Execution Engine (EL)",
+            "description": "The execution layer client responsible for processing blocks, executing transactions, computing state roots, transaction roots, receipt roots, bloom filters, and encoding/decoding receipts. It applies state transitions and validates block structure.",
+            "trust_level": "trusted"
+          },
+          {
+            "id": "actor-rlp-decoder",
+            "name": "RLP Codec",
+            "description": "The RLP encoding/decoding library used for serializing and deserializing block structures, receipts, and transactions. It is a critical internal dependency that operates on attacker-controlled data.",
+            "trust_level": "trusted"
+          }
+        ],
+        "trust_boundaries": [
+          {
+            "id": "tb-001",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-engine",
+            "description": "P2P peer delivers a block containing a header, transactions, and withdrawals to the execution engine for validation. The block structure must be deserialized and all 21 header fields, the transaction list, ommer list, and withdrawal list must be validated. Attacker can craft arbitrary blocks with malformed headers, invalid transaction types, or inconsistent Merkle roots.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Serialized Block (Header with 21 fields, Transactions as Bytes|LegacyTransaction, Ommers as Tuple[Header], Withdrawals as Tuple[Withdrawal])"
+          },
+          {
+            "id": "tb-002",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-engine",
+            "description": "P2P peer delivers encoded receipts for block validation. The receipt bytes must be decoded via decode_receipt, which checks the type prefix byte and RLP-decodes the remainder. An attacker can craft receipts with invalid type prefixes, malformed RLP, or inconsistent bloom filters.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Encoded receipt bytes (type prefix + RLP-encoded Receipt), or raw Receipt objects"
+          },
+          {
+            "id": "tb-003",
+            "from_actor": "actor-tx-sender",
+            "to_actor": "actor-execution-engine",
+            "description": "Transaction sender submits a transaction that determines the receipt encoding path. The transaction type (Legacy, AccessList, FeeMarket, Blob, SetCode) dictates the prefix byte (none, 0x01, 0x02, 0x03, 0x04) applied during encode_receipt. A mismatch between transaction type and receipt encoding could cause consensus failures.",
+            "entry_point_type": "Transaction",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Transaction object (one of 5 types), used to determine receipt encoding format"
+          },
+          {
+            "id": "tb-004",
+            "from_actor": "actor-consensus-layer",
+            "to_actor": "actor-execution-engine",
+            "description": "Consensus layer provides withdrawal instructions and beacon block root to the execution engine via Engine API. The CL provides withdrawal objects (index, validator_index, address, amount) and parent_beacon_block_root that are included in the block header and body. Corrupted withdrawal data could cause incorrect ETH credit or state divergence.",
+            "entry_point_type": "EngineAPI",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Withdrawal objects (index:U64, validator_index:U64, address:Address, amount:U256), parent_beacon_block_root:Root, prev_randao:Bytes32"
+          },
+          {
+            "id": "tb-005",
+            "from_actor": "actor-block-proposer",
+            "to_actor": "actor-execution-engine",
+            "description": "Block proposer constructs the block header with all 21 fields and assembles the block body. The proposer determines state_root, transactions_root, receipt_root, bloom, gas_used, and other computed fields. If the proposer supplies incorrect computed fields, the block must be rejected during validation.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Complete Header (21 fields), Transaction list, Withdrawal list"
+          },
+          {
+            "id": "tb-006",
+            "from_actor": "actor-execution-engine",
+            "to_actor": "actor-rlp-decoder",
+            "description": "Execution engine passes attacker-controlled receipt bytes to the RLP decoder. The decode_receipt function strips the type prefix byte and passes the remaining bytes to rlp.decode_to(Receipt, receipt[1:]). Malformed RLP data from an attacker could trigger unexpected behavior in the RLP library.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Raw bytes after type prefix stripping, passed to rlp.decode_to()"
+          },
+          {
+            "id": "tb-007",
+            "from_actor": "actor-execution-engine",
+            "to_actor": "actor-rlp-decoder",
+            "description": "Execution engine uses RLP encoding for receipt serialization in encode_receipt. Each typed transaction receipt is RLP-encoded and prefixed with the type byte. The encode path processes log bloom data that was computed from transaction execution logs. Incorrect encoding could cause receipt root divergence across clients.",
+            "entry_point_type": "Internal",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": false,
+            "data_flow": "Receipt objects to be RLP-encoded for Merkle tree inclusion"
+          },
+          {
+            "id": "tb-008",
+            "from_actor": "actor-p2p-peer",
+            "to_actor": "actor-execution-engine",
+            "description": "P2P peer provides log data within receipts that feeds into bloom filter computation. The logs_bloom function processes log addresses and topics through keccak256 hashing and bit manipulation to construct the 256-byte bloom filter. Malicious log data with crafted addresses and topics could test bloom filter edge cases.",
+            "entry_point_type": "P2P",
+            "bug_bounty_scope": "in-scope",
+            "attacker_controlled": true,
+            "data_flow": "Log objects (address:Address, topics:Tuple[Hash32], data:Bytes) within receipts"
+          }
+        ],
+        "assumptions": [
+          {
+            "id": "asm-001",
+            "text": "Transaction type discriminators are exhaustive and mutually exclusive: every transaction is exactly one of LegacyTransaction, AccessListTransaction, FeeMarketTransaction, BlobTransaction, or SetCodeTransaction. If a new transaction type is introduced without updating encode_receipt/decode_receipt, receipts will be incorrectly encoded or the assertion in decode_receipt will fail.",
+            "related_boundary_ids": [
+              "tb-002",
+              "tb-003"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-002",
+            "text": "The assertion in decode_receipt (receipt[0] in {1, 2, 3, 4}) is the sole validation of receipt type prefix. If an attacker can bypass or violate this assertion (e.g., in a production build where assertions are disabled), arbitrary bytes could be passed to the RLP decoder.",
+            "related_boundary_ids": [
+              "tb-002",
+              "tb-006"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-003",
+            "text": "Block headers are immutable after construction (slotted_freezable). Once the freeze(Header) operation is called, no field can be modified. This immutability is enforced by the Python dataclass mechanism and is critical for header hash consistency.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-005"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-004",
+            "text": "In post-merge (PoS) forks, difficulty is constant and nonce is zero, and ommers_hash is always EMPTY_OMMER_HASH. Violations of these invariants indicate an invalid block, but incorrect validation could allow legacy PoW fields to carry hidden data or cause consensus splits between clients that handle these fields differently.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-005"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-005",
+            "text": "The keccak256 hash function produces at least 6 bytes of output, which is required for the bloom filter's 3 iterations reading 2-byte pairs at indices (0, 2, 4). This is inherently true for keccak256 (32-byte output), but the assumption should be explicitly documented.",
+            "related_boundary_ids": [
+              "tb-008"
+            ],
+            "criticality": "LOW"
+          },
+          {
+            "id": "asm-006",
+            "text": "Bloom filter is always exactly 256 bytes. The bit_to_set value is masked to 11 bits (0x07FF, range 0-2047), so byte_index is always in [0, 255]. This arithmetic invariant ensures no out-of-bounds access, but an implementation error in the mask or bit arithmetic could cause memory corruption.",
+            "related_boundary_ids": [
+              "tb-008"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-007",
+            "text": "Withdrawal objects from the consensus layer are trusted to have valid validator_index and amount values. The execution layer does not independently verify that the validator exists or that the withdrawal amount is correct. A compromised or buggy CL could inject invalid withdrawals.",
+            "related_boundary_ids": [
+              "tb-004"
+            ],
+            "criticality": "HIGH"
+          },
+          {
+            "id": "asm-008",
+            "text": "Legacy transaction receipts are returned as-is without RLP wrapping (no type prefix), while all other types get a prefix byte. This asymmetry means that legacy receipt handling is a special case that must be consistently implemented across all clients to avoid consensus failures.",
+            "related_boundary_ids": [
+              "tb-002",
+              "tb-003",
+              "tb-007"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-009",
+            "text": "The cumulative_gas_used in receipts is monotonically non-decreasing within a block. This property is used for gas accounting verification and, if violated, could indicate an incorrect state transition or allow gas-related attacks.",
+            "related_boundary_ids": [
+              "tb-001",
+              "tb-003"
+            ],
+            "criticality": "MEDIUM"
+          },
+          {
+            "id": "asm-010",
+            "text": "The bloom filter in a receipt must be consistent with the logs it contains. The logs_bloom function is the canonical computation, and any discrepancy between the computed bloom and the one stored in the receipt indicates data corruption or a consensus bug.",
+            "related_boundary_ids": [
+              "tb-008"
+            ],
+            "criticality": "MEDIUM"
+          }
+        ],
+        "stride_analysis": [
+          {
+            "id": "stride-001",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Tampering",
+            "description": "An attacker on the P2P network crafts receipt bytes with a valid type prefix (1-4) but malformed RLP payload after the prefix. The decode_receipt function passes the assertion check on receipt[0] but then calls rlp.decode_to(Receipt, receipt[1:]) on corrupted data. This could trigger RLP decoder bugs, cause panics/crashes, or produce unexpected Receipt objects that differ across client implementations, leading to consensus splits.",
+            "mitigation": "RLP decoder must safely handle all malformed inputs without panics. Receipt validation must verify all decoded fields (succeeded, cumulative_gas_used, bloom, logs) are well-formed after decoding. Fuzz testing of RLP decode paths with arbitrary payloads is essential.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-002",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Denial of Service",
+            "description": "An attacker sends receipts with extremely large RLP-encoded payloads after a valid type prefix byte. The decode_receipt function does not impose size limits before passing data to the RLP decoder. Processing extremely large or deeply nested RLP structures could exhaust memory or CPU, causing node crashes or severe slowdowns.",
+            "mitigation": "Impose maximum receipt size limits before RLP decoding. Implement RLP decoder resource limits (max nesting depth, max element count, max total size). Rate-limit receipt processing from individual P2P peers.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-003",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "An attacker constructs a block with a header containing inconsistent Merkle roots (transactions_root, receipt_root, withdrawals_root) that do not match the actual block contents. If the execution engine fails to recompute and verify these roots, a block with tampered transactions or receipts could be accepted, leading to state divergence and potential consensus failure across the network.",
+            "mitigation": "Execution engine must independently compute transactions_root, receipt_root, and withdrawals_root from the block body and reject blocks where header roots do not match computed roots. This is a critical validation step that must never be skipped.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-004",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Tampering",
+            "description": "A transaction sender creates a transaction whose type is ambiguous or falls through all isinstance checks in encode_receipt. If the type dispatch logic in encode_receipt does not handle all cases correctly (e.g., due to class inheritance issues or a new transaction type not yet added), the function could reach an unreachable state, potentially encoding the receipt incorrectly or causing an unhandled exception. The current code has no explicit else/default case for unknown types.",
+            "mitigation": "Add an explicit else clause in encode_receipt that raises an error for unknown transaction types. Ensure isinstance checks are ordered correctly and are exhaustive. Add regression tests for all 5 transaction types.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-005",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Spoofing",
+            "description": "An attacker crafts a receipt with type prefix 0x04 (SetCode) but encodes the receipt body in a format that is only valid for a different transaction type. If clients implement decode_receipt differently (some checking type prefix consistency, others not), this could cause one client to accept the receipt and another to reject it, leading to a consensus split between client implementations.",
+            "mitigation": "After decoding, validate that the receipt contents are consistent with the expected transaction type. Implement cross-client consensus tests for all receipt type prefix and body combinations.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-006",
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Tampering",
+            "description": "An attacker submits transactions that produce logs with carefully crafted addresses and topics designed to cause bloom filter collisions. While bloom filters are probabilistic by nature, an adversary who can maximize false positives could degrade the utility of bloom-based log filtering, causing excessive computation for nodes and services that rely on bloom filters to filter events.",
+            "mitigation": "Bloom filter collisions are inherent to the design (256-byte filter with 3 bits per entry via keccak256). The impact is limited to log query performance. This is a known limitation rather than a vulnerability. However, nodes should implement query-time resource limits.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "conditional",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-007",
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Tampering",
+            "description": "An implementation error in the bloom filter bit arithmetic (bit_to_set, bit_index, byte_index, bit_value) could cause the computed bloom to differ across client implementations. The specification uses specific operations: 11-bit mask (0x07FF), reversed bit indexing (0x07FF - bit_to_set), and specific byte/bit position calculations. Any client that implements these operations differently will produce a different bloom filter, leading to receipt root divergence and a consensus split.",
+            "mitigation": "Comprehensive test vectors for bloom filter computation across all client implementations. The spec should provide canonical test cases with known inputs and expected bloom outputs. Cross-client fuzzing of bloom filter computation is recommended.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-008",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Tampering",
+            "description": "A compromised or buggy consensus layer sends withdrawal objects with incorrect amounts (e.g., inflated withdrawal amounts) via the Engine API. Since the execution layer processes withdrawals by crediting the specified address with the specified amount, incorrect withdrawal data could lead to unauthorized ETH minting. The EL relies on the CL to provide valid withdrawal data and does not independently verify withdrawal amounts against the beacon state.",
+            "mitigation": "Engine API authentication via JWT limits this to co-located CL-EL pairs. The CL is responsible for correct withdrawal computation. Cross-layer validation could be added but would require the EL to have access to beacon state, which is architecturally complex. This is a known trust boundary in the EL-CL design.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-009",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Denial of Service",
+            "description": "An attacker sends blocks with an extremely large number of transactions, logs, or withdrawals. The block construction allows transactions as Tuple[Bytes | LegacyTransaction, ...] and withdrawals as Tuple[Withdrawal, ...] without explicit bounds in the data structure definition. Processing blocks with millions of entries could exhaust memory and CPU, causing node crashes.",
+            "mitigation": "Block validation must enforce gas_limit constraints (which implicitly limit transaction count), and the EIP-7934 RLP execution block size limit provides an upper bound on serialized block size. Withdrawal count is bounded by the consensus layer (max 16 per block). Nodes should reject blocks exceeding these limits early in the validation pipeline.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-010",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Elevation of Privilege",
+            "description": "In post-merge Osaka, the difficulty field should be constant and nonce should be zero (INV-003), and ommers_hash should always be EMPTY_OMMER_HASH (INV-004). If a client fails to validate these invariants, an attacker could craft a block with non-zero difficulty or nonce values. While these fields are functionally unused in PoS, they could be exploited to: (1) smuggle data through the block header, (2) cause consensus splits between clients that validate vs. ignore these fields, or (3) be misinterpreted by legacy code paths.",
+            "mitigation": "Strictly validate that difficulty, nonce, and ommers_hash match their required post-merge values. Reject any block that deviates from these constants.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-011",
+            "trust_boundary_id": "tb-006",
+            "threat_type": "Denial of Service",
+            "description": "The decode_receipt function passes attacker-controlled bytes (after stripping the type prefix) to rlp.decode_to(). If the RLP decoder has any bugs related to parsing deeply nested structures, extremely long lists, or integer overflow in length prefixes, an attacker could trigger a crash, infinite loop, or excessive memory allocation in the RLP library, taking down the node.",
+            "mitigation": "Use a battle-tested RLP library with comprehensive fuzzing. Implement resource limits in the RLP decoder (max nesting depth, max total decoded size). Ensure the decoder fails safely on all malformed inputs without panics or undefined behavior.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-012",
+            "trust_boundary_id": "tb-003",
+            "threat_type": "Information Disclosure",
+            "description": "Transaction type information is leaked through the receipt encoding prefix byte. While this is by design (the prefix byte indicates the transaction type), it means that receipt data reveals the transaction type even if the full transaction is not available. In the context of censorship or transaction analysis, this could be used to identify blob transactions (0x03) or SetCode transactions (0x04) for selective processing.",
+            "mitigation": "This is inherent to the EIP-2718 typed transaction envelope design and is a known property. The information disclosed (transaction type) is already publicly available on-chain. No additional mitigation is required.",
+            "exploitability": "api-only",
+            "bug_bounty_scope": "out-of-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-013",
+            "trust_boundary_id": "tb-005",
+            "threat_type": "Repudiation",
+            "description": "The block proposer constructs the block header with fields like coinbase (fee recipient), extra_data, and timestamp. While the block is signed by the proposer (via CL), the extra_data field allows up to 32 bytes of arbitrary data that could be used for covert signaling. A proposer could deny responsibility for messages embedded in extra_data.",
+            "mitigation": "Block proposer identity is cryptographically linked to the block via the consensus layer signature. The extra_data field is a known feature. This is a low-severity repudiation concern.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "out-of-scope",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-014",
+            "trust_boundary_id": "tb-001",
+            "threat_type": "Tampering",
+            "description": "The header construction requires all 21 fields to be set in a specific order before freeze() is called. If the construction order is not enforced (e.g., due to Python dataclass behavior allowing partial construction), it might be possible to create a Header with default/zero values for some fields that should have been explicitly set. This could lead to blocks with missing or zero-valued critical fields (like requests_hash or base_fee_per_gas) being accepted.",
+            "mitigation": "The slotted_freezable pattern should enforce that all fields are set before freeze() succeeds. Block validation must independently verify all header fields against expected values (e.g., base_fee follows EIP-1559, blob gas follows EIP-4844, requests_hash follows EIP-7685).",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "MEDIUM"
+          },
+          {
+            "id": "stride-015",
+            "trust_boundary_id": "tb-002",
+            "threat_type": "Elevation of Privilege",
+            "description": "The decode_receipt assertion checks receipt[0] in (1, 2, 3, 4). In Python, assertions can be disabled with the -O flag (optimized mode). If a production deployment runs with assertions disabled, any byte value in position 0 would pass the check, potentially allowing an attacker to inject a receipt with an invalid type prefix that gets decoded differently across nodes (some with assertions, some without).",
+            "mitigation": "Replace the assert statement with an explicit if-check that raises an appropriate exception (e.g., InvalidBlock or InvalidReceipt). Never rely on Python assertions for security-critical validation in production code.",
+            "exploitability": "configuration-error",
+            "bug_bounty_scope": "conditional",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-016",
+            "trust_boundary_id": "tb-007",
+            "threat_type": "Tampering",
+            "description": "The encode_receipt function uses isinstance() checks to determine the transaction type and select the receipt encoding prefix. If the check order matters (e.g., if SetCodeTransaction is a subclass of FeeMarketTransaction), the isinstance check could match the wrong type first, causing an incorrect prefix byte to be applied. This would produce an incorrectly encoded receipt that, when included in the receipt Merkle root, would cause a consensus divergence.",
+            "mitigation": "Ensure that transaction type classes do not share inheritance hierarchies that could cause isinstance ambiguity. The check order in encode_receipt (AccessList -> FeeMarket -> Blob -> SetCode -> Legacy) should be validated against the actual class hierarchy. Add explicit type identity checks if inheritance is possible.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          },
+          {
+            "id": "stride-017",
+            "trust_boundary_id": "tb-008",
+            "threat_type": "Denial of Service",
+            "description": "The logs_bloom function processes all logs in all receipts by calling add_to_bloom once per address and once per topic. A block with the maximum number of transactions, each producing the maximum number of logs (limited by gas), each with the maximum 4 topics, would result in a very large number of keccak256 calls and bloom filter updates. While bounded by gas limits, a carefully constructed block could maximize bloom computation cost.",
+            "mitigation": "Bloom filter computation is O(n) in the total number of log entries and topics, bounded by the block gas limit. This is a known computational cost. The EIP-7825 transaction gas limit cap and EIP-7934 block size limit provide upper bounds.",
+            "exploitability": "external-attack",
+            "bug_bounty_scope": "conditional",
+            "severity": "LOW"
+          },
+          {
+            "id": "stride-018",
+            "trust_boundary_id": "tb-004",
+            "threat_type": "Spoofing",
+            "description": "The withdrawal construction includes an address field (the ETH recipient). If the consensus layer provides a withdrawal with a spoofed or incorrect address, ETH would be credited to the wrong account. Since the EL trusts CL-provided withdrawal data, this is a critical trust boundary. However, the Engine API is JWT-authenticated, limiting this to a compromised CL scenario.",
+            "mitigation": "Engine API JWT authentication prevents external spoofing. Withdrawal addresses are determined by validator withdrawal credentials on the beacon chain, which are cryptographically bound. A compromised CL is the only realistic attack vector, and the impact would be detectable on-chain.",
+            "exploitability": "internal-bug",
+            "bug_bounty_scope": "in-scope",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      "metadata": {
+        "timestamp": "2026-02-05T11:21:26Z",
+        "analyzed_specs": [
+          {
+            "source_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/blocks.py",
+            "title": "Osaka Blocks - Block, Header, Transaction Receipt Data Structures and Encoding",
+            "subgraph_count": 7,
+            "subgraph_ids": [
+              "SG-001",
+              "SG-002",
+              "SG-003",
+              "SG-004",
+              "SG-005",
+              "SG-006",
+              "SG-007"
+            ]
+          },
+          {
+            "source_url": "https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/osaka/bloom.py",
+            "title": "Osaka Bloom Filter",
+            "subgraph_count": 2,
+            "subgraph_ids": [
+              "SG-001",
+              "SG-002"
+            ]
+          }
+        ],
+        "scope_summary": {
+          "total_boundaries": 8,
+          "in_scope_boundaries": 8,
+          "out_of_scope_boundaries": 0,
+          "conditional_boundaries": 0,
+          "total_stride_threats": 18,
+          "in_scope_threats": 13,
+          "out_of_scope_threats": 2,
+          "conditional_threats": 3,
+          "threats_by_severity": {
+            "HIGH": 8,
+            "MEDIUM": 6,
+            "LOW": 4
+          },
+          "threats_by_exploitability": {
+            "external-attack": 9,
+            "internal-bug": 7,
+            "api-only": 1,
+            "configuration-error": 1
+          },
+          "threats_by_type": {
+            "Tampering": 8,
+            "Denial of Service": 4,
+            "Spoofing": 2,
+            "Elevation of Privilege": 2,
+            "Repudiation": 1,
+            "Information Disclosure": 1
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "01d",
+    "worker_id": 5,
+    "batch_index": 6,
+    "item_count": 1,
+    "timestamp": 1770290726,
+    "processed_ids": []
+  }
+}
