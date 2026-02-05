@@ -1,7 +1,7 @@
 ---
 name: checklist-specialist
 description: Generate a security audit checklist from formal properties with bug bounty scope filtering.
-allowed-tools: read, write, mcp__github__search_code, mcp__github__list_issues
+allowed-tools: read, write
 context: fork
 ---
 # SKILL: Checklist Specialist
@@ -57,11 +57,7 @@ A JSON object containing a list of items, where each item is a file containing f
 
 ### Phase C: Generate Checklist Items
 
-6.  **Search Similar Patterns**: Use `mcp__github__search_code` to find similar vulnerability patterns or known-bad code patterns in public repositories. This informs checklist item severity and test procedures.
-
-7.  **Check Known Issues**: Use `mcp__github__list_issues` to check if similar issues have been reported in the target repository or related projects.
-
-8.  **Generate Checklist Items**:
+6.  **Generate Checklist Items** (process all properties in batch, do NOT call external APIs per property):
 
     **For Boundary Properties:**
     - Generate a **CRITICAL Boundary Check**: Create one checklist item specifically for the boundary edge. Title: `"Verify Trust Boundary Integrity for {EDGE_ID}..."`. Focus on input validation, authentication, and data sanitization.
@@ -74,18 +70,20 @@ A JSON object containing a list of items, where each item is a file containing f
       - `Pre-condition`: Design a test to bypass the condition with invalid inputs.
       - `Post-condition`: Design a test to verify side-effects and check for unexpected state changes.
 
-9.  **Assign Severity**: Inherit severity from the property if available. Otherwise, assign based on:
+7.  **Assign Severity**: Inherit severity from the property if available. Otherwise, assign based on:
     - `Critical`: Boundary properties with `attacker_controlled: true`
     - `High`: Properties with `severity: HIGH` or `CRITICAL`
     - `Medium`: Properties with `severity: MEDIUM`
     - `Low`: Properties with `severity: LOW`
     - `Informational`: Properties with `severity: INFORMATIONAL`
 
-10. **Map to Code**: Using the `covers` information in the property, identify specific code locations (files, functions) relevant to verifying the checklist item.
+8.  **Map to Code**: Using the `covers` information in the property, identify specific code locations (files, functions) relevant to verifying the checklist item. If code locations are not determinable, omit this field.
 
-11. **Define Test Procedure**: For each item, provide a clear procedure for how an auditor should test it.
+9.  **Define Test Procedure**: For each item, provide a clear procedure for how an auditor should test it.
 
-12. **Assign IDs**: Assign a unique, sequential ID to each checklist item (e.g., `CHK-0001`, `CHK-0002`).
+10. **Assign IDs**: Assign a unique, sequential ID to each checklist item (e.g., `CHK-0001`, `CHK-0002`).
+
+
 
 ## Output Format
 Return a JSON object containing the list of generated checklist items. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.
@@ -117,17 +115,6 @@ Return a JSON object containing the list of generated checklist items. The outpu
       "test_procedure": "1. Identify all entry points for transaction submission. 2. Review input validation logic for each field. 3. Attempt to submit malformed transactions and verify rejection. 4. Check for integer overflow/underflow in size calculations.",
       "bug_class": "Input Validation",
       "risk_category": "Tampering",
-      "code_locations": [
-        {
-          "file": "/path/to/transaction.go",
-          "function": "ValidateTransaction",
-          "line_range": "100-150"
-        }
-      ],
-      "executable_checks": [
-        "Fuzz test transaction parsing with malformed inputs",
-        "Unit test boundary conditions for all numeric fields"
-      ],
       "notes": "Source: PROP-0001, Trust Boundary: tb-001"
     },
     {
@@ -146,15 +133,6 @@ Return a JSON object containing the list of generated checklist items. The outpu
       "test_procedure": "1. Identify all functions that modify balances. 2. Verify that sum of all balances equals total supply before and after each operation. 3. Check for any mint/burn paths that could violate invariant.",
       "bug_class": "State Consistency",
       "risk_category": "Tampering",
-      "code_locations": [
-        {
-          "file": "/path/to/token.sol",
-          "function": "transfer"
-        }
-      ],
-      "executable_checks": [
-        "Property-based test: forall transfers, sum(balances) == totalSupply"
-      ],
       "notes": "Source: PROP-0005, Invariant: INV-001"
     }
   ],
@@ -177,6 +155,15 @@ Return a JSON object containing the list of generated checklist items. The outpu
 }
 ```
 
+## Performance Optimization
+
+To ensure efficient processing:
+
+1. **Batch Processing**: Process all properties in a single pass. Do NOT make external API calls for each property.
+2. **Minimal Output**: Omit optional fields (`code_locations`, `executable_checks`) if not determinable.
+3. **No External Tools**: This skill operates entirely offline without external API calls.
+4. **Streaming Output**: Write results incrementally if processing large batches.
+
 ## Quality Checklist
 - [ ] All out-of-scope properties are filtered (not converted to checklist items)
 - [ ] All api-only and configuration-error properties are filtered
@@ -186,3 +173,4 @@ Return a JSON object containing the list of generated checklist items. The outpu
 - [ ] Filtering summary accurately reflects the filtering applied
 - [ ] All checklist items are traceable to source properties
 - [ ] Test procedures are specific and actionable
+- [ ] No external API calls were made (offline processing only)
