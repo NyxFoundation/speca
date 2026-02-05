@@ -1,0 +1,287 @@
+{
+  "specs": [
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7918.md",
+      "title": "EIP-7918: Blob base fee bounded by execution cost",
+      "sub_graphs": [
+        {
+          "id": "SG-001",
+          "name": "calc_excess_blob_gas",
+          "mermaid_file": "EIP-7918/SG-001_calc_excess_blob_gas.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_compute_target", "q_check_underflow", "q_check_reserve", "q_exec_led", "q_blob_led", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "target_blob_gas = GAS_PER_BLOB * blobSchedule.target",
+              "excess + blob_gas_used < target_blob_gas",
+              "excess + blob_gas_used >= target_blob_gas",
+              "return 0",
+              "BLOB_BASE_COST * base_fee > GAS_PER_BLOB * blob_base_fee",
+              "BLOB_BASE_COST * base_fee <= GAS_PER_BLOB * blob_base_fee",
+              "return excess + blob_gas_used * (max - target) / max",
+              "return excess + blob_gas_used - target_blob_gas"
+            ],
+            "E": [
+              ["q_init", "target_blob_gas = GAS_PER_BLOB * blobSchedule.target", "q_compute_target"],
+              ["q_compute_target", "excess + blob_gas_used < target_blob_gas", "q_check_underflow"],
+              ["q_compute_target", "excess + blob_gas_used >= target_blob_gas", "q_check_reserve"],
+              ["q_check_underflow", "return 0", "q_final"],
+              ["q_check_reserve", "BLOB_BASE_COST * base_fee > GAS_PER_BLOB * blob_base_fee", "q_exec_led"],
+              ["q_check_reserve", "BLOB_BASE_COST * base_fee <= GAS_PER_BLOB * blob_base_fee", "q_blob_led"],
+              ["q_exec_led", "return excess + blob_gas_used * (max - target) / max", "q_final"],
+              ["q_blob_led", "return excess + blob_gas_used - target_blob_gas", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-001: calc_excess_blob_gas always returns a non-negative integer",
+            "INV-002: When total gas (excess + used) is below target, excess resets to 0",
+            "INV-003: In execution-fee-led regime, excess never decreases (no target subtraction)",
+            "INV-004: Maximum per-block increase in excess is bounded by blob_gas_used * (max - target) / max",
+            "INV-005: The function uses the current block's blobSchedule (not the parent's) for baseFeeUpdateFraction"
+          ]
+        },
+        {
+          "id": "SG-002",
+          "name": "get_base_fee_per_blob_gas",
+          "mermaid_file": "EIP-7918/SG-002_get_base_fee_per_blob_gas.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_read_excess", "q_read_fraction", "q_compute", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "excess = parent.excess_blob_gas",
+              "fraction = blobSchedule.baseFeeUpdateFraction",
+              "blob_base_fee = fake_exponential(MIN_BASE_FEE, excess, fraction)",
+              "return blob_base_fee"
+            ],
+            "E": [
+              ["q_init", "excess = parent.excess_blob_gas", "q_read_excess"],
+              ["q_read_excess", "fraction = blobSchedule.baseFeeUpdateFraction", "q_read_fraction"],
+              ["q_read_fraction", "blob_base_fee = fake_exponential(MIN_BASE_FEE, excess, fraction)", "q_compute"],
+              ["q_compute", "return blob_base_fee", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-006: blob_base_fee is always >= MIN_BASE_FEE (1 wei)",
+            "INV-007: Uses new blobSchedule.baseFeeUpdateFraction in first block after fork"
+          ]
+        },
+        {
+          "id": "SG-003",
+          "name": "reserve_price_check",
+          "mermaid_file": "EIP-7918/SG-003_reserve_price_check.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_compute_reserve", "q_compute_blob_cost", "q_compare", "q_below_reserve", "q_above_reserve", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "reserve_price = BLOB_BASE_COST * parent.base_fee_per_gas",
+              "blob_cost = GAS_PER_BLOB * get_base_fee_per_blob_gas(parent)",
+              "reserve_price > blob_cost",
+              "reserve_price <= blob_cost",
+              "return EXEC_FEE_LED",
+              "return BLOB_FEE_LED"
+            ],
+            "E": [
+              ["q_init", "reserve_price = BLOB_BASE_COST * parent.base_fee_per_gas", "q_compute_reserve"],
+              ["q_compute_reserve", "blob_cost = GAS_PER_BLOB * get_base_fee_per_blob_gas(parent)", "q_compute_blob_cost"],
+              ["q_compute_blob_cost", "reserve_price > blob_cost", "q_below_reserve"],
+              ["q_compute_blob_cost", "reserve_price <= blob_cost", "q_above_reserve"],
+              ["q_below_reserve", "return EXEC_FEE_LED", "q_final"],
+              ["q_above_reserve", "return BLOB_FEE_LED", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-008: BLOB_BASE_COST = 2^13 = 8192",
+            "INV-009: Reserve ratio BLOB_BASE_COST / GAS_PER_BLOB = 1/16",
+            "INV-010: Reserve price scales linearly with execution base fee"
+          ]
+        },
+        {
+          "id": "SG-004",
+          "name": "blob_fee_regime_selection",
+          "mermaid_file": "EIP-7918/SG-004_blob_fee_regime_selection.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_read_header", "q_calc_target", "q_check_total", "q_underflow", "q_reset", "q_regime_check", "q_get_blob_fee", "q_compare_prices", "q_exec_led", "q_increase_only", "q_blob_led", "q_normal_update", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "read parent header fields",
+              "target_blob_gas = GAS_PER_BLOB * blobSchedule.target",
+              "total = excess_blob_gas + blob_gas_used",
+              "total < target_blob_gas",
+              "total >= target_blob_gas",
+              "excess_blob_gas = 0",
+              "regime = RESET",
+              "blob_base_fee = get_base_fee_per_blob_gas(parent)",
+              "BLOB_BASE_COST * base_fee vs GAS_PER_BLOB * blob_base_fee",
+              "reserve_price > blob_price",
+              "reserve_price <= blob_price",
+              "excess = excess + used * (max - target) / max",
+              "regime = EXEC_FEE_LED",
+              "excess = excess + used - target_blob_gas",
+              "regime = BLOB_FEE_LED"
+            ],
+            "E": [
+              ["q_init", "read parent header fields", "q_read_header"],
+              ["q_read_header", "target_blob_gas = GAS_PER_BLOB * blobSchedule.target", "q_calc_target"],
+              ["q_calc_target", "total = excess_blob_gas + blob_gas_used", "q_check_total"],
+              ["q_check_total", "total < target_blob_gas", "q_underflow"],
+              ["q_check_total", "total >= target_blob_gas", "q_regime_check"],
+              ["q_underflow", "excess_blob_gas = 0", "q_reset"],
+              ["q_reset", "regime = RESET", "q_final"],
+              ["q_regime_check", "blob_base_fee = get_base_fee_per_blob_gas(parent)", "q_get_blob_fee"],
+              ["q_get_blob_fee", "BLOB_BASE_COST * base_fee vs GAS_PER_BLOB * blob_base_fee", "q_compare_prices"],
+              ["q_compare_prices", "reserve_price > blob_price", "q_exec_led"],
+              ["q_compare_prices", "reserve_price <= blob_price", "q_blob_led"],
+              ["q_exec_led", "excess = excess + used * (max - target) / max", "q_increase_only"],
+              ["q_increase_only", "regime = EXEC_FEE_LED", "q_final"],
+              ["q_blob_led", "excess = excess + used - target_blob_gas", "q_normal_update"],
+              ["q_normal_update", "regime = BLOB_FEE_LED", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-011: Exactly one of three regimes is selected per block: RESET, EXEC_FEE_LED, or BLOB_FEE_LED",
+            "INV-012: In EXEC_FEE_LED regime, excess can only increase (monotonically non-decreasing)",
+            "INV-013: In BLOB_FEE_LED regime, excess follows standard EIP-4844 update rule",
+            "INV-014: blobSchedule.max and blobSchedule.target use current block's schedule, not parent's",
+            "INV-015: The delayed response during quick execution fee rises produces smooth blob base fee increase"
+          ]
+        }
+      ]
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7934.md",
+      "title": "EIP-7934: RLP Execution Block Size Limit",
+      "sub_graphs": [
+        {
+          "id": "SG-001",
+          "name": "exceed_max_rlp_block_size",
+          "mermaid_file": "EIP-7934/SG-001_exceed_max_rlp_block_size.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_encode", "q_check", "q_reject", "q_accept", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "encoded_size = len(rlp.encode(block))",
+              "compare encoded_size to MAX_RLP_BLOCK_SIZE",
+              "encoded_size > MAX_RLP_BLOCK_SIZE",
+              "encoded_size <= MAX_RLP_BLOCK_SIZE",
+              "return True",
+              "return False"
+            ],
+            "E": [
+              ["q_init", "encoded_size = len(rlp.encode(block))", "q_encode"],
+              ["q_encode", "compare encoded_size to MAX_RLP_BLOCK_SIZE", "q_check"],
+              ["q_check", "encoded_size > MAX_RLP_BLOCK_SIZE", "q_reject"],
+              ["q_check", "encoded_size <= MAX_RLP_BLOCK_SIZE", "q_accept"],
+              ["q_reject", "return True", "q_final"],
+              ["q_accept", "return False", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-001: MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN = 8388608 bytes",
+            "INV-002: Function is a pure predicate with no side effects",
+            "INV-003: rlp.encode(block) is deterministic for a given block"
+          ]
+        },
+        {
+          "id": "SG-002",
+          "name": "block_creation",
+          "mermaid_file": "EIP-7934/SG-002_block_creation.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_build", "q_encode", "q_check", "q_propose", "q_reduce", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "validator constructs candidate block",
+              "encoded_size = len(rlp.encode(block))",
+              "compare encoded_size to MAX_RLP_BLOCK_SIZE",
+              "encoded_size <= MAX_RLP_BLOCK_SIZE",
+              "encoded_size > MAX_RLP_BLOCK_SIZE",
+              "remove transactions to reduce block size",
+              "propose block to network"
+            ],
+            "E": [
+              ["q_init", "validator constructs candidate block", "q_build"],
+              ["q_build", "encoded_size = len(rlp.encode(block))", "q_encode"],
+              ["q_encode", "compare encoded_size to MAX_RLP_BLOCK_SIZE", "q_check"],
+              ["q_check", "encoded_size <= MAX_RLP_BLOCK_SIZE", "q_propose"],
+              ["q_check", "encoded_size > MAX_RLP_BLOCK_SIZE", "q_reduce"],
+              ["q_reduce", "remove transactions to reduce block size", "q_build"],
+              ["q_propose", "propose block to network", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-004: Block creation loop must terminate (transactions are finite)",
+            "INV-005: Proposed block always satisfies encoded_size <= MAX_RLP_BLOCK_SIZE",
+            "INV-006: Size check applies independently of gas-related metrics"
+          ]
+        },
+        {
+          "id": "SG-003",
+          "name": "block_validation",
+          "mermaid_file": "EIP-7934/SG-003_block_validation.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_receive", "q_encode", "q_check", "q_accept", "q_continue", "q_reject", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "node receives block from network",
+              "encoded_size = len(rlp.encode(block))",
+              "compare encoded_size to MAX_RLP_BLOCK_SIZE",
+              "encoded_size <= MAX_RLP_BLOCK_SIZE",
+              "encoded_size > MAX_RLP_BLOCK_SIZE",
+              "proceed with remaining validation",
+              "block accepted",
+              "block rejected as invalid"
+            ],
+            "E": [
+              ["q_init", "node receives block from network", "q_receive"],
+              ["q_receive", "encoded_size = len(rlp.encode(block))", "q_encode"],
+              ["q_encode", "compare encoded_size to MAX_RLP_BLOCK_SIZE", "q_check"],
+              ["q_check", "encoded_size <= MAX_RLP_BLOCK_SIZE", "q_accept"],
+              ["q_check", "encoded_size > MAX_RLP_BLOCK_SIZE", "q_reject"],
+              ["q_accept", "proceed with remaining validation", "q_continue"],
+              ["q_continue", "block accepted", "q_final"],
+              ["q_reject", "block rejected as invalid", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-007: Size validation occurs before other validation steps",
+            "INV-008: Rejected blocks are never propagated further",
+            "INV-009: CL gossip protocol does not propagate blocks exceeding 10 MiB"
+          ]
+        },
+        {
+          "id": "SG-004",
+          "name": "constant_derivation",
+          "mermaid_file": "EIP-7934/SG-004_constant_derivation.mmd",
+          "program_graph": {
+            "Q": ["q_init", "q_max", "q_margin", "q_calc", "q_final"],
+            "q_init": "q_init",
+            "q_final": "q_final",
+            "Act": [
+              "MAX_BLOCK_SIZE = 10485760",
+              "SAFETY_MARGIN = 2097152",
+              "MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN",
+              "MAX_RLP_BLOCK_SIZE = 8388608"
+            ],
+            "E": [
+              ["q_init", "MAX_BLOCK_SIZE = 10485760", "q_max"],
+              ["q_max", "SAFETY_MARGIN = 2097152", "q_margin"],
+              ["q_margin", "MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN", "q_calc"],
+              ["q_calc", "MAX_RLP_BLOCK_SIZE = 8388608", "q_final"]
+            ]
+          },
+          "invariants": [
+            "INV-010: MAX_BLOCK_SIZE aligns with CL gossip protocol limit of 10 MiB",
+            "INV-011: SAFETY_MARGIN of 2 MiB accommodates beacon block overhead",
+            "INV-012: MAX_RLP_BLOCK_SIZE = 8 MiB is the effective execution block limit"
+          ]
+        }
+      ]
+    }
+  ]
+}
