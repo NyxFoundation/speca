@@ -1,0 +1,921 @@
+{
+  "sub_graphs": [
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7594.md",
+      "title": "EIP-7594: PeerDAS - Peer Data Availability Sampling",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "consensus+networking",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7594-001",
+          "name": "1D Erasure Coding Extension",
+          "description": "Extends EIP-4844 blobs using one-dimensional erasure coding. Each row consists of blob data combined with its erasure code, subdivided into cells (smallest authenticatable units via KZG commitments). Each column maps to a specific gossip subnet.",
+          "invariants": [
+            {
+              "id": "INV-7594-001",
+              "text": "A node can reconstruct the entire data matrix if it acquires at least 50% of all columns."
+            },
+            {
+              "id": "INV-7594-002",
+              "text": "Each cell MUST be authenticatable with its respective blob's KZG commitment."
+            },
+            {
+              "id": "INV-7594-003",
+              "text": "A maximum of 6 blobs per transaction MUST be enforced at submission time, when received from the network, and during block production and processing."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7594-001",
+              "text": "EIP-4844 blob transactions must already be supported by the network."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7594-001",
+              "text": "All blob data is available and reconstructible from at least 50% of columns."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7594-001",
+              "name": "CELLS_PER_EXT_BLOB",
+              "description": "Number of cells for an extended blob, defined in consensus specs."
+            },
+            {
+              "id": "SV-7594-002",
+              "name": "NUMBER_OF_CUSTODY_GROUPS",
+              "description": "Total number of samples possible (parameter m in security analysis)."
+            },
+            {
+              "id": "SV-7594-003",
+              "name": "SAMPLES_PER_SLOT",
+              "description": "Minimum number of samples a node must download per slot (parameter k in security analysis)."
+            }
+          ],
+          "functions": [],
+          "data_structures": []
+        },
+        {
+          "id": "SG-7594-002",
+          "name": "Column-Based Custody and Sampling",
+          "description": "Each node maintains a deterministic set of column subnets as a function of their node ID. Nodes find and maintain a diverse peer set and sample columns from peers to perform DAS every slot.",
+          "invariants": [
+            {
+              "id": "INV-7594-004",
+              "text": "Each node's custody set is deterministic as a function of their node ID."
+            },
+            {
+              "id": "INV-7594-005",
+              "text": "Validators have an additional custody requirement that scales with the validator count."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [
+            {
+              "id": "POST-7594-002",
+              "text": "Nodes can request missing columns (below 50% threshold) from peer nodes."
+            }
+          ],
+          "state_variables": [],
+          "functions": [],
+          "data_structures": []
+        },
+        {
+          "id": "SG-7594-003",
+          "name": "Transaction Wrapper Modification (Networking)",
+          "description": "Modifies the EIP-4844 transaction pool wrapper for blob transactions to include cell KZG proofs and a wrapper version, replacing the old proofs field.",
+          "invariants": [
+            {
+              "id": "INV-7594-006",
+              "text": "cell_proofs MUST contain exactly CELLS_PER_EXT_BLOB * len(blobs) cell proofs."
+            },
+            {
+              "id": "INV-7594-007",
+              "text": "KZG commitments MUST hash to the versioned hashes: kzg_to_versioned_hash(commitments[i]) == tx_payload_body.blob_versioned_hashes[i]."
+            },
+            {
+              "id": "INV-7594-008",
+              "text": "There MUST be an equal number of tx_payload_body.blob_versioned_hashes, blobs, and commitments."
+            },
+            {
+              "id": "INV-7594-009",
+              "text": "KZG commitments MUST match the corresponding blobs and cell_proofs (verified via compute_cells and verify_cell_kzg_proof_batch)."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7594-002",
+              "text": "Blob transaction senders MUST compute cell proofs themselves and include them in the wrapper."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7594-003",
+              "text": "The node MUST validate tx_payload_body and verify the wrapped data against it."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7594-004",
+              "name": "wrapper_version",
+              "description": "One byte indicating wrapper version. Currently set to 1."
+            }
+          ],
+          "functions": [
+            {
+              "id": "FN-7594-001",
+              "signature": "compute_cells(blob) -> cells[]",
+              "description": "Outputs all cells of a blob including extension cells."
+            },
+            {
+              "id": "FN-7594-002",
+              "signature": "verify_cell_kzg_proof_batch(commitments, cell_proofs) -> bool",
+              "description": "Batch verifies all cell KZG proofs against their commitments."
+            },
+            {
+              "id": "FN-7594-003",
+              "signature": "kzg_to_versioned_hash(commitment) -> hash",
+              "description": "Converts a KZG commitment to a versioned hash."
+            }
+          ],
+          "data_structures": [
+            {
+              "id": "DS-7594-001",
+              "name": "PooledTransactions wrapper",
+              "definition": "rlp([tx_payload_body, wrapper_version, blobs, commitments, cell_proofs])",
+              "description": "Modified transaction wrapper for gossip responses including cell proofs."
+            }
+          ]
+        },
+        {
+          "id": "SG-7594-004",
+          "name": "Withholding Attack Security Model",
+          "description": "Formalizes the security of PeerDAS against data withholding attacks using a probabilistic bound. The probability of convincing a fraction epsilon of nodes that data is available when withheld decreases rapidly with network size.",
+          "invariants": [
+            {
+              "id": "INV-7594-010",
+              "text": "For mainnet parameters (10,000 nodes), the probability of a successful withholding attack drops to negligible (< 10^-20) when targeting more than 2% of nodes."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [],
+          "state_variables": [],
+          "functions": [],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7823.md",
+      "title": "EIP-7823: Set Upper Bounds for MODEXP",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7823-001",
+          "name": "MODEXP Input Length Bound",
+          "description": "Introduces an upper bound on MODEXP precompile inputs. Each of the three length inputs (length_of_BASE, length_of_EXPONENT, length_of_MODULUS) MUST be <= 8192 bits (1024 bytes).",
+          "invariants": [
+            {
+              "id": "INV-7823-001",
+              "text": "Each of length_of_BASE, length_of_EXPONENT, and length_of_MODULUS MUST be less than or equal to 8192 bits (1024 bytes)."
+            },
+            {
+              "id": "INV-7823-002",
+              "text": "If any input length exceeds the limit, the precompile execution MUST stop, return an error, and consume all gas."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7823-001",
+              "text": "MODEXP precompile at address 0x05 accepts input in format: <length_of_BASE> <length_of_EXPONENT> <length_of_MODULUS> <BASE> <EXPONENT> <MODULUS> (per EIP-198)."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7823-001",
+              "text": "Successful MODEXP execution only occurs when all input lengths are within the 1024-byte bound."
+            },
+            {
+              "id": "POST-7823-002",
+              "text": "Out-of-bound inputs result in error with full gas consumption."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7823-001",
+              "name": "MODEXP_INPUT_LIMIT",
+              "description": "Maximum input field size: 8192 bits (1024 bytes)."
+            }
+          ],
+          "functions": [
+            {
+              "id": "FN-7823-001",
+              "signature": "MODEXP(base, exponent, modulus) -> result",
+              "description": "Precompile at 0x05 now with upper bound enforcement on all three input lengths."
+            }
+          ],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7825.md",
+      "title": "EIP-7825: Transaction Gas Limit Cap",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7825-001",
+          "name": "Transaction Gas Limit Enforcement",
+          "description": "Introduces a protocol-level cap on maximum gas per transaction to 16,777,216 (2^24). This cap applies regardless of block gas limit and is enforced at txpool validation and block validation.",
+          "invariants": [
+            {
+              "id": "INV-7825-001",
+              "text": "No single transaction may specify a gasLimit exceeding 16,777,216 (2^24) gas."
+            },
+            {
+              "id": "INV-7825-002",
+              "text": "The transaction gas cap is independent of the block gas limit."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [
+            {
+              "id": "POST-7825-001",
+              "text": "Transactions with gasLimit > 16,777,216 are invalidated and not included in the txpool."
+            },
+            {
+              "id": "POST-7825-002",
+              "text": "Blocks containing a transaction with gasLimit > 16,777,216 are deemed invalid and rejected."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7825-001",
+              "name": "MAX_TRANSACTION_GAS_LIMIT",
+              "description": "Protocol-level maximum gas per transaction: 16,777,216 (2^24)."
+            }
+          ],
+          "functions": [],
+          "data_structures": [],
+          "state_transitions": [
+            {
+              "id": "ST-7825-001",
+              "description": "Txpool validation: if sender's gasLimit > 16,777,216, transaction is invalidated (MAX_GAS_LIMIT_EXCEEDED error)."
+            },
+            {
+              "id": "ST-7825-002",
+              "description": "Block validation: any block with a transaction having gasLimit > 16,777,216 is rejected as invalid."
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7883.md",
+      "title": "EIP-7883: ModExp Gas Cost Increase",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7883-001",
+          "name": "ModExp Gas Pricing Algorithm Update",
+          "description": "Modifies the EIP-2565 ModExp precompile pricing: increases minimum gas from 200 to 500, triples general cost (removes /3 divisor), and doubles cost for exponents >32 bytes (multiplier 8->16). Introduces minimum multiplication_complexity of 16 and doubles complexity for base/modulus >32 bytes.",
+          "invariants": [
+            {
+              "id": "INV-7883-001",
+              "text": "Minimum gas cost for MODEXP is 500 (increased from 200)."
+            },
+            {
+              "id": "INV-7883-002",
+              "text": "General cost is multiplication_complexity * iteration_count (no division by 3)."
+            },
+            {
+              "id": "INV-7883-003",
+              "text": "Minimum multiplication_complexity is 16 (for base/modulus <= 32 bytes)."
+            },
+            {
+              "id": "INV-7883-004",
+              "text": "For base/modulus > 32 bytes, multiplication_complexity = 2 * words^2."
+            },
+            {
+              "id": "INV-7883-005",
+              "text": "For exponents > 32 bytes, iteration_count multiplier is 16 (increased from 8)."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7883-001",
+              "text": "Precompile at address 0x05 must be called with valid MODEXP inputs per EIP-198."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7883-001",
+              "text": "Gas charged according to new formula: max(500, floor(multiplication_complexity * iteration_count))."
+            }
+          ],
+          "state_variables": [],
+          "functions": [
+            {
+              "id": "FN-7883-001",
+              "signature": "calculate_multiplication_complexity(base_length, modulus_length) -> int",
+              "description": "Returns min 16 for <=32 bytes, or 2*words^2 for >32 bytes, where words=ceil(max_length/8)."
+            },
+            {
+              "id": "FN-7883-002",
+              "signature": "calculate_iteration_count(exponent_length, exponent) -> int",
+              "description": "Returns iteration count with 16x multiplier for exponent_length > 32 bytes (was 8x). Minimum return value is 1."
+            },
+            {
+              "id": "FN-7883-003",
+              "signature": "calculate_gas_cost(base_length, modulus_length, exponent_length, exponent) -> int",
+              "description": "Returns max(500, floor(multiplication_complexity * iteration_count))."
+            }
+          ],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7892.md",
+      "title": "EIP-7892: Blob Parameter Only Hardforks",
+      "category": "EIP",
+      "type": "Informational",
+      "layer": "consensus+execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7892-001",
+          "name": "BPO Hardfork Definition and Configuration",
+          "description": "Defines BPO (Blob Parameter Only) hardforks as protocol upgrades that modify only blob-related parameters (target, max, baseFeeUpdateFraction) through configuration without requiring client code changes.",
+          "invariants": [
+            {
+              "id": "INV-7892-001",
+              "text": "BPO hardforks MUST only modify blob-related parameters: target, max, baseFeeUpdateFraction."
+            },
+            {
+              "id": "INV-7892-002",
+              "text": "No client-side code changes are required for BPO forks."
+            },
+            {
+              "id": "INV-7892-003",
+              "text": "When a regular hardfork changes blob parameters, it MUST do so by adding an entry to the blob schedule configuration."
+            },
+            {
+              "id": "INV-7892-004",
+              "text": "Execution and consensus clients MUST share consistent BPO fork schedules."
+            },
+            {
+              "id": "INV-7892-005",
+              "text": "The EL blobSchedule slot MUST align with the start of the epoch specified in CL configuration."
+            },
+            {
+              "id": "INV-7892-006",
+              "text": "The EL max field MUST equal the CL MAX_BLOBS_PER_BLOCK value."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7892-001",
+              "text": "EIP-7840 blobSchedule configuration must be supported."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7892-001",
+              "text": "New blob parameters take effect immediately at the specified activation time."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7892-001",
+              "name": "blobSchedule.target",
+              "description": "Expected number of blobs per block."
+            },
+            {
+              "id": "SV-7892-002",
+              "name": "blobSchedule.max",
+              "description": "Maximum number of blobs per block."
+            },
+            {
+              "id": "SV-7892-003",
+              "name": "blobSchedule.baseFeeUpdateFraction",
+              "description": "Determines how blob gas pricing adjusts per block."
+            }
+          ],
+          "functions": [],
+          "data_structures": [
+            {
+              "id": "DS-7892-001",
+              "name": "BlobSchedule",
+              "definition": "class BlobSchedule: target: U64, max: U64, base_fee_update_fraction: Uint",
+              "description": "Configuration object holding blob parameters for a fork."
+            }
+          ]
+        },
+        {
+          "id": "SG-7892-002",
+          "name": "Modified Blob Base Fee Computation",
+          "description": "Modifies calc_excess_blob_gas and get_base_fee_per_blob_gas to explicitly use the blob schedule, removing the static TARGET_BLOB_GAS_PER_BLOCK.",
+          "invariants": [
+            {
+              "id": "INV-7892-007",
+              "text": "TARGET_BLOB_GAS_PER_BLOCK is removed; replaced by GAS_PER_BLOB * blob_schedule.target."
+            },
+            {
+              "id": "INV-7892-008",
+              "text": "Functions use the current block's blob schedule."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [],
+          "state_variables": [],
+          "functions": [
+            {
+              "id": "FN-7892-001",
+              "signature": "calc_excess_blob_gas(parent: Header, blob_schedule: BlobSchedule) -> int",
+              "description": "Calculates excess blob gas using dynamic blob schedule instead of static constant."
+            },
+            {
+              "id": "FN-7892-002",
+              "signature": "get_base_fee_per_blob_gas(header: Header, blob_schedule: BlobSchedule) -> int",
+              "description": "Calculates base fee per blob gas using dynamic blob schedule's baseFeeUpdateFraction."
+            }
+          ],
+          "data_structures": []
+        },
+        {
+          "id": "SG-7892-003",
+          "name": "Modified Fork Digest for P2P Networking",
+          "description": "Updates compute_fork_digest to account for BPO forks by bitmasking blob parameters (max_blobs_per_block) into the fork digest, enabling automatic topic rotation at BPO forks.",
+          "invariants": [
+            {
+              "id": "INV-7892-009",
+              "text": "All gossip topics automatically rotate at a BPO fork due to changes in ForkDigestValue."
+            },
+            {
+              "id": "INV-7892-010",
+              "text": "max_blobs_per_block MUST be in range [0, 0xFFFFFFFF] for safe bitmasking."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [],
+          "state_variables": [],
+          "functions": [
+            {
+              "id": "FN-7892-003",
+              "signature": "compute_fork_digest(current_version, genesis_validators_root, current_epoch, blob_schedule) -> ForkDigest",
+              "description": "Returns 4-byte fork digest with blob parameters bitmasked in, for p2p domain separation."
+            }
+          ],
+          "data_structures": [
+            {
+              "id": "DS-7892-002",
+              "name": "BlobScheduleEntry",
+              "definition": "dataclass: epoch: Epoch, max_blobs_per_block: uint64",
+              "description": "CL configuration entry for blob schedule."
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7917.md",
+      "title": "EIP-7917: Deterministic Proposer Lookahead",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "consensus",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7917-001",
+          "name": "Proposer Lookahead State Extension",
+          "description": "Extends BeaconState with a proposer_lookahead field: a vector of validator indices covering MIN_SEED_LOOKAHEAD + 1 epochs starting from the current epoch. Pre-calculated at epoch boundary.",
+          "invariants": [
+            {
+              "id": "INV-7917-001",
+              "text": "proposer_lookahead MUST be a Vector[ValidatorIndex, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH]."
+            },
+            {
+              "id": "INV-7917-002",
+              "text": "proposer_lookahead[0] is the validator index for the first proposer in the current epoch."
+            },
+            {
+              "id": "INV-7917-003",
+              "text": "The lookahead for epoch N uses RANDAO from epoch N - MIN_SEED_LOOKAHEAD - 1 and effective balances from epoch N - MIN_SEED_LOOKAHEAD."
+            },
+            {
+              "id": "INV-7917-004",
+              "text": "It is no longer possible for validators to grind effective balances to manipulate the proposer schedule of the next epoch."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7917-001",
+              "text": "The first block after fork must calculate all lookaheads for epochs up to MIN_SEED_LOOKAHEAD ahead."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7917-001",
+              "text": "Next-epoch proposer schedule is fully deterministic and accessible via beacon root + Merkle proof."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7917-001",
+              "name": "proposer_lookahead",
+              "description": "Vector[ValidatorIndex, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH] stored in BeaconState."
+            }
+          ],
+          "functions": [
+            {
+              "id": "FN-7917-001",
+              "signature": "get_beacon_proposer_index(state: BeaconState) -> ValidatorIndex",
+              "description": "Returns proposer index from pre-calculated lookahead: state.proposer_lookahead[state.slot % SLOTS_PER_EPOCH]."
+            },
+            {
+              "id": "FN-7917-002",
+              "signature": "process_proposer_lookahead(state: BeaconState) -> None",
+              "description": "At epoch boundary: shifts out current epoch's lookahead, appends new epoch's proposer indices."
+            },
+            {
+              "id": "FN-7917-003",
+              "signature": "get_beacon_proposer_indices(state: BeaconState, epoch: Epoch) -> Vector[ValidatorIndex, SLOTS_PER_EPOCH]",
+              "description": "Returns proposer indices for the given epoch using active validators and seed."
+            },
+            {
+              "id": "FN-7917-004",
+              "signature": "compute_proposer_indices(state, epoch, seed, indices) -> Vector[ValidatorIndex, SLOTS_PER_EPOCH]",
+              "description": "Computes proposer indices for each slot in the given epoch from seed."
+            }
+          ],
+          "data_structures": [
+            {
+              "id": "DS-7917-001",
+              "name": "BeaconState (extended)",
+              "definition": "class BeaconState: ..., proposer_lookahead: Vector[ValidatorIndex, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH]",
+              "description": "Extended beacon state with deterministic proposer lookahead vector."
+            }
+          ],
+          "state_transitions": [
+            {
+              "id": "ST-7917-001",
+              "description": "At each epoch boundary: shift proposer_lookahead left by SLOTS_PER_EPOCH positions, fill last epoch with newly computed proposer indices for epoch (current + MIN_SEED_LOOKAHEAD + 1)."
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7918.md",
+      "title": "EIP-7918: Blob Base Fee Bounded by Execution Cost",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7918-001",
+          "name": "Blob Reserve Price Mechanism",
+          "description": "Imposes a reserve price on blobs by modifying calc_excess_blob_gas(). When BLOB_BASE_COST * base_fee_per_gas > GAS_PER_BLOB * base_fee_per_blob_gas, excess_blob_gas increases without subtracting target_blob_gas, preventing the blob fee from dropping below the execution cost floor.",
+          "invariants": [
+            {
+              "id": "INV-7918-001",
+              "text": "BLOB_BASE_COST = 2^13 (8192)."
+            },
+            {
+              "id": "INV-7918-002",
+              "text": "The reserve blob base fee is BLOB_BASE_COST * base_fee_per_gas / GAS_PER_BLOB."
+            },
+            {
+              "id": "INV-7918-003",
+              "text": "The ratio between reserve price and execution base fee is fixed at BLOB_BASE_COST / GAS_PER_BLOB = 1/16."
+            },
+            {
+              "id": "INV-7918-004",
+              "text": "The blob fee's share of total price is always at least BLOB_BASE_COST / (BLOB_BASE_COST + execution_cost)."
+            },
+            {
+              "id": "INV-7918-005",
+              "text": "The per-block maximum increase in excess_blob_gas remains unchanged."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7918-001",
+              "text": "EIP-4844 blob fee market must be active."
+            },
+            {
+              "id": "PRE-7918-002",
+              "text": "EIP-7840 blobSchedule for target, max, baseFeeUpdateFraction must be available."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7918-001",
+              "text": "Blob consumers always pay at least a fraction (1/16) of the execution base fee for blob compute."
+            },
+            {
+              "id": "POST-7918-002",
+              "text": "The blob fee update mechanism can properly converge to equilibrium instead of falling to 1 wei."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7918-001",
+              "name": "BLOB_BASE_COST",
+              "description": "Constant = 2^13 (8192). Defines the execution gas equivalent reserve price per blob."
+            }
+          ],
+          "functions": [
+            {
+              "id": "FN-7918-001",
+              "signature": "calc_excess_blob_gas(parent: Header) -> int",
+              "description": "Modified to include if-clause: when reserve price exceeds blob price, uses blob_gas_used * (max - target) // max instead of subtracting target_blob_gas. Uses current block's blobSchedule."
+            }
+          ],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7934.md",
+      "title": "EIP-7934: RLP Execution Block Size Limit",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7934-001",
+          "name": "RLP Block Size Validation",
+          "description": "Introduces a protocol-level cap on maximum RLP-encoded execution block size to 10 MiB (MAX_BLOCK_SIZE), with a 2 MiB safety margin for beacon blocks, yielding MAX_RLP_BLOCK_SIZE of ~8 MiB.",
+          "invariants": [
+            {
+              "id": "INV-7934-001",
+              "text": "MAX_BLOCK_SIZE = 10,485,760 bytes (10 MiB)."
+            },
+            {
+              "id": "INV-7934-002",
+              "text": "SAFETY_MARGIN = 2,097,152 bytes (2 MiB)."
+            },
+            {
+              "id": "INV-7934-003",
+              "text": "MAX_RLP_BLOCK_SIZE = MAX_BLOCK_SIZE - SAFETY_MARGIN = 8,388,608 bytes (~8 MiB)."
+            },
+            {
+              "id": "INV-7934-004",
+              "text": "Any RLP-encoded block exceeding MAX_RLP_BLOCK_SIZE MUST be considered invalid."
+            },
+            {
+              "id": "INV-7934-005",
+              "text": "This limit applies independently of gas-related metrics."
+            }
+          ],
+          "pre_conditions": [],
+          "post_conditions": [
+            {
+              "id": "POST-7934-001",
+              "text": "Validators must ensure produced blocks do not exceed MAX_RLP_BLOCK_SIZE."
+            },
+            {
+              "id": "POST-7934-002",
+              "text": "Nodes must reject blocks whose RLP-encoded size exceeds MAX_RLP_BLOCK_SIZE."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7934-001",
+              "name": "MAX_BLOCK_SIZE",
+              "description": "10,485,760 bytes (10 MiB) - overall block size constraint including CL overhead."
+            },
+            {
+              "id": "SV-7934-002",
+              "name": "SAFETY_MARGIN",
+              "description": "2,097,152 bytes (2 MiB) - reserved for beacon block overhead."
+            },
+            {
+              "id": "SV-7934-003",
+              "name": "MAX_RLP_BLOCK_SIZE",
+              "description": "8,388,608 bytes (~8 MiB) - effective limit for RLP-encoded execution blocks."
+            }
+          ],
+          "functions": [
+            {
+              "id": "FN-7934-001",
+              "signature": "exceed_max_rlp_block_size(block: Block) -> bool",
+              "description": "Returns True if len(rlp.encode(block)) > MAX_RLP_BLOCK_SIZE, indicating the block is invalid."
+            }
+          ],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7935.md",
+      "title": "EIP-7935: Set Default Gas Limit to 60M",
+      "category": "EIP",
+      "type": "Informational",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7935-001",
+          "name": "Default Gas Limit Configuration Update",
+          "description": "Recommends EL clients update their default gas limit configuration to 60M for Fusaka, up from the current 36M mainnet gas limit. This is a configuration-only change, not a protocol enforcement.",
+          "invariants": [
+            {
+              "id": "INV-7935-001",
+              "text": "Recommended default gas limit is 60,000,000 (60M) for Fusaka."
+            },
+            {
+              "id": "INV-7935-002",
+              "text": "This is a client configuration change, not a protocol-enforced limit."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7935-001",
+              "text": "Current mainnet gas limit is 36M."
+            },
+            {
+              "id": "PRE-7935-002",
+              "text": "EIP-7825 transaction gas limit cap (2^24) should be coordinated with this change."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7935-001",
+              "text": "EL client defaults generate configurations with 60M gas limit."
+            }
+          ],
+          "state_variables": [
+            {
+              "id": "SV-7935-001",
+              "name": "DEFAULT_GAS_LIMIT",
+              "description": "Recommended default: 60,000,000 (60M)."
+            }
+          ],
+          "functions": [],
+          "data_structures": []
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    },
+    {
+      "source_url": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-7939.md",
+      "title": "EIP-7939: Count Leading Zeros (CLZ) Opcode",
+      "category": "EIP",
+      "type": "Standards Track / Core",
+      "layer": "execution",
+      "status": "success",
+      "sub_graphs": [
+        {
+          "id": "SG-7939-001",
+          "name": "CLZ Opcode Definition",
+          "description": "Introduces CLZ opcode (0x1e) that pops x from the stack and pushes the number of leading zero bits in x (256 if x=0). Gas cost is 5.",
+          "invariants": [
+            {
+              "id": "INV-7939-001",
+              "text": "CLZ opcode is assigned bytecode 0x1e."
+            },
+            {
+              "id": "INV-7939-002",
+              "text": "CLZ(0) = 256."
+            },
+            {
+              "id": "INV-7939-003",
+              "text": "CLZ(x) for x > 0 returns the number of zero bits preceding the most significant one bit in the 256-bit representation."
+            },
+            {
+              "id": "INV-7939-004",
+              "text": "Gas cost of CLZ is 5 (matching MUL)."
+            }
+          ],
+          "pre_conditions": [
+            {
+              "id": "PRE-7939-001",
+              "text": "Stack must have at least 1 element (x)."
+            }
+          ],
+          "post_conditions": [
+            {
+              "id": "POST-7939-001",
+              "text": "Stack has x popped and result (0-256) pushed."
+            },
+            {
+              "id": "POST-7939-002",
+              "text": "CLZ(0x80...0) = 0, CLZ(0x40...0) = 1, CLZ(0x01) = 255, CLZ(0x00) = 256."
+            }
+          ],
+          "state_variables": [],
+          "functions": [
+            {
+              "id": "FN-7939-001",
+              "signature": "CLZ(x: uint256) -> uint256",
+              "description": "Pops x, pushes count of leading zero bits. Returns 256 if x=0. Gas cost: 5."
+            }
+          ],
+          "data_structures": [],
+          "test_vectors": [
+            {
+              "id": "TV-7939-001",
+              "input": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "expected": "0x0000000000000000000000000000000000000000000000000000000000000100"
+            },
+            {
+              "id": "TV-7939-002",
+              "input": "0x8000000000000000000000000000000000000000000000000000000000000000",
+              "expected": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "id": "TV-7939-003",
+              "input": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "expected": "0x0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            {
+              "id": "TV-7939-004",
+              "input": "0x4000000000000000000000000000000000000000000000000000000000000000",
+              "expected": "0x0000000000000000000000000000000000000000000000000000000000000001"
+            },
+            {
+              "id": "TV-7939-005",
+              "input": "0x0000000000000000000000000000000000000000000000000000000000000001",
+              "expected": "0x00000000000000000000000000000000000000000000000000000000000000ff"
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "timestamp": "1770262049",
+        "extraction_method": "subgraph-extractor",
+        "worker_id": 0
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "01b",
+    "phase_name": "Subgraph Extraction",
+    "total_items": 10,
+    "timestamp": 1770262270,
+    "summary": {
+      "total": 10
+    }
+  }
+}
