@@ -1,0 +1,342 @@
+{
+  "source_files": ["inline-property:PROP-0010", "inline-property:PROP-0011", "inline-property:PROP-0012", "inline-property:PROP-0013"],
+  "filtering_summary": {
+    "total_properties_input": 4,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 4
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0010",
+      "title": "Pre-condition Bypass Test: Can cell_index >= CELLS_PER_EXT_BLOB be passed to coset_for_cell or coset_shift_for_cell without rejection?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["verify_cell_kzg_proof_batch", "P2P DataColumnSidecar validation"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify all call sites to verify_cell_kzg_proof_batch in the codebase. 2. Trace the validation flow: verify_cell_kzg_proof_batch should assert 'cell_index < CELLS_PER_EXT_BLOB' at state q_validate_indices BEFORE calling verify_cell_kzg_proof_batch_impl. 3. Verify the impl function calls coset_shift_for_cell(cell_indices[k]) at state q_rlp_init - confirm this happens AFTER the bounds check. 4. Construct test case: Create a batch verification request with cell_index = CELLS_PER_EXT_BLOB (exactly at boundary). 5. Construct test case: Create a batch verification request with cell_index = CELLS_PER_EXT_BLOB + 1 (one past boundary). 6. Construct test case: Create a batch verification request with cell_index = MAX_UINT64 (maximum value). 7. For each test case, verify the function rejects with appropriate error BEFORE attempting to use the index in coset_for_cell or coset_shift_for_cell. 8. Check for integer wraparound: In coset_shift_for_cell, the access is roots_brp[FIELD_ELEMENTS_PER_CELL * cell_index] - verify multiplication cannot overflow. 9. Check for off-by-one: Verify the check is strictly less than (<), not less than or equal (<=).",
+      "bug_class": "Input Validation / Bounds Check",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_validate_indices",
+          "action": "for each cell_index assert < CELLS_PER_EXT_BLOB"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch_impl",
+          "subgraph": "SG-015",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_rlp_init",
+          "action": "h_k = coset_shift_for_cell(cell_indices[k])"
+        },
+        {
+          "function": "coset_shift_for_cell",
+          "subgraph": "SG-016",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_assert",
+          "action": "assert cell_index < CELLS_PER_EXT_BLOB"
+        },
+        {
+          "function": "coset_for_cell",
+          "subgraph": "SG-017",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_assert",
+          "action": "assert cell_index < CELLS_PER_EXT_BLOB"
+        }
+      ],
+      "invariants_to_verify": [
+        "INV: cell_index must be in [0, CELLS_PER_EXT_BLOB) - from SG-016, SG-017, SG-021",
+        "INV: Cell indices must be in [0, CELLS_PER_EXT_BLOB) - from SG-021 note"
+      ],
+      "attack_scenarios": [
+        {
+          "scenario": "Out-of-bounds array access in coset_shift_for_cell",
+          "description": "If cell_index >= CELLS_PER_EXT_BLOB passes validation, the computation roots_brp[FIELD_ELEMENTS_PER_CELL * cell_index] will access memory outside the roots_brp array bounds",
+          "impact": "Memory corruption, potential arbitrary read, crash, or incorrect cryptographic computation leading to proof forgery"
+        },
+        {
+          "scenario": "Integer overflow in index multiplication",
+          "description": "The expression FIELD_ELEMENTS_PER_CELL * cell_index may overflow if cell_index is sufficiently large, potentially wrapping to a small valid index",
+          "impact": "Wrong coset selected, leading to incorrect verification result (false positive or false negative)"
+        },
+        {
+          "scenario": "Defense-in-depth bypass",
+          "description": "Even if coset_shift_for_cell has its own assert, relying solely on it creates a fragile security boundary. The public API verify_cell_kzg_proof_batch must validate inputs before passing to internal functions",
+          "impact": "Defense-in-depth violation; if internal assert is removed or weakened in refactoring, vulnerability is exposed"
+        }
+      ],
+      "notes": "Source: PROP-0010. This is a HIGH severity pre-condition that ensures cell_index bounds are validated at the public API boundary (verify_cell_kzg_proof_batch) before the value propagates to internal functions (coset_for_cell, coset_shift_for_cell). The Ethereum consensus spec explicitly requires this validation at state q_validate_indices. Failure to validate could lead to out-of-bounds array access when computing roots_brp[FIELD_ELEMENTS_PER_CELL * cell_index]."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0011",
+      "title": "Verify Trust Boundary Integrity: Are commitment_bytes, cell, and proof_bytes lengths strictly validated in verify_cell_kzg_proof_batch?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P DataColumnSidecar validation", "RPC batch verification requests"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify all entry points where verify_cell_kzg_proof_batch is called (P2P message handlers, RPC endpoints). 2. For each commitment_bytes input: submit data with length != BYTES_PER_COMMITMENT (e.g., BYTES_PER_COMMITMENT-1, BYTES_PER_COMMITMENT+1, 0, empty). Verify rejection with appropriate error. 3. For each cell input: submit data with length != BYTES_PER_CELL (e.g., BYTES_PER_CELL-1, BYTES_PER_CELL+1, 0, empty). Verify rejection. 4. For each proof_bytes input: submit data with length != BYTES_PER_PROOF (e.g., BYTES_PER_PROOF-1, BYTES_PER_PROOF+1, 0, empty). Verify rejection. 5. Test boundary cases: verify length checks occur BEFORE any cryptographic operations to prevent potential out-of-bounds reads or buffer overflows. 6. Test mixed invalid lengths: some valid, some invalid within a batch. Verify entire batch is rejected. 7. Verify error messages do not leak sensitive information about internal state. 8. Test with truncated inputs that could cause underflow when computing field element offsets. 9. Test with oversized inputs to check for potential integer overflow in length calculations.",
+      "bug_class": "Input Validation / Length Check",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_validate_commitments",
+          "action": "for each commitment_bytes assert len == BYTES_PER_COMMITMENT"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_validate_cells",
+          "action": "for each cell assert len == BYTES_PER_CELL"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_validate_proofs",
+          "action": "for each proof_bytes assert len == BYTES_PER_PROOF"
+        }
+      ],
+      "invariants_to_verify": [
+        "INV-001: Public method: accepts raw bytes and performs cryptographic normalization",
+        "INV-002: All four input lists must have equal length"
+      ],
+      "attack_scenarios": [
+        {
+          "scenario": "Buffer over-read via undersized commitment_bytes",
+          "description": "If commitment_bytes with length < BYTES_PER_COMMITMENT passes validation, subsequent deserialization (bytes_to_kzg_commitment) may read beyond the buffer boundary",
+          "impact": "Information disclosure via memory over-read, potential crash, or use of uninitialized memory in cryptographic operations"
+        },
+        {
+          "scenario": "Buffer over-read via undersized cell",
+          "description": "If cell with length < BYTES_PER_CELL passes validation, the cell_to_coset_evals function (SG-001) computes offsets like cell[start:end] where end could exceed the actual cell length",
+          "impact": "Out-of-bounds read when converting cells to field elements, potential crash or incorrect coset evaluation"
+        },
+        {
+          "scenario": "Buffer over-read via undersized proof_bytes",
+          "description": "If proof_bytes with length < BYTES_PER_PROOF passes validation, bytes_to_kzg_proof deserialization may access memory beyond the buffer",
+          "impact": "Cryptographic operations with corrupted proof data, potential false verification results"
+        },
+        {
+          "scenario": "DoS via crafted malformed inputs",
+          "description": "Submitting batches with systematically malformed length inputs to trigger expensive error handling or crash the node",
+          "impact": "Denial of service against consensus nodes processing P2P data availability samples"
+        },
+        {
+          "scenario": "Cryptographic confusion via oversized inputs",
+          "description": "Oversized inputs might be silently truncated in some implementations, leading to different nodes computing different cryptographic results for the same logical input",
+          "impact": "Consensus split if implementations handle oversized inputs differently"
+        }
+      ],
+      "notes": "Source: PROP-0011. This is a HIGH severity pre-condition that ensures byte array lengths are strictly validated at the public API boundary (verify_cell_kzg_proof_batch) BEFORE any cryptographic operations. The function is a trust boundary as it accepts raw bytes from external sources (P2P network, RPC). Per the spec flow: q_init -> q_assert_len -> q_validate_commitments -> q_validate_indices -> q_validate_cells -> q_validate_proofs -> cryptographic processing. Length validation at states q_validate_commitments, q_validate_cells, and q_validate_proofs must reject incorrect lengths immediately. Constants: BYTES_PER_COMMITMENT = 48, BYTES_PER_CELL = FIELD_ELEMENTS_PER_CELL * BYTES_PER_FIELD_ELEMENT, BYTES_PER_PROOF = 48."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0012",
+      "title": "Verify BLS12-381 G1 Subgroup Checks: Do bytes_to_kzg_commitment and bytes_to_kzg_proof reject points not on the correct G1 subgroup?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P DataColumnSidecar", "verify_cell_kzg_proof_batch", "bytes_to_kzg_commitment", "bytes_to_kzg_proof"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. IDENTIFY DESERIALIZATION ENTRY POINTS: Locate all implementations of bytes_to_kzg_commitment and bytes_to_kzg_proof in the codebase. These are called from verify_cell_kzg_proof_batch (SG-021) at states q_validate_commitments (implicit via deduplication) and q_convert_proofs.\n\n2. VERIFY SUBGROUP CHECK IMPLEMENTATION: For each implementation, verify that:\n   a) The function checks if the deserialized point is on the BLS12-381 curve (affine equation: y^2 = x^3 + 4)\n   b) The function verifies the point is in the correct G1 subgroup by checking [r]P = O where r is the subgroup order (0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001)\n   c) Rejection occurs BEFORE any cryptographic operations use the point\n\n3. CRAFT MALICIOUS TEST VECTORS: Generate points that:\n   a) Are on the BLS12-381 curve but NOT in the G1 subgroup (small subgroup attack vectors)\n   b) Are the identity point (point at infinity) - check if this is handled correctly\n   c) Are invalid compressed point encodings (invalid sign bit, x-coordinate not on curve)\n   d) Have coordinates outside the field modulus p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab\n\n4. SUBMIT MALFORMED PROOFS VIA P2P: Using the P2P interface, submit DataColumnSidecars containing:\n   a) Commitments with valid curve points but non-subgroup points\n   b) Proofs with valid curve points but non-subgroup points\n   c) Verify these are rejected with appropriate error codes before any pairing operations\n\n5. VERIFY PAIRING SECURITY: Confirm that if subgroup checks were bypassed:\n   a) The pairing check e(LL, LR) == e(RL, [1]) in verify_cell_kzg_proof_batch_impl would produce incorrect results\n   b) An attacker could forge valid-looking proofs for invalid data by exploiting the bilinearity property with non-subgroup elements\n   c) Consensus could be manipulated through accepted malicious sidecars\n\n6. CHECK LIBRARY DEPENDENCIES: If using external cryptographic libraries (e.g., blst, arkworks, noble-curves), verify:\n   a) The library performs subgroup checks by default OR\n   b) The application explicitly enables subgroup checks (e.g., blst's 'check' parameter)\n   c) The library version is not affected by known subgroup check bypass CVEs\n   d) The library's subgroup check is not optimizable away by the compiler\n\n7. VERIFY DEFENSE-IN-DEPTH: Check if subgroup validation occurs at multiple layers:\n   a) In the deserialization function (bytes_to_kzg_*)\n   b) In the verify_cell_kzg_proof_batch public API before internal processing\n   c) Confirm consistent behavior regardless of which layer catches invalid points",
+      "bug_class": "Cryptographic Validation Bypass",
+      "risk_category": "Spoofing / Tampering",
+      "code_locations": [
+        {
+          "function": "bytes_to_kzg_commitment",
+          "subgraph": "N/A (primitive)",
+          "spec": "deneb-polynomial-commitments",
+          "critical_state": "deserialization",
+          "action": "Deserialize 48 bytes to G1 point with subgroup check"
+        },
+        {
+          "function": "bytes_to_kzg_proof",
+          "subgraph": "N/A (primitive)",
+          "spec": "deneb-polynomial-commitments",
+          "critical_state": "deserialization",
+          "action": "Deserialize 48 bytes to G1 point with subgroup check"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_convert_proofs",
+          "action": "proofs = [bytes_to_kzg_proof(p) for p in proofs_bytes]"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch_impl",
+          "subgraph": "SG-015",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_pairing",
+          "action": "pairing_check([[LL, LR], [RL, neg(G2)]]) - uses deserialized points"
+        }
+      ],
+      "invariants_to_verify": [
+        "INV: bytes_to_kzg_commitment MUST perform BLS12-381 G1 subgroup check",
+        "INV: bytes_to_kzg_proof MUST perform BLS12-381 G1 subgroup check",
+        "INV: Non-subgroup points MUST be rejected before pairing operations",
+        "INV: Pairing check correctness depends on all inputs being in correct subgroups"
+      ],
+      "attack_scenarios": [
+        {
+          "scenario": "Small Subgroup Attack via Non-Subgroup Commitment",
+          "description": "An attacker submits a DataColumnSidecar with a commitment that is a valid BLS12-381 curve point but lies in a small subgroup (not the prime-order G1 subgroup). Without subgroup validation, this point is used in the pairing check. The pairing e(P, Q) where P is in a small subgroup does not satisfy the expected algebraic properties, potentially allowing the attacker to craft proofs that verify for data they never possessed.",
+          "impact": "Proof forgery, acceptance of invalid blob data, potential data availability attack on Ethereum consensus"
+        },
+        {
+          "scenario": "Small Subgroup Attack via Non-Subgroup Proof",
+          "description": "Similar to above, but the attacker crafts a proof (rather than commitment) that is not in the G1 subgroup. The verify_cell_kzg_proof_batch_impl function computes LL = g1_lincomb(proofs, r_powers) - if any proof is not in the subgroup, the resulting LL is also not in the subgroup, corrupting the pairing check.",
+          "impact": "False positive verification (invalid proof accepted as valid), consensus manipulation"
+        },
+        {
+          "scenario": "Consensus Split via Implementation Variance",
+          "description": "Different Ethereum client implementations may use different BLS libraries with varying subgroup check behavior. If one client checks and rejects while another accepts, nodes running different clients will disagree on block validity.",
+          "impact": "Chain split, network partition, potential for double-spend or other consensus attacks"
+        },
+        {
+          "scenario": "Cofactor Multiplication Bypass",
+          "description": "Some implementations multiply by the cofactor h instead of checking [r]P = O. For BLS12-381, h*P maps non-subgroup points to the identity or a subgroup point. An attacker could craft inputs where h*P equals a target value, bypassing semantic validation while passing the mathematical check.",
+          "impact": "Subtle proof forgery if cofactor clearing is used instead of explicit subgroup membership verification"
+        }
+      ],
+      "cwe_id": "CWE-347",
+      "cwe_name": "Improper Verification of Cryptographic Signature",
+      "related_cwe": ["CWE-327 (Use of Broken Crypto)", "CWE-295 (Improper Certificate Validation)"],
+      "notes": "Source: PROP-0012. Property Type: pre-condition. Severity: CRITICAL. Covers: SG-021:verify_cell_kzg_proof_batch.\n\nThis is a CRITICAL security check for the KZG polynomial commitment scheme used in Ethereum's data availability sampling (DAS) for the Fulu/Fusaka upgrade.\n\nBLS12-381 Curve Parameters:\n- Field modulus p: 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab\n- Subgroup order r: 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001\n- Cofactor h: 0x396c8c005555e1568c00aaab0000aaab\n\nThe existence of the cofactor h means that the full curve group has order h*r, so not all curve points are in the prime-order subgroup. Subgroup attacks are well-documented in cryptographic literature (see: Bowe, 'Faster Subgroup Checks for BLS12-381', https://eprint.iacr.org/2019/814.pdf).\n\nThe Ethereum consensus specs require this check per the KZG ceremony security assumptions. The c-kzg library (used by several clients) performs subgroup checks by default, but this must be verified for each implementation."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0013",
+      "title": "Does commitment deduplication in verify_cell_kzg_proof_batch preserve semantic equivalence between original and deduplicated commitments?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P DataColumnSidecar validation", "verify_cell_kzg_proof_batch"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. IDENTIFY DEDUPLICATION LOGIC: Locate the deduplication implementation in verify_cell_kzg_proof_batch (SG-021) at states q_dedup and q_map_indices. Understand how deduplicated_commitments and commitment_indices are computed.\n\n2. VERIFY SEMANTIC EQUIVALENCE INVARIANT: For all indices k in the original commitment_bytes array, verify that: deduplicated_commitments[commitment_indices[k]] == original_commitment_bytes[k]. This must hold for every k from 0 to len(commitment_bytes)-1.\n\n3. TEST DUPLICATE COMMITMENT HANDLING:\n   a) Submit a batch with multiple identical commitment byte sequences\n   b) Verify they map to the same deduplicated entry\n   c) Verify the commitment_indices correctly reference the shared entry\n   d) Confirm verification results are identical whether duplicates are present or not\n\n4. TEST BIJECTION PROPERTY ON EQUIVALENCE CLASSES:\n   a) Verify commitment_indices creates a proper surjection from original indices to deduplicated indices\n   b) Each unique commitment byte sequence should map to exactly one deduplicated entry\n   c) All original indices with the same commitment bytes should map to the same deduplicated index\n   d) Test with pathological inputs: all identical commitments, all unique commitments, mixed patterns\n\n5. CRAFT ADVERSARIAL INPUTS:\n   a) Test commitments that differ only in trailing/leading bytes that might be ignored\n   b) Test commitments with subtle bit differences that might cause hash collisions in deduplication\n   c) Test empty commitment arrays and single-element arrays (boundary cases)\n   d) Test maximum batch sizes to stress the deduplication data structures\n\n6. VERIFY INDEX BOUNDS:\n   a) Confirm commitment_indices[k] is always < len(deduplicated_commitments) for all k\n   b) Test for potential integer overflow when computing indices\n   c) Verify no out-of-bounds access can occur when using the mapped indices\n\n7. VERIFY PROOF VERIFICATION CORRECTNESS AFTER DEDUPLICATION:\n   a) The verify_cell_kzg_proof_batch_impl function uses the deduplicated commitments\n   b) Verify that proofs are validated against the correct (semantically equivalent) commitment\n   c) Submit batches where deduplication incorrectly mapping could cause proof verification against wrong commitment\n   d) Confirm identical verification results with and without the deduplication optimization\n\n8. TEST COMMUTATIVITY WITH OTHER OPERATIONS:\n   a) Verify that the order of commitments in the input does not affect deduplication correctness\n   b) Verify that interleaving duplicate and unique commitments produces correct mappings",
+      "bug_class": "State Consistency / Data Integrity",
+      "risk_category": "Tampering",
+      "code_locations": [
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_dedup",
+          "action": "deduplicated_commitments = deduplicate(commitments_bytes)"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch",
+          "subgraph": "SG-021",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "q_map_indices",
+          "action": "commitment_indices = map to deduplicated indices"
+        },
+        {
+          "function": "verify_cell_kzg_proof_batch_impl",
+          "subgraph": "SG-015",
+          "spec": "fulu-polynomial-commitments-sampling",
+          "critical_state": "uses deduplicated commitments",
+          "action": "Verification uses deduplicated_commitments[commitment_indices[k]]"
+        }
+      ],
+      "invariants_to_verify": [
+        "INV: forall k: deduplicated_commitments[commitment_indices[k]] == original_commitment_bytes[k]",
+        "INV: The mapping from original indices to deduplicated indices is bijective on equivalence classes",
+        "INV: Commitment deduplication preserves semantic equivalence (from SG-021 note)",
+        "INV: Deduplication is a performance optimization that MUST NOT change verification semantics"
+      ],
+      "falsification_tests": [
+        {
+          "test_name": "Commitment Mapping Integrity",
+          "description": "Attempt to falsify the invariant by finding a k where deduplicated_commitments[commitment_indices[k]] != original_commitment_bytes[k]",
+          "attack_vector": "Submit a batch with carefully crafted commitments that might cause incorrect index mapping during deduplication, such as commitments with hash collisions or boundary byte patterns"
+        },
+        {
+          "test_name": "Bijection Violation on Equivalence Classes",
+          "description": "Attempt to break the bijection property by finding two distinct commitment byte sequences that incorrectly map to the same deduplicated index, or one commitment that maps to multiple distinct indices across different batch positions",
+          "attack_vector": "Submit commitments with carefully chosen byte patterns that might confuse the deduplication algorithm's equality comparison or hashing"
+        },
+        {
+          "test_name": "Proof Verification Mismatch After Deduplication",
+          "description": "Verify that proof verification uses the correct commitment after the deduplication mapping is applied, ensuring no semantic change",
+          "attack_vector": "Submit a batch where a subtle deduplication bug could cause a proof to be verified against a different (but similar) commitment, potentially accepting an invalid proof or rejecting a valid one"
+        },
+        {
+          "test_name": "Index Out-of-Bounds via Deduplication Bug",
+          "description": "Attempt to trigger an out-of-bounds access by causing commitment_indices to contain an index >= len(deduplicated_commitments)",
+          "attack_vector": "Submit batches with patterns designed to confuse the index computation, such as removing entries during deduplication without properly adjusting indices"
+        }
+      ],
+      "attack_scenarios": [
+        {
+          "scenario": "Incorrect Commitment Selection in Multi-Blob Batch",
+          "description": "In a batch verification containing cells from multiple blobs with similar (but not identical) commitments, a deduplication bug could cause cells from blob A to be verified against the commitment of blob B. If commitments are incorrectly merged during deduplication, an attacker could craft a batch where invalid cells pass verification because they're checked against the wrong commitment.",
+          "impact": "Acceptance of invalid data availability samples, potential data availability attack compromising Ethereum consensus safety"
+        },
+        {
+          "scenario": "Hash Collision Exploitation",
+          "description": "If deduplication uses a hash table internally, an attacker could craft commitment byte sequences that cause hash collisions, potentially mapping distinct commitments to the same deduplicated entry or causing incorrect index lookups.",
+          "impact": "Proof verification against wrong commitment, false positive or false negative verification results"
+        },
+        {
+          "scenario": "Consensus Split via Implementation-Dependent Deduplication",
+          "description": "Different client implementations might implement deduplication differently (different hashing, different equality comparison, different data structures). If one implementation has a bug that another doesn't, nodes will disagree on verification results for certain batches.",
+          "impact": "Chain split, network partition, potential for double-spend attacks during consensus disagreement"
+        },
+        {
+          "scenario": "Memory Corruption via Index Overflow",
+          "description": "If the commitment_indices array contains indices that exceed the bounds of deduplicated_commitments, subsequent access in verify_cell_kzg_proof_batch_impl could read arbitrary memory, potentially leading to crashes or incorrect cryptographic computations.",
+          "impact": "Denial of service, potential for cryptographic bypass if garbage memory is interpreted as a valid commitment"
+        }
+      ],
+      "cwe_id": "CWE-129",
+      "cwe_name": "Improper Validation of Array Index",
+      "related_cwe": ["CWE-787 (Out-of-bounds Write)", "CWE-125 (Out-of-bounds Read)", "CWE-682 (Incorrect Calculation)"],
+      "notes": "Source: PROP-0013. Property Type: invariant. Severity: HIGH. Covers: SG-021:verify_cell_kzg_proof_batch.\n\nThis invariant ensures the correctness of a critical optimization in the KZG batch verification. The deduplication step (states q_dedup and q_map_indices) is designed to avoid redundant commitment deserialization and cryptographic operations when the same blob commitment appears multiple times in a batch.\n\nThe formal property states:\n- forall k: deduplicated_commitments[commitment_indices[k]] == original_commitment_bytes[k]\n- The mapping must be bijective on equivalence classes (each unique commitment maps to exactly one deduplicated entry)\n\nIf this invariant is violated, the batch verification could:\n1. Verify proofs against wrong commitments (security violation)\n2. Access out-of-bounds memory if indices are miscalculated (crash/corruption)\n3. Produce different results on different implementations (consensus split)\n\nThis is a bug bounty eligible property as it directly affects the cryptographic integrity of data availability sampling in the Fulu/Fusaka upgrade."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 4,
+    "by_severity": {
+      "Critical": 1,
+      "High": 3,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 2,
+      "Formal Verification Engineer": 2
+    },
+    "all_in_scope": true
+  }
+}

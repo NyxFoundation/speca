@@ -1,0 +1,117 @@
+{
+  "source_files": ["inline:PROP-0003", "inline:PROP-0004", "inline:PROP-0005"],
+  "filtering_summary": {
+    "total_properties_input": 3,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 3
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0003",
+      "title": "Verify Trust Boundary Integrity: Does compute_fork_version safely handle all epoch values from attacker-controlled ENR records?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["ENR eth2 field verification"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Edge case epoch values (0, max uint64) from attacker-crafted ENR records could trigger panics."
+      },
+      "test_procedure": "1. Identify the compute_fork_version function and trace all callers from P2P entry points. 2. Review the ENR eth2 field parsing to verify epoch values are validated before being passed to compute_fork_version. 3. Craft test ENR records with edge case epoch values: 0, 1, max uint64 (18446744073709551615), and max uint64 - 1. 4. Submit these crafted ENR records via P2P and monitor for panics, exceptions, or null returns. 5. Verify the function returns a valid Version type for all inputs without crashing the node. 6. Check error handling paths to ensure graceful degradation rather than panic.",
+      "bug_class": "Input Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-0003, Trust Boundary: tb-009, Invariant: p2p:SG-001:INV-003. PoC approach: craft ENR record with extreme epoch value causing node crash."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0003",
+      "title": "Verify compute_fork_version maintains return type invariant across all epoch edge cases",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["ENR eth2 field verification"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Edge case epoch values (0, max uint64) from attacker-crafted ENR records could trigger panics."
+      },
+      "test_procedure": "1. Unit test compute_fork_version with epoch = 0 to verify valid Version returned. 2. Unit test with epoch = uint64_max (18446744073709551615) to verify no overflow/panic. 3. Test with epoch values at each fork transition boundary. 4. Verify return type is always Version (never null/nil). 5. Check for any panic-inducing code paths (unwrap, expect, assert) that could be triggered by edge case inputs. 6. Review fork configuration loading to ensure all expected fork epochs are properly defined.",
+      "bug_class": "Robustness",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-0003, Supporting check for boundary verification. Focus on internal logic ensuring the invariant holds."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0004",
+      "title": "Falsify Pre-condition: Can upgrade_to_fulu be triggered at non-epoch boundary slots?",
+      "severity": "Critical",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": ["Internal"],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Fork trigger is an internal state transition. An attacker cannot directly invoke it, but an off-by-one error would cause a consensus split at FULU_FORK_EPOCH."
+      },
+      "test_procedure": "1. Identify the upgrade_to_fulu function and locate the epoch boundary check (state.slot % SLOTS_PER_EPOCH == 0). 2. Verify the check uses correct SLOTS_PER_EPOCH constant (32 slots). 3. Test edge cases: slot = FULU_FORK_EPOCH * SLOTS_PER_EPOCH - 1 (should NOT trigger), slot = FULU_FORK_EPOCH * SLOTS_PER_EPOCH (should trigger), slot = FULU_FORK_EPOCH * SLOTS_PER_EPOCH + 1 (should NOT trigger). 4. Check for off-by-one errors in the modulo operation or comparison. 5. Verify no other code path can invoke upgrade_to_fulu bypassing this check. 6. Simulate state transitions at slots immediately before and after FULU_FORK_EPOCH boundary to confirm fork triggers exactly once at the correct slot.",
+      "bug_class": "Logic Error",
+      "risk_category": "Consensus Failure",
+      "falsification_approach": "Attempt to trigger the fork state transition at a slot where state.slot % SLOTS_PER_EPOCH != 0. If successful, this would cause a network split where buggy nodes fork at incorrect slots relative to correct implementations.",
+      "notes": "Source: PROP-0004, Pre-condition for fork:SG-001:fork_trigger. Critical severity due to consensus split risk. Even though internal-only, explicitly in-scope for Fusaka bug bounty."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0005",
+      "title": "Falsify Fork Trigger Single-Fire Invariant: Can FULU_FORK_EPOCH trigger fire more than once or not at all during chain reorganizations?",
+      "severity": "Critical",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": ["Internal"],
+        "attacker_controlled": false,
+        "validation_layers": [],
+        "bug_bounty_scope": "in-scope",
+        "notes": "If the fork triggers multiple times (e.g., during reorg at fork epoch boundary), state corruption would occur. The guard condition must ensure idempotent single-fire."
+      },
+      "test_procedure": "1. Identify all code paths where compute_epoch_at_slot(state.slot) == FULU_FORK_EPOCH is evaluated. 2. Trace the upgrade_to_fulu function and verify it has idempotent guards preventing re-execution on already-upgraded state. 3. Construct a reorg scenario at the fork epoch boundary where the chain rewinds to pre-fork state and advances past fork epoch again. 4. Verify the fork trigger guard checks for already-upgraded state (e.g., state version field) before executing upgrade logic. 5. Test edge case: What happens if state.slot crosses FULU_FORK_EPOCH multiple times due to reorg? Does the guard prevent double-initialization of proposer_lookahead? 6. Verify that proposer_lookahead initialization cannot corrupt an already-initialized structure if called twice. 7. Test missed trigger scenario: Simulate a node that skips the exact fork epoch slot - verify it still upgrades on the next slot. 8. Check for race conditions in concurrent state processing that could allow parallel fork triggers.",
+      "bug_class": "State Consistency",
+      "risk_category": "Tampering",
+      "falsification_approach": "Demonstrate that the fork trigger can fire more than once during a reorg at the fork epoch boundary, causing proposer_lookahead re-initialization on an already-upgraded state, OR demonstrate that the trigger can be missed entirely, causing the node to permanently fork off the network.",
+      "invariant_under_test": "compute_epoch_at_slot(state.slot) == FULU_FORK_EPOCH evaluates to true exactly once during chain lifetime, and the state transition is irreversible",
+      "attack_vectors": [
+        "Chain reorganization spanning the fork epoch boundary",
+        "Multiple blocks at fork epoch processed in quick succession",
+        "Node restart during fork epoch transition",
+        "Late block attestation causing reorg at boundary"
+      ],
+      "notes": "Source: PROP-0005, Invariant: fork:SG-001:INV-002, Assumption: asm-002, Threat: stride-021, Primary Element: fork:SG-001:fork_trigger. Bug bounty eligible - demonstrate scenario where upgrade_to_fulu fires more than once or not at all."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 4,
+    "by_severity": {
+      "Critical": 3,
+      "High": 1,
+      "Medium": 0,
+      "Low": 0,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 2,
+      "Formal Verification Engineer": 2
+    },
+    "all_in_scope": true
+  }
+}

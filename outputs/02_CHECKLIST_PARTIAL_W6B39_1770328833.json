@@ -1,0 +1,148 @@
+{
+  "source_properties": ["PROP-0064", "PROP-0065", "PROP-0066"],
+  "filtering_summary": {
+    "total_properties_input": 3,
+    "filtered_out_of_scope": 0,
+    "filtered_api_only": 0,
+    "filtered_configuration_error": 0,
+    "properties_processed": 3
+  },
+  "checklist": [
+    {
+      "check_id": "CHK-0001",
+      "property_id": "PROP-0064",
+      "title": "Verify Trust Boundary Integrity: Does gossip validation return IGNORE (not REJECT) for sidecars at or before the finalized epoch's start slot?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker sends sidecars for already-finalized slots. These should be IGNORED (stale data). If REJECTED, the sender is penalized for sending stale data, which could be exploited to penalize honest peers during reorgs."
+      },
+      "test_procedure": "1. Identify the gossip validation function handling sidecar messages (element: p2p:SG-006:q_check_finalized). 2. Verify the finalized slot boundary check: slot > compute_start_slot_at_epoch(store.finalized_checkpoint.epoch). 3. Test Case A: Send a sidecar with slot == compute_start_slot_at_epoch(finalized_epoch) and confirm IGNORE is returned. 4. Test Case B: Send a sidecar with slot < compute_start_slot_at_epoch(finalized_epoch) and confirm IGNORE is returned. 5. Verify the validation does NOT return REJECT for stale (finalized) sidecars, as this would incorrectly penalize honest peers. 6. Simulate a reorg scenario where an honest peer sends sidecars for recently-finalized slots and verify no penalty is applied.",
+      "bug_class": "Input Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-0064, Trust Boundary: tb-001. This is a boundary check at the P2P gossip layer. Incorrect REJECT behavior could be weaponized to penalize honest peers during chain reorgs by sending them stale sidecar data that they relay before finalization completes."
+    },
+    {
+      "check_id": "CHK-0002",
+      "property_id": "PROP-0065",
+      "title": "Verify Trust Boundary Integrity: Does the gossip validation pipeline REJECT (not IGNORE) sidecars whose parent block has failed validation?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker sends sidecars for blocks known to be invalid. If these are IGNORED instead of REJECTED, they would be re-queued indefinitely, wasting resources."
+      },
+      "test_procedure": "1. Identify the gossip validation handler for blob sidecars (p2p:SG-006:q_check_parent_valid). 2. Locate the code path that checks if a sidecar's parent block has failed validation. 3. Verify that when parent_valid == false (parent is known but invalid), the return value is REJECT, not IGNORE. 4. Craft a test case: submit a sidecar referencing a parent block that has previously failed state transition validation. 5. Confirm the sidecar is immediately REJECTED (not queued for reprocessing). 6. Monitor validation queue to ensure no infinite re-queuing occurs. 7. Check for resource exhaustion vectors if IGNORE is incorrectly returned.",
+      "bug_class": "Input Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-0065, Trust Boundary: tb-001, Primary Element: p2p:SG-006:q_check_parent_valid. Pre-condition violation: If invalid-parent sidecars are IGNORED instead of REJECTED, they will be indefinitely re-queued, causing resource exhaustion and potential DoS. PoC approach: send sidecars for known-invalid parent blocks and demonstrate they are IGNORED instead of REJECTED."
+    },
+    {
+      "check_id": "CHK-0003",
+      "property_id": "PROP-0065",
+      "title": "Supporting Check: Is the parent block validation status correctly tracked and accessible during sidecar gossip validation?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": false,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "Supporting check for boundary integrity - ensures internal state tracking supports the boundary decision."
+      },
+      "test_procedure": "1. Identify how the beacon node tracks block validation status (valid, invalid, unknown). 2. Verify that when a block fails validation, its status is persisted and queryable. 3. Confirm the gossip validation handler for sidecars has access to query parent block validation status. 4. Test that after a parent block fails validation, subsequent sidecar lookups correctly return 'invalid' status. 5. Check for race conditions: if a block is being validated while a sidecar arrives, ensure proper synchronization.",
+      "bug_class": "State Consistency",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-0065, Covered Nodes: actor-p2p-peer, actor-beacon-node. This supporting check ensures the internal state management correctly informs the boundary decision at tb-001."
+    },
+    {
+      "check_id": "CHK-0004",
+      "property_id": "PROP-0066",
+      "title": "Verify Trust Boundary Integrity: Is the proposer_index in data column sidecars validated against the deterministic proposer lookahead (EIP-7917) before acceptance?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline (proposer sig)", "Gossip validation pipeline (proposer index)"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker with access to a validator private key sends sidecars for slots where they are not the assigned proposer. The proposer verification must use the correct lookahead, not stale shuffling data."
+      },
+      "test_procedure": "1. Identify the gossip validation handler for data column sidecars (SG-006). 2. Locate the proposer_index verification logic (q_check_expected_proposer). 3. Verify that the implementation uses the proposer lookahead from EIP-7917, not stale or cached shuffling data. 4. Craft a test sidecar with a valid validator signature but for a slot where that validator is NOT the assigned proposer. 5. Submit the malformed sidecar via P2P gossip and verify it is REJECTED (not accepted into the pending pool). 6. Confirm rejection occurs specifically due to proposer_index mismatch, not signature failure. 7. Test edge cases: boundary slots between epochs, slots during reorgs, slots when shuffling is being recalculated.",
+      "bug_class": "Authorization Bypass",
+      "risk_category": "Spoofing / Elevation of Privilege",
+      "notes": "Source: PROP-0066, Trust Boundary: tb-011, Source Threat: stride-022, Source Assumption: asm-009. PoC requirement: send sidecar with valid signature but wrong proposer_index for the slot and show it is accepted."
+    },
+    {
+      "check_id": "CHK-0005",
+      "property_id": "PROP-0066",
+      "title": "Verify proposer lookahead consistency: Does the node use fresh shuffling data when validating proposer_index?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline (proposer sig)", "Gossip validation pipeline (proposer index)"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker with access to a validator private key sends sidecars for slots where they are not the assigned proposer. The proposer verification must use the correct lookahead, not stale shuffling data."
+      },
+      "test_procedure": "1. Review how the beacon node obtains proposer assignments for validation. 2. Verify that shuffling data is fetched from the correct epoch and is not stale. 3. Test scenarios where shuffling might be unavailable (e.g., during initial sync, after reorg). 4. Confirm that when shuffling is available, any mismatch results in REJECT. 5. Test what happens when shuffling is temporarily unavailable - verify the node does not accept potentially invalid sidecars.",
+      "bug_class": "State Consistency / Race Condition",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-0066, Supporting check for trust boundary tb-011. Focus on the internal state management that supports boundary security."
+    },
+    {
+      "check_id": "CHK-0006",
+      "property_id": "PROP-0066",
+      "title": "Verify signature binding: Can a valid proposer signature be replayed for a non-assigned slot?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "validation_layers": ["Gossip validation pipeline (proposer sig)", "Gossip validation pipeline (proposer index)"],
+        "bug_bounty_scope": "in-scope",
+        "notes": "An attacker with access to a validator private key sends sidecars for slots where they are not the assigned proposer. The proposer verification must use the correct lookahead, not stale shuffling data."
+      },
+      "test_procedure": "1. Analyze the signature scheme for data column sidecars. 2. Verify that the signed message includes the slot number, preventing cross-slot replay. 3. Verify that proposer_index is either signed or independently validated. 4. Attempt to construct a sidecar where signature is valid but proposer_index does not match the signer's assignment. 5. Confirm that the order of validation checks (signature first vs. proposer_index first) does not create a bypass window.",
+      "bug_class": "Cryptographic Weakness / Replay Attack",
+      "risk_category": "Spoofing",
+      "notes": "Source: PROP-0066, Supporting check ensuring signature cannot be abused across slot boundaries."
+    }
+  ],
+  "metadata": {
+    "timestamp": "2026-02-06T00:00:00Z",
+    "total_checks": 6,
+    "by_severity": {
+      "Critical": 0,
+      "High": 3,
+      "Medium": 2,
+      "Low": 1,
+      "Informational": 0
+    },
+    "by_mindset": {
+      "Boundary Guard": 6,
+      "Formal Verification Engineer": 0
+    },
+    "all_in_scope": true
+  }
+}
