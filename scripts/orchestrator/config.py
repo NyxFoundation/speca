@@ -180,7 +180,6 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=50,
         item_id_field="check_id",
         result_key="audit_items",
-        workdir="target_workspace",
         output_prefix="AUDITMAP",
     ),
 
@@ -198,7 +197,6 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=2,
         item_id_field="check_id",
         result_key="reviewed_items",
-        workdir="target_workspace",
         output_prefix="REVIEW",
     ),
 }
