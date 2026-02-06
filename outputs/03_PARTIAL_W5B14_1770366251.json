@@ -1,0 +1,1630 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-0019",
+      "property_id": "PROP-W7B16-37",
+      "title": "Is Bloom returned only after all logs are fully processed?",
+      "code_scope": {
+        "file": "crates/ethereum/primitives/src/receipt.rs",
+        "lines": "274-276"
+      },
+      "code_excerpt": "fn bloom(&self) -> Bloom {\n    alloy_primitives::logs_bloom(self.logs())\n}",
+      "phase1_finding": {
+        "description": "The bloom() method on Receipt delegates to alloy_primitives::logs_bloom(), passing the full slice of logs returned by self.logs(). The logs() method returns &self.logs, a reference to the complete Vec<Log> stored in the receipt struct. The fold in validation.rs (line 81) that combines per-receipt blooms into a block bloom is also synchronous.",
+        "code_behavior": "The bloom is computed synchronously in a single-threaded context. alloy_primitives::logs_bloom() iterates over the complete log slice, computing keccak256 hashes for each log address and topic, and sets the corresponding bits in a 2048-bit bloom filter. The function returns only after processing all logs. The block-level bloom is computed via a synchronous fold over all receipt blooms. There is no async, no parallelism, and no early return before all logs are processed.",
+        "relevant_functions": [
+          "Receipt::bloom()",
+          "Receipt::logs()",
+          "alloy_primitives::logs_bloom()",
+          "verify_receipts()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "No attack surface identified. The bloom computation is entirely deterministic and synchronous.",
+        "vulnerability_assessment": "No race condition exists. The bloom is computed from a fully materialized Vec<Log> that is already stored in the receipt. There is no concurrent access, no shared mutable state, and no async boundary between log collection and bloom computation.",
+        "edge_cases_analyzed": "Empty log lists produce Bloom::ZERO correctly. Single log entries are handled. The fold operation with Bloom::ZERO as initial value and bitwise OR is correct and idempotent."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The bloom computation is fully synchronous, operating on an immutable slice of logs. There is no concurrent or async processing involved anywhere in the bloom computation pipeline. The alloy_primitives::logs_bloom() function processes all logs before returning. The fold in verify_receipts() is also synchronous.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0020",
+      "property_id": "PROP-W7B16-38",
+      "title": "Verify Trust Boundary Integrity: Is receipt bloom consistency with logs verified?",
+      "code_scope": {
+        "file": "crates/ethereum/consensus/src/validation.rs",
+        "lines": "71-91"
+      },
+      "code_excerpt": "fn verify_receipts<R: Receipt>(\n    expected_receipts_root: B256,\n    expected_logs_bloom: Bloom,\n    receipts: &[R],\n) -> Result<(), ConsensusError> {\n    let receipts_with_bloom = receipts.iter().map(TxReceipt::with_bloom_ref).collect::<Vec<_>>();\n    let receipts_root = calculate_receipt_root(&receipts_with_bloom);\n    let logs_bloom = receipts_with_bloom.iter().fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());\n    compare_receipts_root_and_logs_bloom(receipts_root, logs_bloom, expected_receipts_root, expected_logs_bloom)?;\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "The verify_receipts() function recomputes blooms from the actual receipt logs via TxReceipt::with_bloom_ref(), which internally calls Receipt::bloom() -> alloy_primitives::logs_bloom(self.logs()). The recomputed blooms are combined via bitwise OR fold, then compared against the expected header bloom via compare_receipts_root_and_logs_bloom(). A mismatch returns ConsensusError::BodyBloomLogDiff.",
+        "code_behavior": "The bloom is independently recomputed from the actual log data in receipts. It is NOT taken from any untrusted external source. The with_bloom_ref() call computes the bloom fresh from the logs each time. The comparison function checks both receipts_root and logs_bloom against the header values, returning specific errors for each mismatch type.",
+        "relevant_functions": [
+          "verify_receipts()",
+          "TxReceipt::with_bloom_ref()",
+          "Receipt::bloom()",
+          "compare_receipts_root_and_logs_bloom()",
+          "validate_block_post_execution()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "The trust boundary is between block headers (containing expected bloom/root) and execution results (containing actual receipts). An attacker who crafts a block with a mismatched bloom in the header would be detected and rejected.",
+        "vulnerability_assessment": "The verification is correctly implemented. Blooms are recomputed from actual log data, not trusted from external input. The comparison is strict equality. Both receipts root and logs bloom are validated independently.",
+        "edge_cases_analyzed": "Empty receipt lists: receipts_with_bloom is empty, fold starts with Bloom::ZERO, which should match an empty block header bloom. This path is correct. The verify_receipts function is only called when Byzantium is active (checked in validate_block_post_execution at line 40)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The bloom consistency verification is correctly implemented. The bloom is recomputed from actual log data (not from untrusted input), combined across all receipts, and compared against the header value. Any inconsistency results in a ConsensusError being returned. The verification sits in the post-execution validation path and is invoked for all blocks after Byzantium.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0021",
+      "property_id": "PROP-W7B16-40",
+      "title": "Verify Trust Boundary Integrity: Is cumulative_gas_used monotonically non-decreasing?",
+      "code_scope": {
+        "file": "crates/ethereum/consensus/src/validation.rs",
+        "lines": "27-34"
+      },
+      "code_excerpt": "let cumulative_gas_used =\n    receipts.last().map(|receipt| receipt.cumulative_gas_used()).unwrap_or(0);\nif block.header().gas_used() != cumulative_gas_used {\n    return Err(ConsensusError::BlockGasUsed {\n        gas: GotExpected { got: cumulative_gas_used, expected: block.header().gas_used() },\n        gas_spent_by_tx: gas_spent_by_transactions(receipts),\n    })\n}",
+      "phase1_finding": {
+        "description": "The consensus validation only checks that the LAST receipt's cumulative_gas_used matches the block header's gas_used. It does NOT explicitly verify monotonic non-decreasing ordering between consecutive receipts. However, the cumulative_gas_used values are produced during EVM execution within the node itself - they are the running sum of gas used by each transaction as executed sequentially by the EVM.",
+        "code_behavior": "The cumulative_gas_used field is set during EVM execution as transactions are processed sequentially. Each receipt's cumulative_gas_used is the sum of all gas consumed by transactions up to and including that transaction. The EVM execution engine inherently produces monotonically non-decreasing values because gas consumption is always non-negative. The consensus layer only validates the final value against the header.",
+        "relevant_functions": [
+          "validate_block_post_execution()",
+          "gas_spent_by_transactions()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "The receipts are produced by the local EVM execution engine, not received from untrusted peers. The cumulative_gas_used is computed as a running total during sequential transaction execution.",
+        "vulnerability_assessment": "There is no explicit monotonicity check, but monotonicity is guaranteed by construction: the EVM execution engine adds non-negative gas costs to a running total. A malicious peer cannot inject receipts with non-monotonic values because receipts are locally computed, not accepted from the network. The only externally-provided value is the header's gas_used, which is validated against the locally-computed final cumulative value.",
+        "edge_cases_analyzed": "Empty blocks: cumulative_gas_used defaults to 0 via unwrap_or(0), which should match a header gas_used of 0. Single transaction blocks: the sole receipt's cumulative_gas_used must match header gas_used. Failed transactions still consume gas, so cumulative_gas_used remains monotonic."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "While there is no explicit monotonicity check in the consensus validation, the property is guaranteed by the EVM execution model. Receipts are locally produced during sequential transaction execution with non-negative gas costs accumulated into a running total. The consensus layer validates the final total against the header. An explicit check would be defense-in-depth but is not strictly necessary given the architecture.",
+        "recommendation": "Consider adding an explicit monotonicity assertion as defense-in-depth, particularly in debug/test builds. This would catch any future regression in the EVM execution engine."
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "CHK-0022",
+      "property_id": "PROP-W7B16-42",
+      "title": "Verify Trust Boundary Integrity: Are logs with more than 4 topics rejected?",
+      "code_scope": {
+        "file": "crates/ethereum/primitives/src/receipt.rs",
+        "lines": "50-61"
+      },
+      "code_excerpt": "pub struct Receipt<T = TxType> {\n    pub tx_type: T,\n    pub success: bool,\n    pub cumulative_gas_used: u64,\n    pub logs: Vec<Log>,\n}",
+      "phase1_finding": {
+        "description": "The Receipt struct stores logs as Vec<Log> where Log is from alloy_primitives. The topic count is not validated at the Receipt level. Topic count enforcement is handled at the EVM execution level by the LOG0-LOG4 opcode implementations in revm. The EVM specification defines only LOG0 through LOG4 opcodes (opcodes 0xA0-0xA4). There is no LOG5 opcode, so the EVM cannot produce logs with more than 4 topics by construction.",
+        "code_behavior": "Logs are produced by EVM opcodes LOG0 (0 topics), LOG1 (1 topic), LOG2 (2 topics), LOG3 (3 topics), and LOG4 (4 topics). These are the only log-producing opcodes in the EVM specification. The revm implementation strictly follows this specification. The Reth Receipt type simply stores whatever logs the EVM produces, without additional topic count validation.",
+        "relevant_functions": [
+          "Receipt struct definition",
+          "Receipt::logs()",
+          "TxReceipt::logs()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "The trust boundary is at the EVM execution level. Logs are only produced by EVM execution, and the EVM opcode set inherently limits topics to 0-4. However, when receipts are received via RLP decoding from peers (e.g., during snap sync), the Log struct from alloy_primitives does not enforce a topic count limit during deserialization.",
+        "vulnerability_assessment": "During normal execution, the EVM guarantees at most 4 topics. During RLP-decoded receipt processing from peers, there is no explicit topic count validation. However, such receipts are verified against the receipts root from the header (via calculate_receipt_root), so a receipt with >4 topics would only be accepted if it matches the canonical receipts trie root, which would require a valid block that produced such a receipt - which is impossible given the EVM constraints.",
+        "edge_cases_analyzed": "RLP deserialization of receipts: The rlp_decode_inner function at line 87-111 decodes logs without topic count validation. However, the decoded receipts are subsequently verified against the expected receipts root from the header, providing indirect protection."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Topic count is enforced by the EVM opcode specification (LOG0-LOG4 only, no LOG5+). The revm dependency implements this correctly. Even if malformed receipts with >4 topics were received during sync, they would fail receipts root verification since no valid block can contain such receipts. The protection is multi-layered: EVM construction guarantees + receipts root cryptographic verification.",
+        "recommendation": "No action required. The EVM-level enforcement is the correct layer for this validation."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0023",
+      "property_id": "PROP-W7B16-43",
+      "title": "Verify Trust Boundary Integrity: Are oversized blocks rejected per EIP-7934?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "16-21,212-219"
+      },
+      "code_excerpt": "pub const MAX_RLP_BLOCK_SIZE: usize = 8_388_608;\n\n// In post_merge_hardfork_fields():\nif chain_spec.is_osaka_active_at_timestamp(block.timestamp()) &&\n    block.rlp_length() > MAX_RLP_BLOCK_SIZE\n{\n    return Err(ConsensusError::BlockTooLarge {\n        rlp_length: block.rlp_length(),\n        max_rlp_length: MAX_RLP_BLOCK_SIZE,\n    })\n}",
+      "phase1_finding": {
+        "description": "EIP-7934 block size validation is implemented in post_merge_hardfork_fields() which is called from validate_block_pre_execution(). The constant MAX_RLP_BLOCK_SIZE is set to 8,388,608 bytes (8MB), matching the EIP-7934 specification (MAX_BLOCK_SIZE 10,485,760 minus SAFETY_MARGIN 2,097,152). The check uses block.rlp_length() which computes the RLP encoding length of the block. The check is only active when the Osaka hardfork is active.",
+        "code_behavior": "The validation occurs in the pre-execution phase via validate_block_pre_execution() -> post_merge_hardfork_fields(). It checks block.rlp_length() > MAX_RLP_BLOCK_SIZE and returns ConsensusError::BlockTooLarge if exceeded. The rlp_length() method is defined on SealedBlock and delegates to Block::rlp_length(header, body), which computes the RLP encoding length. This runs BEFORE transaction execution, providing early rejection of oversized blocks.",
+        "relevant_functions": [
+          "post_merge_hardfork_fields()",
+          "validate_block_pre_execution()",
+          "SealedBlock::rlp_length()",
+          "Block::rlp_length()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Oversized blocks received from peers during P2P sync. The check prevents resource exhaustion by rejecting blocks that exceed the EIP-7934 size limit before any execution work is done.",
+        "vulnerability_assessment": "The implementation correctly enforces the EIP-7934 block size limit. The constant value matches the specification. The check occurs in pre-execution validation, meaning oversized blocks are rejected before expensive execution work. The rlp_length() computation itself should be bounded since it operates on an already-deserialized block structure.",
+        "edge_cases_analyzed": "Blocks exactly at the limit (8,388,608 bytes): These pass since the check is strictly greater-than (>), not >=. This is correct per EIP-7934 which uses > comparison. Pre-Osaka blocks: The check is correctly gated behind is_osaka_active_at_timestamp(), so it does not apply to pre-Osaka blocks."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The EIP-7934 block size limit is correctly implemented with the right constant value (8,388,608 = 10,485,760 - 2,097,152), correct comparison operator (>), correct hardfork gating (Osaka), and correct placement in the validation pipeline (pre-execution). The block must already be deserialized to reach this check, but the RLP length is computed without re-encoding, using the Encodable trait's length() method.",
+        "recommendation": "No action required. Consider also enforcing a raw byte limit at the P2P layer before deserialization to prevent memory exhaustion from extremely large payloads."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0024",
+      "property_id": "PROP-W7B16-44",
+      "title": "Verify Trust Boundary Integrity: Is bloom bit arithmetic spec-compliant across implementations?",
+      "code_scope": {
+        "file": "crates/ethereum/primitives/src/receipt.rs",
+        "lines": "274-276"
+      },
+      "code_excerpt": "fn bloom(&self) -> Bloom {\n    alloy_primitives::logs_bloom(self.logs())\n}",
+      "phase1_finding": {
+        "description": "Bloom computation is delegated to alloy_primitives::logs_bloom(), which is part of the alloy library - a shared Ethereum primitives library used by multiple Rust-based Ethereum clients (reth, lighthouse-adjacent tooling, etc.). The alloy library implements the Ethereum Yellow Paper bloom filter specification: for each log entry, hash the address and each topic with Keccak-256, extract 3 pairs of 2 bytes (6 bytes total) from the hash, and set the corresponding bits in the 2048-bit bloom filter.",
+        "code_behavior": "The bloom computation follows the Ethereum specification exactly. The alloy_primitives crate is a widely-used, well-tested library that serves as the canonical Rust implementation of Ethereum primitives. Reth does not implement its own bloom computation logic - it relies entirely on alloy. The block-level bloom is then computed by bitwise OR of all per-receipt blooms (line 81 of validation.rs).",
+        "relevant_functions": [
+          "Receipt::bloom()",
+          "alloy_primitives::logs_bloom()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Cross-client consensus failure if bloom computation differs between clients. Since alloy is a shared library, this risk is mitigated by the common implementation.",
+        "vulnerability_assessment": "The risk of cross-client bloom computation inconsistency is low because: (1) Reth delegates to alloy_primitives, a shared and well-tested library; (2) The bloom filter specification is well-defined in the Yellow Paper; (3) The alloy library is actively maintained and tested against the Ethereum execution spec tests. A bloom implementation bug in alloy would affect multiple clients simultaneously, making it more likely to be caught quickly.",
+        "edge_cases_analyzed": "Empty logs: alloy_primitives::logs_bloom produces Bloom::ZERO for empty input. Logs with zero topics: only the address contributes to the bloom. Maximum topics (4): all 4 topics plus the address contribute. The per-log bloom is combined with the block bloom via bitwise OR, which is commutative and associative."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Bloom computation is delegated to alloy_primitives, a shared, well-tested Ethereum primitives library. The implementation follows the Yellow Paper specification. Using a shared library reduces cross-client divergence risk. The alloy library is part of the broader Ethereum Rust ecosystem and is tested against consensus test vectors.",
+        "recommendation": "No action required. Continue tracking alloy_primitives updates for any bloom-related changes."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0025",
+      "property_id": "PROP-W7B16-45",
+      "title": "Verify Trust Boundary Integrity: Is bloom computation bounded by gas limits?",
+      "code_scope": {
+        "file": "crates/ethereum/consensus/src/validation.rs",
+        "lines": "77-81"
+      },
+      "code_excerpt": "let receipts_with_bloom = receipts.iter().map(TxReceipt::with_bloom_ref).collect::<Vec<_>>();\nlet receipts_root = calculate_receipt_root(&receipts_with_bloom);\nlet logs_bloom = receipts_with_bloom.iter().fold(Bloom::ZERO, |bloom, r| bloom | r.bloom_ref());",
+      "phase1_finding": {
+        "description": "The bloom computation iterates over all receipts and their logs. The number of logs is bounded by gas costs: each LOG opcode costs at least 375 gas (LOG0 base cost) plus 375 * num_topics + 8 * data_length. With a block gas limit (currently 30M on mainnet, max 2^63-1 in the protocol), the number of log entries per block is bounded.",
+        "code_behavior": "The bloom computation is O(n) where n is the total number of log entries across all receipts. Each log entry requires hashing (1 address + k topics) where k is in [0,4]. The total work is bounded by block_gas_limit / min_log_gas_cost. For mainnet's 30M gas limit and minimum LOG0 cost of ~375 gas, the upper bound is approximately 80,000 log entries per block, each producing 1 keccak256 call (for the address), resulting in manageable computational overhead.",
+        "relevant_functions": [
+          "verify_receipts()",
+          "TxReceipt::with_bloom_ref()",
+          "Receipt::bloom()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An attacker could construct a block maximizing the number of log entries to slow bloom computation. However, each log costs gas, so the total work is bounded by the block gas limit.",
+        "vulnerability_assessment": "The bloom computation cost is inherently bounded by gas economics. The O(n) nature of the computation, combined with gas-based limits on n, means the worst-case computation time is predictable and bounded. The keccak256 operations involved are fast (nanosecond scale per hash). Even in the worst case (max logs per block), bloom computation is not a performance bottleneck.",
+        "edge_cases_analyzed": "Maximum block gas limit (2^63-1): This is an extreme theoretical upper bound. In practice, the gas limit is constrained by the gas limit adjustment mechanism (parent_gas_limit / 1024 per block). The EIP-7934 block size limit (8MB for Osaka) also indirectly limits the number of logs."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Bloom computation is bounded by gas economics. Each log entry costs gas, and the block gas limit caps the total number of logs. The computation is O(n) with n bounded by gas_limit / min_log_cost. This is a well-understood design characteristic of the Ethereum protocol, not a vulnerability.",
+        "recommendation": "No action required. This is by-design behavior."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0026",
+      "property_id": "PROP-W7B16-46",
+      "title": "Verify Trust Boundary Integrity: Is bloom keccak256 call count bounded?",
+      "code_scope": {
+        "file": "crates/ethereum/primitives/src/receipt.rs",
+        "lines": "274-276"
+      },
+      "code_excerpt": "fn bloom(&self) -> Bloom {\n    alloy_primitives::logs_bloom(self.logs())\n}",
+      "phase1_finding": {
+        "description": "Each call to alloy_primitives::logs_bloom() produces keccak256 hashes: 1 for the log address + 1 per topic, yielding (1 + num_topics) keccak256 calls per log entry. With num_topics in [0,4], each log produces 1 to 5 keccak256 calls. The total keccak256 calls per block equals the sum of (1 + topics_i) across all log entries i.",
+        "code_behavior": "The keccak256 call count is bounded by: total_keccak_calls <= sum over all logs of (1 + topics_count). Since topics_count <= 4, total_keccak_calls <= 5 * total_log_count. Since total_log_count <= block_gas_limit / min_log_gas, total_keccak_calls <= 5 * block_gas_limit / min_log_gas. For mainnet (30M gas, min ~375 gas per log), this is approximately 400,000 keccak256 calls in the theoretical worst case.",
+        "relevant_functions": [
+          "Receipt::bloom()",
+          "alloy_primitives::logs_bloom()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An attacker could craft transactions that maximize keccak256 calls during bloom computation by emitting LOG4 events (4 topics + 1 address = 5 keccak256 calls per log). However, LOG4 costs more gas than LOG0 (375 + 4*375 = 1875 gas minimum), so the total keccak256 calls are still bounded.",
+        "vulnerability_assessment": "Worst case for maximizing keccak256: using LOG4 costs at least 1875 gas per log, producing 5 keccak256 calls. At 30M gas limit: 30M/1875 * 5 = 80,000 keccak256 calls. Modern hardware can perform millions of keccak256 operations per second, so 80,000 calls complete in well under a second. This is not a resource exhaustion concern.",
+        "edge_cases_analyzed": "Using LOG0 (cheapest at ~375 gas) produces only 1 keccak256 call per log: 30M/375 = 80,000 keccak256 calls. Using LOG4 (most keccak calls) costs more gas but produces 5 calls: 30M/1875 * 5 = 80,000 keccak256 calls. Both extremes produce the same order of magnitude of keccak256 calls."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Keccak256 call count during bloom computation is bounded by gas economics. The worst-case scenario produces approximately 80,000-400,000 keccak256 calls (depending on gas limit), which is trivially handled by modern hardware. The gas cost of LOG opcodes naturally limits the work required.",
+        "recommendation": "No action required. This is by-design behavior bounded by gas economics."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0027",
+      "property_id": "PROP-W7B16-49",
+      "title": "Verify Trust Boundary Integrity: Is gas_used <= gas_limit enforced?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "25-37"
+      },
+      "code_excerpt": "pub fn validate_header_gas<H: BlockHeader>(header: &H) -> Result<(), ConsensusError> {\n    if header.gas_used() > header.gas_limit() {\n        return Err(ConsensusError::HeaderGasUsedExceedsGasLimit {\n            gas_used: header.gas_used(),\n            gas_limit: header.gas_limit(),\n        })\n    }\n    if header.gas_limit() > MAXIMUM_GAS_LIMIT_BLOCK {\n        return Err(ConsensusError::HeaderGasLimitExceedsMax { gas_limit: header.gas_limit() })\n    }\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "The validate_header_gas() function performs two checks: (1) gas_used <= gas_limit (rejects if gas_used > gas_limit), and (2) gas_limit <= MAXIMUM_GAS_LIMIT_BLOCK (2^63 - 1). This function is called from EthBeaconConsensus::validate_header() at line 129 of crates/ethereum/consensus/src/lib.rs, which is part of the header validation pipeline.",
+        "code_behavior": "The function correctly validates that header.gas_used() does not exceed header.gas_limit() using a strict greater-than comparison. It also validates that gas_limit does not exceed the protocol maximum (2^63 - 1). Both checks return specific ConsensusError variants on failure. The function is called during header validation, which occurs before block execution.",
+        "relevant_functions": [
+          "validate_header_gas()",
+          "EthBeaconConsensus::validate_header()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Block headers received from peers with manipulated gas_used/gas_limit values. The validation correctly rejects headers where gas_used exceeds gas_limit.",
+        "vulnerability_assessment": "The validation is correctly implemented. The gas_used > gas_limit check ensures that the claimed gas usage does not exceed the block's gas limit. The additional check against MAXIMUM_GAS_LIMIT_BLOCK prevents unreasonably large gas limits. Both checks run during header validation, before any execution work is performed.",
+        "edge_cases_analyzed": "gas_used == gas_limit: Allowed (correct, a block can use exactly its gas limit). gas_used == 0: Allowed (correct, empty blocks have 0 gas used). gas_limit == 0: Not explicitly rejected here, but other validations (minimum gas limit check in validate_against_parent_gas_limit) would catch this. gas_limit == MAXIMUM_GAS_LIMIT_BLOCK: Allowed (correct, the check is strictly greater-than)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The gas_used <= gas_limit validation is correctly implemented with appropriate error handling. It is invoked during header validation (pre-execution). The additional maximum gas limit check provides defense against extreme values. Both checks are in the correct validation pipeline and return appropriate error types.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0028",
+      "property_id": "PROP-W7B16-50",
+      "title": "Verify Trust Boundary Integrity: Is header bloom verified against computed receipt blooms?",
+      "code_scope": {
+        "file": "crates/ethereum/consensus/src/validation.rs",
+        "lines": "40-51"
+      },
+      "code_excerpt": "if chain_spec.is_byzantium_active_at_block(block.header().number()) {\n    if let Err(error) =\n        verify_receipts(block.header().receipts_root(), block.header().logs_bloom(), receipts)\n    {\n        let receipts = receipts\n            .iter()\n            .map(|r| Bytes::from(r.with_bloom_ref().encoded_2718()))\n            .collect::<Vec<_>>();\n        tracing::debug!(%error, ?receipts, \"receipts verification failed\");\n        return Err(error)\n    }\n}",
+      "phase1_finding": {
+        "description": "In validate_block_post_execution(), the header's logs_bloom is passed to verify_receipts() as the expected value. Inside verify_receipts(), blooms are recomputed from the actual receipt logs and the computed block bloom is compared against the expected header bloom via compare_receipts_root_and_logs_bloom(). A mismatch triggers ConsensusError::BodyBloomLogDiff. The verification is gated on Byzantium being active.",
+        "code_behavior": "The verification flow is: (1) Extract header bloom and receipts root from block header, (2) Recompute per-receipt blooms from logs via with_bloom_ref(), (3) Combine into block bloom via fold with bitwise OR, (4) Compare computed bloom against header bloom, (5) Return BodyBloomLogDiff error on mismatch. The verification also checks the receipts root in the same function, providing a comprehensive post-execution validation.",
+        "relevant_functions": [
+          "validate_block_post_execution()",
+          "verify_receipts()",
+          "compare_receipts_root_and_logs_bloom()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "A block with a manipulated bloom in the header would be detected during post-execution validation. The attacker cannot bypass this check because the bloom is independently recomputed from the locally-executed receipt logs.",
+        "vulnerability_assessment": "The header bloom verification is correctly implemented. The bloom is recomputed from actual execution results, not from any externally-provided value. The comparison is strict equality. The error handling includes debug logging of the encoded receipts for diagnosis.",
+        "edge_cases_analyzed": "Pre-Byzantium blocks: The verification is skipped (correct, pre-Byzantium receipts used state root instead of status code and had different encoding). Empty blocks: No receipts, computed bloom is Bloom::ZERO, which should match the header bloom for a block with no events."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The header bloom is correctly verified against independently computed receipt blooms during post-execution validation. The implementation recomputes blooms from actual log data, uses strict equality comparison, and returns a specific error on mismatch. The check is appropriately gated behind the Byzantium hardfork.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0029",
+      "property_id": "PROP-W7B16-51",
+      "title": "Verify Trust Boundary Integrity: Is parent_hash validated against canonical chain?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "280-299"
+      },
+      "code_excerpt": "pub fn validate_against_parent_hash_number<H: BlockHeader>(\n    header: &H,\n    parent: &SealedHeader<H>,\n) -> Result<(), ConsensusError> {\n    if parent.number() + 1 != header.number() {\n        return Err(ConsensusError::ParentBlockNumberMismatch {\n            parent_block_number: parent.number(),\n            block_number: header.number(),\n        })\n    }\n    if parent.hash() != header.parent_hash() {\n        return Err(ConsensusError::ParentHashMismatch(\n            GotExpected { got: header.parent_hash(), expected: parent.hash() }.into(),\n        ))\n    }\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "The validate_against_parent_hash_number() function validates two properties: (1) The header's block number is exactly parent.number() + 1 (sequential numbering), and (2) The header's parent_hash matches the actual hash of the parent block (parent.hash()). The parent is provided as a SealedHeader, which means its hash has been computed and sealed. This function is called from EthBeaconConsensus::validate_header_against_parent() at line 175 of crates/ethereum/consensus/src/lib.rs.",
+        "code_behavior": "The function receives the parent as a SealedHeader<H>, which contains the pre-computed hash of the parent block. It compares parent.hash() (the actual sealed hash of the parent) against header.parent_hash() (the parent hash claimed by the child header). The parent SealedHeader is retrieved from the canonical chain storage, so parent.hash() represents the canonical parent's hash. If either the number or hash check fails, a specific ConsensusError is returned.",
+        "relevant_functions": [
+          "validate_against_parent_hash_number()",
+          "EthBeaconConsensus::validate_header_against_parent()",
+          "SealedHeader::hash()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An attacker could craft a header claiming to extend a different parent than the canonical chain expects. This check prevents such attacks by verifying both the parent hash and the sequential block number.",
+        "vulnerability_assessment": "The validation is correctly implemented. Both the parent hash and block number are checked. The use of SealedHeader ensures that the parent hash is the actual cryptographic hash of the parent header, not a user-provided value. The check prevents fork-based attacks where an attacker tries to insert a block with a non-canonical parent.",
+        "edge_cases_analyzed": "Block number overflow: parent.number() + 1 could overflow for u64::MAX, but reaching block number 2^64-1 is practically impossible. Genesis block: The genesis block has no parent, so this validation would not be called for it. Hash collision: parent.hash() uses keccak256, which is cryptographically secure against collisions."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Parent hash validation is correctly implemented. The function verifies both the sequential block number and the parent hash against the sealed (cryptographically committed) parent header from the canonical chain. The use of SealedHeader ensures the parent hash is authentic. Both checks must pass for the block to be accepted.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0030",
+      "property_id": "PROP-W7B16-52",
+      "title": "Verify Trust Boundary Integrity: Is timestamp > parent.timestamp enforced?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "334-345"
+      },
+      "code_excerpt": "pub fn validate_against_parent_timestamp<H: BlockHeader>(\n    header: &H,\n    parent: &H,\n) -> Result<(), ConsensusError> {\n    if header.timestamp() <= parent.timestamp() {\n        return Err(ConsensusError::TimestampIsInPast {\n            parent_timestamp: parent.timestamp(),\n            timestamp: header.timestamp(),\n        })\n    }\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "The validate_against_parent_timestamp() function enforces that the child block's timestamp is STRICTLY GREATER than the parent's timestamp. The comparison uses <= (less than or equal), meaning timestamps equal to the parent's are rejected. This function is called from EthBeaconConsensus::validate_header_against_parent() at line 177 of crates/ethereum/consensus/src/lib.rs.",
+        "code_behavior": "The function performs a strict inequality check: header.timestamp() must be > parent.timestamp(). If the child timestamp is equal to or less than the parent timestamp, ConsensusError::TimestampIsInPast is returned. This matches the Ethereum specification requirement that block timestamps must be strictly increasing. The function operates on the raw u64 timestamp values from the headers.",
+        "relevant_functions": [
+          "validate_against_parent_timestamp()",
+          "EthBeaconConsensus::validate_header_against_parent()"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An attacker could attempt to submit blocks with timestamps equal to or before the parent's timestamp, potentially enabling timestamp manipulation attacks or disrupting time-based protocol logic (e.g., difficulty adjustment, hardfork activation).",
+        "vulnerability_assessment": "The validation is correctly implemented with strict inequality (>), matching the Ethereum specification. Equal timestamps are correctly rejected. The error type (TimestampIsInPast) clearly communicates the validation failure. For post-merge blocks, the consensus layer (beacon chain) also enforces timestamp ordering with 12-second slots, providing additional protection.",
+        "edge_cases_analyzed": "Timestamps differing by 1 second: Allowed (correct, minimum valid difference). Equal timestamps: Rejected (correct). Timestamp of 0: Would be rejected for any block after genesis since genesis timestamp is typically > 0. Very large timestamps: Not checked here, but for pre-merge blocks, there is a separate future timestamp check in validate_header() (crates/ethereum/consensus/src/lib.rs lines 112-126)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Timestamp ordering is correctly enforced with strict inequality. The implementation matches the Ethereum specification requirement that block timestamps must be strictly increasing. The error handling is appropriate and informative. The check is properly integrated into the header-against-parent validation pipeline.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0031",
+      "property_id": "PROP-W7B16-53",
+      "title": "Verify Trust Boundary Integrity: Is extra_data limited to 32 bytes?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "266-273"
+      },
+      "code_excerpt": "pub fn validate_header_extra_data<H: BlockHeader>(header: &H) -> Result<(), ConsensusError> {\n    let extra_data_len = header.extra_data().len();\n    if extra_data_len > MAXIMUM_EXTRA_DATA_SIZE {\n        Err(ConsensusError::ExtraDataExceedsMax { len: extra_data_len })\n    } else {\n        Ok(())\n    }\n}",
+      "phase1_finding": {
+        "description": "The function validate_header_extra_data checks that the length of extra_data does not exceed MAXIMUM_EXTRA_DATA_SIZE, which is imported from alloy_consensus::constants and defined as 32. The check uses a strict greater-than comparison, meaning extra_data of exactly 32 bytes is allowed (valid per the Yellow Paper).",
+        "code_behavior": "Returns ConsensusError::ExtraDataExceedsMax if extra_data length exceeds 32 bytes. Returns Ok(()) if length is 0..=32. This function is called during header validation in both EthBeaconConsensus (crates/ethereum/consensus/src/lib.rs:128) and OpBeaconConsensus (crates/optimism/consensus/src/lib.rs:163), ensuring all incoming block headers are validated.",
+        "relevant_functions": [
+          "validate_header_extra_data",
+          "EthBeaconConsensus::validate_header",
+          "OpBeaconConsensus::validate_header"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incoming block headers from the P2P network or Engine API. An attacker could craft a block with oversized extra_data to exploit downstream consumers that assume a bounded field.",
+        "vulnerability_assessment": "The validation is correctly implemented with the proper constant (32) and the correct comparison operator (>). The function is invoked in the consensus validation path for all block headers, providing comprehensive coverage.",
+        "edge_cases_analyzed": "extra_data of exactly 32 bytes is correctly accepted. Empty extra_data (0 bytes) is correctly accepted. The check also exists for payload builder CLI args (crates/node/core/src/args/payload_builder.rs:89) providing defense-in-depth for locally built blocks."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The extra_data validation is correctly implemented using the standard MAXIMUM_EXTRA_DATA_SIZE constant (32 bytes) from alloy_consensus. The check is properly integrated into the consensus validation pipeline and is invoked for all block headers during validation. Both Ethereum and Optimism consensus implementations call this function.",
+        "recommendation": "No changes required. The implementation is correct and well-integrated."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0032",
+      "property_id": "PROP-W7B16-54",
+      "title": "Verify Trust Boundary Integrity: Is block number == parent.number + 1 validated?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "280-299"
+      },
+      "code_excerpt": "pub fn validate_against_parent_hash_number<H: BlockHeader>(\n    header: &H,\n    parent: &SealedHeader<H>,\n) -> Result<(), ConsensusError> {\n    if parent.number() + 1 != header.number() {\n        return Err(ConsensusError::ParentBlockNumberMismatch {\n            parent_block_number: parent.number(),\n            block_number: header.number(),\n        })\n    }\n    if parent.hash() != header.parent_hash() {\n        return Err(ConsensusError::ParentHashMismatch(...))\n    }\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "The function validate_against_parent_hash_number verifies that the block number is exactly parent.number() + 1. It also validates the parent_hash matches. Both checks are performed together as they are logically coupled.",
+        "code_behavior": "Returns ConsensusError::ParentBlockNumberMismatch if block_number != parent_number + 1. Returns ConsensusError::ParentHashMismatch if the parent hash doesn't match. Returns Ok(()) when both conditions hold.",
+        "relevant_functions": [
+          "validate_against_parent_hash_number",
+          "EthBeaconConsensus::validate_header_against_parent",
+          "OpBeaconConsensus::validate_header_against_parent"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An attacker could attempt to introduce blocks with incorrect numbering to disrupt chain continuity. This check runs during parent-child header validation in the consensus pipeline.",
+        "vulnerability_assessment": "The validation is correct: parent.number() + 1 != header.number() catches all invalid block numbers. The addition parent.number() + 1 could theoretically overflow for u64, but since Ethereum block numbers are far from u64::MAX, this is not a practical concern.",
+        "edge_cases_analyzed": "Block number 0 (genesis) does not have a parent in normal flow so this check would not be reached for genesis. The u64 overflow at u64::MAX is astronomically unlikely given Ethereum produces ~1 block per 12 seconds. Both hash and number are checked together, preventing partial spoofing."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The block number sequential validation is correctly implemented. The check ensures strict sequential ordering (parent + 1 == child). The function is called from both EthBeaconConsensus and OpBeaconConsensus validate_header_against_parent methods. The u64 overflow edge case is not practically exploitable.",
+        "recommendation": "No changes required. The implementation correctly validates the block number invariant."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0033",
+      "property_id": "PROP-W7B16-55",
+      "title": "Verify Trust Boundary Integrity: Is state_root verified after full block execution?",
+      "code_scope": {
+        "file": "crates/engine/tree/src/tree/payload_validator.rs",
+        "lines": "631-650"
+      },
+      "code_excerpt": "if state_root != block.header().state_root() {\n    self.on_invalid_block(\n        &parent_block, &block, &output,\n        Some((&trie_output, state_root)), ctx.state_mut(),\n    );\n    let block_state_root = block.header().state_root();\n    return Err(InsertBlockError::new(\n        block.into_sealed_block(),\n        ConsensusError::BodyStateRootDiff(\n            GotExpected { got: state_root, expected: block_state_root }.into(),\n        ).into(),\n    ).into())\n}",
+      "phase1_finding": {
+        "description": "After full block execution, the computed state_root is compared against the state_root declared in the block header. If they don't match, the block is rejected with BodyStateRootDiff error. The on_invalid_block hook is called for diagnostics. This same check also exists in the merkle stage (crates/stages/stages/src/stages/merkle.rs:423-438) for pipeline sync.",
+        "code_behavior": "The comparison is a strict equality check between the locally computed state root and the block header's declared state root. On mismatch, the block is marked invalid and an InsertBlockError is returned. The check is present in both the engine tree (for live sync) and the merkle stage (for initial sync).",
+        "relevant_functions": [
+          "PayloadValidator::validate_payload (engine tree context)",
+          "validate_state_root (merkle stage)",
+          "StateRoot::root",
+          "StateRoot::root_with_updates"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "This is the most critical consensus check. Without state root verification, an attacker could submit blocks with arbitrary state transitions (e.g., minting tokens, stealing funds) that would be accepted. The check runs after the EVM executes all transactions and the resulting state trie root is computed.",
+        "vulnerability_assessment": "The state root verification is correctly placed after block execution and trie root computation. It covers both the Engine API path (newPayload) through the engine tree and the initial sync path through the merkle stage. The comparison uses B256 equality which is exact.",
+        "edge_cases_analyzed": "Empty blocks still produce a valid state root (same as parent). The EMPTY_ROOT_HASH sentinel is used for accounts with no storage. The parallel state root computation has a fallback path that is also verified. Intermediate progress thresholds do not skip the final root verification."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "State root verification is correctly implemented in both critical code paths: the engine tree (for CL-driven block processing) and the merkle stage (for pipeline sync). The computed root is strictly compared against the header's declared root, and any mismatch results in block rejection. The verification is positioned after full block execution and trie computation, ensuring completeness.",
+        "recommendation": "No changes required. The state root verification is comprehensive and correctly placed in the processing pipeline."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0034",
+      "property_id": "PROP-0001",
+      "title": "Verify Trust Boundary Integrity: Is trie root computation deterministic regardless of insertion order?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-309"
+      },
+      "code_excerpt": "while let Some(node) = account_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n        }\n        TrieElement::Leaf(hashed_address, account) => {\n            let storage_root_calculator = StorageRoot::new_hashed(...);\n            let storage_result = storage_root_calculator.calculate(retain_updates)?;\n            // ... encode account with storage root ...\n            hash_builder.add_leaf(Nibbles::unpack(hashed_address), &account_rlp);\n        }\n    }\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "The trie root computation uses TrieNodeIter which walks the trie in sorted key order (ascending nibble order). The HashBuilder from alloy_trie requires keys to be inserted in sorted order and produces a deterministic Merkle Patricia Trie root. The TrieNodeIter relies on TrieWalker and HashedCursor which both iterate in sorted order (B256 keys from the database are sorted, and hashed keys using keccak256 produce a deterministic ordering).",
+        "code_behavior": "TrieNodeIter::try_next() merges branch nodes from the existing trie (via TrieWalker) with leaf nodes from hashed state (via HashedCursor), always returning them in sorted nibble order. The HashBuilder processes these in order and produces the canonical MPT root. Given the same set of key-value pairs, the iteration always produces the same sequence, yielding the same root.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "TrieNodeIter::try_next",
+          "HashBuilder::add_leaf",
+          "HashBuilder::add_branch",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If the trie root computation were non-deterministic, different nodes could compute different roots for the same state, breaking consensus. The determinism relies on the iteration order being consistent.",
+        "vulnerability_assessment": "The implementation is deterministic by construction: (1) all keys are keccak256 hashed, producing a fixed 32-byte key space; (2) the database (MDBX) stores keys in sorted order; (3) TrieNodeIter merges trie walker and hashed cursor entries in sorted order; (4) HashBuilder requires and assumes sorted insertion order. The MPT structure itself is mathematically deterministic - same key-value set always produces the same root.",
+        "edge_cases_analyzed": "Intermediate progress (threshold-based pausing) preserves iteration state via IntermediateStateRootState, ensuring resumed computation continues in sorted order. Parallel state root computation produces the same result as sequential computation. The sorted merge in TrieNodeIter handles the case where branch and leaf nodes interleave correctly."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Trie root computation is deterministic by construction. The sorted iteration order is guaranteed by the database layer (MDBX stores keys in sorted order), the HashedCursor trait semantics (seek/next in ascending order), and the TrieNodeIter merge logic. The HashBuilder from alloy_trie produces canonical MPT structure given sorted inputs. This is fundamental to Ethereum consensus and is well-tested across the ecosystem.",
+        "recommendation": "No changes required. The deterministic property is inherent in the MPT construction and the sorted iteration approach."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0035",
+      "property_id": "PROP-0002",
+      "title": "Verify Trust Boundary Integrity: Does patricialize terminate for all valid inputs?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-309"
+      },
+      "code_excerpt": "while let Some(node) = account_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            hash_builder.add_branch(node.key, node.value, ...);\n        }\n        TrieElement::Leaf(hashed_address, account) => {\n            hash_builder.add_leaf(Nibbles::unpack(hashed_address), &account_rlp);\n        }\n    }\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "In Reth, the equivalent of 'patricialize' is the combination of TrieNodeIter iteration and HashBuilder finalization. The TrieNodeIter iterates over a finite set of entries (accounts or storage slots), each identified by a 32-byte (256-bit) hashed key. Since the key space is finite and each iteration advances to the next key, the loop always terminates. The HashBuilder::root() method finalizes the trie, which involves processing any remaining stack entries - also a bounded operation since the trie depth is bounded by key length (64 nibbles).",
+        "code_behavior": "The while loop in StateRoot::calculate() processes each node returned by account_node_iter.try_next(). The iterator returns None when all entries are exhausted, breaking the loop. The hash_builder.root() call then finalizes the trie structure, which is a bounded operation.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "StorageRoot::calculate",
+          "TrieNodeIter::try_next",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Non-termination would be a denial-of-service vulnerability, causing the node to hang during block validation. This is especially critical in the consensus path.",
+        "vulnerability_assessment": "Termination is guaranteed because: (1) TrieNodeIter walks entries in strictly ascending order and the key space is finite (2^256 possible keys, but only the existing entries are iterated); (2) Each try_next() call either returns the next entry or None; (3) The intermediate threshold mechanism provides an additional safety bound, allowing long computations to yield intermediate progress; (4) HashBuilder operates on a stack bounded by key length (64 nibbles max depth).",
+        "edge_cases_analyzed": "Empty state: the iterator immediately returns None, and root() returns EMPTY_ROOT_HASH. Very large state: the threshold mechanism (DEFAULT_INTERMEDIATE_THRESHOLD = 100,000) allows the computation to be split across multiple invocations. The alloy_trie HashBuilder internally uses a bounded stack and processes keys in order, guaranteeing termination."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The trie construction always terminates because it iterates over a finite set of database entries in sorted order, advancing monotonically through the key space. The HashBuilder finalization is bounded by the maximum trie depth (64 nibbles for 32-byte keys). The core patricialize logic is in alloy_trie which is a well-tested library. The intermediate threshold mechanism provides additional protection against unbounded computation time.",
+        "recommendation": "No changes required. Termination is guaranteed by the finite, sorted iteration and bounded trie depth."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0036",
+      "property_id": "PROP-0003",
+      "title": "Are default values excluded from trie._data (no ghost entries)?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "618-628"
+      },
+      "code_excerpt": "let mut hashed_storage_cursor =\n    self.hashed_cursor_factory.hashed_storage_cursor(self.hashed_address)?;\n\n// short circuit on empty storage\nif hashed_storage_cursor.is_storage_empty()? {\n    return Ok(StorageRootProgress::Complete(\n        EMPTY_ROOT_HASH,\n        0,\n        StorageTrieUpdates::deleted(),\n    ))\n}",
+      "phase1_finding": {
+        "description": "Ghost entries (default/zero values in the trie) are prevented at multiple layers. The HashedStorageCursor only iterates over non-zero storage values as stored in the database. When a storage slot is set to zero in the EVM, it is removed from the state rather than stored as zero. The HashedPostStateCursorFactory (used during state root computation with pending changes) also filters out zero-value entries. The is_storage_empty() check provides a fast path for accounts with no storage.",
+        "code_behavior": "StorageRoot::calculate() first checks is_storage_empty() and returns EMPTY_ROOT_HASH if true. For non-empty storage, it iterates via HashedStorageCursor which only returns non-zero entries. The TrieNodeIter processes these entries and feeds them to HashBuilder. Zero-value storage slots are never included in the trie.",
+        "relevant_functions": [
+          "StorageRoot::calculate",
+          "HashedStorageCursor::is_storage_empty",
+          "HashedPostStateCursorFactory",
+          "DatabaseHashedStorageCursor"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Ghost entries would cause incorrect state roots (trie would include zero-value entries that should be absent), potentially breaking consensus or enabling state inflation attacks.",
+        "vulnerability_assessment": "The implementation correctly excludes zero-value storage slots. The database layer only stores non-zero values. The HashedPostStateCursorFactory (which overlays pending changes on top of the database) explicitly handles the case where storage is wiped (zeroed) by marking the storage as empty. Tests in crates/trie/db/tests/post_state.rs verify that wiped storage with zero-value entries results in is_storage_empty() returning true.",
+        "edge_cases_analyzed": "Wiped storage with post-state zero entries is correctly reported as empty. Storage slots transitioning from non-zero to zero are removed from the trie. The EMPTY_ROOT_HASH constant is the correct Merkle root for an empty trie."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Default values (zero storage slots) are correctly excluded from the trie at multiple levels: the EVM removes zero slots, the database only stores non-zero values, and the HashedStorageCursor only iterates non-zero entries. The implementation includes tests verifying that wiped storage is correctly treated as empty. The EMPTY_ROOT_HASH is correctly used for accounts with no storage.",
+        "recommendation": "No changes required. The ghost entry prevention is correctly implemented across the storage and trie layers."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0037",
+      "property_id": "PROP-0004",
+      "title": "Does trie_get return the exact value set by trie_set?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "420-432"
+      },
+      "code_excerpt": "StorageRootProgress::Complete(storage_root, storage_slots_walked, updates) => {\n    self.hashed_entries_walked += storage_slots_walked;\n    if retain_updates {\n        self.updated_storage_nodes += updates.len();\n        self.trie_updates.insert_storage_updates(hashed_address, updates);\n    }\n    self.account_rlp.clear();\n    let trie_account = account.into_trie_account(storage_root);\n    trie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\n    hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n    Ok(None)\n}",
+      "phase1_finding": {
+        "description": "This property maps to whether values stored in the state database are faithfully represented in the trie. Reth uses MDBX (an LMDB-derived database) which provides ACID guarantees. Values are RLP-encoded before storage and RLP-decoded upon retrieval. The TrieAccount struct is deterministically encoded/decoded via alloy_rlp, and the encoding is verified by the TRIE_ACCOUNT_RLP_MAX_SIZE constant test. Storage values (U256) use alloy_rlp::encode_fixed_size for deterministic encoding.",
+        "code_behavior": "When building the trie, accounts are encoded with into_trie_account() and then RLP-encoded. Storage values are encoded with alloy_rlp::encode_fixed_size(). These encodings are deterministic and reversible. The database layer (MDBX) stores and retrieves values exactly as written.",
+        "relevant_functions": [
+          "Account::into_trie_account",
+          "TrieAccount::encode",
+          "alloy_rlp::encode_fixed_size",
+          "StateRootContext::process_storage_root_result"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If encoded values were corrupted or non-deterministic during storage/retrieval, the trie root would be incorrect, breaking consensus.",
+        "vulnerability_assessment": "The value fidelity is guaranteed by: (1) MDBX's ACID properties ensuring data integrity; (2) RLP encoding/decoding being deterministic and well-tested in alloy_rlp; (3) The TRIE_ACCOUNT_RLP_MAX_SIZE test (crates/trie/common/src/constants.rs) verifying that max-size account encoding matches expectations. The encode_fixed_size function for U256 produces canonical RLP encoding.",
+        "edge_cases_analyzed": "Zero-value U256 is correctly RLP-encoded as a single byte (0x80). Maximum-size accounts (nonce=u64::MAX, balance=U256::MAX, full-size hashes) encode to exactly 110 bytes as verified by tests. Empty code_hash defaults to KECCAK_EMPTY, ensuring consistent encoding."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Value fidelity is ensured by the ACID properties of the MDBX database layer and the deterministic, well-tested RLP encoding/decoding from alloy_rlp. The encoding is verified by tests (TRIE_ACCOUNT_RLP_MAX_SIZE). The alloy_rlp library is a core dependency used across the entire Ethereum ecosystem, providing strong confidence in encoding correctness.",
+        "recommendation": "No changes required. The data integrity is ensured by the database layer and well-tested encoding libraries."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0038",
+      "property_id": "PROP-0005",
+      "title": "Verify Trust Boundary Integrity: Are secured trie keys always keccak256 hashed?",
+      "code_scope": {
+        "file": "crates/trie/common/src/key.rs",
+        "lines": "1-18"
+      },
+      "code_excerpt": "pub struct KeccakKeyHasher;\n\nimpl KeyHasher for KeccakKeyHasher {\n    #[inline]\n    fn hash_key<T: AsRef<[u8]>>(bytes: T) -> B256 {\n        keccak256(bytes)\n    }\n}",
+      "phase1_finding": {
+        "description": "All trie keys in Reth are hashed using keccak256. The KeccakKeyHasher implements the KeyHasher trait with keccak256. Account addresses are hashed via keccak256(address) in StorageRoot::new() (crates/trie/trie/src/trie.rs:489). Storage keys are hashed similarly. The HashedCursor interfaces work with pre-hashed B256 keys. The hashing is performed when transitioning from plain state to hashed state, and the hashed state tables in the database store entries by their keccak256-hashed keys.",
+        "code_behavior": "KeccakKeyHasher::hash_key() calls keccak256() from alloy_primitives. StorageRoot::new() explicitly calls keccak256(address) before passing to new_hashed(). The database stores hashed account state in the HashedAccounts table and hashed storage in the HashedStorages table, both keyed by keccak256 hashes.",
+        "relevant_functions": [
+          "KeccakKeyHasher::hash_key",
+          "StorageRoot::new",
+          "keccak256"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If trie keys were not consistently hashed with keccak256, the resulting trie root would differ from what other Ethereum clients compute, breaking consensus. Using unhashed keys would also make the trie vulnerable to imbalanced structures (an attacker could craft keys that create a deeply unbalanced trie).",
+        "vulnerability_assessment": "The implementation consistently uses keccak256 for all trie key hashing. The KeyHasher trait provides a single point of abstraction, and KeccakKeyHasher is the only production implementation. The StorageRoot::new() method explicitly hashes the raw address before use. All database tables for hashed state use keccak256-hashed keys.",
+        "edge_cases_analyzed": "StorageRoot::new_hashed() accepts pre-hashed addresses, bypassing the keccak256 call - this is used when the caller already has the hashed address (e.g., from the hashed state tables). This is correct behavior, not a bypass. The KeccakKeyHasher is the only concrete KeyHasher implementation in the codebase."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "All trie keys are consistently hashed with keccak256 as required by the Ethereum specification. The KeccakKeyHasher provides the single hashing implementation, and StorageRoot::new() explicitly hashes raw addresses. The database layer stores state in hashed form. The new_hashed() variant exists for callers that already have pre-hashed keys, which is a correct optimization pattern.",
+        "recommendation": "No changes required. The keccak256 hashing is consistently applied to all trie keys."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0039",
+      "property_id": "PROP-0006",
+      "title": "Does encode_node always produce non-empty output?",
+      "code_scope": {
+        "file": "crates/trie/common/src/constants.rs",
+        "lines": "1-24"
+      },
+      "code_excerpt": "/// The maximum size of RLP encoded trie account in bytes.\n/// 2 (header) + 4 * 1 (field lens) + 8 (nonce) + 32 * 3 (balance, storage root, code hash)\npub const TRIE_ACCOUNT_RLP_MAX_SIZE: usize = 110;\n\n#[test]\nfn account_rlp_max_size() {\n    let account = TrieAccount {\n        nonce: u64::MAX,\n        balance: U256::MAX,\n        storage_root: B256::from_slice(&[u8::MAX; 32]),\n        code_hash: B256::from_slice(&[u8::MAX; 32]),\n    };\n    let mut encoded = Vec::new();\n    account.encode(&mut encoded);\n    assert_eq!(encoded.len(), TRIE_ACCOUNT_RLP_MAX_SIZE);\n}",
+      "phase1_finding": {
+        "description": "Node encoding in Reth uses RLP encoding via alloy_rlp::Encodable. For account nodes, the TrieAccount struct always has four fields (nonce, balance, storage_root, code_hash) and its RLP encoding always produces at least several bytes (minimum ~6 bytes for a zeroed account). For storage values (U256), alloy_rlp::encode_fixed_size always produces at least 1 byte. The TRIE_ACCOUNT_RLP_MAX_SIZE constant (110) confirms that accounts have substantial encoding, and a test verifies this.",
+        "code_behavior": "TrieAccount::encode() produces RLP-encoded output with a list header and four encoded fields. The minimum encoding includes the list header (1-2 bytes) and at least one byte per field. For storage leaves, encode_fixed_size(&value) produces canonical RLP encoding of U256 which is always at least 1 byte (0x80 for zero).",
+        "relevant_functions": [
+          "TrieAccount::encode",
+          "alloy_rlp::encode_fixed_size",
+          "Account::into_trie_account"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If a node encoding produced empty output, it could cause issues in the trie structure where empty leaves might be indistinguishable from absent entries, potentially corrupting the trie root.",
+        "vulnerability_assessment": "RLP encoding by definition always produces non-empty output. Even the simplest RLP encoding (empty byte string) produces 0x80 (1 byte). TrieAccount is an RLP list with four fields, each of which has a minimum encoding. The encode_fixed_size function for U256 uses FixedEncodable which always produces non-empty RLP. The test in constants.rs verifies the maximum encoding size.",
+        "edge_cases_analyzed": "Account with all-zero fields: nonce=0 encodes as 0x80 (1 byte), balance=0 encodes as 0x80, storage_root and code_hash are always 32 bytes. The minimum TrieAccount encoding is approximately 70 bytes. U256::ZERO encodes as 0x80 via RLP."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "RLP encoding is mathematically guaranteed to produce non-empty output for any valid input. The TrieAccount struct has a fixed structure with four fields, ensuring a minimum encoding size well above zero. The encode_fixed_size function for U256 similarly produces non-empty output. This property is verified by the TRIE_ACCOUNT_RLP_MAX_SIZE test which confirms the encoding behavior.",
+        "recommendation": "No changes required. The non-empty encoding property is inherent to the RLP specification."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0040",
+      "property_id": "PROP-0007",
+      "title": "Verify Trust Boundary Integrity: Is get_storage_root always invoked for Account encoding?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "419-434"
+      },
+      "code_excerpt": "StorageRootProgress::Complete(storage_root, storage_slots_walked, updates) => {\n    // ...\n    self.account_rlp.clear();\n    let trie_account = account.into_trie_account(storage_root);\n    trie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\n    hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n    Ok(None)\n}",
+      "phase1_finding": {
+        "description": "In StateRoot::calculate(), every time a leaf account is encountered by TrieNodeIter, a StorageRoot calculator is created and computed BEFORE the account is encoded. The storage_root result is then passed to account.into_trie_account(storage_root), which constructs the TrieAccount with the computed storage root. This ensures the storage root is always computed and included in the account encoding. The same pattern exists in the parallel root computation (crates/trie/parallel/src/root.rs).",
+        "code_behavior": "The flow is: (1) TrieNodeIter yields a leaf account; (2) StorageRoot::new_hashed() creates a storage root calculator; (3) storage_root_calculator.calculate() computes the root; (4) process_storage_root_result() encodes the account with the computed root via into_trie_account(storage_root); (5) The encoded account is added to HashBuilder. There is no code path where an account is encoded without its storage root.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "StateRootContext::process_storage_root_result",
+          "StorageRoot::calculate",
+          "Account::into_trie_account"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If an account were encoded without computing its storage root, the resulting state root would be incorrect. An attacker could potentially modify storage without detection if the storage root were not properly included.",
+        "vulnerability_assessment": "The implementation correctly ensures that storage root computation is mandatory for every account. The into_trie_account(storage_root) method signature requires a B256 storage_root parameter - there is no default or optional version. Every code path through process_storage_root_result() either computes the storage root (Complete variant) or returns intermediate progress (Progress variant) to resume later. No account is ever encoded without its storage root.",
+        "edge_cases_analyzed": "Accounts with empty storage: StorageRoot::calculate() returns EMPTY_ROOT_HASH via the is_storage_empty() fast path, which is still passed to into_trie_account(). Intermediate progress: when the storage root computation hits the threshold, the state is saved and resumed later - the account is NOT encoded until the storage root is complete. The Progress variant returns IntermediateStorageRootState which includes the account, to be encoded later when the storage root finishes."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The storage root is always computed before any account is encoded into the trie. The into_trie_account() method requires the storage_root as a mandatory parameter, making it impossible to skip. The intermediate progress mechanism correctly defers account encoding until the storage root computation is complete. Empty storage correctly uses EMPTY_ROOT_HASH. This invariant holds across both sequential and parallel root computation paths.",
+        "recommendation": "No changes required. The mandatory storage root computation before account encoding is correctly enforced."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0041",
+      "property_id": "PROP-0008",
+      "title": "Verify Trust Boundary Integrity: Does get_storage_root return correct canonical roots?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "614-718"
+      },
+      "code_excerpt": "if hashed_storage_cursor.is_storage_empty()? {\n    return Ok(StorageRootProgress::Complete(\n        EMPTY_ROOT_HASH, 0, StorageTrieUpdates::deleted(),\n    ))\n}\n// ... walks storage entries via TrieNodeIter ...\nwhile let Some(node) = storage_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            hash_builder.add_branch(node.key, node.value, ...);\n        }\n        TrieElement::Leaf(hashed_slot, value) => {\n            hash_builder.add_leaf(Nibbles::unpack(hashed_slot),\n                alloy_rlp::encode_fixed_size(&value).as_ref());\n        }\n    }\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "StorageRoot::calculate() produces correct canonical storage roots by: (1) returning EMPTY_ROOT_HASH for empty storage, which is the keccak256 hash of the empty RLP-encoded trie (correct per Ethereum specification); (2) for non-empty storage, iterating all hashed storage entries in sorted order via TrieNodeIter and building the MPT root via HashBuilder. Storage values are RLP-encoded using encode_fixed_size which produces canonical encoding.",
+        "code_behavior": "Empty storage -> EMPTY_ROOT_HASH (correct sentinel). Non-empty storage -> walks all entries sorted by keccak256(storage_key), RLP-encodes each U256 value, feeds to HashBuilder which produces the canonical MPT root. The TrieWalker handles existing trie nodes (for incremental updates) while HashedStorageCursor provides the actual storage values.",
+        "relevant_functions": [
+          "StorageRoot::calculate",
+          "StorageRoot::root",
+          "StorageRoot::root_with_updates",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect storage root computation would cause state root mismatches, either allowing invalid blocks or rejecting valid ones. This could be exploited for denial-of-service or, in extreme cases, consensus splits.",
+        "vulnerability_assessment": "The implementation correctly handles both empty and non-empty storage cases. EMPTY_ROOT_HASH is the standard Ethereum constant for empty tries. The sorted iteration guarantees deterministic root computation. The encode_fixed_size function produces canonical RLP encoding for U256 values. The HashBuilder from alloy_trie is a well-tested implementation of MPT root computation.",
+        "edge_cases_analyzed": "Empty storage returns EMPTY_ROOT_HASH with StorageTrieUpdates::deleted() to clean up any existing trie nodes. Incremental updates: when only some storage slots change, the TrieWalker reuses existing trie nodes where possible, and only recomputes affected branches. Very large storage: the threshold mechanism allows the computation to yield intermediate progress. Single storage slot: correctly produces a trie with one leaf."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The storage root computation correctly handles all cases: empty storage returns the standard EMPTY_ROOT_HASH, and non-empty storage is computed by walking all entries in sorted order and building the MPT via HashBuilder. The RLP encoding of storage values is canonical. The incremental update mechanism correctly reuses existing trie nodes while recomputing affected branches. The implementation is consistent with the Ethereum specification.",
+        "recommendation": "No changes required. The storage root computation is correct and handles all edge cases properly."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0042",
+      "property_id": "PROP-0010",
+      "title": "Verify Trust Boundary Integrity: Is the 32-byte threshold in encode_internal_node exact?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-309"
+      },
+      "code_excerpt": "// HashBuilder from alloy_trie handles the 32-byte threshold internally.\n// When an RLP-encoded node is < 32 bytes, it is stored inline.\n// When >= 32 bytes, its keccak256 hash is stored instead.\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "The 32-byte threshold for internal node encoding is handled entirely within alloy_trie's HashBuilder. Per the Ethereum Yellow Paper, if the RLP encoding of a trie node is less than 32 bytes, the node is stored inline (as-is); if 32 bytes or more, only its keccak256 hash is stored. This logic is not directly in the Reth codebase but in the alloy_trie dependency which Reth uses via HashBuilder. Reth does not override or modify this behavior.",
+        "code_behavior": "Reth calls hash_builder.add_leaf() and hash_builder.add_branch() to feed data into the HashBuilder, and hash_builder.root() to finalize. The 32-byte threshold decision is made internally by alloy_trie during the root computation. Reth does not directly implement or interfere with this threshold logic.",
+        "relevant_functions": [
+          "HashBuilder::add_leaf",
+          "HashBuilder::add_branch",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "An incorrect threshold would produce different trie roots than other clients, breaking consensus. For example, if the threshold were > 32, some nodes that should be hashed would be stored inline, resulting in a different root hash.",
+        "vulnerability_assessment": "The 32-byte threshold is implemented in alloy_trie, which is a well-tested Ethereum library used by multiple projects. Reth correctly delegates this responsibility to alloy_trie rather than re-implementing it. The threshold follows the Ethereum Yellow Paper specification exactly. Since this is in a dependency rather than Reth's own code, the scope of this check is partially out-of-scope for a Reth-specific audit, though the correct usage of alloy_trie is within scope.",
+        "edge_cases_analyzed": "Nodes exactly 32 bytes: should be hashed (the threshold is >= 32, meaning nodes of exactly 32 bytes are hashed). Nodes of 31 bytes: stored inline. Empty nodes: handled by the EMPTY_ROOT_HASH constant. These edge cases are all handled within alloy_trie's well-tested implementation."
+      },
+      "phase3_finding": {
+        "final_classification": "out-of-scope",
+        "confidence": "high",
+        "reasoning": "The 32-byte threshold for internal node encoding is implemented in the alloy_trie dependency, not in Reth's own codebase. Reth correctly delegates this responsibility to alloy_trie by using HashBuilder without overriding the threshold behavior. The alloy_trie library is a well-tested, widely-used Ethereum library that correctly implements the Yellow Paper specification. While Reth's usage of alloy_trie is correct, the actual threshold logic is outside Reth's code boundary.",
+        "recommendation": "No changes required in Reth. The threshold implementation resides in alloy_trie and follows the Ethereum specification. For comprehensive assurance, a separate audit of alloy_trie would cover this property directly."
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "CHK-0043",
+      "property_id": "PROP-0011",
+      "title": "Verify Trust Boundary Integrity: Is RLP encoding deterministic and canonical?",
+      "code_scope": {
+        "file": "crates/trie/common/src/constants.rs",
+        "lines": "1-24"
+      },
+      "code_excerpt": "pub const TRIE_ACCOUNT_RLP_MAX_SIZE: usize = 110;\n// 2 (header) + 4 * 1 (field lens) + 8 (nonce) + 32 * 3\n\n#[test]\nfn account_rlp_max_size() {\n    let account = TrieAccount {\n        nonce: u64::MAX,\n        balance: U256::MAX,\n        storage_root: B256::from_slice(&[u8::MAX; 32]),\n        code_hash: B256::from_slice(&[u8::MAX; 32]),\n    };\n    let mut encoded = Vec::new();\n    account.encode(&mut encoded);\n    assert_eq!(encoded.len(), TRIE_ACCOUNT_RLP_MAX_SIZE);\n}",
+      "phase1_finding": {
+        "description": "RLP encoding in Reth is handled by the alloy_rlp crate via the Encodable trait. The TrieAccount type (re-exported from alloy_trie) is RLP-encoded using derive macros that follow canonical RLP encoding rules. The TRIE_ACCOUNT_RLP_MAX_SIZE constant is validated by a unit test confirming max-size encoding is exactly 110 bytes. Storage values are encoded via alloy_rlp::encode_fixed_size. The encoding is deterministic by construction: the Encodable trait implementation produces identical byte sequences for identical inputs.",
+        "code_behavior": "alloy_rlp::Encodable is derived on TrieAccount with fields (nonce, balance, storage_root, code_hash) in fixed order. encode_fixed_size is used for U256 storage values. Both produce canonical RLP output.",
+        "relevant_functions": [
+          "TrieAccount::encode",
+          "alloy_rlp::encode_fixed_size",
+          "Account::into_trie_account"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If RLP encoding were non-canonical or non-deterministic, different nodes could compute different state roots for identical state, causing consensus splits.",
+        "vulnerability_assessment": "No vulnerability found. The alloy_rlp crate implements canonical RLP per the Ethereum Yellow Paper. The derive macro produces deterministic field ordering. The TRIE_ACCOUNT_RLP_MAX_SIZE constant is validated with a test using maximum values. The encoding is used consistently throughout the codebase via the same trait implementations.",
+        "edge_cases_analyzed": "Max-value encoding (u64::MAX nonce, U256::MAX balance, full 32-byte hashes) is explicitly tested. Zero-value encoding is implicitly tested via default TrieAccount tests. Storage value encoding uses encode_fixed_size which handles all U256 values canonically."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "RLP encoding is delegated to the well-audited alloy_rlp crate shared across multiple Ethereum clients. The encoding is deterministic by construction through Rust's type system and derive macros. Field ordering is fixed at compile time. The max size constant has explicit test coverage. No custom or potentially buggy RLP encoding logic exists in Reth's trie code.",
+        "recommendation": "No action needed. Continue relying on alloy_rlp for canonical encoding."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0044",
+      "property_id": "PROP-0012",
+      "title": "Verify Trust Boundary Integrity: Is keccak256 deterministic and collision-resistant?",
+      "code_scope": {
+        "file": "crates/trie/common/src/key.rs",
+        "lines": "1-18"
+      },
+      "code_excerpt": "pub struct KeccakKeyHasher;\n\nimpl KeyHasher for KeccakKeyHasher {\n    #[inline]\n    fn hash_key<T: AsRef<[u8]>>(bytes: T) -> B256 {\n        keccak256(bytes)\n    }\n}",
+      "phase1_finding": {
+        "description": "The KeccakKeyHasher implements the KeyHasher trait by delegating to alloy_primitives::keccak256. This function wraps the standard Keccak-256 implementation (tiny-keccak or similar). The function is pure and stateless: given the same byte input, it always produces the same 32-byte output. The hash function is used for key hashing in the Merkle Patricia Trie, address hashing, and various other cryptographic operations throughout Reth.",
+        "code_behavior": "keccak256(bytes) is called with AsRef<[u8]> input, producing a deterministic B256 output. No salt, nonce, or random state is involved.",
+        "relevant_functions": [
+          "KeccakKeyHasher::hash_key",
+          "alloy_primitives::keccak256"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Non-deterministic hashing would cause different state roots across nodes. A broken collision resistance would allow crafting distinct inputs that hash to the same trie key, enabling state manipulation.",
+        "vulnerability_assessment": "No vulnerability found. keccak256 from alloy_primitives is a well-known, standardized cryptographic hash function (FIPS 202 / SHA-3 family). The implementation is deterministic (pure function, no internal state) and cryptographically secure with 128-bit collision resistance.",
+        "edge_cases_analyzed": "Empty input, single byte, and maximum-length inputs all produce deterministic outputs. The hash function has no internal mutable state that could cause non-determinism."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "keccak256 is a standardized cryptographic hash function with well-established determinism and collision resistance properties. The implementation comes from alloy_primitives, a widely-used Ethereum library. There is no custom cryptographic code in Reth's trie that could introduce non-determinism or weaken collision resistance.",
+        "recommendation": "No action needed."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0045",
+      "property_id": "PROP-0013",
+      "title": "Verify Trust Boundary Integrity: Is keccak256 collision resistance maintained?",
+      "code_scope": {
+        "file": "crates/trie/common/src/key.rs",
+        "lines": "1-18"
+      },
+      "code_excerpt": "pub struct KeccakKeyHasher;\n\nimpl KeyHasher for KeccakKeyHasher {\n    #[inline]\n    fn hash_key<T: AsRef<[u8]>>(bytes: T) -> B256 {\n        keccak256(bytes)\n    }\n}",
+      "phase1_finding": {
+        "description": "This check concerns the mathematical collision resistance property of Keccak-256 (128-bit security level). The Reth codebase delegates all hashing to the standard Keccak-256 implementation via alloy_primitives. No truncation, domain-mixing, or other transformations are applied to the hash output that could weaken collision resistance. The full 256-bit hash output is used as B256 throughout.",
+        "code_behavior": "The full 32-byte (256-bit) output of keccak256 is used without truncation. B256 type preserves all 256 bits of the hash output.",
+        "relevant_functions": [
+          "KeccakKeyHasher::hash_key",
+          "keccak256"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If collision resistance were broken, an attacker could craft two different account addresses or storage keys that hash to the same trie location, potentially overwriting legitimate state data.",
+        "vulnerability_assessment": "No vulnerability at the code level. Keccak-256 has 128-bit collision resistance, meaning finding a collision requires approximately 2^128 operations, which is computationally infeasible. No code in Reth truncates or weakens the hash output. This is a cryptographic property of the algorithm itself, not a code-level concern.",
+        "edge_cases_analyzed": "The full 256-bit output is used everywhere. No birthday-attack-prone patterns (like using only partial hashes) were found in the codebase."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Collision resistance of Keccak-256 is a well-studied cryptographic property. No known practical attacks exist. The Reth codebase uses the full 256-bit output without any truncation or weakening transformations. This is an inherent property of the algorithm, not something that can be broken by implementation choices in Reth.",
+        "recommendation": "No action needed. This is a mathematical property of the hash function itself."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0046",
+      "property_id": "PROP-0014",
+      "title": "Verify Trust Boundary Integrity: Is encode_node type dispatch correct?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "419-454"
+      },
+      "code_excerpt": "// Encode the account with the computed storage root\nself.account_rlp.clear();\nlet trie_account = account.into_trie_account(storage_root);\ntrie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\nhash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n\n// For storage values:\nhash_builder.add_leaf(\n    Nibbles::unpack(hashed_slot),\n    alloy_rlp::encode_fixed_size(&value).as_ref(),\n);",
+      "phase1_finding": {
+        "description": "In Reth, node encoding type dispatch is handled by Rust's static type system rather than runtime checks. Account data is always converted to TrieAccount via into_trie_account() which produces a fixed struct with (nonce, balance, storage_root, code_hash), then RLP-encoded. Storage values are always U256 encoded via encode_fixed_size. The type system guarantees at compile time that accounts and storage values are encoded with their correct respective encoders. There is no runtime isinstance/type-switch that could dispatch to wrong encoder.",
+        "code_behavior": "Account encoding: Account -> into_trie_account(storage_root) -> TrieAccount -> encode(). Storage encoding: U256 -> encode_fixed_size(). Both paths are statically typed and cannot be confused.",
+        "relevant_functions": [
+          "Account::into_trie_account",
+          "TrieAccount::encode",
+          "alloy_rlp::encode_fixed_size",
+          "StateRootContext::process_storage_root_result"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect type dispatch could cause accounts to be encoded as storage values or vice versa, leading to incorrect state roots and potential consensus failures.",
+        "vulnerability_assessment": "No vulnerability found. Rust's static type system eliminates the class of bugs where the wrong encoder is used. Account and storage leaf nodes are handled in separate, type-safe code paths. The TrieElement enum dispatches to Branch or Leaf variants at the type level. into_trie_account always includes the storage_root parameter, ensuring the complete account encoding.",
+        "edge_cases_analyzed": "Empty accounts (is_empty() check), zero storage values, accounts with no bytecode (KECCAK_EMPTY code_hash) are all correctly handled through the same type-safe encoding path."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Rust's compile-time type system ensures that account data is always encoded as TrieAccount and storage data is always encoded as U256. There is no runtime type dispatch that could fail or be bypassed. The into_trie_account() method correctly maps Account fields including bytecode_hash defaulting to KECCAK_EMPTY when None. This is a strictly safer design than dynamic type dispatch.",
+        "recommendation": "No action needed. The compile-time type safety provides stronger guarantees than runtime type checks."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0047",
+      "property_id": "PROP-0015",
+      "title": "Verify Trust Boundary Integrity: Is previous_trie fallback encoding compatible?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "419-432"
+      },
+      "code_excerpt": "self.account_rlp.clear();\nlet trie_account = account.into_trie_account(storage_root);\ntrie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\nhash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);",
+      "phase1_finding": {
+        "description": "Reth does not use a 'previous_trie' fallback encoding pattern as found in the Python Ethereum spec (pyspec). Instead, Reth always encodes accounts uniformly as TrieAccount with four fields: (nonce, balance, storage_root, code_hash). This encoding is consistent across all forks. The Account::into_trie_account() method always produces the same TrieAccount struct regardless of the fork, with bytecode_hash defaulting to KECCAK_EMPTY when None. Fork-specific behavior is handled at the execution layer (EVM configuration), not in trie encoding.",
+        "code_behavior": "into_trie_account always produces TrieAccount{nonce, balance, storage_root, code_hash: bytecode_hash.unwrap_or(KECCAK_EMPTY)}. No fork-conditional encoding logic exists.",
+        "relevant_functions": [
+          "Account::into_trie_account",
+          "TrieAccount::encode"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If encoding differed across forks without proper fallback, state roots computed during fork transitions could be incorrect, leading to chain splits.",
+        "vulnerability_assessment": "Not applicable in Reth's architecture. The trie encoding format for accounts has been the same since Ethereum's inception (nonce, balance, storage_root, code_hash). Reth uses a single, consistent encoding path. No fork-conditional logic exists in the encoding path that could introduce incompatibility.",
+        "edge_cases_analyzed": "Fork transitions (Shanghai, Cancun, Prague) do not change the account encoding format. New EVM features (e.g., EIP-7702 code delegation) are handled at the execution layer without affecting trie account encoding."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The concept of 'previous_trie fallback encoding' from the Python spec does not apply to Reth. Reth uses a single, uniform encoding path for all accounts regardless of fork. The TrieAccount struct is always (nonce, balance, storage_root, code_hash), which matches the Ethereum specification for all forks. No cross-fork encoding incompatibility is possible.",
+        "recommendation": "No action needed. The uniform encoding design is inherently safe."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0048",
+      "property_id": "PROP-0016",
+      "title": "Does copy_trie produce a fully independent copy?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/state.rs",
+        "lines": "75-87"
+      },
+      "code_excerpt": "// SparseStateTrie construction\nSelf {\n    state: Default::default(),\n    revealed_account_paths: Default::default(),\n    storage: Default::default(),\n    retain_updates: false,\n    account_rlp_buf: Vec::with_capacity(TRIE_ACCOUNT_RLP_MAX_SIZE),\n}",
+      "phase1_finding": {
+        "description": "Reth does not have a direct 'copy_trie' operation analogous to the Python Ethereum specification. State isolation is achieved through different mechanisms: (1) The database layer (MDBX) provides transactional isolation via read transactions, (2) The revm journaled state handles per-transaction state with commit/revert semantics, (3) SparseStateTrie instances are constructed independently with their own data structures. The StateRoot calculator works with cursor-based iteration over immutable database snapshots, not mutable trie copies.",
+        "code_behavior": "Each StateRoot calculation creates its own HashBuilder, TrieUpdates, and iteration context (StateRootContext). Database cursors read from immutable MDBX transactions. No mutable state is shared between concurrent trie calculations.",
+        "relevant_functions": [
+          "StateRootContext::new",
+          "StateRoot::calculate",
+          "StorageRoot::calculate"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If trie copies shared internal state (shallow copy), modifications to one copy could affect the other, leading to incorrect state roots or data corruption during parallel processing.",
+        "vulnerability_assessment": "Not directly applicable. Reth's architecture uses cursor-based iteration over immutable database snapshots rather than trie cloning. Each state root calculation creates independent in-memory structures (HashBuilder, Vec<u8> for RLP buffer, TrieUpdates). The SparseStateTrie, used for stateless execution, constructs independent instances with owned data. Rust's ownership model prevents accidental sharing of mutable state.",
+        "edge_cases_analyzed": "Parallel state root computation (ParallelStateRoot) spawns independent tasks with cloned cursor factories, but the underlying MDBX transactions provide read isolation. The HashBuilder instances are independently constructed."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Reth's design avoids the need for trie copying entirely. State isolation is provided by MDBX transactional semantics and Rust's ownership model. Each trie computation operates on independent in-memory structures. The SparseStateTrie instances own their data. Rust's borrow checker prevents accidental sharing of mutable state between computations.",
+        "recommendation": "No action needed. The architectural approach of cursor-based iteration over immutable snapshots is inherently safer than trie copying."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0049",
+      "property_id": "PROP-0018",
+      "title": "Does trie_set correctly delete keys when value equals default?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/state.rs",
+        "lines": "682-716"
+      },
+      "code_excerpt": "pub fn update_account(\n    &mut self, address: B256, account: Account,\n    provider_factory: impl TrieNodeProviderFactory,\n) -> SparseStateTrieResult<bool> {\n    // ...\n    if account.is_empty() && storage_root == EMPTY_ROOT_HASH {\n        return Ok(false); // signals removal\n    }\n    let nibbles = Nibbles::unpack(address);\n    self.account_rlp_buf.clear();\n    account.into_trie_account(storage_root).encode(&mut self.account_rlp_buf);\n    self.update_account_leaf(nibbles, self.account_rlp_buf.clone(), provider_factory)?;\n    Ok(true)\n}",
+      "phase1_finding": {
+        "description": "In the SparseStateTrie, the update_account method checks if the account is empty (zero nonce, zero balance, no code) AND the storage root equals EMPTY_ROOT_HASH. If both conditions hold, it returns Ok(false), signaling to the caller that the account leaf should be removed via remove_account_leaf(). For storage, the remove_storage_leaf method removes individual storage slots. In the standard trie computation (StateRoot::calculate), deleted accounts are handled by the destroyed_accounts set in HashedPostStateSorted, which causes them to be skipped during iteration, thus excluded from the new trie.",
+        "code_behavior": "update_account returns false when account.is_empty() && storage_root == EMPTY_ROOT_HASH. The caller (stateless/trie.rs) uses this signal to call remove_account_leaf(). The standard trie path excludes destroyed accounts via is_account_cleared() in the cursor.",
+        "relevant_functions": [
+          "SparseStateTrie::update_account",
+          "SparseStateTrie::remove_account_leaf",
+          "SparseStateTrie::remove_storage_leaf",
+          "HashedPostStateAccountCursor::is_account_cleared"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If accounts or storage slots with default values are not properly deleted from the trie, the state root would differ from the expected value, causing consensus failures. Conversely, if non-default values are incorrectly deleted, state would be lost.",
+        "vulnerability_assessment": "The implementation correctly handles deletion. In the sparse trie path, account emptiness is checked with is_empty() (nonce==0, balance==0, bytecode_hash is None or KECCAK_EMPTY) combined with EMPTY_ROOT_HASH for storage. For the standard trie path, destroyed_accounts is a separate tracking set populated by the execution layer. Both mechanisms ensure that default-valued entries are excluded from the trie.",
+        "edge_cases_analyzed": "Account with zero balance/nonce but non-empty storage root is NOT deleted (correct). Account with non-zero balance but empty storage is NOT deleted (correct). update_account_storage_root checks trie_account == TrieAccount::default() for removal signal."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Account and storage deletion in the trie is correctly implemented through two complementary mechanisms: (1) the sparse trie's update_account returns false for empty accounts, signaling removal, and (2) the standard trie path uses destroyed_accounts sets to skip deleted accounts during iteration. The emptiness check correctly considers all four TrieAccount fields. Storage leaf removal is handled via remove_storage_leaf.",
+        "recommendation": "No action needed."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0050",
+      "property_id": "PROP-0019",
+      "title": "Is trie_set a no-op when deleting non-existent key?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/state.rs",
+        "lines": "770-794"
+      },
+      "code_excerpt": "pub fn remove_account_leaf(\n    &mut self, path: &Nibbles,\n    provider_factory: impl TrieNodeProviderFactory,\n) -> SparseStateTrieResult<()> {\n    let provider = provider_factory.account_node_provider();\n    self.state.remove_leaf(path, provider)?;\n    Ok(())\n}\n\npub fn remove_storage_leaf(\n    &mut self, address: B256, slot: &Nibbles,\n    provider_factory: impl TrieNodeProviderFactory,\n) -> SparseStateTrieResult<()> {\n    let storage_trie = self.storage.tries.get_mut(&address)\n        .ok_or(SparseTrieErrorKind::Blind)?;\n    let provider = provider_factory.storage_node_provider(address);\n    storage_trie.remove_leaf(slot, provider)?;\n    Ok(())\n}",
+      "phase1_finding": {
+        "description": "In the standard trie computation path (StateRoot::calculate), deleting a non-existent key is inherently a no-op because the cursor iteration only visits keys that exist in the database. Non-existent keys simply never appear in the iteration. In the sparse trie path, remove_leaf delegates to the underlying SparseTrie::remove_leaf, which handles the case where the path doesn't exist in the trie. The HashedPostState only includes keys that were actually modified during execution, so non-existent keys with zero values won't appear in the change set.",
+        "code_behavior": "Cursor-based iteration naturally skips non-existent keys. The destroyed_accounts set only contains accounts that actually existed and were destroyed. SSTORE to zero on a non-existent slot produces no entry in the HashedPostState.",
+        "relevant_functions": [
+          "SparseStateTrie::remove_account_leaf",
+          "SparseStateTrie::remove_storage_leaf",
+          "HashedPostStateAccountCursor::is_account_cleared"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If removing a non-existent key modified the trie (e.g., creating a tombstone entry), the state root would be incorrect, leading to consensus failures.",
+        "vulnerability_assessment": "No vulnerability. The cursor-based approach in standard trie computation naturally handles this: only existing keys are visited. In the sparse trie, the execution layer (revm) correctly tracks which slots were actually modified. SSTORE writing zero to an already-zero slot does not produce a state change in revm's journaled state, so it won't appear in the HashedPostState.",
+        "edge_cases_analyzed": "SSTORE(slot, 0) where slot was never set: revm correctly identifies this as a no-op (no state change, appropriate gas refund handling). The storage change won't propagate to HashedPostState."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The design naturally handles deletion of non-existent keys as a no-op. The cursor-based trie computation only processes keys that exist. The EVM execution layer (revm) correctly identifies zero-to-zero SSTORE operations as no-ops. The HashedPostState only contains actual state changes. No trie corruption can result from attempting to delete a non-existent key.",
+        "recommendation": "No action needed."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0051",
+      "property_id": "PROP-0020",
+      "title": "Does trie_get return trie.default for unset keys?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/state.rs",
+        "lines": "691-703"
+      },
+      "code_excerpt": "} else if self.is_account_revealed(address) {\n    if let Some(value) = self.get_account_value(&address) {\n        TrieAccount::decode(&mut &value[..])?.storage_root\n    } else {\n        // ...the account is newly created and the storage trie is empty.\n        EMPTY_ROOT_HASH\n    }\n} else {\n    return Err(SparseTrieErrorKind::Blind.into())\n}",
+      "phase1_finding": {
+        "description": "In the EVM execution context, reading an unset storage slot returns U256::ZERO, which is the default value per the Ethereum specification. This is handled by revm's state implementation for the SLOAD instruction. In the sparse trie, when an account path is revealed but no leaf value exists, the storage root defaults to EMPTY_ROOT_HASH. The get_account_value method returns None for non-existent accounts, and the calling code handles this by using appropriate defaults.",
+        "code_behavior": "SLOAD on non-existent slot returns U256::ZERO (handled by revm). get_account_value returns None for non-existent accounts. EMPTY_ROOT_HASH is used as default storage root for newly created accounts.",
+        "relevant_functions": [
+          "SparseStateTrie::get_account_value",
+          "SparseStateTrie::update_account"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If unset keys returned non-default values, EVM execution would produce incorrect results, and state roots would not match consensus expectations.",
+        "vulnerability_assessment": "No vulnerability. The default behavior is correctly implemented at multiple layers: (1) revm's SLOAD returns U256::ZERO for non-existent slots, (2) the sparse trie's get_account_value returns None for absent accounts and callers use EMPTY_ROOT_HASH as the default storage root, (3) the database cursor returns None/empty for non-existent entries. These defaults align with the Ethereum specification.",
+        "edge_cases_analyzed": "Newly created account with no prior state: storage_root defaults to EMPTY_ROOT_HASH. Revealed but non-existent account: get_account_value returns None, correctly handled. Unrevealed account: returns Blind error rather than a default, which is correct for stateless validation."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Default values for unset keys are correctly implemented across all layers. revm guarantees U256::ZERO for SLOAD on non-existent slots. The sparse trie returns None for absent accounts with appropriate default handling by callers. EMPTY_ROOT_HASH is correctly used as the default storage root. These behaviors conform to the Ethereum specification.",
+        "recommendation": "No action needed."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0052",
+      "property_id": "PROP-0023",
+      "title": "Are nibble values validated to be in range [0, 15]?",
+      "code_scope": {
+        "file": "crates/trie/common/src/nibbles.rs",
+        "lines": "1-10"
+      },
+      "code_excerpt": "pub use nybbles::Nibbles;\n\npub struct StoredNibbles(pub Nibbles);\n\nimpl From<Vec<u8>> for StoredNibbles {\n    fn from(value: Vec<u8>) -> Self {\n        Self(Nibbles::from_nibbles_unchecked(value))\n    }\n}",
+      "phase1_finding": {
+        "description": "Nibbles in Reth are managed by the nybbles crate (re-exported as Nibbles). The primary entry point for creating nibbles in trie operations is Nibbles::unpack(), which converts a B256 (32 bytes) into 64 nibbles by splitting each byte into its high and low 4-bit halves. This bit-shifting operation guarantees values in [0, 15] by construction. However, StoredNibbles and StoredNibblesSubKey use from_nibbles_unchecked when deserializing from database storage, which does not validate the range. The 'unchecked' variant accepts any u8 values.",
+        "code_behavior": "Nibbles::unpack() splits bytes into 4-bit nibbles (always [0,15]). from_nibbles_unchecked() accepts arbitrary u8 values without validation. StoredNibbles::from(Vec<u8>) uses unchecked variant. Compact deserialization also uses unchecked.",
+        "relevant_functions": [
+          "Nibbles::unpack",
+          "Nibbles::from_nibbles_unchecked",
+          "StoredNibbles::from",
+          "StoredNibblesSubKey::from_compact"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If nibble values outside [0, 15] entered the trie, they could cause incorrect trie traversal, out-of-bounds access in 16-branch nodes, or state corruption. The from_nibbles_unchecked path could theoretically accept invalid values from corrupted database entries.",
+        "vulnerability_assessment": "Low risk. In practice, all nibbles originate from Nibbles::unpack() which guarantees valid range. Database-stored nibbles were originally created from valid unpack() calls. The 'unchecked' path trusts the database, which is a reasonable assumption since the database is a trusted internal store. A corrupted database would cause many other failures before nibble validation becomes relevant.",
+        "edge_cases_analyzed": "Database corruption could introduce out-of-range nibbles via from_nibbles_unchecked. However, the nybbles crate internally stores nibbles as u8 values that are only interpreted as 4-bit values during trie operations. The HashBuilder and trie walker treat nibbles as indices into 16-element arrays, so out-of-range values could cause panics."
+      },
+      "phase3_finding": {
+        "final_classification": "informational",
+        "confidence": "medium",
+        "reasoning": "While Nibbles::unpack() guarantees valid [0,15] range by construction, the from_nibbles_unchecked paths used in database deserialization do not validate nibble ranges. In practice, this is safe because database entries originate from valid unpack() calls, and database corruption is outside the threat model for consensus-critical code. However, defensive validation could prevent panics from corrupted database entries.",
+        "recommendation": "Consider adding debug assertions in from_nibbles_unchecked or using the checked variant for database deserialization to catch corruption early. This would improve robustness against database corruption without affecting performance in release builds."
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "CHK-0053",
+      "property_id": "PROP-0024",
+      "title": "Verify Trust Boundary Integrity: Is compact encoding header byte correct?",
+      "code_scope": {
+        "file": "crates/trie/common/src/lib.rs",
+        "lines": "72"
+      },
+      "code_excerpt": "pub use alloy_trie::{nodes::*, proof, BranchNodeCompact, HashBuilder, TrieMask, EMPTY_ROOT_HASH};",
+      "phase1_finding": {
+        "description": "Compact encoding (hex prefix encoding) is entirely delegated to the alloy_trie and nybbles libraries. The HashBuilder from alloy_trie handles the hex prefix encoding when constructing trie nodes. The encoding follows the Ethereum specification: the first nibble of the encoded key indicates whether the path is for a leaf (0x2/0x3) or extension (0x0/0x1) and whether the path length is even or odd. Reth does not implement any custom compact encoding logic; it relies entirely on the well-tested alloy_trie implementation.",
+        "code_behavior": "HashBuilder::add_leaf() and HashBuilder::add_branch() handle hex prefix encoding internally. The is_leaf flag is set based on whether the node is a leaf or extension. The nybbles crate handles the compact encoding of nibble paths.",
+        "relevant_functions": [
+          "HashBuilder::add_leaf",
+          "HashBuilder::add_branch",
+          "Nibbles::encode_path_leaf"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect hex prefix encoding would cause different trie structures for the same state, leading to consensus failures. Wrong leaf/extension flags or even/odd handling would produce incorrect node hashes.",
+        "vulnerability_assessment": "No vulnerability found at the Reth level. The compact encoding is entirely delegated to alloy_trie, which is a shared library used across multiple Ethereum clients and has extensive test coverage. The encoding follows the standardized hex prefix encoding from the Ethereum Yellow Paper (Appendix C).",
+        "edge_cases_analyzed": "Even-length paths (0x20 prefix for leaf, 0x00 for extension), odd-length paths (0x3X for leaf, 0x1X for extension), single-nibble paths, and empty paths are all handled by alloy_trie's implementation."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Compact encoding is fully delegated to alloy_trie, a well-tested, widely-used Ethereum library. No custom hex prefix encoding logic exists in Reth. The library correctly implements the Ethereum specification for hex prefix encoding with proper even/odd and leaf/extension flag handling. This is validated by cross-client compatibility in production.",
+        "recommendation": "No action needed. Continue relying on alloy_trie for hex prefix encoding."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0054",
+      "property_id": "PROP-0028",
+      "title": "Verify Trust Boundary Integrity: Does empty trie produce EMPTY_TRIE_ROOT?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "620-628"
+      },
+      "code_excerpt": "// short circuit on empty storage\nif hashed_storage_cursor.is_storage_empty()? {\n    return Ok(StorageRootProgress::Complete(\n        EMPTY_ROOT_HASH,\n        0,\n        StorageTrieUpdates::deleted(),\n    ))\n}",
+      "phase1_finding": {
+        "description": "Reth correctly returns EMPTY_ROOT_HASH for empty storage tries. The EMPTY_ROOT_HASH constant is imported from alloy_trie (originally from alloy_consensus) and equals keccak256(rlp.encode(b'')) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421. The StorageRoot::calculate method explicitly checks is_storage_empty() and returns EMPTY_ROOT_HASH as a short-circuit optimization. For accounts, the default TrieAccount has storage_root set to EMPTY_ROOT_HASH. The HashBuilder also produces EMPTY_ROOT_HASH when root() is called with no leaves added.",
+        "code_behavior": "is_storage_empty() returns true when no storage entries exist. When true, EMPTY_ROOT_HASH is returned immediately. For non-empty storage, HashBuilder computes the root from added leaves and branches. HashBuilder::root() returns EMPTY_ROOT_HASH when no items were added.",
+        "relevant_functions": [
+          "StorageRoot::calculate",
+          "HashedStorageCursor::is_storage_empty",
+          "HashBuilder::root",
+          "Account::into_trie_account"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If an empty trie produced a root hash other than EMPTY_ROOT_HASH, every account with no storage would have an incorrect storage root, causing state root mismatches and consensus failures across the entire network.",
+        "vulnerability_assessment": "No vulnerability found. The EMPTY_ROOT_HASH is correctly used in all paths: (1) explicit short-circuit in StorageRoot::calculate when is_storage_empty() returns true, (2) HashBuilder::root() returns EMPTY_ROOT_HASH when no leaves are added, (3) Account::into_trie_account uses the computed storage_root which will be EMPTY_ROOT_HASH for empty storage, (4) default TrieAccount has EMPTY_ROOT_HASH as storage_root. The constant value matches the Ethereum specification.",
+        "edge_cases_analyzed": "Account with all storage slots deleted (post-SELFDESTRUCT): StorageTrieUpdates::deleted() is returned alongside EMPTY_ROOT_HASH. Newly created account with no storage: EMPTY_ROOT_HASH used by default. Account where all storage slots are set to zero: properly excluded during iteration, resulting in empty trie and EMPTY_ROOT_HASH from HashBuilder."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The EMPTY_ROOT_HASH constant is correctly used throughout the codebase for empty tries. The explicit short-circuit in StorageRoot::calculate provides both correctness and performance optimization. The HashBuilder's fallback behavior (returning EMPTY_ROOT_HASH for no leaves) provides a safety net. The constant value is defined in alloy_trie and matches the Ethereum specification. Unit tests in account.rs verify that default accounts have EMPTY_ROOT_HASH as their storage root.",
+        "recommendation": "No action needed. The implementation correctly handles empty tries at multiple levels with proper constant usage."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0055",
+      "property_id": "PROP-0029",
+      "title": "Does single-element trie produce correct LeafNode?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "160-330"
+      },
+      "code_excerpt": "let hash_builder = HashBuilder::default().with_updates(retain_updates);\n// ... iteration loop ...\nTrieElement::Leaf(hashed_address, account) => {\n    let trie_account = account.into_trie_account(storage_root);\n    trie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\n    hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "The StateRoot::calculate() method creates a HashBuilder and feeds it key-value pairs via add_leaf(). When only one leaf is present, the HashBuilder from alloy_trie produces a LeafNode with the full compact-encoded key suffix and RLP-encoded value. The root is then derived from this single LeafNode.",
+        "code_behavior": "The HashBuilder::add_leaf() method accepts Nibbles (the full key path) and a byte slice (the RLP-encoded value). For a single-element trie, the HashBuilder will construct a LeafNode with the complete key as its path and the value. The root() method then RLP-encodes this node and hashes it if needed.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "HashBuilder::add_leaf",
+          "HashBuilder::root",
+          "StorageRoot::calculate"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "The attack surface is limited because the HashBuilder is from the well-tested alloy_trie library. A single-element trie is a boundary case that could produce an incorrect root if the LeafNode construction is wrong.",
+        "vulnerability_assessment": "No vulnerability identified. The alloy_trie HashBuilder correctly handles single-element tries by producing a LeafNode with the full key path. This behavior is covered by alloy_trie's own test suite and indirectly by Reth's consensus tests (hive tests).",
+        "edge_cases_analyzed": "Single account in state trie; single storage slot in storage trie; empty storage (handled separately via EMPTY_ROOT_HASH check at line 622-628)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The HashBuilder from alloy_trie is a well-tested library that correctly constructs LeafNodes for single-element tries. Reth delegates to this library and the behavior is verified through Ethereum consensus test suites. The code path is straightforward with no custom logic that could introduce errors.",
+        "recommendation": "No action required. Continue relying on alloy_trie's HashBuilder for trie construction."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0056",
+      "property_id": "PROP-0030",
+      "title": "Are ExtensionNodes correctly constructed for shared prefixes?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-307"
+      },
+      "code_excerpt": "while let Some(node) = account_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n        }\n        TrieElement::Leaf(hashed_address, account) => {\n            hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n        }\n    }\n}",
+      "phase1_finding": {
+        "description": "Extension node construction is handled internally by the alloy_trie HashBuilder. Reth feeds keys in sorted order via TrieNodeIter, which walks the trie in lexicographic order. The HashBuilder identifies shared prefixes between consecutive keys and constructs ExtensionNodes when a common prefix exists before a divergence point.",
+        "code_behavior": "The TrieNodeIter (node_iter.rs) ensures keys are yielded in sorted order by combining the TrieWalker (which traverses existing intermediate trie nodes in order) with the HashedCursor (which provides hashed entries in sorted key order). The HashBuilder then processes these sorted keys and internally creates ExtensionNodes for shared prefixes.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "TrieNodeIter::try_next",
+          "HashBuilder::add_leaf",
+          "HashBuilder::add_branch"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect ExtensionNode construction could lead to state root mismatches. The sorted ordering guarantee from TrieNodeIter is critical; if keys are fed out of order, the HashBuilder would produce incorrect nodes.",
+        "vulnerability_assessment": "No vulnerability identified. The TrieNodeIter enforces sorted order through the combination of the TrieWalker (sorted trie cursor) and HashedCursor (sorted database cursor with seek/next semantics). The HashBuilder from alloy_trie has its own comprehensive tests for ExtensionNode construction.",
+        "edge_cases_analyzed": "Keys with long shared prefixes; keys with no shared prefix; keys that differ only at the last nibble; resumption from intermediate state."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "ExtensionNode construction is delegated to alloy_trie's HashBuilder, a well-tested library following the Ethereum MPT specification. Reth ensures correct sorted key ordering through TrieNodeIter. The integration is verified through consensus tests.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0057",
+      "property_id": "PROP-0031",
+      "title": "Are BranchNodes correctly constructed with 16 subnodes?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/node_iter.rs",
+        "lines": "9-25"
+      },
+      "code_excerpt": "pub struct TrieBranchNode {\n    pub key: Nibbles,\n    pub value: B256,\n    pub children_are_in_trie: bool,\n}\n\nimpl TrieBranchNode {\n    pub const fn new(key: Nibbles, value: B256, children_are_in_trie: bool) -> Self {\n        Self { key, value, children_are_in_trie }\n    }\n}",
+      "phase1_finding": {
+        "description": "BranchNode construction is handled by alloy_trie's HashBuilder. The TrieBranchNode in Reth is an intermediate representation used during iteration. It carries the key prefix, a hash value (B256), and a flag indicating whether children are stored in the trie. The actual 16-child BranchNode structure is managed internally by the HashBuilder via add_branch().",
+        "code_behavior": "When the TrieNodeIter encounters an existing branch node in the trie that can be reused (can_skip_current_node is true), it returns a TrieBranchNode. This is then fed to hash_builder.add_branch(). The HashBuilder internally manages the 16-slot child array indexed by nibble values 0-15, using TrieMask bitmaps to track which children exist.",
+        "relevant_functions": [
+          "TrieBranchNode::new",
+          "TrieNodeIter::try_next",
+          "HashBuilder::add_branch",
+          "BranchNodeCompact"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect BranchNode construction could lead to state root divergence. The TrieMask bitmap must correctly represent which of the 16 children are present.",
+        "vulnerability_assessment": "No vulnerability identified. The BranchNodeCompact type uses TrieMask (a u16 bitmask) to represent exactly 16 possible children (bits 0-15). This is enforced by the type system. The HashBuilder correctly populates these masks during trie construction.",
+        "edge_cases_analyzed": "Branch nodes with only 2 children; branch nodes with all 16 children; branch nodes with children_are_in_trie flag."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "BranchNode construction with 16 subnodes is correctly implemented through alloy_trie's HashBuilder and the TrieMask type (u16 bitmask for 16 children). The type system prevents construction of branch nodes with more than 16 children.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0058",
+      "property_id": "PROP-0032",
+      "title": "Is Account/Receipt/Uint rejected at BranchNode value position?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/node_iter.rs",
+        "lines": "27-34"
+      },
+      "code_excerpt": "pub enum TrieElement<Value> {\n    Branch(TrieBranchNode),\n    Leaf(B256, Value),\n}\n\n// In trie.rs:\nhash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n// vs:\nhash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);",
+      "phase1_finding": {
+        "description": "Rust's type system enforces a strict separation between branch and leaf operations. The TrieElement enum distinguishes Branch and Leaf variants at the type level. add_branch() accepts (Nibbles, B256, bool) while add_leaf() accepts (Nibbles, &[u8]). There is no way to pass an Account, Receipt, or Uint at a BranchNode value position without a compile error.",
+        "code_behavior": "The HashBuilder::add_branch() takes a B256 value parameter (a 32-byte hash) and a boolean flag. The HashBuilder::add_leaf() takes a byte slice of RLP-encoded data. These are entirely different type signatures. The Rust compiler prevents mixing these types at compile time.",
+        "relevant_functions": [
+          "HashBuilder::add_branch",
+          "HashBuilder::add_leaf",
+          "TrieElement::Branch",
+          "TrieElement::Leaf"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "In dynamic languages like Python, type confusion at branch node positions could allow invalid data. In Rust, this is impossible due to compile-time type checking.",
+        "vulnerability_assessment": "No vulnerability. Rust's static type system makes this class of bug impossible. The add_branch() function signature only accepts B256 (32-byte hash), not Account, Receipt, or arbitrary data.",
+        "edge_cases_analyzed": "N/A - this is a compile-time guarantee, not a runtime check."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Rust's compile-time type system prevents Account, Receipt, or Uint from being passed at a BranchNode value position. The add_branch() method signature requires B256, and any incorrect type would result in a compilation error.",
+        "recommendation": "No action required. The type system provides stronger guarantees than runtime checks."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0059",
+      "property_id": "PROP-0033",
+      "title": "Verify Trust Boundary Integrity: Does root() always return exactly 32 bytes?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/trie.rs",
+        "lines": "921-930"
+      },
+      "code_excerpt": "fn root(&mut self) -> B256 {\n    let mut prefix_set = core::mem::take(&mut self.prefix_set).freeze();\n    let rlp_node = self.rlp_node_allocate(&mut prefix_set);\n    if let Some(root_hash) = rlp_node.as_hash() {\n        root_hash\n    } else {\n        keccak256(rlp_node)\n    }\n}",
+      "phase1_finding": {
+        "description": "All root() implementations in Reth return B256, which is a fixed 32-byte type guaranteed by Rust's type system. In the sparse trie implementation, if the RLP node is already 32 bytes (a hash), it is returned directly. If the root node's RLP encoding is less than 32 bytes, keccak256 is applied to produce a 32-byte hash. The HashBuilder::root() in alloy_trie follows the same pattern. The StateRoot::calculate() and StorageRoot::calculate() methods return B256 from hash_builder.root().",
+        "code_behavior": "B256 is defined as FixedBytes<32>, a compile-time fixed-size array of 32 bytes. There is no possibility of returning fewer or more bytes. The keccak256 function always produces exactly 32 bytes.",
+        "relevant_functions": [
+          "SerialSparseTrie::root",
+          "StateRoot::calculate",
+          "StorageRoot::calculate",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If root() could return a non-32-byte value, state root comparisons would fail or produce incorrect consensus. This is a critical trust boundary.",
+        "vulnerability_assessment": "No vulnerability. The B256 return type is a compile-time guarantee of exactly 32 bytes. Both code paths (direct hash extraction and keccak256 hashing) produce B256 values. The parallel sparse trie (sparse-parallel/src/trie.rs line 736) also returns B256, using EMPTY_ROOT_HASH as fallback.",
+        "edge_cases_analyzed": "Empty trie (returns EMPTY_ROOT_HASH, which is a fixed 32-byte constant); single-element trie with small RLP encoding (hashed to 32 bytes via keccak256); large trie where root node RLP >= 32 bytes (hash is already embedded)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "B256 is a fixed 32-byte type enforced at compile time. All root() implementations return B256, making it impossible to return anything other than exactly 32 bytes. Small root nodes are explicitly hashed with keccak256 to produce 32 bytes.",
+        "recommendation": "No action required. The type system guarantees this property."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0060",
+      "property_id": "PROP-0034",
+      "title": "Verify Trust Boundary Integrity: Are pathological trie structures prevented?",
+      "code_scope": {
+        "file": "crates/trie/common/src/key.rs",
+        "lines": "1-18"
+      },
+      "code_excerpt": "pub struct KeccakKeyHasher;\n\nimpl KeyHasher for KeccakKeyHasher {\n    #[inline]\n    fn hash_key<T: AsRef<[u8]>>(bytes: T) -> B256 {\n        keccak256(bytes)\n    }\n}",
+      "phase1_finding": {
+        "description": "Reth uses secured tries (keccak256-hashed keys) for both state and storage tries, following the Ethereum specification. The KeccakKeyHasher is the default key hasher. All account addresses are hashed with keccak256 before being used as trie keys, and all storage slot keys are similarly hashed. This distributes keys uniformly across the 256-bit keyspace.",
+        "code_behavior": "The keccak256 hash function produces uniformly distributed 256-bit outputs. This means an attacker cannot craft addresses or storage keys to create degenerate trie structures (e.g., a trie that degenerates to a linked list of extension nodes). The expected trie depth is bounded by O(log n) where n is the number of entries.",
+        "relevant_functions": [
+          "KeccakKeyHasher::hash_key",
+          "keccak256",
+          "StorageRoot::new (line 489: keccak256(address))"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Without key hashing, an attacker could craft keys with specific prefixes to create deeply nested trie structures, causing O(n) traversal time and excessive memory usage for proofs.",
+        "vulnerability_assessment": "No vulnerability. Key hashing with keccak256 provides 128-bit collision resistance and uniform distribution. Creating pathological structures would require finding keccak256 preimages with specific prefixes, which is computationally infeasible.",
+        "edge_cases_analyzed": "Attacker creating many accounts with similar addresses; storage key crafting for degenerate tries; worst-case trie depth with uniform hash distribution."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The use of keccak256 key hashing (secured tries) prevents pathological trie structures. This is a fundamental design property of the Ethereum MPT and is correctly implemented in Reth via the KeccakKeyHasher.",
+        "recommendation": "No action required. This is a well-established security property of secured Merkle Patricia Tries."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0061",
+      "property_id": "PROP-0035",
+      "title": "Verify Trust Boundary Integrity: Are new types explicitly handled, not falling through?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-307"
+      },
+      "code_excerpt": "while let Some(node) = account_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n        }\n        TrieElement::Leaf(hashed_address, account) => {\n            // ... encode and add_leaf ...\n        }\n    }\n}",
+      "phase1_finding": {
+        "description": "Rust's match expression requires exhaustive pattern matching. The TrieElement enum has exactly two variants: Branch and Leaf. If a new variant were added to the enum, all match expressions would fail to compile until the new variant is handled. There is no fallthrough or default case that could silently ignore new types.",
+        "code_behavior": "The match on TrieElement is exhaustive. For the state trie, leaves carry Account values; for the storage trie, leaves carry U256 values. These types are determined by the HashedCursor's Value associated type, fixed at compile time. Adding a new TrieElement variant would require updating every match site.",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "StorageRoot::calculate",
+          "TrieElement (enum)"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "In dynamic languages, fallthrough default cases could silently ignore new node types, potentially skipping entries during root computation. In Rust, this is prevented by exhaustive matching.",
+        "vulnerability_assessment": "No vulnerability. Rust's exhaustive match guarantees that adding new TrieElement variants would cause compilation errors at every usage site, forcing developers to explicitly handle the new type.",
+        "edge_cases_analyzed": "N/A - this is a compile-time guarantee enforced by the Rust compiler."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Rust's exhaustive pattern matching prevents fallthrough behavior. The TrieElement enum has exactly Branch and Leaf variants, both explicitly handled. New variants would cause compilation errors.",
+        "recommendation": "No action required. Rust's type system provides this guarantee at compile time."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0062",
+      "property_id": "PROP-0038",
+      "title": "Verify Trust Boundary Integrity: Is state growth bounded by gas costs?",
+      "code_scope": {
+        "file": "crates/consensus/common/src/validation.rs",
+        "lines": "26-34"
+      },
+      "code_excerpt": "if header.gas_used() > header.gas_limit() {\n    return Err(ConsensusError::HeaderGasUsedExceedsGasLimit {\n        gas_used: header.gas_used(),\n        gas_limit: header.gas_limit(),\n    })\n}\nif header.gas_limit() > MAXIMUM_GAS_LIMIT_BLOCK {\n    return Err(ConsensusError::HeaderGasLimitExceedsMax { gas_limit: header.gas_limit() })\n}",
+      "phase1_finding": {
+        "description": "Reth validates that gas_used does not exceed gas_limit in block headers and enforces a maximum gas limit per block. State growth is bounded indirectly: SSTORE (new slot creation) costs 20,000 gas, CREATE costs 32,000 gas. With a block gas limit (typically ~30M), the maximum new state entries per block is bounded. This gas metering is enforced by revm (the EVM implementation) and validated by Reth's consensus layer.",
+        "code_behavior": "The consensus validation checks gas_used <= gas_limit and gas_limit <= MAXIMUM_GAS_LIMIT_BLOCK. The EVM execution (revm) enforces per-operation gas costs. Reth also validates gas_limit changes between parent and child blocks (within 1/1024 bounds).",
+        "relevant_functions": [
+          "validate_header_gas",
+          "validate_against_parent_gas_limit"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Unbounded state growth could lead to denial of service through disk exhaustion or slow trie operations. The gas mechanism is the primary defense.",
+        "vulnerability_assessment": "No vulnerability in Reth's implementation. Gas cost enforcement is handled by revm, and Reth correctly validates gas-related header fields. State growth per block is bounded to approximately 1,500 new storage slots (30M / 20,000) or fewer new accounts.",
+        "edge_cases_analyzed": "Maximum gas limit blocks; gas limit boundary changes between blocks; EIP-3860 init code size limits (also validated at line 161)."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "State growth is bounded by EVM gas costs enforced by revm, combined with Reth's consensus-layer validation of gas limits. The maximum state growth per block is well-bounded by the gas limit mechanism.",
+        "recommendation": "No action required. The gas cost mechanism is a fundamental Ethereum security property."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0063",
+      "property_id": "PROP-0040",
+      "title": "Verify Trust Boundary Integrity: Are small root nodes hashed to 32 bytes?",
+      "code_scope": {
+        "file": "crates/trie/sparse/src/trie.rs",
+        "lines": "921-930"
+      },
+      "code_excerpt": "fn root(&mut self) -> B256 {\n    let mut prefix_set = core::mem::take(&mut self.prefix_set).freeze();\n    let rlp_node = self.rlp_node_allocate(&mut prefix_set);\n    if let Some(root_hash) = rlp_node.as_hash() {\n        root_hash\n    } else {\n        keccak256(rlp_node)\n    }\n}",
+      "phase1_finding": {
+        "description": "The sparse trie root() implementation explicitly handles small root nodes. The rlp_node_allocate() method returns an RlpNode. If the RLP encoding is >= 32 bytes, as_hash() returns the embedded hash directly. If < 32 bytes, the else branch applies keccak256() to hash the small RLP encoding to exactly 32 bytes. The alloy_trie HashBuilder::root() follows the same logic internally.",
+        "code_behavior": "The as_hash() method on RlpNode checks if the node is already a 32-byte hash. If it is not (meaning the RLP encoding is short), keccak256 is explicitly applied. This ensures the root is always a 32-byte B256 value, regardless of the trie size.",
+        "relevant_functions": [
+          "SerialSparseTrie::root",
+          "RlpNode::as_hash",
+          "keccak256",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If a small root node were returned without hashing, it could be misinterpreted or cause comparison failures. This is critical for single-element or very small tries where the root node's RLP encoding is < 32 bytes.",
+        "vulnerability_assessment": "No vulnerability. The code explicitly checks whether the RLP node is a hash (>= 32 bytes) and applies keccak256 if it is not. This follows the Ethereum specification for MPT root computation.",
+        "edge_cases_analyzed": "Empty trie (EMPTY_ROOT_HASH constant); single small value in trie; trie with exactly 32-byte RLP root node encoding."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Small root nodes are explicitly hashed to 32 bytes via keccak256 in both the sparse trie and HashBuilder implementations. The code has a clear if-else branch that handles both cases (already a hash vs. needs hashing).",
+        "recommendation": "No action required. The implementation correctly handles small root nodes per the Ethereum specification."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0064",
+      "property_id": "PROP-0041",
+      "title": "Does _prepare_trie process ALL entries in trie._data?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "247-309"
+      },
+      "code_excerpt": "while let Some(node) = account_node_iter.try_next()? {\n    match node {\n        TrieElement::Branch(node) => {\n            tracker.inc_branch();\n            hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n        }\n        TrieElement::Leaf(hashed_address, account) => {\n            tracker.inc_leaf();\n            // ... compute storage root, encode account, add_leaf ...\n        }\n    }\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "The StateRoot::calculate() method iterates ALL entries using a while loop over account_node_iter.try_next(). The TrieNodeIter combines the TrieWalker (existing trie nodes) and HashedCursor (hashed account entries from the database). The loop continues until try_next() returns None, meaning all entries have been processed. The StorageRoot::calculate() follows the same pattern (lines 658-695).",
+        "code_behavior": "The TrieNodeIter::try_next() method walks all unprocessed keys from the TrieWalker and all hashed entries from the HashedCursor. It yields Branch nodes for existing intermediate trie nodes that can be reused, and Leaf nodes for each hashed account entry. The loop only exits when both the walker and cursor are exhausted (no more keys).",
+        "relevant_functions": [
+          "StateRoot::calculate",
+          "TrieNodeIter::try_next",
+          "TrieWalker::next_unprocessed_key",
+          "HashedCursor::seek",
+          "HashedCursor::next"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If any entries were skipped during root computation, the resulting state root would be incorrect, potentially allowing invalid state transitions to appear valid.",
+        "vulnerability_assessment": "No vulnerability identified. The while loop with try_next() exhaustively processes all entries. The TrieNodeIter interleaves walker (intermediate trie nodes) and cursor (leaf entries) results, yielding all entries in sorted order. The loop only terminates when next_unprocessed_key() returns None (line 254-255).",
+        "edge_cases_analyzed": "Intermediate progress with threshold (entries are not lost, just paused via IntermediateStateRootState); empty storage (handled by EMPTY_ROOT_HASH shortcircuit); resumption from previous_hashed_key preserving state."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The while loop over try_next() exhaustively iterates all entries. The TrieNodeIter combines sorted traversal of existing trie nodes with sorted traversal of hashed entries, ensuring no entries are skipped. Intermediate progress support correctly preserves and resumes state.",
+        "recommendation": "No action required. The exhaustive iteration pattern is sound."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0065",
+      "property_id": "PROP-0042",
+      "title": "Verify Trust Boundary Integrity: Are secured trie key collisions prevented?",
+      "code_scope": {
+        "file": "crates/trie/common/src/key.rs",
+        "lines": "1-18"
+      },
+      "code_excerpt": "pub struct KeccakKeyHasher;\n\nimpl KeyHasher for KeccakKeyHasher {\n    #[inline]\n    fn hash_key<T: AsRef<[u8]>>(bytes: T) -> B256 {\n        keccak256(bytes)\n    }\n}",
+      "phase1_finding": {
+        "description": "Key collisions are prevented by the cryptographic properties of keccak256. The KeccakKeyHasher is used to hash all trie keys (addresses for state trie, storage slots for storage tries). Keccak256 provides 128-bit collision resistance, meaning finding two different inputs that produce the same hash requires approximately 2^128 operations.",
+        "code_behavior": "Every account address is hashed via keccak256 before being used as a state trie key. Every storage slot key is similarly hashed. If two different addresses produced the same keccak256 hash, their account data would collide in the trie, leading to state corruption. However, this requires breaking keccak256's collision resistance.",
+        "relevant_functions": [
+          "KeccakKeyHasher::hash_key",
+          "keccak256"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "A keccak256 collision would allow an attacker to overwrite another account's state or storage, which would be catastrophic. However, this requires ~2^128 operations.",
+        "vulnerability_assessment": "No practical vulnerability. Keccak256 collision resistance (128 bits) is well beyond computational feasibility with current and foreseeable technology. This is a fundamental security assumption of the Ethereum protocol, not specific to Reth.",
+        "edge_cases_analyzed": "Birthday attack complexity: ~2^128 operations; preimage resistance: ~2^256 operations; no known weaknesses in keccak256."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Keccak256's 128-bit collision resistance makes key collisions computationally infeasible. This is a protocol-level security assumption shared by all Ethereum clients. Reth correctly uses KeccakKeyHasher for all trie key hashing.",
+        "recommendation": "No action required. This is a fundamental cryptographic security guarantee."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0066",
+      "property_id": "PROP-0044",
+      "title": "Verify Trust Boundary Integrity: Is root computation order-independent?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "240-310"
+      },
+      "code_excerpt": "let walker = TrieWalker::state_trie(trie_cursor, self.prefix_sets.account_prefix_set)\n    .with_deletions_retained(retain_updates);\nlet node_iter = TrieNodeIter::state_trie(walker, hashed_account_cursor);\n// ...\nwhile let Some(node) = account_node_iter.try_next()? {\n    // processes in sorted order\n}\nlet root = hash_builder.root();",
+      "phase1_finding": {
+        "description": "Root computation is order-independent because: (1) keys are iterated in deterministic sorted order via TrieNodeIter, which combines sorted TrieWalker traversal with sorted HashedCursor lookups; (2) the HashBuilder processes keys in sorted order and constructs a deterministic MPT; (3) for any given set of key-value pairs, the resulting trie structure and root hash are unique regardless of insertion order, because the trie structure is determined solely by the key-value set, not the order they are processed.",
+        "code_behavior": "The TrieNodeIter yields entries in lexicographic key order. The HashedCursor provides seek() and next() operations that traverse sorted database entries. The TrieWalker traverses existing trie nodes in sorted key order. The HashBuilder expects and validates sorted input, producing a deterministic root.",
+        "relevant_functions": [
+          "TrieNodeIter::try_next",
+          "TrieWalker::advance",
+          "HashedCursor::seek",
+          "HashedCursor::next",
+          "HashBuilder::root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If root computation were order-dependent, different nodes could compute different state roots for the same state, breaking consensus.",
+        "vulnerability_assessment": "No vulnerability. The Merkle Patricia Trie is inherently order-independent: for any given set of key-value pairs, there is exactly one valid trie structure and one valid root hash. Reth enforces sorted processing order, which is a requirement of the HashBuilder but does not affect the mathematical order-independence of the result.",
+        "edge_cases_analyzed": "Parallel state root computation (crates/trie/parallel/src/root.rs) where storage roots are computed in parallel but deterministically combined; sparse trie updates where only changed entries are re-processed; intermediate progress resumption."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "The MPT root is a mathematical function of the key-value set, independent of processing order. Reth's implementation processes entries in sorted order (a requirement of the HashBuilder) and produces deterministic results. The parallel implementation correctly handles concurrent storage root computation.",
+        "recommendation": "No action required. Order-independence is a mathematical property of the MPT, correctly implemented through sorted iteration."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0067",
+      "property_id": "PROP-0046",
+      "title": "Verify Trust Boundary Integrity: Are Accounts correctly routed through encode_node?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/trie.rs",
+        "lines": "428-432"
+      },
+      "code_excerpt": "self.account_rlp.clear();\nlet trie_account = account.into_trie_account(storage_root);\ntrie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\nhash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);",
+      "phase1_finding": {
+        "description": "Accounts are correctly routed through the encoding pipeline: (1) the Account struct is converted to TrieAccount via into_trie_account(storage_root), which includes nonce, balance, storage_root, and code_hash; (2) the TrieAccount is RLP-encoded via the Encodable trait; (3) the RLP-encoded bytes are passed to hash_builder.add_leaf(). This matches the Ethereum specification where accounts are stored as RLP-encoded [nonce, balance, storageRoot, codeHash] tuples.",
+        "code_behavior": "The into_trie_account() method (crates/primitives-traits/src/account.rs:61-69) constructs a TrieAccount with nonce, balance, storage_root, and code_hash (defaulting to KECCAK_EMPTY if no bytecode). The encode() method performs standard RLP encoding. The buffer is cleared before each use (line 429) to prevent data leakage between accounts.",
+        "relevant_functions": [
+          "Account::into_trie_account",
+          "TrieAccount::encode",
+          "StateRootContext::process_storage_root_result",
+          "HashBuilder::add_leaf"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "Incorrect account encoding would produce wrong state roots. Missing fields, wrong field order, or incorrect RLP encoding would cause consensus failures.",
+        "vulnerability_assessment": "No vulnerability. The encoding pipeline is correct: Account -> TrieAccount (with computed storage_root) -> RLP encoding -> add_leaf. The TrieAccount struct from alloy_trie follows the Ethereum specification for account encoding [nonce, balance, storageRoot, codeHash]. The buffer is properly cleared between accounts.",
+        "edge_cases_analyzed": "Account with no bytecode (code_hash defaults to KECCAK_EMPTY); account with empty storage (storage_root is EMPTY_ROOT_HASH); account with zero nonce and balance; buffer reuse with clear()."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Accounts are correctly converted to TrieAccount format (with storage_root and code_hash), RLP-encoded, and passed to the HashBuilder. The encoding follows the Ethereum specification. The buffer is properly cleared between uses. Tests in crates/trie/common/src/account.rs verify the conversion.",
+        "recommendation": "No action required. The account encoding pipeline is correct and well-tested."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-0068",
+      "property_id": "PROP-0047",
+      "title": "Verify Trust Boundary Integrity: Is root() cross-implementation compatible?",
+      "code_scope": {
+        "file": "crates/trie/trie/src/test_utils.rs",
+        "lines": "1-49"
+      },
+      "code_excerpt": "pub fn state_root<I, S>(accounts: I) -> B256\nwhere\n    I: IntoIterator<Item = (Address, (Account, S))>,\n    S: IntoIterator<Item = (B256, U256)>,\n{\n    let encoded_accounts = accounts.into_iter().map(|(address, (account, storage))| {\n        let storage_root = storage_root(storage);\n        let account = account.into_trie_account(storage_root);\n        (address, alloy_rlp::encode(account))\n    });\n    triehash::sec_trie_root::<KeccakHasher, _, _, _>(encoded_accounts)\n}",
+      "phase1_finding": {
+        "description": "Cross-implementation compatibility is achieved through: (1) use of the alloy_trie library, which is shared across multiple Rust Ethereum clients; (2) test utility functions that use triehash::sec_trie_root as an independent reference implementation for validation; (3) participation in the Ethereum Foundation's hive test suite for cross-client compatibility; (4) standard RLP encoding via alloy_rlp and keccak256 hashing.",
+        "code_behavior": "The test_utils.rs file provides reference implementations (state_root, storage_root) using triehash::sec_trie_root, which is an independent MPT implementation. These are used in tests (crates/trie/db/tests/trie.rs) to verify that Reth's optimized trie computation produces the same roots as the reference implementation. The triehash::trie_root function sorts entries internally, providing an order-independent reference.",
+        "relevant_functions": [
+          "test_utils::state_root",
+          "test_utils::storage_root",
+          "triehash::sec_trie_root",
+          "triehash::trie_root"
+        ]
+      },
+      "phase2_finding": {
+        "attack_surface": "If Reth's root computation diverged from other implementations, the node would fail to sync with the network and reject valid blocks or accept invalid ones.",
+        "vulnerability_assessment": "No vulnerability. Cross-implementation compatibility is ensured through: (1) reference implementation testing with triehash crate; (2) shared alloy libraries used by multiple clients; (3) Ethereum consensus test suite (hive tests). The trie implementation follows the Ethereum Yellow Paper specification.",
+        "edge_cases_analyzed": "Empty state root (EMPTY_ROOT_HASH constant matches spec); genesis block state root; large state with millions of accounts; EIP-7685 and other recent EIP compatibility."
+      },
+      "phase3_finding": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "reasoning": "Cross-implementation compatibility is verified through reference implementation testing (triehash crate), shared libraries (alloy), and Ethereum consensus test suites. The test utilities explicitly compare Reth's optimized trie computation against independent reference implementations.",
+        "recommendation": "No action required. Continue participating in cross-client testing (hive) and maintaining reference implementation tests."
+      },
+      "final_classification": "safe"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 14,
+    "item_count": 50,
+    "timestamp": 1770366251,
+    "processed_ids": [
+      "CHK-0019",
+      "CHK-0020",
+      "CHK-0021",
+      "CHK-0022",
+      "CHK-0023",
+      "CHK-0024",
+      "CHK-0025",
+      "CHK-0026",
+      "CHK-0027",
+      "CHK-0028",
+      "CHK-0029",
+      "CHK-0030",
+      "CHK-0031",
+      "CHK-0032",
+      "CHK-0033",
+      "CHK-0034",
+      "CHK-0035",
+      "CHK-0036",
+      "CHK-0037",
+      "CHK-0038",
+      "CHK-0039",
+      "CHK-0040",
+      "CHK-0041",
+      "CHK-0042",
+      "CHK-0043",
+      "CHK-0044",
+      "CHK-0045",
+      "CHK-0046",
+      "CHK-0047",
+      "CHK-0048",
+      "CHK-0049",
+      "CHK-0050",
+      "CHK-0051",
+      "CHK-0052",
+      "CHK-0053",
+      "CHK-0054",
+      "CHK-0055",
+      "CHK-0056",
+      "CHK-0057",
+      "CHK-0058",
+      "CHK-0059",
+      "CHK-0060",
+      "CHK-0061",
+      "CHK-0062",
+      "CHK-0063",
+      "CHK-0064",
+      "CHK-0065",
+      "CHK-0066",
+      "CHK-0067",
+      "CHK-0068"
+    ]
+  }
+}
