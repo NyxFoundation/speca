@@ -301,25 +301,64 @@ class Phase02Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 02 (Checklist Generation)."""
     
     def load_items(self) -> list[dict[str, Any]]:
-        """Load properties from 01e partials."""
+        """Load properties from 01e partials efficiently with deduplication."""
         import glob
         
-        items = []
+        items = {}  # Deduplication map
         for filepath in sorted(glob.glob("outputs/01e_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
                 for prop in data.get("properties", []):
-                    if isinstance(prop, dict) and prop.get("id"):
-                        items.append({
-                            "property_id": prop.get("id"),
-                            "property": prop,
-                            "source_file": filepath,
-                        })
+                    if isinstance(prop, dict):
+                        prop_id = prop.get("id")
+                        if prop_id and prop_id not in items:
+                            # Keep first occurrence
+                            items[prop_id] = {
+                                "property_id": prop_id,
+                                "property": prop,
+                                "source_file": filepath,
+                            }
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
         
-        return items
+        return list(items.values())
+
+    def apply_early_exit(
+        self,
+        items: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Apply early exit for properties without required fields."""
+        early_exit_results = []
+        items_to_process = []
+        
+        for item in items:
+            prop = item.get("property", {})
+            
+            # Check required fields
+            if not prop.get("id"):
+                early_exit_results.append(self._build_skip_result(item, "missing property id"))
+                continue
+            
+            # Skip out-of-scope properties
+            reachability = prop.get("reachability", {})
+            if reachability.get("bug_bounty_scope") == "out-of-scope":
+                early_exit_results.append(self._build_skip_result(item, "out-of-scope"))
+                continue
+            
+            items_to_process.append(item)
+        
+        return early_exit_results, items_to_process
+    
+    def _build_skip_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
+        """Build a skip result for early exit items."""
+        return {
+            "check_id": f"SKIP-{item.get('property_id', 'unknown')}",
+            "property_id": item.get("property_id"),
+            "checklist": [],  # Empty checklist for skipped items
+            "skipped": True,
+            "skip_reason": reason,
+        }
 
 
 class Phase03Orchestrator(BaseOrchestrator):
@@ -341,7 +380,7 @@ class Phase03Orchestrator(BaseOrchestrator):
         self._build_property_subgraph_map()
         
         items = {}
-        for filepath in sorted(glob.glob("outputs/02_CHECKLIST_PARTIAL_*.json")):
+        for filepath in sorted(glob.glob("outputs/02_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
