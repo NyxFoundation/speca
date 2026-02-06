@@ -7,8 +7,8 @@ This repo defines two quantitative evaluation tracks:
 RQ1: Sherlock Audit Contest (Audit Map vs Issues)
 
 Method
-- Inputs: audit findings JSON (03_*.json) produced by the agent and the Sherlock contest issue CSV.
-- Matching: 3-stage matching (text similarity, token overlap, optional LLM adjudication).
+- Inputs: audit findings JSON (03_PARTIAL_*.json / 03_AUDITMAP_PARTIAL_*.json) produced by the agent and the Sherlock contest issue CSV.
+- Matching: 3-stage matching (text similarity, token overlap, keyword candidate selection + optional LLM adjudication).
 - Output: overlap vs new findings, per-branch summaries, matching details.
 - Optional: statistical comparison vs a baseline run, and human-label precision on sampled "new" findings.
 - Code: see `benchmarks/rq1/` (matchers, stats, evaluate). `benchmarks/rq1/cli.py` is the CLI wrapper.
@@ -16,6 +16,7 @@ Method
 Core metrics
 - overlap_rate: fraction of audit items matched to known issues.
 - new_rate: fraction of audit items not matched (candidate novel findings).
+- issue_recall: fraction of known issues matched by at least one audit item.
 - stage_counts: how many matches came from each matching stage.
 - llm_calls: number of LLM adjudications used.
 - overlap_rate_ci / new_rate_ci: bootstrap confidence intervals.
@@ -70,6 +71,7 @@ Outputs
 - benchmarks/results/rq1/sherlock_ethereum_audit_contest/evaluation_summary.json
 - benchmarks/results/rq1/sherlock_ethereum_audit_contest/evaluation_<branch>.json
 - benchmarks/results/rq1/sherlock_ethereum_audit_contest/human_eval_sample.jsonl (if requested)
+- benchmarks/results/rq1/sherlock_ethereum_audit_contest/evaluation_summary.md
 
 Workflow (GitHub Actions)
 - .github/workflows/benchmark-rq1-sherlock-eval.yml

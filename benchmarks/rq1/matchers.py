@@ -116,13 +116,21 @@ def extract_audit_items(files: Iterable[Path]) -> list[AuditItem]:
     return items
 
 
-def select_top_candidates(audit_item: AuditItem, issues: list[Issue], top_k: int) -> list[Issue]:
-    scored: list[tuple[float, Issue]] = []
+def select_keyword_candidates(
+    audit_item: AuditItem,
+    issues: list[Issue],
+    top_k: int,
+    min_overlap: int,
+) -> list[Issue]:
+    scored: list[tuple[int, float, Issue]] = []
     for issue in issues:
+        overlap = len(audit_item.tokens & issue.tokens)
+        if overlap < min_overlap:
+            continue
         score = jaccard(audit_item.tokens, issue.tokens)
-        scored.append((score, issue))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [issue for score, issue in scored[:top_k] if score > 0.0]
+        scored.append((overlap, score, issue))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [issue for overlap, score, issue in scored[:top_k]]
 
 
 def call_claude(prompt: str) -> str:
@@ -213,6 +221,8 @@ def match_items(
     llm_max: int,
     stage1_threshold: float,
     stage2_threshold: float,
+    keyword_min_overlap: int,
+    candidate_top_k: int,
 ) -> tuple[dict[str, dict], dict, int]:
     matches: dict[str, dict] = {}
     stage_counts = {"stage1": 0, "stage2": 0, "stage3": 0}
@@ -259,7 +269,12 @@ def match_items(
                 continue
             if llm_calls >= llm_max:
                 break
-            candidates = select_top_candidates(item, issues, top_k=5)
+            candidates = select_keyword_candidates(
+                item,
+                issues,
+                top_k=candidate_top_k,
+                min_overlap=keyword_min_overlap,
+            )
             if not candidates:
                 continue
             llm_calls += 1

@@ -47,6 +47,8 @@ def match_branch(
     llm_max: int,
     stage1_threshold: float,
     stage2_threshold: float,
+    keyword_min_overlap: int,
+    candidate_top_k: int,
 ) -> tuple[dict, list[AuditItem]]:
     sanitized = sanitize_branch(branch)
     branch_dir = results_dir / sanitized
@@ -60,6 +62,8 @@ def match_branch(
         llm_max,
         stage1_threshold,
         stage2_threshold,
+        keyword_min_overlap,
+        candidate_top_k,
     )
 
     total = len(audit_items)
@@ -67,6 +71,9 @@ def match_branch(
     new_total = total - matched_total
     overlap_rate = matched_total / total if total else 0.0
     new_rate = new_total / total if total else 0.0
+    matched_issue_ids = {match["issue_id"] for match in matches.values() if match.get("issue_id")}
+    issues_matched_total = len(matched_issue_ids)
+    issue_recall = issues_matched_total / len(issues) if issues else 0.0
 
     detail = {
         "branch": branch,
@@ -76,6 +83,8 @@ def match_branch(
         "new_total": new_total,
         "overlap_rate": overlap_rate,
         "new_rate": new_rate,
+        "issues_matched_total": issues_matched_total,
+        "issue_recall": issue_recall,
         "stage_counts": stage_counts,
         "llm_used": use_llm,
         "llm_calls": llm_calls,
@@ -95,6 +104,8 @@ def evaluate_branches(
     llm_max: int,
     stage1_threshold: float,
     stage2_threshold: float,
+    keyword_min_overlap: int,
+    candidate_top_k: int,
     baseline_dir: Path | None,
     bootstrap_samples: int,
     bootstrap_seed: int,
@@ -113,6 +124,14 @@ def evaluate_branches(
         "dataset": {"path": str(csv_path), "issues": len(issues)},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "branches": {},
+        "match_config": {
+            "stage1_threshold": stage1_threshold,
+            "stage2_threshold": stage2_threshold,
+            "keyword_min_overlap": keyword_min_overlap,
+            "candidate_top_k": candidate_top_k,
+            "llm_max": llm_max,
+            "llm_used": use_llm,
+        },
     }
     if metadata_path and metadata_path.exists():
         try:
@@ -123,6 +142,8 @@ def evaluate_branches(
     human_candidates: list[dict] = []
     human_lookup: dict[tuple[str, str], dict] = {}
 
+    overall_matched_issue_ids: set[str] = set()
+
     for branch in branches:
         detail, audit_items = match_branch(
             branch,
@@ -132,6 +153,8 @@ def evaluate_branches(
             llm_max,
             stage1_threshold,
             stage2_threshold,
+            keyword_min_overlap,
+            candidate_top_k,
         )
 
         matched_flags = [item.item_id in detail["matches"] for item in audit_items]
@@ -175,6 +198,8 @@ def evaluate_branches(
             "new_total": detail["new_total"],
             "overlap_rate": detail["overlap_rate"],
             "new_rate": detail["new_rate"],
+            "issues_matched_total": detail["issues_matched_total"],
+            "issue_recall": detail["issue_recall"],
             "overlap_rate_ci": overlap_ci,
             "new_rate_ci": new_ci,
             "stage_counts": detail["stage_counts"],
@@ -183,6 +208,10 @@ def evaluate_branches(
         }
         if baseline_stats:
             summary["branches"][branch]["baseline_comparison"] = baseline_stats
+
+        overall_matched_issue_ids.update(
+            match["issue_id"] for match in detail["matches"].values() if match.get("issue_id")
+        )
 
         for item in audit_items:
             matched = item.item_id in detail["matches"]
@@ -206,6 +235,9 @@ def evaluate_branches(
             }
             human_candidates.append(record)
             human_lookup[(branch, item.item_id)] = record
+
+    summary["issues_matched_total"] = len(overall_matched_issue_ids)
+    summary["issue_recall"] = len(overall_matched_issue_ids) / len(issues) if issues else 0.0
 
     summary_path = results_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

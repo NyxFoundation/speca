@@ -31,6 +31,8 @@ def main() -> None:
     parser.add_argument("--llm-max", type=int, default=200)
     parser.add_argument("--stage1-threshold", type=float, default=0.88)
     parser.add_argument("--stage2-threshold", type=float, default=0.25)
+    parser.add_argument("--keyword-min-overlap", type=int, default=2)
+    parser.add_argument("--candidate-top-k", type=int, default=5)
     parser.add_argument("--baseline-results", type=str, default="", help="Baseline results dir with evaluation_*.json")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
@@ -53,6 +55,8 @@ def main() -> None:
         llm_max=args.llm_max,
         stage1_threshold=args.stage1_threshold,
         stage2_threshold=args.stage2_threshold,
+        keyword_min_overlap=args.keyword_min_overlap,
+        candidate_top_k=args.candidate_top_k,
         baseline_dir=Path(args.baseline_results) if args.baseline_results else None,
         bootstrap_samples=args.bootstrap_samples,
         bootstrap_seed=args.bootstrap_seed,

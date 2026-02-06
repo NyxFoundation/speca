@@ -64,6 +64,7 @@ jobs:
         run: |
           uv run python benchmarks/scripts/collect_branch_outputs.py \
             --branches "${{ inputs.branches }}" \
+            --output-globs "03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,03_TARGET_INFO.json" \
             --output-root "benchmarks/results/rq1/sherlock_ethereum_audit_contest"
 
       - name: Verify Collected Outputs
@@ -72,10 +73,13 @@ jobs:
           import glob
           import os
           branches = [b.strip() for b in os.environ.get("BRANCHES", "").split(",") if b.strip()]
+          patterns = [p.strip() for p in os.environ.get("OUTPUT_GLOBS", "").split(",") if p.strip()]
           missing = []
           for branch in branches:
             sanitized = branch.replace("/", "__")
-            matches = glob.glob(f"benchmarks/results/rq1/sherlock_ethereum_audit_contest/{sanitized}/03_*.json")
+            matches = []
+            for pattern in patterns:
+              matches.extend(glob.glob(f"benchmarks/results/rq1/sherlock_ethereum_audit_contest/{sanitized}/{pattern}"))
             if not matches:
               missing.append(branch)
           if missing:
@@ -83,6 +87,25 @@ jobs:
           PY
         env:
           BRANCHES: ${{ inputs.branches }}
+          OUTPUT_GLOBS: "03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,03_TARGET_INFO.json"
+
+      - name: Capture AI Version
+        run: |
+          AI_VERSION="unknown"
+          if [ "${{ inputs.use_llm }}" = "true" ] && command -v claude >/dev/null 2>&1; then
+            AI_VERSION="$(claude --version 2>/dev/null | head -n1)"
+            if [ -z "$AI_VERSION" ]; then
+              AI_VERSION="unknown"
+            fi
+          fi
+          echo "AI_VERSION=$AI_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build Run Metadata
+        run: |
+          uv run python benchmarks/rq1/build_metadata.py \
+            --collection "benchmarks/results/rq1/sherlock_ethereum_audit_contest/collection_summary.json" \
+            --output "benchmarks/results/rq1/sherlock_ethereum_audit_contest/run_metadata.json" \
+            --ai-version "${AI_VERSION}"
 
       - name: Evaluate Matches
         run: |
@@ -94,7 +117,15 @@ jobs:
             --branches "${{ inputs.branches }}" \
             --results-dir "benchmarks/results/rq1/sherlock_ethereum_audit_contest" \
             --llm-max "${{ inputs.llm_max }}" \
+            --metadata "benchmarks/results/rq1/sherlock_ethereum_audit_contest/run_metadata.json" \
             $LLM_FLAG
+
+      - name: Generate Markdown Report
+        run: |
+          uv run python benchmarks/rq1/generate_report.py \
+            --summary "benchmarks/results/rq1/sherlock_ethereum_audit_contest/evaluation_summary.json" \
+            --collection "benchmarks/results/rq1/sherlock_ethereum_audit_contest/collection_summary.json" \
+            --output "benchmarks/results/rq1/sherlock_ethereum_audit_contest/evaluation_summary.md"
 
       - name: Push Evaluation Results
         if: always()
