@@ -1,0 +1,351 @@
+[
+  {
+    "check_id": "CHK-PROP-0013-001",
+    "property_id": "PROP-0013",
+    "title": "Is keccak256 collision resistance maintained for Ethereum address and key spaces?",
+    "severity": "Critical",
+    "phase1_result": {
+      "abstract_domain": "Cryptographic hash function domain: Input space (arbitrary-length byte sequences) mapped to 256-bit output space via Keccak-256. The implementation uses golang.org/x/crypto/sha3.NewLegacyKeccak256() which provides standard Keccak-256 (pre-SHA3) as specified in Ethereum Yellow Paper.",
+      "abstract_state_transitions": "Key hashing flow: raw_key → crypto.Keccak256(key) → 32-byte hash → trie operations. StateTrie.MustGet/GetAccount wraps all key access with crypto.Keccak256(key). The hasher uses crypto.NewKeccakState() for node hashing with full 32-byte output via Read() method. No truncation, padding modification, or algorithmic changes occur.",
+      "potential_violations": "None identified. The implementation uses the standard Go crypto library (golang.org/x/crypto/sha3) without modification. Full 32-byte (256-bit) output is used consistently across all hashing operations. No custom implementations or modifications that could weaken collision resistance.",
+      "summary": "Keccak-256 implementation verified as standard and unmodified, providing full 128-bit collision resistance (2^128 security level) for the 256-bit output space."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "StateTrie.MustGet() at secure_trie.go:105",
+        "StateTrie.GetAccount() at secure_trie.go:112",
+        "hasher.hash() at hasher.go:59",
+        "crypto.Keccak256() at crypto.go:92"
+      ],
+      "reachability_path": "Application → StateTrie.GetAccount(address) → crypto.Keccak256(address.Bytes()) → sha3.NewLegacyKeccak256() → standard Keccak-256 computation → 32-byte output → trie.Get(hashedKey)",
+      "symbolic_constraints": "Let k1, k2 be distinct keys. Collision occurs iff Keccak256(k1) = Keccak256(k2). Probability bounded by birthday paradox: P(collision) ≤ n²/2^257 where n is number of keys. For Ethereum's ~10^8 addresses, P ≈ 10^16/2^257 ≈ 10^-61 (negligible).",
+      "feasibility": "Collision requires solving the preimage problem for Keccak-256 or finding natural collisions. Best known attacks on Keccak-256 require 2^128 operations (brute force on collision resistance). Computationally infeasible with current and foreseeable technology.",
+      "summary": "Symbolic analysis confirms collision resistance is maintained at cryptographic security levels (128-bit security). No feasible attack path exists within the implementation."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀k1,k2 ∈ KeySpace. (k1 ≠ k2) ⟹ P(H(k1) = H(k2)) ≤ 2^-128 where H = Keccak256.\n\nProof: (1) Implementation delegates to golang.org/x/crypto/sha3.NewLegacyKeccak256(), a well-vetted implementation of the Keccak-256 standard. (2) Keccak-256 has 256-bit output and proven collision resistance of 2^128 operations. (3) Code inspection shows no truncation (Read(h[:]) fills full 32 bytes), no custom mixing, no weakening transformations. (4) The hasher.hashData() uses the same KeccakState without modification. (5) All key paths through StateTrie enforce hashing before trie operations. Therefore, collision resistance is maintained at the theoretical cryptographic bound.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds with cryptographic certainty. The implementation correctly uses standard Keccak-256 without weakening modifications, maintaining full 128-bit collision resistance."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation uses the standard, well-audited golang.org/x/crypto/sha3 library for Keccak-256 without any modifications, truncations, or custom logic that could weaken collision resistance. Full 32-byte output is used consistently. The cryptographic properties of Keccak-256 (128-bit collision resistance) are fully preserved. Code paths verified through StateTrie wrapper and hasher implementation."
+  },
+  {
+    "check_id": "CHK-PROP-0014-001",
+    "property_id": "PROP-0014",
+    "title": "Does encode_node correctly dispatch all value types through isinstance chain?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Node type domain in Go MPT: {fullNode, shortNode, hashNode, valueNode, nil}. Type dispatch occurs in hasher.hash() via Go's type switch. Values stored in trie are raw byte slices (valueNode). Higher-level encoding (Account/Transaction/Receipt) occurs at state layer before trie insertion.",
+      "abstract_state_transitions": "Encoding flow: node → type switch{case *shortNode: encodeShortNode(); case *fullNode: encodeFullNode(); case hashNode: return n; default: panic}. encodeShortNode distinguishes leaf (hasTerm=true, encode Key+Val) vs extension (hasTerm=false, encode Key+hash(Val)). Values are always valueNode ([]byte), not structured types.",
+      "potential_violations": "Conceptual mismatch with Python specification: Python EELS uses isinstance chain for value types (Account/Transaction/etc). Go separates concerns: trie layer handles node types only; state layer (types.StateAccount, etc.) handles value encoding via RLP before trie insertion. No violation if we recognize architectural difference.",
+      "summary": "Go's type switch correctly handles all four trie node types (fullNode, shortNode, hashNode, valueNode). Value-level encoding is handled at state layer, not trie layer, which is architecturally sound."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "hasher.hash() at hasher.go:59",
+        "hasher.encodeShortNode() at hasher.go:108",
+        "hasher.encodeFullNode() at hasher.go:137"
+      ],
+      "reachability_path": "trie.Commit() → hasher.hash(root) → type switch → {encodeShortNode | encodeFullNode} → RLP encoding → 32-byte threshold check → hash or embed. Value nodes are always []byte at this layer; structured encoding happens in state.StateDB before trie.Update().",
+      "symbolic_constraints": "Completeness: ∀n ∈ NodeTypes. (n ∈ {*fullNode, *shortNode, hashNode, valueNode}) ⟹ hasher.hash(n) terminates with encoded output. Panic on unknown type ensures exhaustive handling. Leaf nodes reach encodeShortNode with hasTerm(Key)=true; extension nodes have hasTerm(Key)=false.",
+      "feasibility": "All node types are statically enumerable in Go's type system. Type switch with default case (panic) ensures no unhandled types reach execution. Trace through insert() shows valueNode is only created from input value []byte. Structured types (StateAccount) are RLP-encoded at state layer before trie insertion.",
+      "summary": "Type dispatch is complete and correct for trie layer. Structured value encoding is correctly delegated to state layer (types.StateAccount.MarshalBinary, etc.), maintaining separation of concerns."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀n ∈ ReachableNodes. hasher.hash(n) correctly encodes n according to its type.\n\nProof: (1) Go's type switch is exhaustive with cases for *fullNode, *shortNode, hashNode, and default panic. (2) valueNode does not reach hash() - it's embedded directly in shortNode.Val for leaf nodes and encoded via leafNodeEncoder. (3) shortNode encoding correctly distinguishes leaf (hasTerm → leafNodeEncoder with Key+Val) vs extension (¬hasTerm → extNodeEncoder with Key+hash(Val)). (4) fullNode encodes all 17 children (16 nibbles + value slot) via fullnodeEncoder. (5) hashNode is returned as-is (already encoded). (6) State-layer values (Account, etc.) are RLP-encoded before trie insertion (e.g., StateAccount.MarshalBinary at state_account.go), so trie only sees []byte. Therefore, all types are correctly dispatched.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. Type dispatch is complete and correct at the trie layer. Value encoding is correctly handled at the state layer before trie operations."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The Go implementation uses a type switch with exhaustive coverage of all node types (fullNode, shortNode, hashNode, valueNode). The architectural separation between trie layer (node encoding) and state layer (value encoding) is correct and maintains the separation of concerns principle. Unlike Python EELS which may combine these concerns, Go's approach is cleaner. All code paths verified through hasher.hash() and encode methods."
+  },
+  {
+    "check_id": "CHK-PROP-0015-001",
+    "property_id": "PROP-0015",
+    "title": "Does the previous_trie.encode_node fallback produce semantically correct encoding?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Fork compatibility domain: Python EELS uses previous_trie.encode_node fallback for cross-fork compatibility when new fork encoding is undefined. Go's architecture: trie layer is fork-agnostic; fork-specific encoding handled at state/types layer (e.g., StateAccount RLP encoding varies by fork, but trie sees only []byte).",
+      "abstract_state_transitions": "Go flow: Fork-specific state → types.StateAccount.MarshalBinary(fork) → []byte → trie.Update(key, encodedBytes). Trie layer has single encoding path: node → RLP(node) → hash. No fork-specific dispatching in trie code. Fork compatibility achieved by state layer producing fork-appropriate encodings before trie insertion.",
+      "potential_violations": "Architectural mismatch: Python EELS spec concept (previous_trie.encode_node) doesn't map to geth. Geth achieves same goal via different architecture (state layer fork handling). No violation if we recognize this is an architectural difference, not a missing feature.",
+      "summary": "Go's trie has no previous_trie.encode_node concept because fork compatibility is handled at state layer. Trie encoding is fork-agnostic and unified."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "types.StateAccount encoding (fork-specific)",
+        "trie.Update() (fork-agnostic)",
+        "hasher.hash() (fork-agnostic)"
+      ],
+      "reachability_path": "Fork-specific state operations → StateAccount.MarshalBinary(fork) → RLP-encoded bytes → trie.Update(key, bytes) → single trie encoding path. No fallback mechanism needed because trie never handles fork-specific types directly.",
+      "symbolic_constraints": "Cross-fork compatibility: ∀ fork f1, f2. StateAccount.MarshalBinary(f1) produces f1-valid encoding; trie.Update() treats as opaque []byte; trie.Hash() produces merkle root independent of fork semantics. Fork-specific decoding handled at state layer retrieval: trie.Get() → []byte → StateAccount.UnmarshalBinary(fork) → decoded account.",
+      "feasibility": "Trace through types/state_account.go shows RLP encoding varies by fork (e.g., pre-EIP fields vs post-EIP fields). Trie code (trie.go, hasher.go) contains no fork-specific logic - all nodes are RLP-encoded uniformly. Fork compatibility verified via state layer tests, not trie tests.",
+      "summary": "No fallback mechanism exists or is needed. Fork compatibility is correctly achieved via state layer abstraction. Trie remains fork-agnostic."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: Cross-fork trie operations are semantically correct without previous_trie fallback.\n\nProof: (1) Geth's architecture separates fork-aware state layer from fork-agnostic trie layer. (2) State layer (types.StateAccount, etc.) handles fork-specific encoding before trie insertion: different forks produce different RLP encodings, but trie receives only []byte. (3) Trie layer has single, unified encoding path (hasher.encodeShortNode/encodeFullNode) independent of fork. (4) This achieves equivalent functionality to Python EELS' fallback: fork-appropriate encodings are stored in trie, but trie code doesn't need fork-specific logic. (5) Architectural pattern verified across codebase: consensus/state layer handles protocol rules, trie layer handles merkle structure. Therefore, absence of fallback is correct architectural choice, not missing feature.",
+      "scope_classification": "out-of-scope",
+      "summary": "This check is based on Python EELS architecture that doesn't apply to Go implementation. Go correctly achieves cross-fork compatibility via different architectural pattern (state layer abstraction). Property holds via alternative mechanism."
+    },
+    "final_classification": "out-of-scope",
+    "confidence": "high",
+    "justification": "This property is specific to the Python EELS architecture where trie encoding has fork-specific logic with fallback mechanisms. Go-ethereum uses a different architectural pattern: the trie layer is completely fork-agnostic and handles only raw byte values, while fork-specific encoding/decoding is handled at the state/types layer before values reach the trie. This architectural difference doesn't represent a security vulnerability - it's a valid alternative design that achieves the same goal (cross-fork compatibility) through separation of concerns. The trie's fork-agnostic design is actually cleaner and more maintainable."
+  },
+  {
+    "check_id": "CHK-PROP-0016-001",
+    "property_id": "PROP-0016",
+    "title": "Does copy_trie produce a completely independent copy?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Trie copy semantics: Source trie T1 with state {root, owner, flags, reader, tracers} → Copy() → new trie T2 with independent state. Independence requirement: ∀ modifications M to T1 or T2, other trie remains unchanged. Requires deep copy of all mutable structures.",
+      "abstract_state_transitions": "Copy flow: Trie.Copy() → {root: copyNode(t.root), owner: t.owner (value copy), committed: t.committed (value copy), unhashed: t.unhashed (value copy), uncommitted: t.uncommitted (value copy), reader: t.reader (shared immutable), opTracer: t.opTracer.copy(), prevalueTracer: t.prevalueTracer.Copy()}. copyNode() recurses through node tree.",
+      "potential_violations": "Potential shallow copy issues: (1) nodeFlag.hash could share underlying []byte, (2) shortNode.Key could share slice, (3) valueNode could share slice, (4) fullNode.Children could share nodes, (5) reader/tracers could share mutable state. Must verify deep copy at all levels.",
+      "summary": "Copy() calls copyNode() for recursive deep copy. Must verify copyNode() handles all node types with proper deep copying of byte slices and recursive node copying."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "Trie.Copy() at trie.go:71",
+        "copyNode() at trie.go:617"
+      ],
+      "reachability_path": "Application → trie.Copy() → copyNode(root) → type switch{case nil: return nil; case valueNode: common.CopyBytes(n); case *shortNode: {flags.copy(), CopyBytes(Key), copyNode(Val)}; case *fullNode: {flags.copy(), for each child: copyNode(child)}; case hashNode: return n (immutable)}. nodeFlag.copy() uses common.CopyBytes(hash).",
+      "symbolic_constraints": "Independence: Let T2 = T1.Copy(). For any node n1 in T1 and n2 in T2 at corresponding position: (1) If n is valueNode/shortNode.Key/nodeFlag.hash: n1 and n2 have distinct underlying arrays (common.CopyBytes allocates new []byte). (2) If n is node pointer: n1 ≠ n2 (new allocation). (3) hashNode is immutable ([]byte), returned as-is is safe. (4) reader is immutable after creation. Modifications to T1 won't affect T2's node structures.",
+      "feasibility": "Trace copyNode implementation: (1) valueNode: common.CopyBytes(n) allocates new slice. (2) shortNode: new struct with CopyBytes(Key) and copyNode(Val) - fully independent. (3) fullNode: new struct with loop copying all 17 children via copyNode() - fully independent. (4) nodeFlag.copy() uses common.CopyBytes(hash) - independent. (5) hashNode returned as-is - but hashNode is immutable reference to DB, never modified. Therefore, all mutable state is deep-copied.",
+      "summary": "Complete deep copy verified through code inspection. All mutable structures (byte slices, node pointers) are recursively deep-copied. Immutable references (hashNode, reader) safely shared."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ tries T1, T2. (T2 = T1.Copy()) ⟹ (∀ modifications M. M(T1) doesn't affect T2 ∧ M(T2) doesn't affect T1).\n\nProof by structural induction on node tree:\nBase cases:\n  - nil node: copyNode(nil) = nil. Independent by construction.\n  - valueNode: copyNode(v) = common.CopyBytes(v). New allocation, independent.\n  - hashNode: copyNode(h) = h. Immutable reference to database, safe to share.\n\nInductive cases:\n  - shortNode: Assume copyNode(n.Val) produces independent copy (IH). Then copyNode(shortNode{Key: k, Val: v}) = shortNode{Key: CopyBytes(k), Val: copyNode(v), flags: flags.copy()}. New struct, independent Key copy, independent Val by IH, independent flags (CopyBytes(hash)). Therefore independent.\n  - fullNode: Assume copyNode(child_i) produces independent copy for all i (IH). Then copyNode(fullNode{Children: [c0..c16]}) creates new struct with independent flags.copy() and Children[i] = copyNode(c_i) for all i. By IH, all children independent. Therefore independent.\n\nBy induction, copyNode(T1.root) produces independent tree. Trie.Copy() also copies scalar fields (owner, committed, etc.) by value and copies tracers with .copy() methods. reader is immutable. Therefore T1 and T2 are fully independent.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. copyNode() performs complete structural recursion with deep copying of all mutable state. Independence verified via structural induction proof."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation correctly performs a complete deep copy of the entire trie structure. copyNode() recursively copies all node types with proper deep copying: valueNode and shortNode.Key use common.CopyBytes() for independent byte slice allocation, shortNode and fullNode recursively copy child nodes, nodeFlag.copy() deep-copies the hash bytes. The only shared state (hashNode references and reader) is immutable, so sharing is safe. Structural induction proof confirms independence. Implementation verified at trie.go:617-644."
+  },
+  {
+    "check_id": "CHK-PROP-0018-001",
+    "property_id": "PROP-0018",
+    "title": "Does trie_set with default value correctly delete existing keys?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Trie update semantics with empty value: trie.Update(key, value) where len(value)==0 should delete key from trie. Delete operation must: (1) remove node from tree structure, (2) simplify parent nodes if needed (e.g., merge shortNodes, collapse fullNode with single child), (3) update trie root, (4) mark as dirty.",
+      "abstract_state_transitions": "Update flow: trie.Update(key, []byte{}) → trie.update(key, value) → if len(value)!=0: insert() else: delete() → delete(root, nil, keybytesToHex(key)) → recursive deletion with simplification → update root. Delete returns (dirty bool, newNode, error) where dirty=true if modification occurred.",
+      "potential_violations": "Potential issues: (1) Empty value might create valueNode([]byte{}) instead of deleting, (2) Delete might leave node in place marked as deleted instead of structural removal, (3) Trie root might not be updated if delete returns dirty=false.",
+      "summary": "Implementation check: trie.update() line 361-373 shows if len(value)!=0: insert(), else: delete(). Must verify delete() performs structural removal, not just marking."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "Trie.Update() at trie.go:349",
+        "trie.update() at trie.go:357",
+        "trie.delete() at trie.go:486"
+      ],
+      "reachability_path": "trie.Update(key, []byte{}) → trie.update(key, []byte{}) → len(value)==0 check → trie.delete(root, nil, keybytesToHex(key)) → returns (dirty, newNode, err) → if no error: t.root = newNode. Delete path: shortNode with full key match → return (true, nil, nil) removes node structurally.",
+      "symbolic_constraints": "Deletion semantics: delete(shortNode{Key: k, Val: v}, _, k) where key fully matches → return (true, nil, nil). The nil return value is assigned to parent's child pointer, structurally removing the node. Simplification: if delete leaves fullNode with single child, collapses to shortNode. If delete leaves shortNode child under shortNode, merges keys. Therefore structural removal is complete.",
+      "feasibility": "Code inspection at trie.go:486-563: delete() on shortNode with matchlen==len(key) returns (true, nil, nil) at line 499 - structural removal. Full node child deletion at line 543-558 collapses fullNode to shortNode if only one child remains. Parent shortNode+child shortNode merge at line 510-521. All paths lead to structural removal and simplification, not just marking.",
+      "summary": "Delete correctly performs structural removal. Empty value triggers delete() which returns nil to remove node, with proper simplification of parent nodes."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ key k, trie T. (T.Update(k, []byte{}) where k exists in T) ⟹ (T.Get(k) returns nil after update).\n\nProof: (1) trie.update() at line 361-373 checks len(value)!=0. Since len([]byte{})=0, takes else branch: delete(). (2) delete(root, nil, keybytesToHex(key)) called at line 368. (3) For existing key in shortNode: delete() at line 493 returns (true, nil, nil) - nil removes node structurally. (4) For existing key in fullNode: delete() at line 543 removes child and collapses if needed. (5) Return value (dirty=true, newNode, nil) assigned to t.root at line 372. (6) Subsequent Get(k) traverses new tree structure, finds nil at deleted position, returns nil per get() line 166-167. (7) Tracers notified via opTracer.onDelete() at line 497. Therefore, key is structurally removed and becomes unreachable.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. Empty value correctly triggers structural deletion via delete() method, which removes nodes from tree and simplifies structure."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation correctly handles empty value as a delete operation. At trie.go:357-375, the update() method explicitly checks len(value)!=0 and calls delete() for empty values. The delete() method at trie.go:486 performs proper structural removal by returning nil for the deleted node (line 499), which removes it from the parent's child array. The implementation also includes proper trie simplification: collapsing fullNode to shortNode when only one child remains, and merging adjacent shortNodes. Verification through Get() after deletion confirms the key is fully removed."
+  },
+  {
+    "check_id": "CHK-PROP-0019-001",
+    "property_id": "PROP-0019",
+    "title": "Is trie_set with default value a no-op when the key doesn't exist?",
+    "severity": "Medium",
+    "phase1_result": {
+      "abstract_domain": "No-op semantics: Deleting non-existent key should not modify trie state. No-op requires: (1) trie root unchanged, (2) no new nodes created, (3) no nodes deleted, (4) dirty flags not set, (5) hash unchanged. Implementation must detect non-existence and early-exit.",
+      "abstract_state_transitions": "Delete flow for non-existent key: delete(node, prefix, key) → traverse tree following key path → reach nil or key mismatch → return (false, originalNode, nil). The dirty=false flag indicates no modification. Caller checks dirty flag and skips root update if false.",
+      "potential_violations": "Potential issues: (1) delete() might mark nodes as dirty even when key not found, (2) unhashed/uncommitted counters might increment, (3) opTracer might record spurious deletion, (4) trie root might be reassigned even with dirty=false.",
+      "summary": "Implementation must return dirty=false for non-existent key deletion. Caller must respect dirty flag and not update state when false."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "trie.update() at trie.go:357",
+        "trie.delete() at trie.go:486"
+      ],
+      "reachability_path": "trie.Update(nonexistent_key, []byte{}) → trie.update() line 368: delete(root, nil, key) → case nil node line 564: return (false, nil, nil) OR case shortNode with key mismatch line 490: return (false, n, nil) → return to update() line 368-372: if err==nil: t.root = newNode. Since newNode==nil from delete on nil, assigns nil to root. POTENTIAL BUG: should check dirty flag!",
+      "symbolic_constraints": "No-op condition: delete(nil, _, _) = (false, nil, nil). Caller logic: _, n, err := delete(...); if err==nil: t.root = n. The root assignment happens unconditionally if no error! If delete on nil returns (false, nil, nil), assigns nil to non-nil root. This breaks no-op requirement. HOWEVER: reviewing code more carefully...",
+      "feasibility": "Re-examining trie.go:486: delete() on nil at line 564 returns (false, nil, nil). But this is for empty trie! For non-existent key in non-empty trie: (1) shortNode key mismatch line 490: returns (false, n, nil) - preserves node. (2) fullNode with nil child line 527: returns (false, n, nil) - preserves node. In update() line 368-372, if delete returns dirty=false, newNode is the original node n, so t.root=n is no-op. If trie is initially empty (root=nil), delete(nil) returns (false, nil, nil), t.root=nil remains nil - still no-op. Therefore, implementation is correct.",
+      "summary": "No-op confirmed. delete() returns dirty=false and original node for non-existent keys. Root assignment with dirty=false preserves original structure."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ key k, trie T. (k ∉ T) ⟹ (T.Update(k, []byte{}) doesn't modify T).\n\nProof: Case 1: Empty trie (root=nil). delete(nil, _, _) at line 564 returns (false, nil, nil). t.root=nil assignment is no-op. ✓\n\nCase 2: Non-empty trie, key mismatch in shortNode. delete() at line 490-491 finds matchlen < len(n.Key), returns (false, n, nil). t.root remains unchanged (or if n is child, parent pointer unchanged). ✓\n\nCase 3: Non-empty trie, key descends to nil child in fullNode. delete() at line 527 checks n.Children[key[0]]==nil on non-existent path, returns (false, n, nil). Node preserved. ✓\n\nCase 4: Non-empty trie, key descends through shortNode to nil. delete() line 505 calls delete(n.Val, ..., suffix) where n.Val could eventually be nil. Returns (false, n.Val, nil) up the stack, preserves all nodes. ✓\n\nIn all cases, dirty=false causes no modification. Counters t.unhashed++ and t.uncommitted++ at line 358-359 DO increment unconditionally - POTENTIAL ISSUE. But these are performance hints, not correctness-affecting. Actual trie structure unchanged, which is the semantic requirement.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds for trie structure (root and nodes unchanged). Minor issue: unhashed/uncommitted counters increment even for no-op, but these are performance hints and don't affect correctness."
+    },
+    "final_classification": "safe",
+    "confidence": "medium",
+    "justification": "The trie structure remains unchanged when deleting a non-existent key, which is the core requirement. The delete() method correctly returns dirty=false for non-existent keys (trie.go:486-565), and this preserves the original node structure. However, there's a minor imperfection: the unhashed and uncommitted counters increment unconditionally at lines 358-359 even for no-op deletions. This is a performance suboptimality (may trigger unnecessary rehashing) but not a correctness issue - the trie structure and hash remain correct. The implementation satisfies the no-op requirement for all practical purposes."
+  },
+  {
+    "check_id": "CHK-PROP-0020-001",
+    "property_id": "PROP-0020",
+    "title": "Does trie_get return exactly trie.default for non-existent keys?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Missing key semantics: Get() on non-existent key must return default value. In Go, default for []byte is nil. Consistency requires: all missing key paths return nil, no path returns empty slice []byte{}, no path returns error for non-existent (vs. error for corruption/missing nodes in DB).",
+      "abstract_state_transitions": "Get flow: trie.Get(key) → keybytesToHex(key) → get(root, key, 0) → traverse tree → {case nil: return (nil, nil, false, nil); case mismatch: return (nil, node, false, nil); case hashNode: resolve from DB or error}. The returned value nil is Go's zero value for []byte. Caller at line 162 returns value directly.",
+      "potential_violations": "Potential issues: (1) Mismatch path might return []byte{} instead of nil, (2) Different code paths might return inconsistent defaults (nil vs []byte{}), (3) Error returned for non-existent (should be nil, no error).",
+      "summary": "Implementation must return (nil, nil) for all non-existent key paths, distinguishing from (nil, error) for database corruption."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "Trie.Get() at trie.go:152",
+        "trie.get() at trie.go:164"
+      ],
+      "reachability_path": "trie.Get(nonexistent_key) → trie.get(root, keybytesToHex(key), 0) → case nil node line 166: return (nil, nil, false, nil) OR case shortNode line 171: !HasPrefix → return (nil, n, false, nil) OR case fullNode line 181: get(n.Children[key[pos]], ...) where child is nil → recurses to case nil. All paths return nil value with nil error.",
+      "symbolic_constraints": "Default value consistency: Let miss(k, T) denote all code paths where key k is not in trie T. ∀ paths p ∈ miss(k, T). p returns (v, _, _, e) where v==nil ∧ e==nil. Checked paths: (1) nil node → nil value, (2) shortNode mismatch → nil value, (3) fullNode with nil child → recurses to (1). No path returns []byte{} (empty but non-nil). No path returns error unless hashNode resolution fails (database issue, not key absence).",
+      "feasibility": "Code inspection: (1) Line 167: case nil returns explicit nil. (2) Line 173: shortNode mismatch returns nil (result of not taking line 169 valueNode path). (3) Line 181: fullNode nil child recurses to case nil. (4) valueNode case line 169 returns n (the value), only reached if key exists. (5) hashNode case line 187-192 returns error only if resolveAndTrack fails (DB issue), not for key absence. All non-existent key paths converge to nil value, nil error.",
+      "summary": "Consistent nil return for all missing keys confirmed. No path returns []byte{} or spurious error."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ key k, trie T. (k ∉ T) ⟹ (T.Get(k) returns (nil, nil)).\n\nProof by case analysis on get() paths:\n\nCase 1: Empty trie (root=nil). get(nil, _, _) line 166-167 returns (nil, nil, false, nil). Trie.Get() line 162 returns nil value with nil error. ✓\n\nCase 2: shortNode mismatch. get(*shortNode{Key: k', ...}, k, pos) where k[pos:] doesn't have prefix k'. Line 171 check fails, line 173 returns (nil, n, false, nil). No subsequent modification. Trie.Get() returns nil. ✓\n\nCase 3: fullNode with nil child. get(*fullNode{Children: [...]}, k, pos) where Children[k[pos]]==nil. Line 181 recurses: get(nil, k, pos+1) → case 1 → nil. ✓\n\nCase 4: shortNode prefix match but value not found in subtree. Line 175 recurses: get(n.Val, k, pos+len(Key)). If n.Val is fullNode with missing path or shortNode with mismatch, recurses to cases 2-3. Eventually reaches nil. ✓\n\nCase 5: Key exists - n is valueNode. Line 169 returns n (the value). NOT a missing key path. ✗ (expected)\n\nAll missing key paths return nil value. Consistent default verified.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. All code paths for non-existent keys return nil (Go's zero value for []byte) with no error, distinguishing from database errors."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation correctly and consistently returns nil for all non-existent keys. Code inspection at trie.go:164-196 shows all missing key paths (nil node, shortNode mismatch, fullNode nil child) explicitly return nil as the value with nil error. The implementation properly distinguishes between key absence (returns nil, no error) and database corruption (returns nil with MissingNodeError). Go's type system ensures nil is the consistent zero value for []byte across all paths. No code path returns an empty slice []byte{} or other inconsistent default."
+  },
+  {
+    "check_id": "CHK-PROP-0023-001",
+    "property_id": "PROP-0023",
+    "title": "Can nibble values outside [0, 15] reach nibble_list_to_compact?",
+    "severity": "Medium",
+    "phase1_result": {
+      "abstract_domain": "Nibble validity domain: Nibbles must be in [0, 15] for valid hex encoding. Invalid nibbles (>15) could cause undefined behavior in compact encoding (encodes two nibbles per byte via n1<<4 | n2). Terminator value 16 is special flag, must be handled separately.",
+      "abstract_state_transitions": "Nibble sources: (1) keybytesToHex() at encoding.go:96-104 converts bytes to nibbles via b/16 (high nibble) and b%16 (low nibble), appends terminator 16. (2) compactToHex() decodes compact format back to nibbles. (3) Trie operations (insert, delete, get) pass nibble slices derived from keybytesToHex(). hexToCompact() consumes nibbles.",
+      "potential_violations": "Potential invalid nibble sources: (1) Corrupted database data decoded via compactToHex(), (2) Direct nibble array manipulation in trie operations, (3) Integer overflow in arithmetic operations, (4) External input not validated.",
+      "summary": "Must verify: keybytesToHex() produces valid [0, 15] nibbles plus 16 terminator; no other code path can inject invalid values; hexToCompact() handles terminator correctly."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "keybytesToHex() at encoding.go:96",
+        "hexToCompact() at encoding.go:37",
+        "compactToHex() at encoding.go:82"
+      ],
+      "reachability_path": "Application → trie.Update(key, value) → keybytesToHex(key) produces nibbles [0..15]+[16] → insert() uses nibbles for tree navigation → hasher.encodeShortNode() → hexToCompact(n.Key) consumes nibbles. Nibble validation: b/16 ∈ [0, 15] for b ∈ [0, 255]; b%16 ∈ [0, 15] for b ∈ [0, 255]; terminator 16 explicitly appended line 103.",
+      "symbolic_constraints": "Nibble validity: ∀b ∈ [0, 255]. (b/16 ∈ [0, 15]) ∧ (b%16 ∈ [0, 15]). Proof: b/16 = ⌊b/16⌋ ≤ ⌊255/16⌋ = 15; b%16 = b mod 16 ∈ [0, 15] by definition. Terminator: hasTerm(hex) at line 154 checks if hex[len-1]==16. hexToCompact line 39-41 checks hasTerm and strips terminator before processing nibbles. Therefore, hexToCompact processes only [0, 15] nibbles, terminator handled separately.",
+      "feasibility": "Trace nibble flow: (1) keybytesToHex() line 100-101: nibbles[i*2]=b/16, nibbles[i*2+1]=b%16. Arithmetic guarantees [0, 15]. (2) Line 103: nibbles[l-1]=16. Only position with 16. (3) insert()/delete()/get() use slicing (key[pos:], key[:matchlen]) which preserves values. (4) hexToCompact() line 39-41: if hasTerm: strips last byte (16), processes remaining [0, 15] nibbles. (5) Line 50: decodeNibbles(hex, buf[1:]) packs nibbles via hex[ni]<<4 | hex[ni+1] - requires nibbles ≤ 15 for valid byte. (6) compactToHex() line 86: calls keybytesToHex(compact) which produces [0, 15]+[16], then manipulates with base[chop:] at line 93 - still [0, 15] values. No code path can introduce >16 values.",
+      "summary": "Nibbles are always [0, 15] (plus 16 terminator). keybytesToHex() generates valid range via division/modulo. hexToCompact() separates terminator handling from nibble encoding. No injection vector for invalid nibbles."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ nibbles n passed to hexToCompact(). (∀ i ∈ [0, len(n) - hasTerm(n)). n[i] ∈ [0, 15]) ∧ (hasTerm(n) ⟹ n[len(n)-1] == 16).\n\nProof: (1) Primary nibble source: keybytesToHex() at encoding.go:96. For each byte b: nibbles[i*2] = b/16 ∈ [0, 15] (since b ≤ 255, b/16 ≤ 15.9), nibbles[i*2+1] = b%16 ∈ [0, 15] (by modulo definition). Terminator: nibbles[len-1] = 16 at line 103. ✓\n\n(2) Nibble manipulation in trie: insert()/delete()/get() use slice operations (key[pos:], key[:matchlen+1]) which create sub-slices of original nibble array from keybytesToHex(). Values preserved. ✓\n\n(3) compactToHex() decoding: calls keybytesToHex(compact) at line 86, producing valid [0, 15]+[16] nibbles, then slices with base[chop:] at line 93. Values still ≤ 16. ✓\n\n(4) hexToCompact() at line 37: if hasTerm(hex) at line 39, terminator detected and hex = hex[:len-1] at line 41, removing 16 before nibble processing. decodeNibbles() at line 50 encodes remaining nibbles via nibbles[ni]<<4 | nibbles[ni+1], which is valid for nibbles ∈ [0, 15]. ✓\n\nNo code path creates nibbles > 16 or allows >16 into hexToCompact() nibble processing. Invariant holds.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. Nibbles are guaranteed to be [0, 15] (plus 16 terminator) by keybytesToHex()'s arithmetic and hexToCompact()'s terminator handling."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation has strong guarantees preventing invalid nibbles. The keybytesToHex() function at encoding.go:96-104 generates nibbles using division (b/16) and modulo (b%16) operations which mathematically guarantee values in [0, 15] for any byte input. The terminator value 16 is explicitly appended and handled separately by hasTerm() checks. The hexToCompact() function at encoding.go:37 properly strips the terminator before processing nibbles. All trie operations use slice operations that preserve nibble values. There is no code path that could introduce invalid nibble values (>16) into the compact encoding process."
+  },
+  {
+    "check_id": "CHK-PROP-0024-001",
+    "property_id": "PROP-0024",
+    "title": "Does nibble_list_to_compact correctly encode the is_leaf flag and parity?",
+    "severity": "Critical",
+    "phase1_result": {
+      "abstract_domain": "Hex-Prefix (HP) encoding specification (Yellow Paper): First byte encodes flags and parity. Bit 5 (0x20): leaf flag (1 if terminator present, 0 if extension). Bit 4 (0x10): odd length flag (1 if odd number of nibbles, 0 if even). Low nibble of first byte: first nibble if odd, 0 if even. Remaining bytes: packed nibbles (2 per byte).",
+      "abstract_state_transitions": "hexToCompact flow: (1) Detect terminator via hasTerm() line 39 → set terminator byte to 1 or 0. (2) Strip terminator from hex line 41. (3) Check odd length via len(hex)&1 line 45. (4) Compose flag byte: buf[0] = terminator<<5 (leaf: 0x20 or 0x00) line 44. (5) If odd: buf[0] |= 1<<4 (add 0x10) line 46; buf[0] |= hex[0] (add first nibble) line 47; hex = hex[1:] line 48. (6) decodeNibbles(hex, buf[1:]) packs remaining nibbles line 50.",
+      "potential_violations": "Potential encoding errors: (1) Terminator bit position wrong (should be bit 5, might be different), (2) Odd flag bit position wrong (should be bit 4), (3) Nibble packing incorrect for odd length, (4) Flag byte composition order incorrect.",
+      "summary": "Must verify: terminator<<5 produces 0x20 for leaf, 1<<4 produces 0x10 for odd, first nibble correctly placed in low nibble of flag byte."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "hexToCompact() at encoding.go:37",
+        "hasTerm() at encoding.go:154"
+      ],
+      "reachability_path": "hasher.encodeShortNode() → hexToCompact(n.Key) → terminator = hasTerm(hex) ? 1 : 0 → buf[0] = terminator << 5 → if len(hex)&1 == 1: buf[0] |= 1<<4; buf[0] |= hex[0] → decodeNibbles(remaining, buf[1:]) → RLP encode → merkle hash.",
+      "symbolic_constraints": "Flag byte encoding: Let t = hasTerm(hex) ∈ {0, 1}, p = len(hex)&1 ∈ {0, 1} (parity), n₀ = hex[0] if p==1 else 0. Then buf[0] = (t<<5) | (p<<4) | n₀ = t×0x20 + p×0x10 + n₀. For leaf with even length: t=1, p=0, n₀=0 → 0x20. For leaf with odd length and first nibble 0x0A: t=1, p=1, n₀=0x0A → 0x20 | 0x10 | 0x0A = 0x3A. For extension with even length: t=0, p=0, n₀=0 → 0x00. For extension with odd length and first nibble 0x05: t=0, p=1, n₀=0x05 → 0x10 | 0x05 = 0x15. Matches Yellow Paper HP encoding.",
+      "feasibility": "Code verification: (1) Line 39: if hasTerm(hex) { terminator = 1 }. hasTerm() line 154 checks hex[len-1]==16. Correct. (2) Line 44: buf[0] = terminator << 5. If terminator==1, buf[0]=0x20. Correct for leaf. (3) Line 45-48: if len(hex)&1 == 1 { buf[0] |= 1<<4; buf[0] |= hex[0]; hex = hex[1:] }. Sets bit 4 (0x10) for odd and includes first nibble in low nibble of flag byte. Correct. (4) Line 50: decodeNibbles(hex, buf[1:]). decodeNibbles line 133-136 packs nibbles: bytes[bi] = nibbles[ni]<<4 | nibbles[ni+1]. Correct packing. HP encoding matches Yellow Paper exactly.",
+      "summary": "HP encoding fully correct. Terminator flag uses bit 5 (0x20), odd flag uses bit 4 (0x10), first nibble for odd length in low nibble, remaining nibbles packed 2 per byte."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: hexToCompact() produces HP-encoded output per Yellow Paper Appendix C.\n\nYellow Paper HP encoding specification:\n- Extension node, even length [hex_0, ..., hex_n]: [0x00, hex_0hex_1, hex_2hex_3, ...]\n- Extension node, odd length [hex_0, ..., hex_n]: [0x1hex_0, hex_1hex_2, hex_3hex_4, ...]\n- Leaf node, even length [hex_0, ..., hex_n]: [0x20, hex_0hex_1, hex_2hex_3, ...]\n- Leaf node, odd length [hex_0, ..., hex_n]: [0x3hex_0, hex_1hex_2, hex_3hex_4, ...]\n\nImplementation verification:\n(1) Leaf detection: hasTerm(hex) checks hex[len-1]==16 (terminator). If true, terminator=1, else 0. Line 39-41. ✓\n\n(2) Flag byte base: buf[0] = terminator << 5. If leaf: 0x20, if extension: 0x00. Line 44. ✓\n\n(3) Odd length: len(hex)&1 == 1. If true: buf[0] |= 1<<4 adds 0x10; buf[0] |= hex[0] adds first nibble. Lines 45-47. Example: leaf + odd + first nibble 0x03 → 0x20 | 0x10 | 0x03 = 0x33. Matches Yellow Paper 0x3hex_0. ✓\n\n(4) Even length: buf[0] remains as terminator<<5 (0x20 or 0x00). Matches Yellow Paper. ✓\n\n(5) Remaining nibbles: decodeNibbles(hex, buf[1:]) at line 50. For even length: encodes hex[0:]paired. For odd length: encodes hex[1:] paired (first already in flag byte). decodeNibbles packs via nibbles[ni]<<4 | nibbles[ni+1] at line 135. Correct pairing. ✓\n\nConclusion: Implementation exactly matches Yellow Paper HP encoding. Invariant holds.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. HP encoding implementation matches Yellow Paper specification exactly for all four cases (leaf/extension × even/odd)."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The hexToCompact() implementation at encoding.go:37-52 correctly implements Ethereum's Hex-Prefix (HP) encoding as specified in the Yellow Paper Appendix C. Bit 5 (0x20) correctly indicates leaf nodes (terminator present), bit 4 (0x10) correctly indicates odd-length keys, and the low nibble of the first byte correctly stores the first nibble for odd-length keys. The encoding has been verified against all four cases: leaf/extension × even/odd length. The implementation uses clear bit operations (terminator<<5, 1<<4) that match the specification exactly. This is critical for consensus as incorrect HP encoding would produce different merkle roots."
+  },
+  {
+    "check_id": "CHK-PROP-0028-001",
+    "property_id": "PROP-0028",
+    "title": "Does an empty trie produce the canonical EMPTY_TRIE_ROOT?",
+    "severity": "Critical",
+    "phase1_result": {
+      "abstract_domain": "Empty trie semantics: Trie with no elements must produce canonical empty root hash. Ethereum defines EMPTY_TRIE_ROOT = keccak256(RLP(empty_string)) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421. Critical for consensus: state roots must match across clients. Empty account storage must hash to canonical empty root.",
+      "abstract_state_transitions": "Empty trie states: (1) Newly created with New(EmptyRootHash, ...) has root=nil. (2) Trie with all keys deleted has root=nil. Hash computation: trie.Hash() → hashRoot() → if root==nil: return types.EmptyRootHash.Bytes() → return canonical empty root.",
+      "potential_violations": "Potential errors: (1) Empty trie might compute hash of nil node instead of returning canonical value, (2) EmptyRootHash constant might be incorrect, (3) Deleted-to-empty trie might not set root=nil, (4) Different empty states might produce different hashes.",
+      "summary": "Must verify: (1) Empty trie has root=nil, (2) hashRoot() checks root==nil and returns EmptyRootHash, (3) EmptyRootHash constant equals keccak256(RLP(''))."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "trie.Hash() at trie.go:689",
+        "trie.hashRoot() at trie.go:741",
+        "types.EmptyRootHash at types/hashes.go:26"
+      ],
+      "reachability_path": "Empty trie creation: New(TrieID(EmptyRootHash), db) → line 101: if id.Root != EmptyRootHash: resolveAndTrack(root) else: trie.root remains nil → trie.Hash() → hashRoot() → line 742: if t.root==nil: return types.EmptyRootHash.Bytes() → return 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421.",
+      "symbolic_constraints": "Canonical empty root: EmptyRootHash = keccak256(RLP('')) = keccak256(0x80) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421. Verification: RLP of empty byte string is 0x80 (per RLP spec: single byte < 0x80 encoded as byte+0x80). Keccak256(0x80) computes to 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421 (verifiable via Keccak implementation).",
+      "feasibility": "Code verification: (1) types/hashes.go:26: EmptyRootHash = common.HexToHash(\"56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421\"). Correct value. (2) trie.go:742: if t.root == nil { return types.EmptyRootHash.Bytes() }. Explicit check returns canonical value. (3) trie.go:101: New() with EmptyRootHash does not resolve root, leaves root=nil. (4) trie.go:372: delete all keys sets t.root = n where n=nil from delete() line 499. Deleted-to-empty trie also has root=nil. All empty trie paths converge to root=nil → canonical hash.",
+      "summary": "Empty trie correctly produces canonical EmptyRootHash in all cases: newly created, never inserted, or deleted-to-empty."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ trie T. (T is empty) ⟹ (T.Hash() == EmptyRootHash).\n\nDefinition: T is empty iff T.root == nil.\n\nProof of correct empty detection:\n(1) New trie created with EmptyRootHash: New(TrieID(EmptyRootHash), db) at trie.go:101 checks id.Root != EmptyRootHash. Since id.Root == EmptyRootHash, does not resolve, root remains nil. ✓\n\n(2) New trie created with zero hash: New(TrieID(ZeroHash), db) at trie.go:101 checks id.Root != ZeroHash. Since id.Root == ZeroHash (all zeros), does not resolve, root remains nil. ✓\n\n(3) Trie with all keys deleted: Last delete() at trie.go:499 returns (true, nil, nil). trie.update() line 372: t.root = nil. Empty. ✓\n\nProof of correct hash:\nhashRoot() at trie.go:742: if t.root == nil { return types.EmptyRootHash.Bytes() }. Returns canonical value. ✓\n\nProof of canonical value correctness:\nEmptyRootHash = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421. Per Yellow Paper and EIP-0, this is keccak256(RLP('')). RLP('') = 0x80 (empty string encoding). Keccak256([0x80]) = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421. Verifiable via standard Keccak implementation. ✓\n\nConclusion: All empty trie states produce canonical EmptyRootHash. Invariant holds.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. Empty tries are correctly detected (root==nil) and hash to the canonical EmptyRootHash value specified in Ethereum protocol."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation correctly handles empty tries and produces the canonical empty root hash. The hashRoot() method at trie.go:741-743 explicitly checks if root is nil and returns types.EmptyRootHash.Bytes(). The EmptyRootHash constant at types/hashes.go:26 is correctly set to 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421, which is keccak256(RLP('')) = keccak256(0x80) as specified in the Ethereum Yellow Paper. All empty trie states (newly created with EmptyRootHash, never inserted, deleted-to-empty) correctly result in root==nil, which produces the canonical hash. This is critical for consensus correctness."
+  },
+  {
+    "check_id": "CHK-PROP-0029-001",
+    "property_id": "PROP-0029",
+    "title": "Does patricialize with a single-element input correctly return a LeafNode?",
+    "severity": "High",
+    "phase1_result": {
+      "abstract_domain": "Single-element trie structure: Trie with exactly one key-value pair should result in root being a leaf node. In Go MPT, leaf is represented as shortNode with hasTerm(Key)==true (Key ends with terminator 16). Single insert on empty trie must create shortNode{Key: full_nibble_path_with_terminator, Val: valueNode(value)}.",
+      "abstract_state_transitions": "Single insert flow: New() creates empty trie with root=nil → Update(key, value) → insert(nil, [], keybytesToHex(key), valueNode(value)) → case nil with len(key)>0 line 432: return shortNode{key, value, newFlag()} → t.root = shortNode{keybytesToHex(key), valueNode(value)}. keybytesToHex appends terminator 16, so hasTerm(root.Key)==true → leaf node.",
+      "potential_violations": "Potential errors: (1) Single insert might create extension+value structure instead of direct leaf, (2) Terminator might not be appended to key, (3) Root might remain nil, (4) valueNode might be wrapped in another node type.",
+      "summary": "Must verify: insert(nil, _, key, value) with non-empty key creates shortNode{key, value} where key has terminator."
+    },
+    "phase2_result": {
+      "entry_points": [
+        "trie.Update() at trie.go:349",
+        "trie.insert() at trie.go:377",
+        "keybytesToHex() at encoding.go:96"
+      ],
+      "reachability_path": "Empty trie: trie.root=nil → trie.Update(key, value) → trie.update() line 360-366: k = keybytesToHex(key) appends terminator 16 → insert(nil, nil, k, valueNode(value)) → line 432: case nil, len(key)==len(k)>0: return (true, &shortNode{key, value, newFlag()}, nil) → t.root = shortNode{k, valueNode(value)}. Root is shortNode with Key ending in 16 (terminator), Val is valueNode. By definition, shortNode with terminator is leaf.",
+      "symbolic_constraints": "Leaf node definition: shortNode is leaf iff hasTerm(Key)==true iff Key[len(Key)-1]==16. Single insert: insert(nil, _, key, value) where len(key)>0 returns shortNode{key, value}. Since key comes from keybytesToHex(), key[len-1]=16 (line 103). Therefore hasTerm(Key)==true → leaf node. Structural invariant: single-element trie has root as leaf shortNode, no intermediate nodes.",
+      "feasibility": "Code trace: (1) keybytesToHex() line 103: nibbles[l-1] = 16. Terminator always appended. (2) insert() line 432: case nil with len(key)>0 returns &shortNode{key, value, t.newFlag()}. Direct shortNode creation, no branching. (3) No other node types created for single insert from nil. (4) hasher.encodeShortNode() line 110 checks hasTerm(n.Key) and encodes as leaf (leafNodeEncoder) vs extension. Single element encodes as leaf. Verified.",
+      "summary": "Single insert on empty trie creates shortNode with terminator (leaf node) directly. No intermediate structure. Correct patricialize behavior."
+    },
+    "phase3_result": {
+      "invariant_status": "holds",
+      "proof_sketch": "Invariant: ∀ key k, value v, empty trie T. T.Update(k, v) results in T.root being a leaf node.\n\nDefinitions:\n- Empty trie: T.root == nil.\n- Leaf node: shortNode{Key: k', Val: v'} where hasTerm(k') == true (k'[len-1] == 16).\n\nProof:\n(1) T.root == nil (empty trie assumption).\n\n(2) T.Update(k, v) calls trie.update(k, v) line 354.\n\n(3) trie.update() line 360: k' = keybytesToHex(k). By encoding.go:103, k'[len(k')-1] = 16 (terminator appended). Therefore hasTerm(k') == true. ✓\n\n(4) trie.update() line 361-366: len(v) != 0, so calls insert(t.root, nil, k', valueNode(v)).\n\n(5) insert(nil, nil, k', valueNode(v)) at line 377. Since t.root == nil, n == nil.\n\n(6) Line 378: len(k') > 0 (keys are never empty from keybytesToHex).\n\n(7) Line 432: case nil: return (true, &shortNode{key, value, t.newFlag()}, nil). Creates shortNode{k', valueNode(v)}.\n\n(8) Line 366: t.root = returned node = shortNode{k', valueNode(v)} where k' has terminator.\n\n(9) By definition, shortNode with terminator is leaf node. ✓\n\n(10) Verification via encoding: hasher.encodeShortNode() line 110 checks hasTerm(n.Key). For our root, hasTerm(k')==true, so encodes as leaf (leafNodeEncoder) line 111-114. Confirms leaf status. ✓\n\nConclusion: Single insert on empty trie produces leaf node (shortNode with terminator). Invariant holds.",
+      "scope_classification": "in-scope",
+      "summary": "The invariant holds. Single-element trie results in root being a shortNode with terminator (leaf node), matching patricialize specification."
+    },
+    "final_classification": "safe",
+    "confidence": "high",
+    "justification": "The implementation correctly creates a leaf node for single-element tries. When inserting into an empty trie (root==nil), the insert() method at trie.go:377-433 directly creates a shortNode containing the full key path and value. The key is generated by keybytesToHex() which always appends terminator byte 16 at encoding.go:103, making it a leaf node by definition (hasTerm(Key)==true). The hasher correctly recognizes this as a leaf via hasTerm() check at hasher.go:110 and encodes it using leafNodeEncoder. No intermediate nodes (extensions or branches) are created for a single element, which is the optimal and correct structure."
+  }
+]

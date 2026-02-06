@@ -1,0 +1,327 @@
+{
+  "check_id": "W2B3:W2B3:CHK-0040#2",
+  "title": "Verify Trust Boundary Integrity: Is decode_transaction the inverse of encode_transaction?",
+  "severity": "High",
+  "property_id": "PROP-0040",
+
+  "phase2_symbolic_execution": {
+    "summary": "Symbolic execution of all encode/decode paths across five transaction types (LegacyTx, AccessListTx, DynamicFeeTx, BlobTx, SetCodeTx) reveals multiple counterexamples where round-trip property encode(decode(encode(tx))) != encode(tx) is violated, and two confirmed counterexamples where semantic field loss occurs.",
+
+    "counterexample_found": true,
+
+    "counterexamples": [
+      {
+        "id": "CE-01",
+        "title": "BlobTx Sidecar Loss on Canonical Encode/Decode Round-Trip",
+        "severity": "Medium",
+        "description": "The BlobTx.Sidecar field is tagged `rlp:\"-\"`, meaning the standard RLP encoder skips it. When BlobTx.encode() is called with Sidecar==nil (the canonical encoding path), the Sidecar is omitted. When BlobTx.encode() is called with Sidecar!=nil, it wraps the tx in blobTxWithBlobsV0 or blobTxWithBlobsV1 (the network encoding path). On BlobTx.decode(), the code detects which format was used by inspecting the first RLP element kind. If the first element is a List (the tx itself), it decodes the sidecar. If the first element is NOT a List (it's chainID), it decodes without sidecar. This means: MarshalBinary(tx_with_sidecar) -> bytes -> UnmarshalBinary(bytes) PRESERVES the sidecar (round-trip holds for network encoding). BUT: MarshalBinary(tx_without_sidecar) -> bytes -> UnmarshalBinary(bytes) produces tx_without_sidecar (round-trip holds trivially). The real issue is that once a BlobTx enters the canonical storage path (block inclusion), the sidecar is permanently stripped. This is BY DESIGN, but it means the round-trip property does NOT hold across the trust boundary of 'network encoding -> block storage -> retrieval': a transaction submitted with a sidecar will be retrieved without one.",
+        "symbolic_variables": {
+          "tx": "BlobTx with Sidecar != nil",
+          "encode_path": "tx.MarshalBinary() via encodeTyped -> BlobTx.encode()",
+          "path_condition": "tx.Sidecar != nil AND tx.Sidecar.Version == BlobSidecarVersion0"
+        },
+        "path_trace": [
+          "MarshalBinary() calls encodeTyped() which writes type byte 0x03 then calls BlobTx.encode()",
+          "BlobTx.encode() sees Sidecar != nil, wraps as blobTxWithBlobsV0{BlobTx, Blobs, Commitments, Proofs}",
+          "RLP encodes as [[chainID, nonce, ...], [blobs...], [commitments...], [proofs...]]",
+          "UnmarshalBinary() reads first byte 0x03 (< 0x7f), calls decodeTyped(b)",
+          "decodeTyped() dispatches to BlobTx.decode(b[1:])",
+          "BlobTx.decode() splits first element, sees it IS a list -> network encoding",
+          "Splits second element, sees it IS a list (blobs) -> v0 sidecar",
+          "Decodes as blobTxWithBlobsV0, assigns sidecar, round-trip HOLDS for network encoding",
+          "HOWEVER: When tx enters block via miner (worker.go:320), WithoutBlobTxSidecar() is called",
+          "Subsequent EncodeRLP for block storage omits sidecar (rlp:\"-\" tag)",
+          "On retrieval from DB, DecodeRLP creates BlobTx with Sidecar==nil -> FIELD LOST"
+        ],
+        "satisfying_assignment": {
+          "tx_type": "BlobTxType (0x03)",
+          "sidecar": "non-nil BlobTxSidecar with Version=0, 1 blob, 1 commitment, 1 proof",
+          "encode_via": "EncodeRLP (for block storage, skips Sidecar due to rlp:\"-\")",
+          "decode_via": "DecodeRLP (reads canonical encoding, no sidecar present)",
+          "result": "decoded.Sidecar == nil, original.Sidecar != nil"
+        },
+        "impact": "Design-level information loss. The sidecar is intentionally separated from block storage. The blob pool stores sidecars separately. This is not a bug but a trust boundary asymmetry that callers must be aware of."
+      },
+      {
+        "id": "CE-02",
+        "title": "BlobTxSidecar encodedSize() Does Not Account for Version Field in V1 Encoding",
+        "severity": "Low",
+        "description": "The BlobTxSidecar.encodedSize() helper (tx_blob.go:136-148) computes the RLP size as: ListSize(blobs) + ListSize(commitments) + ListSize(proofs). However, the blobTxWithBlobsV1 struct includes an additional 'Version byte' field that is NOT accounted for in encodedSize(). This means that for V1 sidecars, the size computation in Transaction.Size() (transaction.go:583-584) and Transaction.WithoutBlobTxSidecar() (transaction.go:475) will be INCORRECT: it will undercount the actual encoded size by the RLP encoding of one byte (1 byte for the version field). This creates a size cache inconsistency: tx.Size() with V1 sidecar will return a value that does NOT match len(tx.MarshalBinary()).",
+        "symbolic_variables": {
+          "sc_version": "BlobSidecarVersion1 (byte 1)",
+          "sc_blobs": "N blobs",
+          "actual_v1_size": "rlp.ListSize(blobs) + rlp.ListSize(commitments) + rlp.ListSize(proofs) + 1 (version byte)",
+          "computed_v1_size": "rlp.ListSize(blobs) + rlp.ListSize(commitments) + rlp.ListSize(proofs)"
+        },
+        "path_trace": [
+          "Transaction.Size() at transaction.go:583: checks BlobTxSidecar() != nil",
+          "Calls rlp.ListSize(sc.encodedSize())",
+          "encodedSize() returns sum of ListSize for blobs+commitments+proofs (NO version byte)",
+          "But BlobTx.encode() for V1 wraps as blobTxWithBlobsV1{BlobTx, Version, Blobs, Commitments, Proofs}",
+          "The outer RLP list encoding of blobTxWithBlobsV1 includes the Version field",
+          "Therefore rlp.ListSize(sc.encodedSize()) < actual encoded sidecar size",
+          "This means tx.Size() < len(tx.MarshalBinary()) for V1 sidecar BlobTxs"
+        ],
+        "satisfying_assignment": {
+          "tx_type": "BlobTxType (0x03)",
+          "sidecar_version": "BlobSidecarVersion1 (1)",
+          "expected_size": "base_tx_size + rlp.ListSize(sc.encodedSize() + 1)",
+          "actual_computed_size": "base_tx_size + rlp.ListSize(sc.encodedSize())",
+          "delta": "1 byte (the version field RLP encoding)"
+        },
+        "impact": "Size cache returns incorrect value for V1 sidecar BlobTxs. This could affect DoS protection calculations, transaction pool eviction decisions, and block size tracking. The WithoutBlobTxSidecar() function also uses this computation, meaning the stripped transaction's size will also be slightly incorrect."
+      },
+      {
+        "id": "CE-03",
+        "title": "Size Cache Asymmetry Between DecodeRLP and UnmarshalBinary",
+        "severity": "Low",
+        "description": "DecodeRLP stores rlp.ListSize(size) as the cached size (transaction.go:154), which includes the RLP list header overhead. UnmarshalBinary stores uint64(len(b)) as the cached size (transaction.go:189), which is the raw byte length of the input. For legacy transactions, these represent different things: DecodeRLP computes the full RLP-encoded size (list header + content), while UnmarshalBinary stores the raw input length (which for legacy is the RLP bytes, so they match). For typed transactions, DecodeRLP stores the RLP string content size (without the outer RLP string header or type byte), while UnmarshalBinary stores the full byte length (with type byte but without any outer RLP wrapping). This means the same transaction decoded via DecodeRLP vs UnmarshalBinary may have different cached sizes, which could lead to inconsistent behavior in code that relies on tx.Size() returning the same value regardless of decode path.",
+        "symbolic_variables": {
+          "b": "encoded typed transaction bytes",
+          "size_via_DecodeRLP": "content_size (from rlp.Stream.Kind())",
+          "size_via_UnmarshalBinary": "len(b)"
+        },
+        "path_trace": [
+          "DecodeRLP at transaction.go:144-176: for typed tx, s.Kind() returns (String, size, nil)",
+          "size = content length of the RLP string (excludes outer RLP header)",
+          "setDecoded(inner, size) stores this value",
+          "UnmarshalBinary at transaction.go:181-198: for typed tx (b[0] <= 0x7f)",
+          "setDecoded(inner, uint64(len(b))) stores len(b) which includes the type byte",
+          "DecodeRLP size excludes type byte; UnmarshalBinary size includes type byte",
+          "Net difference: 1 byte (the type prefix byte)"
+        ],
+        "satisfying_assignment": {
+          "tx_type": "any typed tx (AccessListTx, DynamicFeeTx, BlobTx, SetCodeTx)",
+          "decode_via_DecodeRLP_size": "N (content only)",
+          "decode_via_UnmarshalBinary_size": "N + 1 (content + type byte)",
+          "mismatch": true
+        },
+        "impact": "Minor inconsistency in size caching. Transaction.Size() has a fallback that recomputes size when cache is 0, but code paths that rely on the pre-cached value could observe different sizes depending on decode path. In practice, this is mitigated because Size() recomputes if needed, but it's a latent correctness issue."
+      },
+      {
+        "id": "CE-04",
+        "title": "Transaction.time Not Preserved Across Encode/Decode",
+        "severity": "Informational",
+        "description": "The Transaction.time field is set to time.Now() in setDecoded() (transaction.go:226). This means that any encode/decode round-trip will reset the time field. The time field is not part of the encoded transaction data. This is intentional (it's a local spam-avoidance heuristic), but it means that the full Transaction struct does NOT round-trip. Only the inner TxData does.",
+        "symbolic_variables": {
+          "original_time": "T0",
+          "decoded_time": "time.Now() at decode instant"
+        },
+        "path_trace": [
+          "setDecoded() at transaction.go:224-230",
+          "tx.time = time.Now() is always called on decode",
+          "Original tx.time is lost"
+        ],
+        "satisfying_assignment": {
+          "original_time": "2024-01-01T00:00:00Z",
+          "decoded_time": "2024-01-01T00:00:01Z (current wall clock)",
+          "equal": false
+        },
+        "impact": "No security impact. The time field is only used for local transaction pool ordering heuristics. It is deliberately not serialized."
+      },
+      {
+        "id": "CE-05",
+        "title": "Hash and From Caches Reset on Decode",
+        "severity": "Informational",
+        "description": "The atomic.Pointer fields 'hash' and 'from' on Transaction are caches that are reset to nil/zero on decode. setDecoded() does not preserve them. This means tx.Hash() must be recomputed after decode, and the sender cache (from sigcache) is lost. This is correct behavior since caches should not be serialized, but it means the full Transaction struct does not round-trip at the Go struct level.",
+        "symbolic_variables": {},
+        "path_trace": [
+          "setDecoded() at transaction.go:224-230: only sets tx.inner, tx.time, tx.size",
+          "hash and from atomic.Pointers are zero-valued (nil)"
+        ],
+        "satisfying_assignment": {},
+        "impact": "No security impact. Cache miss on first access after decode, recomputed lazily."
+      },
+      {
+        "id": "CE-06",
+        "title": "LegacyTx.encode() and LegacyTx.decode() Panic Guards Are Dead Code for Standard Paths",
+        "severity": "Informational",
+        "description": "LegacyTx.encode() panics with 'encode called on LegacyTx' and LegacyTx.decode() panics with 'decode called on LegacyTx)'. These methods exist to satisfy the TxData interface but are never called in the standard encode/decode paths because Transaction.EncodeRLP(), MarshalBinary(), DecodeRLP(), and UnmarshalBinary() all special-case LegacyTxType to use direct RLP encoding on the LegacyTx struct rather than going through the typed tx dispatch. The panic guards serve as defense-in-depth: if any code path incorrectly routes a LegacyTx through the typed encoding, it will crash immediately rather than producing corrupt data.",
+        "symbolic_variables": {},
+        "path_trace": [
+          "EncodeRLP: if tx.Type() == LegacyTxType -> rlp.Encode(w, tx.inner) directly",
+          "MarshalBinary: if tx.Type() == LegacyTxType -> rlp.EncodeToBytes(tx.inner) directly",
+          "DecodeRLP: if kind == rlp.List -> decode as LegacyTx directly (no dispatch through decodeTyped)",
+          "UnmarshalBinary: if b[0] > 0x7f -> decode as LegacyTx directly",
+          "decodeTyped: switch on b[0] does NOT include case 0x00 (LegacyTxType)",
+          "Therefore LegacyTx.encode() and LegacyTx.decode() are unreachable from standard paths"
+        ],
+        "satisfying_assignment": {},
+        "impact": "No security impact. The panics are unreachable from standard code paths. They serve as invariant assertions."
+      },
+      {
+        "id": "CE-07",
+        "title": "UnmarshalBinary Legacy Detection Heuristic Differs from DecodeRLP",
+        "severity": "Low",
+        "description": "DecodeRLP (transaction.go:144-176) detects legacy transactions by checking if the RLP stream kind is 'List'. If the kind is a single Byte, it returns errShortTypedTx. UnmarshalBinary (transaction.go:181-198) detects legacy transactions by checking if b[0] > 0x7f. This is semantically equivalent but structurally different: RLP List encoding starts with a byte >= 0xc0, and RLP single bytes are 0x00-0x7f. The heuristic b[0] > 0x7f is correct because: (1) valid legacy RLP starts with a list header byte >= 0xc0, which satisfies b[0] > 0x7f, (2) typed transaction envelopes start with the type byte (0x01-0x04) which is <= 0x7f, (3) a single byte 0x00 (which would be LegacyTxType=0x00) satisfies b[0] <= 0x7f, correctly routing it to the typed decoder, where decodeTyped's switch does NOT include case 0x00, so it returns ErrTxTypeNotSupported. However, there is a subtle edge: if an attacker sends bytes where b[0] is in range 0x80-0xbf, this satisfies b[0] > 0x7f and UnmarshalBinary treats it as legacy. But RLP bytes in range 0x80-0xbf are SHORT STRING headers (not list headers). rlp.DecodeBytes() will fail with an error since it expects a list for LegacyTx. In DecodeRLP, this same input would have kind=String (not List), so it would go through the typed path and also fail (since the first byte would be read as content, not a valid type byte). Both paths reject the input, but through DIFFERENT error paths.",
+        "symbolic_variables": {
+          "b_0": "first byte of encoded transaction",
+          "range_0x80_0xbf": "RLP short string header range"
+        },
+        "path_trace": [
+          "Input: b = [0x80, ...] (short string header)",
+          "UnmarshalBinary: b[0]=0x80 > 0x7f -> treats as legacy",
+          "  -> rlp.DecodeBytes(b, &data) where data is LegacyTx",
+          "  -> RLP decoder sees short string header, expects list for struct -> ERROR",
+          "DecodeRLP: s.Kind() returns (String, size, nil) for 0x80",
+          "  -> falls to default case (typed tx envelope)",
+          "  -> reads bytes, calls decodeTyped(b)",
+          "  -> decodeTyped reads b[0] as type byte (0x80 or content), likely fails",
+          "Both paths reject, but via different error codes/messages"
+        ],
+        "satisfying_assignment": {
+          "input_byte_0": "0x80 (RLP short string header for empty string)",
+          "unmarshal_binary_path": "legacy detection -> rlp.DecodeBytes fails",
+          "decode_rlp_path": "typed tx path -> decodeTyped fails",
+          "both_reject": true,
+          "different_error_message": true
+        },
+        "impact": "No functional security impact since both paths reject invalid input. The different error messages are an information asymmetry that could theoretically be used for fingerprinting which decode path was used, but this has no practical security consequence."
+      }
+    ]
+  },
+
+  "phase2_5_reachability_analysis": {
+    "summary": "The encode/decode functions are reachable from two primary attacker-controlled entry points: (1) the eth p2p protocol handlers that decode transactions from network peers, and (2) the JSON-RPC eth_sendRawTransaction endpoint that decodes transactions from external callers. Both paths feed into the transaction pool which performs extensive validation before the transaction can affect state. The BlobTx sidecar encoding asymmetry (CE-01) is design-intentional and well-guarded. The V1 sidecar size miscalculation (CE-02) is the most actionable finding -- it is reachable from attacker-controlled inputs post-Osaka fork and could cause minor DoS via transaction pool size tracking inaccuracy.",
+
+    "entry_points": [
+      {
+        "name": "eth_sendRawTransaction JSON-RPC",
+        "file": "internal/ethapi/api.go",
+        "line": 1631,
+        "function": "TransactionAPI.SendRawTransaction",
+        "decode_method": "UnmarshalBinary",
+        "attacker_controlled": true,
+        "trust_level": "untrusted external caller"
+      },
+      {
+        "name": "P2P TransactionsMsg handler",
+        "file": "eth/protocols/eth/handlers.go",
+        "line": 487,
+        "function": "handleTransactions",
+        "decode_method": "DecodeRLP (via rlp.Decode on TransactionsPacket []*Transaction)",
+        "attacker_controlled": true,
+        "trust_level": "peer (semi-trusted, rate-limited, can be malicious)"
+      },
+      {
+        "name": "P2P PooledTransactionsResponse handler",
+        "file": "eth/protocols/eth/handlers.go",
+        "line": 507,
+        "function": "handlePooledTransactions",
+        "decode_method": "DecodeRLP (via rlp.Decode on PooledTransactionsPacket)",
+        "attacker_controlled": true,
+        "trust_level": "peer (semi-trusted)"
+      },
+      {
+        "name": "Block body decode (blockchain insertion)",
+        "file": "core/blockchain.go",
+        "line": 1386,
+        "function": "InsertChain -> block body decode",
+        "decode_method": "DecodeRLP (via block RLP decode)",
+        "attacker_controlled": true,
+        "trust_level": "peer-sourced block (validated by consensus)"
+      }
+    ],
+
+    "data_flow_paths": [
+      {
+        "path_id": "DFP-01",
+        "description": "RPC -> UnmarshalBinary -> TxPool.Add -> validation -> miner -> WithoutBlobTxSidecar -> block storage",
+        "stages": [
+          "eth_sendRawTransaction: raw bytes -> tx.UnmarshalBinary(input)",
+          "SubmitTransaction -> TxPool.Add(tx)",
+          "validateBlobTx: requires sidecar != nil for pool entry",
+          "Miner.commitBlobTransaction: tx.WithoutBlobTxSidecar() strips sidecar",
+          "Block storage: EncodeRLP on Transaction with Sidecar==nil (canonical encoding)"
+        ],
+        "sidecar_present_at_entry": true,
+        "sidecar_present_at_exit": false,
+        "by_design": true
+      },
+      {
+        "path_id": "DFP-02",
+        "description": "P2P peer -> DecodeRLP -> TxPool -> same as DFP-01",
+        "stages": [
+          "handleTransactions: msg.Decode(&txs) triggers Transaction.DecodeRLP",
+          "Same validation pipeline as DFP-01"
+        ],
+        "sidecar_present_at_entry": true,
+        "sidecar_present_at_exit": false,
+        "by_design": true
+      }
+    ],
+
+    "validation_layers": [
+      {
+        "layer": "Transaction decode",
+        "location": "core/types/transaction.go:202-221 (decodeTyped)",
+        "checks": "Type byte validation, minimum length check, RLP structural validity"
+      },
+      {
+        "layer": "Transaction pool validation",
+        "location": "core/txpool/validation.go:154-208",
+        "checks": "Sidecar presence, blob fee cap minimum, blob count limits, commitment hash validation, version-specific proof verification (V0 vs V1 based on fork)"
+      },
+      {
+        "layer": "Block validator",
+        "location": "core/block_validator.go:95-97",
+        "checks": "Rejects blocks containing transactions WITH sidecars (sidecar must be stripped before block inclusion)"
+      },
+      {
+        "layer": "Blockchain insertion",
+        "location": "core/blockchain.go:1387-1389",
+        "checks": "Same sidecar absence check as block validator"
+      },
+      {
+        "layer": "Blob sidecar version validation",
+        "location": "core/txpool/validation.go:185-208",
+        "checks": "Pre-Osaka: requires Version==0 with blob proofs; Post-Osaka: requires Version==1 with cell proofs"
+      }
+    ],
+
+    "attacker_controlled": true,
+
+    "classification": "defense-in-depth",
+
+    "per_counterexample_classification": {
+      "CE-01_BlobTx_Sidecar_Loss": {
+        "classification": "internal-only",
+        "rationale": "The sidecar stripping is by design. The system intentionally separates sidecar data from block storage. The blob pool manages sidecars independently. No attacker can exploit this to cause incorrect state transitions because the sidecar is only used for data availability verification at pool entry, and the canonical tx hash is computed WITHOUT the sidecar (as confirmed by the rlp:\"-\" tag and TestBlobTxHashing). An attacker sending a tx with a sidecar will have it validated and then stripped -- this is the correct behavior.",
+        "exploitable": false
+      },
+      "CE-02_V1_Sidecar_Size_Miscalculation": {
+        "classification": "defense-in-depth",
+        "rationale": "The encodedSize() function does not account for the Version byte in V1 sidecar encoding. This means Transaction.Size() will return a value SMALLER than the actual encoded size for V1 sidecar BlobTxs. Post-Osaka fork, this affects: (1) tx pool memory tracking - pool thinks transactions are ~1 byte smaller than they are, (2) WithoutBlobTxSidecar size subtraction - the stripped tx may have an incorrect cached size. The magnitude is tiny (1 byte per tx), so exploitation potential is negligible. However, it is a correctness bug that could compound if many V1 sidecar BlobTxs are in the pool.",
+        "exploitable": false,
+        "fix_suggestion": "Update encodedSize() to include the version byte size when Version == BlobSidecarVersion1, or update Size() / WithoutBlobTxSidecar() to account for the version field."
+      },
+      "CE-03_Size_Cache_Asymmetry": {
+        "classification": "internal-only",
+        "rationale": "The size cache difference between DecodeRLP and UnmarshalBinary is at most 1 byte (the type prefix). Transaction.Size() has a fallback recomputation when the cache is 0 or stale, so in practice this rarely matters. The two decode paths are used in different contexts (DecodeRLP for RLP streams like p2p, UnmarshalBinary for raw bytes like RPC), so the same transaction would not typically be decoded via both paths in the same process. Not exploitable.",
+        "exploitable": false
+      },
+      "CE-04_Time_Not_Preserved": {
+        "classification": "unreachable",
+        "rationale": "The time field is intentionally not serialized. No security impact.",
+        "exploitable": false
+      },
+      "CE-05_Cache_Reset": {
+        "classification": "unreachable",
+        "rationale": "Caches are correctly recomputed on demand. No security impact.",
+        "exploitable": false
+      },
+      "CE-06_LegacyTx_Panic_Guards": {
+        "classification": "unreachable",
+        "rationale": "The panic paths are unreachable from all standard code paths. They serve as invariant assertions.",
+        "exploitable": false
+      },
+      "CE-07_Heuristic_Divergence": {
+        "classification": "unreachable",
+        "rationale": "Both decode paths reject the same set of invalid inputs, just through different error paths. No functional difference in accept/reject behavior. Not exploitable.",
+        "exploitable": false
+      }
+    },
+
+    "notes": "The overall encode/decode architecture is sound. The BlobTx sidecar handling is the most complex part, with deliberate asymmetry between network encoding (with sidecar) and canonical encoding (without sidecar). The V1 sidecar size miscalculation (CE-02) is the only finding with any practical (though minimal) impact, and it only affects post-Osaka fork behavior. The transaction round-trip property holds for all consensus-relevant fields across all transaction types. Non-consensus fields (time, hash cache, from cache) are correctly treated as transient. The LegacyTx panic guards and the heuristic differences between DecodeRLP/UnmarshalBinary are defense-in-depth measures that function correctly."
+  }
+}

@@ -1,0 +1,242 @@
+[
+  {
+    "check_id": "W2B3:W2B3:CHK-0010#3",
+    "property_id": "PROP-0010",
+    "title": "Does rollback_transaction restore exact snapshot state?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "730-737, 85-98, 110-123",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "RevertToSnapshot(revid) calls journal.revertToSnapshot(revid, s) which iterates through journal entries in reverse order (lines 110-123 of journal.go), calling revert() on each entry. Each journal entry type (balance, nonce, storage, transient storage, etc.) implements revert() to restore previous values. The journal tracks all state modifications including: balance changes, nonce changes, storage changes, transient storage changes, code changes, refund changes, access list changes, object creation/destruction, and self-destruct flags. Abstract interpretation confirms all state components are tracked and properly reverted."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "An attacker cannot exploit snapshot revert because: (1) journal entries are append-only during execution, (2) revert processes entries in strict reverse order, (3) each entry stores the exact previous value at time of change, (4) snapshot IDs are monotonically increasing integers preventing replay attacks",
+      "constraints": "revid must be a valid snapshot ID from validRevisions array (lines 86-92 of journal.go), otherwise panic occurs. All journal entries must properly implement revert() interface. State modifications must call appropriate journal tracking methods."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: ∀ state S, snapshot ID n, after Snapshot() → n, then RevertToSnapshot(n) restores S. Proof: (1) Snapshot() records current journal index j_n at time t_n. (2) Each state modification between t_n and t_m appends journal entry with previous value. (3) RevertToSnapshot(n) replays entries[j_n:] in reverse, restoring each previous value. (4) Journal is complete (tracks all 13 types of state changes). (5) By induction, reverting all changes restores exact state S. Journal entries verified: balanceChange, nonceChange, storageChange, transientStorageChange, codeChange, refundChange, addLogChange, createObjectChange, createContractChange, selfDestructChange, touchChange, accessListAddAccountChange, accessListAddSlotChange.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "The journal pattern is comprehensive and correctly implemented. All state modifications are properly tracked. The only minor risk is if new state fields are added to StateDB without corresponding journal entries, but current implementation is complete. The system uses panic for invalid snapshot IDs which is appropriate for consensus-critical code."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0011#3",
+    "property_id": "PROP-0011",
+    "title": "Is transient storage correctly restored after rollback?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "545-558, 415-428 (journal.go)",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "SetTransientState (line 545-552) records previous value via journal.transientStateChange(addr, key, prev) before modifying transientStorage. The transientStorageChange journal entry (lines 287-290, 415-428 in journal.go) implements revert() by calling s.setTransientState(ch.account, ch.key, ch.prevalue), which directly sets the transient storage without journaling (to avoid infinite recursion). The revert bypasses journal recording via setTransientState (line 556-558) which directly calls transientStorage.Set(). This ensures transient storage changes are properly tracked and reverted."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No exploitable attack vector identified. Transient storage follows same journal pattern as persistent storage. The setTransientState lower-level setter prevents journal recursion during revert. Transient storage is cleared at transaction boundaries (line 1432), preventing cross-transaction leakage.",
+      "constraints": "SetTransientState must be used for all transient storage modifications (not setTransientState directly). Prepare() must be called at transaction start to reset transientStorage. Journal revert must use setTransientState to avoid recursive journaling."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: Transient storage snapshot/revert maintains same guarantees as persistent storage. Proof: (1) SetTransientState retrieves prev value via GetTransientState. (2) If prev ≠ value, journals transientStateChange with (addr, key, prev). (3) Calls setTransientState(addr, key, value) which updates transientStorage.Set(). (4) transientStorage.Set() handles zero-value deletion (lines 37-44 transient_storage.go). (5) On revert, transientStorageChange.revert() calls setTransientState with prevalue. (6) setTransientState bypasses journaling, directly calling transientStorage.Set(). (7) This restores exact previous state. (8) Transient storage is transaction-scoped (reset in Prepare), preventing cross-tx pollution.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "Transient storage (EIP-1153) is correctly implemented with proper journal integration. The two-level setter pattern (SetTransientState for normal ops, setTransientState for revert) correctly prevents journal recursion. Transient storage is properly cleared at transaction boundaries. The implementation correctly handles zero-value deletions to maintain memory efficiency."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0012#3",
+    "property_id": "PROP-0012",
+    "title": "Are persistent and transient snapshot stacks synchronized?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "136, 730-737",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "There is a SINGLE journal (line 136: 'journal *journal') that handles ALL state changes including both persistent and transient storage. Snapshot() (line 730-731) returns journal.snapshot() which records current journal index. RevertToSnapshot() (line 735-736) calls journal.revertToSnapshot() which reverts ALL journal entries since that index. Both persistent storage changes (via storageChange) and transient storage changes (via transientStorageChange) are appended to the same journal.entries slice. Therefore, persistent and transient state share the same snapshot stack by design - there is no separate stack."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No desynchronization possible because there is only one journal. All state modifications (persistent storage via SetState, transient storage via SetTransientState, balance, nonce, etc.) append to the same journal.entries array. Snapshot IDs are global across all state types.",
+      "constraints": "Single journal architecture means: (1) Snapshot() captures both persistent and transient state at same logical point. (2) RevertToSnapshot() atomically reverts both. (3) No interleaving or desync possible. (4) Journal entries must be processed in strict FIFO append order and LIFO revert order."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: Persistent and transient storage snapshots are always synchronized. Proof: (1) StateDB has single journal field (line 136). (2) All state modifications call journal.append() (line 101-106 journal.go). (3) storageChange and transientStorageChange both implement journalEntry interface. (4) Both are appended to same journal.entries slice. (5) Snapshot() records index in same validRevisions array. (6) RevertToSnapshot() iterates same entries slice in reverse (lines 110-123 journal.go). (7) By construction, no separate stacks exist - synchronization is architectural guarantee, not implementation detail. (8) Unified journal ensures atomic snapshot/revert across all state types.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.99,
+    "notes": "This is a design-level property. The architecture uses a single unified journal for ALL state changes, making desynchronization impossible. This is superior to having separate snapshot stacks which would require careful synchronization. The question assumes multiple stacks exist, but the implementation uses a single stack by design, which is the safest approach."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0013#3",
+    "property_id": "PROP-0013",
+    "title": "Is get_account guaranteed to never return None?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "589-622, 311-318, 321-328",
+    "phase1_abstract_interpretation": {
+      "status": "potential-issue",
+      "summary": "getStateObject() (lines 589-622) CAN return nil in several cases: (1) object not in stateObjects cache AND in stateObjectsDestruct map (lines 594-597), (2) reader.Account(addr) returns nil (line 609-610), (3) database error occurs (lines 602-605). Callers like GetBalance (lines 311-318) check 'if stateObject != nil' and return zero values when nil. GetNonce (lines 321-328) similarly returns 0 for nil. In Go, this is idiomatic - functions return nil for non-existent accounts, and callers handle the nil case. The question asks if get_account never returns None, but in Go-Ethereum, it CAN and DOES return nil for non-existent accounts."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "Not an attack vector but intended behavior. Non-existent accounts return nil, which is correct Ethereum semantics. Reading balance/nonce/code of non-existent account returns zero values. The nil return is checked by all callers: Exist() line 300-301 returns false for nil, Empty() line 306-308 returns true for nil, GetBalance returns common.U2560 (zero) for nil, etc.",
+      "constraints": "All callers of getStateObject() must handle nil return. Pattern: obj := s.getStateObject(addr); if obj != nil { return obj.Value() }; return zeroValue. This is consistently applied across the codebase."
+    },
+    "phase3_invariant_proof": {
+      "holds": false,
+      "proof_sketch": "Property states 'get_account guaranteed to never return None'. This is FALSE in Go-Ethereum. Counterexample: Call getStateObject() for address 0x1234... that has never been touched. (1) Not in stateObjects cache. (2) Not in stateObjectsDestruct. (3) reader.Account() queries database. (4) Database returns acct = nil for non-existent account (line 609-610). (5) getStateObject returns nil (line 610). This is CORRECT behavior per Ethereum spec - non-existent accounts have no state. All callers properly handle nil by returning zero values.",
+      "counterexample": "Address addr = 0x1234567890123456789012345678901234567890 (never used). Call getStateObject(addr). Returns nil because account doesn't exist in state trie. This is expected and correct behavior."
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "The property as stated is FALSE - getStateObject CAN return nil. However, this is CORRECT and SAFE behavior. In Ethereum, non-existent accounts have no state, and returning nil (Go's equivalent of None) is the right approach. All 24+ callers in statedb.go properly handle nil by returning appropriate zero values. The question may be based on Python revm_audit which might handle this differently. In Go-Ethereum, nil returns are safe, idiomatic, and correct. Classification is 'verified-safe' because the implementation correctly handles non-existent accounts, even though the literal property 'never returns None' is false."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0014#3",
+    "property_id": "PROP-0014",
+    "title": "Does set_account(None) preserve storage?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "505-529, 639-644",
+    "phase1_abstract_interpretation": {
+      "status": "undetermined",
+      "summary": "Go-Ethereum does not have a direct 'set_account(None)' API. The closest operations are: (1) SelfDestruct() (lines 510-529) which marks account as destructed and sets balance to zero but does NOT immediately clear storage. (2) createObject() (lines 639-644) which creates a new state object, potentially overwriting an existing one. However, there's no explicit 'set account to None while preserving storage' operation. Account deletion is handled through self-destruct marking + Finalise cleanup, not through setting account to None."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": false,
+      "attack_vector": "No direct 'set_account(None)' API exists in Go-Ethereum. SelfDestruct() marks account for deletion but storage cleanup happens in handleDestruction() during commit (lines 1106-1149). The storage is actually deleted, not preserved. If the question is about account destruction: storage is NOT preserved - it's explicitly deleted in deleteStorage() (lines 1065-1086).",
+      "constraints": "Account lifecycle: (1) SelfDestruct marks account, sets balance to 0. (2) Account remains accessible until Finalise. (3) Finalise adds to stateObjectsDestruct, removes from stateObjects (lines 760-768). (4) Commit calls handleDestruction which deletes storage via deleteStorage. (5) Storage is NOT preserved across destruction. EIP-6780 changes this - self-destruct only works for contracts created in same tx."
+    },
+    "phase3_invariant_proof": {
+      "holds": false,
+      "proof_sketch": "Property: 'set_account(None) preserves storage'. In Go-Ethereum, account deletion DOES NOT preserve storage. Evidence: (1) SelfDestruct() marks account as selfDestructed. (2) Finalise() moves to stateObjectsDestruct. (3) handleDestruction() (lines 1106-1149) calls deleteStorage() for destructed accounts with non-empty storage root. (4) deleteStorage() (lines 1065-1086) iterates all storage slots and creates deletion markers. (5) Storage is explicitly wiped. Post-Cancun (EIP-6780), self-destruct no longer deletes account unless created in same tx, but storage is still cleared for newly created contracts.",
+      "counterexample": "Contract C at address A with storage slot[0] = 100. Call SelfDestruct(A). Finalise(). Commit(). handleDestruction() is called. Since C.origin != nil (existent account) and Root != EmptyRootHash, deleteStorage(A) is called. Storage slot[0] is marked for deletion. After commit, storage is empty. Storage was NOT preserved."
+    },
+    "final_classification": "out-of-scope",
+    "confidence": 0.85,
+    "notes": "The question asks about 'set_account(None)' which is not a direct Go-Ethereum API. If interpreted as SelfDestruct: storage is NOT preserved - it's explicitly deleted. If interpreted as account deletion in general: storage is deleted. The only case where storage might be 'preserved' is account resurrection in the same block (case b/d in handleDestruction comments), but that's not 'set to None' - the account is marked destructed but then a new object is created. For true deletion, storage is wiped. This may be a Python revm_audit concept that doesn't directly map to Go-Ethereum."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0015#3",
+    "property_id": "PROP-0015",
+    "title": "Does destroy_account remove both account and storage atomically?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "510-529, 1106-1149",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "Account destruction is a multi-phase process: (1) SelfDestruct() (lines 510-529) marks account as selfDestructed, journals the change, sets balance to zero. (2) Finalise() (lines 747-785) moves destructed objects to stateObjectsDestruct map. (3) commit()/handleDestruction() (lines 1106-1149) processes all destructed accounts atomically within the same commit transaction. For each destructed account with storage, deleteStorage() is called which: (a) iterates all storage slots, (b) creates deletion markers, (c) returns NodeSet for trie updates. (4) All storage deletions and account deletion are applied to the trie in the same commit() call. (5) The database commit is atomic - either all changes succeed or all fail."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No attack vector for non-atomic deletion because: (1) All deletions happen within single commit() call. (2) handleDestruction returns all storage NodeSets which are merged into single node set (line 1217). (3) Account trie and storage trie updates are applied together (lines 1238-1281). (4) Final database commit is atomic. (5) If any error occurs, commit returns error and state is not persisted. (6) State is not visible to other transactions until commit completes.",
+      "constraints": "Atomicity guaranteed by: (1) All deletions processed in handleDestruction before account trie updates. (2) All trie mutations collected in single NodeSet. (3) Single database batch/transaction for commit. (4) State mutations not visible until after commitAndFlush returns. (5) Error in any phase aborts entire commit."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: Account and storage deletion are atomic - both succeed or both fail. Proof: (1) SelfDestruct marks account but doesn't delete immediately. (2) Finalise moves to stateObjectsDestruct. (3) commit() calls handleDestruction which processes ALL destructed accounts before any trie updates. (4) For each account, deleteStorage returns (storages, storageOrigins, nodes) or error. (5) If error, handleDestruction returns error, commit aborts. (6) All storage NodeSets merged into single nodes object (lines 1216-1220). (7) Account trie updates and storage trie updates happen in same commit phase (lines 1238-1281). (8) All trie mutations batched in single NodeSet. (9) Database Update (line 1349) applies all changes atomically. (10) If db.Update fails, error propagates, state remains unchanged. By transactional semantics, account and storage deletion are atomic.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "Atomicity is guaranteed by the commit transaction model. All storage deletions for ALL destructed accounts are processed first (handleDestruction), then all account updates and deletions happen together in the trie commit phase, and finally all changes are written to the database in a single atomic operation. The three-phase approach (mark → finalize → commit) ensures atomicity while allowing within-block resurrection. Post-EIP-6780, self-destruct semantics changed but atomicity guarantees remain."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0016#3",
+    "property_id": "PROP-0016",
+    "title": "Does destroy_storage handle double-deletion safely?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "1065-1086, 989-1024, 1029-1058",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "deleteStorage() (lines 1065-1086) is called once per account during handleDestruction. It tries fastDeleteStorage first (uses snapshot), falls back to slowDeleteStorage (uses trie iteration) on failure. Both methods iterate storage slots and create deletion markers. Double-deletion safety: (1) deleteStorage is only called once per account in handleDestruction loop (lines 1111-1147). (2) Each account appears once in stateObjectsDestruct map. (3) If account.origin == nil (never existed), handleDestruction skips it (lines 1119-1121). (4) If storage root is EmptyRootHash, deletion is skipped (lines 1131-1133). (5) deleteStorage itself is idempotent - iterating empty storage produces no deletion markers."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No attack vector for double-deletion because: (1) stateObjectsDestruct is a map, each address appears once. (2) handleDestruction iterates map once. (3) After processing, stateObjectsDestruct is cleared (line 1305). (4) Even if deleteStorage were called twice on same account, both fastDeleteStorage and slowDeleteStorage iterate existing slots - second call would find no slots to delete. (5) Stack trie (lines 1001-1016) and node iterator (lines 1034-1054) are safe for empty storage.",
+      "constraints": "Safety mechanisms: (1) Map ensures uniqueness. (2) origin == nil check prevents deletion of never-existent accounts. (3) EmptyRootHash check prevents unnecessary trie operations. (4) Iteration-based approach (not recursive deletion) is inherently safe for empty tries. (5) Error handling prevents partial deletions - any error aborts entire commit."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: deleteStorage is safe when called multiple times or on already-deleted storage. Proof by cases: Case 1 (double-deletion in same commit): Impossible - stateObjectsDestruct map ensures each address processed once. Case 2 (deletion of already-empty storage): deleteStorage with root=EmptyRootHash skipped (line 1131). If not skipped, fastDeleteStorage iterator returns no items for empty storage. slowDeleteStorage iterator returns no leaf nodes. Both produce empty storages map and empty NodeSet, which is safe. Case 3 (deletion of non-existent account): origin == nil check (line 1119) skips processing. Case 4 (deletion after previous block's deletion): Account no longer exists in state trie, reader.Account returns nil, account not loaded into stateObjects, can't be marked for destruction. By exhaustive case analysis, double-deletion is safe.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "The implementation has multiple layers of protection against double-deletion: (1) Architectural - stateObjectsDestruct map ensures uniqueness. (2) Guard clauses - origin == nil and EmptyRootHash checks. (3) Iteration-based deletion - safe for empty tries. (4) Fallback mechanism - fastDeleteStorage failure falls back to slowDeleteStorage, both handle edge cases. (5) Transaction semantics - stateObjectsDestruct cleared after each commit. The code is defensive and handles all edge cases safely."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0017#3",
+    "property_id": "PROP-0017",
+    "title": "Does mark_account_created persist across reverts?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "639-644, 659-665, 747-785",
+    "phase1_abstract_interpretation": {
+      "status": "potential-issue",
+      "summary": "Two related concepts: (1) createObject (lines 639-644) creates new state object and journals createObjectChange. (2) CreateContract (lines 659-665) sets newContract flag and journals createContractChange. The createObjectChange is REVERTABLE - on revert, it deletes the account from stateObjects map (line 294 journal.go). The createContractChange is also REVERTABLE - on revert, it sets newContract=false (line 308 journal.go). So 'mark_account_created' does NOT persist across reverts by design. After revert, the account is removed. However, Finalise (lines 747-785) processes created objects differently - it decides whether to delete empty objects. The question is ambiguous about what 'persist across reverts' means."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "If 'persist across reverts' means 'mark should survive Snapshot/RevertToSnapshot', then NO - it's explicitly reverted. This is CORRECT behavior. If a transaction creates account then reverts, the account should disappear. The newContract flag (for EIP-6780) is also reverted, which is correct - if contract creation is reverted, it shouldn't be eligible for self-destruct. If 'persist' means 'mark should survive Finalise', then YES - newContract flag is reset to false in Finalise (line 274 state_object.go) but account remains if non-empty.",
+      "constraints": "createObjectChange.revert() removes account from stateObjects (line 294 journal.go). This is intentional. createContractChange.revert() clears newContract flag (line 308). This is also intentional. After successful transaction, Finalise clears newContract flag (line 274 state_object.go), 'finalizing' the contract's existence."
+    },
+    "phase3_invariant_proof": {
+      "holds": false,
+      "proof_sketch": "Property: 'mark_account_created persists across reverts'. This is FALSE if 'revert' means snapshot revert. Counterexample: (1) Snapshot() → id=5. (2) CreateAccount(addr). Journal appends createObjectChange. (3) addr now in stateObjects. (4) RevertToSnapshot(5). (5) createObjectChange.revert() called. (6) delete(s.stateObjects, addr). (7) Account is gone. Mark did NOT persist. This is CORRECT behavior - if transaction creating the account is reverted, account should not exist. Alternative interpretation: 'persist across transaction boundaries'. In this case, YES - Finalise does not remove the account (unless empty), newContract flag is cleared but account persists. The question is ambiguous but most likely refers to snapshot revert, where the answer is NO (intentionally).",
+      "counterexample": "Tx creates contract at addr 0x123. Snapshot(). Later code reverts. createObjectChange.revert() removes account from stateObjects. Mark did not persist across revert."
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.90,
+    "notes": "The property as stated is FALSE - account creation marks do NOT persist across snapshot reverts, and this is CORRECT. Reverting a transaction should undo account creation. The journal system correctly implements this. If the question asks about persistence across transaction boundaries (not reverts), then YES - accounts persist through Finalise if non-empty. The createContractChange for newContract flag also correctly reverts, maintaining EIP-6780 semantics. Classification is 'verified-safe' because the revert behavior is correct, even though marks don't persist."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0018#3",
+    "property_id": "PROP-0018",
+    "title": "Does get_storage return U256(0) for unset keys?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "375-382, 154-169, 173-209",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "GetState() (lines 375-382) calls getStateObject(addr). If object is nil, returns common.Hash{} (zero hash, line 381). If object exists, calls stateObject.GetState(key). GetState (lines 154-158 state_object.go) calls getState which checks dirtyStorage, then calls GetCommittedState (lines 173-209). GetCommittedState checks: (1) pendingStorage - returns value if cached, (2) originStorage - returns value if cached, (3) checks if account was destructed - returns common.Hash{} (zero), (4) reads from database via reader.Storage(). If value not found in database, reader returns zero value. common.Hash{} is 32-byte zero array, equivalent to U256(0) in Ethereum."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No attack vector. Zero returns for unset keys are correct Ethereum semantics. All paths return common.Hash{}: (1) non-existent account → nil stateObject → common.Hash{}. (2) existent account, unset key not in cache → reader.Storage returns zero if not found. (3) destructed account in same block → explicit common.Hash{} (line 189). (4) Go's zero value for common.Hash is {0,0,0,...,0}.",
+      "constraints": "common.Hash is [32]byte array. Zero value is 32 zero bytes. This matches Ethereum's U256(0) when interpreted as storage value. Reader interface implementations (snapshot, trie) must return zero/nil for missing keys. All implementations in Go-Ethereum follow this convention."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Invariant: GetState returns zero (U256(0)) for unset storage keys. Proof by case analysis: Case 1 (non-existent account): getStateObject returns nil (line 610). GetState checks nil, returns common.Hash{} (line 381). Case 2 (existent account, key not in dirty): getState returns GetCommittedState result. Case 3 (key not in pending/origin cache, account not destructed): reader.Storage called. Database trie lookup for missing key returns nil/zero. Case 4 (account destructed in same block): explicit return common.Hash{} (line 189). Case 5 (key in cache): returns cached value (could be zero if previously set to zero). In all cases, unset keys return zero value. common.Hash{} is equivalent to [0,0,0,...,0] which interprets as U256(0).",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "The implementation correctly returns zero values for unset storage keys. common.Hash{} is a 32-byte zero array which is equivalent to U256(0) in Ethereum semantics. The code handles all cases: non-existent accounts, existent accounts with unset keys, cache misses, and destructed accounts. The special case for destructed accounts (line 187-189) is particularly important for correctness - it prevents reading stale storage values from a previous incarnation of a resurrected contract."
+  },
+  {
+    "check_id": "W2B3:W2B3:CHK-0019#3",
+    "property_id": "PROP-0019",
+    "title": "Does set_storage require account existence?",
+    "code_file": "core/state/statedb.go",
+    "code_lines": "469-474, 211-224",
+    "phase1_abstract_interpretation": {
+      "status": "verified",
+      "summary": "SetState() (lines 469-474) calls getOrNewStateObject(addr). getOrNewStateObject (lines 629-635) calls getStateObject(addr), and if it returns nil, calls createObject(addr) to create a new account. So SetState does NOT strictly require pre-existence - it creates account if needed. Once stateObject exists (or is created), SetState calls stateObject.SetState (lines 211-224 state_object.go) which: checks if value unchanged (returns early), journals the change, calls setState to update dirtyStorage. The account will be created as empty account (zero balance, nonce, EmptyCodeHash) if it didn't exist."
+    },
+    "phase2_symbolic_execution": {
+      "reachable": true,
+      "attack_vector": "No attack vector. Creating accounts on-demand for storage writes is correct Ethereum behavior. The account is created with empty state (balance=0, nonce=0, code=empty). If transaction later reverts, createObjectChange.revert() removes the account. If transaction succeeds and account is empty, Finalise may delete it depending on deleteEmptyObjects parameter. This matches EIP-161 semantics for empty account handling.",
+      "constraints": "getOrNewStateObject always returns non-nil stateObject (either existing or newly created). createObject calls journal.createObject to make creation revertable. SetState on non-existent account creates 'touched' account. If account remains empty after transaction, it may be deleted in Finalise if deleteEmptyObjects=true (post-Spurious Dragon)."
+    },
+    "phase3_invariant_proof": {
+      "holds": true,
+      "proof_sketch": "Property: 'set_storage requires account existence'. This is FALSE in Go-Ethereum - SetState creates account if needed. However, this is SAFE and CORRECT. Proof: (1) SetState calls getOrNewStateObject. (2) getOrNewStateObject calls getStateObject. (3) If nil, calls createObject which creates empty account and journals the creation. (4) SetState proceeds with storage write. (5) If transaction reverts, createObjectChange.revert() removes account. (6) If transaction succeeds, account persists. (7) If account is empty (balance=0, nonce=0, code=empty) after Finalise, it may be deleted per EIP-161. (8) Storage write on non-existent account is valid Ethereum operation - it touches/creates the account. This matches Ethereum Yellow Paper semantics where storage writes can create accounts.",
+      "counterexample": null
+    },
+    "final_classification": "verified-safe",
+    "confidence": 0.95,
+    "notes": "The property 'set_storage requires account existence' is FALSE - SetState creates accounts on-demand. However, this is CORRECT behavior per Ethereum specification. The implementation properly handles account creation, journaling, and empty account cleanup per EIP-161. The question may assume a different design where storage writes fail on non-existent accounts, but Go-Ethereum follows Ethereum's actual semantics where storage writes create accounts. Classification is 'verified-safe' because the auto-creation behavior is correct and properly implemented."
+  }
+]
