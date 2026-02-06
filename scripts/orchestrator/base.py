@@ -388,7 +388,7 @@ class Phase03Orchestrator(BaseOrchestrator):
                 for entry in entries:
                     if not isinstance(entry, dict):
                         continue
-                    check_id = entry.get("id") or entry.get("check_id")
+                    check_id = entry.get("check_id")
                     if not check_id:
                         continue
                     

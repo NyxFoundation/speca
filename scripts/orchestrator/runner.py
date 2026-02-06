@@ -272,6 +272,15 @@ class ClaudeRunner:
         Handles both raw lists and wrapper dicts with a known result key
         (e.g. {"sub_graphs": [...]}).
         """
+        if self.config.phase_id == "02":
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            if isinstance(data, dict):
+                if self.config.result_key in data and isinstance(data[self.config.result_key], list):
+                    return [item for item in data[self.config.result_key] if isinstance(item, dict)]
+                return []
+            return []
+
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
 

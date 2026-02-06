@@ -1,7 +1,7 @@
 ---
 name: checklist-specialist
 description: Generate a security audit checklist from formal properties with bug bounty scope filtering.
-allowed-tools: read, write
+allowed-tools: read
 context: fork
 ---
 # SKILL: Checklist Specialist
@@ -17,22 +17,32 @@ You embody two complementary personas, working in tandem:
 Given a set of formal properties, transform them into a comprehensive and actionable security audit checklist. **Only in-scope properties are converted to checklist items.** Each checklist item must be a concrete, testable question that a security auditor can use to verify the system's correctness.
 
 ## Input
-A JSON object containing a list of items, where each item is a file containing formal properties.
+A JSON object containing a single property file to process.
 ```json
 {
-  "items": [
-    {
-      "property_file": "outputs/01e_PROP_PARTIAL_W0_B0.json"
-    }
-  ]
+  "property_file": "outputs/01e_PROP_PARTIAL_W0_B0.json"
 }
 ```
+
+## Output Contract
+
+**CRITICAL: This skill MUST return a JSON object to the caller. Do NOT write to any file.**
+
+The calling worker is responsible for:
+1. Collecting results from multiple skill invocations
+2. Aggregating results into the final output file
+3. Writing the output file to disk
+
+This skill MUST:
+1. Process the input property file
+2. Return the result object (not write it to a file)
+3. Include ALL required fields in every checklist item
 
 ## Procedure
 
 ### Phase A: Filter Out-of-Scope Properties
 
-1.  **Load Properties**: Read the content of the `property_file` for each item.
+1.  **Load Properties**: Read the content of the `property_file`.
 
 2.  **Apply Scope Filter**: For each property, check its `reachability.bug_bounty_scope`:
     - If `"out-of-scope"`: **SKIP** this property entirely. Do not generate a checklist item.
@@ -81,16 +91,35 @@ A JSON object containing a list of items, where each item is a file containing f
 
 9.  **Define Test Procedure**: For each item, provide a clear procedure for how an auditor should test it.
 
-10. **Assign IDs**: Assign a unique, sequential ID to each checklist item (e.g., `CHK-0001`, `CHK-0002`).
+10. **Assign IDs**: Assign a unique ID to each checklist item using the property ID as base:
+    - Format: `CHK-{property_id}-{index}` where index is 1-based within this property's checks
+    - Example: For property `PROP-W3B12-7`, the first check is `CHK-W3B12-7-001`
 
+## Required Fields
 
+**CRITICAL: Every checklist item MUST include ALL of the following fields. Missing fields are a critical error.**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `check_id` | string | **YES** | Unique ID in format `CHK-{property_id}-{index}` |
+| `property_id` | string | **YES** | Source property ID (e.g., `PROP-W3B12-7`) |
+| `title` | string | **YES** | Clear, actionable question for the auditor |
+| `severity` | string | **YES** | One of: `Critical`, `High`, `Medium`, `Low`, `Informational` |
+| `mindset` | string | **YES** | One of: `Boundary Guard`, `Formal Verification Engineer` |
+| `is_boundary_check` | boolean | **YES** | `true` if this is a boundary check, `false` otherwise |
+| `reachability` | object | **YES** | Copied from source property, must include `classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope` |
+| `test_procedure` | string | **YES** | **MUST NOT be empty.** Specific, numbered steps (minimum 3 steps) describing how to test this item |
+| `bug_class` | string | **YES** | Category of potential bug (e.g., `Input Validation`, `State Consistency`, `Access Control`) |
+| `risk_category` | string | **YES** | STRIDE category: `Spoofing`, `Tampering`, `Repudiation`, `Information Disclosure`, `Denial of Service`, `Elevation of Privilege` |
+| `notes` | string | **YES** | Source traceability (e.g., `Source: PROP-0001, Trust Boundary: tb-001`) |
 
 ## Output Format
-Return a JSON object containing the list of generated checklist items. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.
+
+Return a JSON object containing the list of generated checklist items. **Do NOT write to OUTPUT_FILE; return the object to the caller.**
 
 ```json
 {
-  "source_files": ["outputs/01e_PROP_PARTIAL_W0_B0.json"],
+  "source_file": "outputs/01e_PROP_PARTIAL_W0_B0.json",
   "filtering_summary": {
     "total_properties_input": 100,
     "filtered_out_of_scope": 25,
@@ -100,8 +129,8 @@ Return a JSON object containing the list of generated checklist items. The outpu
   },
   "checklist": [
     {
-      "check_id": "CHK-0001",
-      "property_id": "PROP-0001",
+      "check_id": "CHK-W0B0-234234-1-001",
+      "property_id": "PROP-W0B0-1",
       "title": "Verify Trust Boundary Integrity: Is transaction payload properly validated before processing?",
       "severity": "Critical",
       "mindset": "Boundary Guard",
@@ -112,14 +141,14 @@ Return a JSON object containing the list of generated checklist items. The outpu
         "attacker_controlled": true,
         "bug_bounty_scope": "in-scope"
       },
-      "test_procedure": "1. Identify all entry points for transaction submission. 2. Review input validation logic for each field. 3. Attempt to submit malformed transactions and verify rejection. 4. Check for integer overflow/underflow in size calculations.",
+      "test_procedure": "1. Identify all entry points for transaction submission.\n2. Review input validation logic for each field.\n3. Attempt to submit malformed transactions and verify rejection.\n4. Check for integer overflow/underflow in size calculations.\n5. Verify error messages do not leak sensitive information.",
       "bug_class": "Input Validation",
       "risk_category": "Tampering",
-      "notes": "Source: PROP-0001, Trust Boundary: tb-001"
+      "notes": "Source: PROP-W0B0-1, Trust Boundary: tb-001"
     },
     {
-      "check_id": "CHK-0002",
-      "property_id": "PROP-0005",
+      "check_id": "CHK-W0B0-5-001",
+      "property_id": "PROP-W0B0-5",
       "title": "Is the total token supply invariant maintained across all transfer operations?",
       "severity": "High",
       "mindset": "Formal Verification Engineer",
@@ -130,14 +159,13 @@ Return a JSON object containing the list of generated checklist items. The outpu
         "attacker_controlled": true,
         "bug_bounty_scope": "in-scope"
       },
-      "test_procedure": "1. Identify all functions that modify balances. 2. Verify that sum of all balances equals total supply before and after each operation. 3. Check for any mint/burn paths that could violate invariant.",
+      "test_procedure": "1. Identify all functions that modify balances.\n2. Verify that sum of all balances equals total supply before and after each operation.\n3. Check for any mint/burn paths that could violate invariant.\n4. Test edge cases with maximum values.\n5. Verify atomic updates prevent partial state changes.",
       "bug_class": "State Consistency",
       "risk_category": "Tampering",
-      "notes": "Source: PROP-0005, Invariant: INV-001"
+      "notes": "Source: PROP-W0B0-5, Invariant: INV-001"
     }
   ],
   "metadata": {
-    "timestamp": "...",
     "total_checks": 42,
     "by_severity": {
       "Critical": 5,
@@ -162,15 +190,21 @@ To ensure efficient processing:
 1. **Batch Processing**: Process all properties in a single pass. Do NOT make external API calls for each property.
 2. **Minimal Output**: Omit optional fields (`code_locations`, `executable_checks`) if not determinable.
 3. **No External Tools**: This skill operates entirely offline without external API calls.
-4. **Streaming Output**: Write results incrementally if processing large batches.
+4. **No File Writing**: Return the result object; do not write to files.
 
 ## Quality Checklist
+
+Before returning the result, verify:
+
 - [ ] All out-of-scope properties are filtered (not converted to checklist items)
 - [ ] All api-only and configuration-error properties are filtered
+- [ ] **CRITICAL**: Every checklist item has ALL required fields
+- [ ] **CRITICAL**: Every `test_procedure` is non-empty and has at least 3 specific steps
 - [ ] Each checklist item includes `reachability` copied from the property
 - [ ] Each checklist item includes `is_boundary_check` flag
 - [ ] Each checklist item includes `mindset` indicator
+- [ ] `check_id` follows the format `CHK-{property_id}-{index}`
 - [ ] Filtering summary accurately reflects the filtering applied
-- [ ] All checklist items are traceable to source properties
-- [ ] Test procedures are specific and actionable
+- [ ] All checklist items are traceable to source properties via `notes`
 - [ ] No external API calls were made (offline processing only)
+- [ ] Result is returned to caller, NOT written to a file
