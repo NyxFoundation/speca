@@ -78,7 +78,9 @@ A JSON object containing a list of items, where each item references a trust mod
     - `reachability.bug_bounty_scope == "in-scope"` AND
     - `severity` is `MEDIUM` or higher
 
-11. **Assign IDs**: Assign a unique, sequential ID to each generated property (e.g., `PROP-0001`, `PROP-0002`).
+11. **Assign IDs**: Assign a unique ID per property using the worker/batch/index scheme:
+    - Format: `PROP-W{worker_id}B{batch_index}-{index}` (1-based `index` within the file’s `properties` list).
+    - Example: `PROP-W3B12-7`
 
 ## Output Format
 Return a JSON object containing the list of generated properties. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.
