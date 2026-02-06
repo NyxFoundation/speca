@@ -1,0 +1,193 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-PROP-0046-001",
+      "property_id": "PROP-0046",
+      "phase1": {
+        "title": "Verify Trust Boundary Integrity: Account type routing in trie preparation",
+        "property_text": "The _prepare_trie function must correctly identify Account values and route them through encode_node with the storage root from get_storage_root. Non-Account values must be routed through encode_node without a storage root.",
+        "code_scope": {
+          "primary_files": [
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/forest/worldview/ForestMutableWorldState.java",
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/worldview/BonsaiWorldState.java",
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/common/PmtStateTrieAccountValue.java",
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/BonsaiAccount.java"
+          ],
+          "line_ranges": {
+            "ForestMutableWorldState.java": "397-463 (Updater.commit)",
+            "BonsaiWorldState.java": "129-200 (internalCalculateRootHash, updateTheAccounts)",
+            "PmtStateTrieAccountValue.java": "32-102 (full class)",
+            "BonsaiAccount.java": "40-177 (constructors, writeTo, getStorageRoot)"
+          }
+        },
+        "code_excerpt_summary": "In ForestMutableWorldState.Updater.commit(), account updates compute storageRoot from the storage trie (either Hash.EMPTY_TRIE_HASH for fresh state or origin.getStorageRoot() updated with storage trie root hash), then serialize via serializeAccount() which creates PmtStateTrieAccountValue(nonce, balance, storageRoot, codeHash). In BonsaiWorldState, updateAccountStorageState() computes storage root from the storage trie and sets it on BonsaiAccount via setStorageRoot(), then updateTheAccounts() serializes the account with serializeAccount() which calls writeTo(). Both paths structurally enforce that account values include storage roots.",
+        "property_type": "invariant",
+        "severity": "Critical"
+      },
+      "phase2": {
+        "analysis": {
+          "mechanism": "Java's type system structurally enforces account vs non-account routing. There is no isinstance() check analogous to the Python reference specification; instead, the separation is architectural: (1) Account state trie: stores PmtStateTrieAccountValue/BonsaiAccount objects, always serialized WITH storageRoot via writeTo(). (2) Storage tries: store raw Bytes (RLP-encoded UInt256), never include storageRoot fields. These are completely separate MerkleTrie instances with different serializers.",
+          "forest_mode_flow": "ForestMutableWorldState.Updater.commit() (line 397-453): Iterates UpdateTrackingAccount<WorldStateAccount> objects. For each, computes storageRoot from storage trie (line 416-442), then calls serializeAccount(nonce, balance, storageRoot, codeHash) which creates PmtStateTrieAccountValue and RLP-encodes it (lines 456-462). This Bytes result is put into accountStateTrie. Storage values are separately put into per-account storage tries as RLP.encode(out -> out.writeBytes(value.toMinimalBytes())) (line 440) - never as Account values.",
+          "bonsai_mode_flow": "BonsaiWorldState.updateAccountStorageState() (line 226-312): Computes storage trie from account's previous storageRoot, updates slots, then sets newStorageRoot on the BonsaiAccount (line 303). updateTheAccounts() (line 174-205): Calls updatedAccount.serializeAccount() which invokes BonsaiAccount.writeTo() (line 154-163) writing nonce, balance, storageRoot, codeHash in RLP.",
+          "type_confusion_risk": "NONE. The Java type system prevents type confusion. Account values are strongly-typed BonsaiAccount/PmtStateTrieAccountValue objects. Storage values are raw Bytes/UInt256. No dynamic dispatch or type checking is needed because the two value types flow through separate code paths and separate trie instances.",
+          "edge_cases_examined": [
+            "Account with empty storage (storageRoot = EMPTY_TRIE_HASH): Correctly handled - storageRoot is always included in serialization even when empty",
+            "New account creation (origin == null): freshState=true, storageRoot=EMPTY_TRIE_HASH (ForestMutableWorldState line 415-416)",
+            "Account with cleared storage: getStorageWasCleared() triggers freshState=true path, resetting to EMPTY_TRIE_HASH",
+            "Account deletion: Trie remove() is called, no serialization needed"
+          ]
+        },
+        "verdict": "SAFE - The property is satisfied through structural type safety. Account values always include storageRoot in serialization; storage values never do. No type confusion is possible."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Java's static type system provides compile-time guarantees that account values (PmtStateTrieAccountValue/BonsaiAccount) always serialize with storageRoot and storage values (raw Bytes) never do. The two value types flow through completely separate code paths (account state trie vs storage tries) with different serializers. No runtime type checking (instanceof) is required, eliminating the type confusion risk identified in the property. The property is satisfied architecturally.",
+        "residual_risk": "None identified. The type-safe separation is enforced at compile time.",
+        "recommendations": []
+      }
+    },
+    {
+      "check_id": "CHK-PROP-0047-001",
+      "property_id": "PROP-0047",
+      "phase1": {
+        "title": "Verify root(S) produces correct Merkle roots matching other Ethereum MPT implementations",
+        "property_text": "For any trie state S, root(S) must produce a value equal to the Merkle root computed by any other correct implementation of the Ethereum Merkle Patricia Trie specification for the same logical state S.",
+        "code_scope": {
+          "primary_files": [
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/StoredMerkleTrie.java",
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/patricia/StoredMerklePatriciaTrie.java",
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/patricia/LeafNode.java",
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/patricia/PutVisitor.java",
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/CompactEncoding.java"
+          ],
+          "line_ranges": {
+            "StoredMerkleTrie.java": "1-197 (full class, getRootHash at 191)",
+            "LeafNode.java": "38-169 (full class, getHash at 130-138, getEncodedBytes at 106-118)",
+            "PutVisitor.java": "1-112 (full class, trie restructuring logic)",
+            "CompactEncoding.java": "1-162 (full class, bytesToPath, encode, decode)"
+          }
+        },
+        "code_excerpt_summary": "Root hash computation flows: StoredMerkleTrie.getRootHash() returns root.getHash(). For LeafNode, getHash() returns keccak256(getEncodedBytes()). getEncodedBytes() RLP-encodes [CompactEncoding.encode(path), valueSerializer.apply(value)]. CompactEncoding.encode() implements standard Ethereum hex-prefix encoding with leaf/extension flag bits. PutVisitor implements standard MPT restructuring: splitting leaf/extension nodes at divergence points, creating branches. BranchNode (not shown but standard) encodes 16 children + value. The implementation follows the Yellow Paper specification for MPT.",
+        "property_type": "invariant",
+        "severity": "Critical"
+      },
+      "phase2": {
+        "analysis": {
+          "mechanism": "The implementation follows the standard Ethereum Merkle Patricia Trie specification: (1) Keys are converted to nibble paths via bytesToPath() which splits bytes into 4-bit nibbles and appends LEAF_TERMINATOR (0x10). (2) Path encoding via encode() follows the hex-prefix encoding specified in the Yellow Paper with correct flag bits (0x20 for leaf, 0x10 for odd length). (3) Node hashing uses keccak256 of RLP-encoded node data. (4) The trie structure (branch/extension/leaf) follows standard MPT rules.",
+          "correctness_of_bytesToPath": "bytesToPath() correctly splits each byte into high nibble ((b >>> 4) & 0x0f) and low nibble (b & 0x0f), appending LEAF_TERMINATOR at the end. This matches the Yellow Paper specification.",
+          "correctness_of_hex_prefix_encoding": "CompactEncoding.encode() correctly sets flag bits: isLeaf=true sets 0x20 flag, odd length sets 0x10 flag with first nibble packed. Even length uses a zero-padded byte. This matches the specification in Ethereum Yellow Paper Appendix C.",
+          "correctness_of_node_encoding": "LeafNode.getEncodedBytes() creates RLP list [compact_encoded_path, serialized_value]. This matches the specification. BranchNode and ExtensionNode follow similar patterns.",
+          "correctness_of_trie_structure": "PutVisitor correctly handles: (1) NullNode -> creates LeafNode with full path (line 110-112). (2) LeafNode with matching path -> replaces value (line 84-85). (3) LeafNode with divergent path -> creates branch with two leaves (lines 87-104). (4) ExtensionNode with partial match -> creates branch + extension (lines 36-63). This matches standard MPT insertion logic.",
+          "cross_implementation_validation": "Besu is one of the major Ethereum execution clients and participates in Ethereum Hive test suites and consensus tests which validate trie root correctness across implementations (geth, Nethermind, etc.). The implementation has been battle-tested on mainnet.",
+          "potential_concerns": [
+            "This is a specification-level property that cannot be fully verified by code review alone - it requires cross-implementation testing (which Besu has via Hive tests)",
+            "Edge case: empty trie correctly returns EMPTY_TRIE_NODE_HASH (keccak256 of RLP empty string) via NullNode"
+          ]
+        },
+        "verdict": "SAFE - The implementation follows the Yellow Paper MPT specification correctly. Key encoding, hex-prefix encoding, node hashing, and trie restructuring all conform to the standard. Cross-implementation correctness is validated through Ethereum consensus test suites."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The MPT implementation follows the Ethereum Yellow Paper specification: (1) bytesToPath correctly converts bytes to nibble paths, (2) CompactEncoding.encode correctly implements hex-prefix encoding with leaf/extension flags, (3) node hashing uses keccak256 of RLP-encoded data, (4) PutVisitor correctly restructures the trie on insertions. This is a mature, battle-tested implementation used on Ethereum mainnet and validated by Hive consensus test suites against other implementations (geth, Nethermind). No deviations from the specification were identified in the code review.",
+        "residual_risk": "This property is fundamentally a cross-implementation consistency property. While code review confirms specification adherence, ultimate validation requires the existing Hive test suite and Ethereum reference tests.",
+        "recommendations": []
+      }
+    },
+    {
+      "check_id": "CHK-PROP-0048-001",
+      "property_id": "PROP-0048",
+      "phase1": {
+        "title": "Verify LeafNode key slicing correctness in patricialize (PutVisitor)",
+        "property_text": "The LeafNode's rest_of_key in patricialize must be the key suffix starting from 'level'. It must contain exactly key[level:] nibbles. An off-by-one in the slice would corrupt the trie path.",
+        "code_scope": {
+          "primary_files": [
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/patricia/PutVisitor.java",
+            "ethereum/trie/src/main/java/org/hyperledger/besu/ethereum/trie/patricia/LeafNode.java"
+          ],
+          "line_ranges": {
+            "PutVisitor.java": "36-112 (all visit methods creating LeafNodes)",
+            "LeafNode.java": "38-70 (constructors, path field)"
+          }
+        },
+        "code_excerpt_summary": "PutVisitor creates LeafNodes in 4 scenarios: (1) visit(NullNode, path): creates LeafNode with full path (line 110-112). (2) visit(LeafNode, path) with exact match: creates LeafNode with leafPath (line 84-85). (3) visit(LeafNode, path) with divergence at commonPathLength: new leaf gets path.slice(commonPathLength+1), existing leaf gets leafPath.slice(commonPathLength+1) (lines 90-94). (4) visit(ExtensionNode, path) with divergence: leaf gets path.slice(commonPathLength+1) (line 48). In all cases, the +1 accounts for the nibble consumed by the branch node at the divergence point.",
+        "property_type": "post-condition",
+        "severity": "High"
+      },
+      "phase2": {
+        "analysis": {
+          "mechanism": "In Besu's MPT implementation, 'patricialize' is equivalent to PutVisitor's visit methods. The 'level' concept maps to the path consumed during trie traversal. Key slicing occurs in three locations where LeafNodes are created after divergence.",
+          "case1_null_node": "visit(NullNode, path) at line 110-112: Creates LeafNode with the full remaining path. The path parameter already represents the unconsumed portion of the key at this point in traversal. No slicing needed - correct.",
+          "case2_leaf_exact_match": "visit(LeafNode, path) at line 84-85: commonPathLength == leafPath.size() && commonPathLength == path.size(). Creates new LeafNode with leafPath (same as path). This is a value replacement - the path is preserved exactly. Correct.",
+          "case3_leaf_divergence": "visit(LeafNode, path) at lines 87-104: Divergence at commonPathLength. New leaf path = path.slice(commonPathLength + 1) (line 90). Updated existing leaf path = leafPath.slice(commonPathLength + 1) (line 94). The +1 is correct because the nibble at index commonPathLength is consumed by the branch node's child index (lines 89, 92). The branch is created with (updatedLeafIndex, updatedLeaf, newLeafIndex, leaf) at line 96, where the indices are the nibbles at the divergence point. This correctly accounts for the nibble consumed by the branch.",
+          "case4_extension_divergence": "visit(ExtensionNode, path) at lines 36-63: Divergence at commonPathLength within the extension. New leaf path = path.slice(commonPathLength + 1) (line 48). Extension is re-pathed to extensionPath.slice(commonPathLength + 1) (line 50). The +1 accounts for the nibble consumed by the new branch. Correct.",
+          "off_by_one_analysis": "The critical question is whether slice(commonPathLength + 1) is correct. In all divergence cases, the nibble at position commonPathLength becomes a child index in the new branch node. Therefore the remaining path for the child starts at commonPathLength + 1. This is the standard MPT divergence handling and is correct. If it were slice(commonPathLength) instead, the branch index nibble would be duplicated in the child path, leading to incorrect Merkle proofs. If it were slice(commonPathLength + 2), a nibble would be lost.",
+          "assertion_checks": "PutVisitor includes assertions: 'commonPathLength < path.size()' and 'commonPathLength < leafPath.size()' (line 87-88 for leaf, line 38-39 for extension), guarding against edge cases where the divergence point is at the boundary."
+        },
+        "verdict": "SAFE - The key slicing logic is correct in all cases. The slice(commonPathLength + 1) correctly accounts for the nibble consumed by the branch node at the divergence point. No off-by-one errors were identified."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "PutVisitor's key slicing is correct across all four LeafNode creation scenarios. In divergence cases, path.slice(commonPathLength + 1) correctly excludes the nibble that becomes the branch child index. The +1 offset is standard MPT behavior: at a divergence point, one nibble is consumed as the branch index, and the remaining nibbles form the child's path. Assertions guard boundary conditions. The implementation matches the Ethereum Yellow Paper specification for trie node insertion and restructuring.",
+        "residual_risk": "None identified. The slicing logic is straightforward and mathematically correct.",
+        "recommendations": []
+      }
+    },
+    {
+      "check_id": "CHK-PROP-0050-001",
+      "property_id": "PROP-0050",
+      "phase1": {
+        "title": "Verify _prepare_trie Address conversion correctness for get_storage_root",
+        "property_text": "The _prepare_trie function must correctly convert preimage keys to Address type when calling get_storage_root. The Address(preimage) conversion must not truncate, extend, or otherwise corrupt the address bytes.",
+        "code_scope": {
+          "primary_files": [
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/forest/worldview/ForestMutableWorldState.java",
+            "ethereum/core/src/main/java/org/hyperledger/besu/ethereum/trie/pathbased/bonsai/worldview/BonsaiWorldState.java",
+            "datatypes/src/main/java/org/hyperledger/besu/datatypes/Address.java"
+          ],
+          "line_ranges": {
+            "ForestMutableWorldState.java": "395-453 (Updater.commit - account update loop)",
+            "BonsaiWorldState.java": "174-205 (updateTheAccounts), 226-312 (updateAccountStorageState)",
+            "Address.java": "254-260 (addressHash)"
+          }
+        },
+        "code_excerpt_summary": "In ForestMutableWorldState.Updater.commit(), accounts are iterated as UpdateTrackingAccount<WorldStateAccount> which already carry the Address object (updated.getAddress()). The storage root is obtained from origin.getStorageRoot() which accesses PmtStateTrieAccountValue.storageRoot - a Hash field already deserialized from the trie. The Address is used for storage trie lookup (updatedStorageTries.get(updated.getAddress())) and preimage storage, but the storage root itself comes from the account value, not from an address conversion. In BonsaiWorldState, the address is used via updatedAddress.addressHash() for storage trie node lookups, and the storage root comes from accountOriginal.getStorageRoot(). No Address(preimage) conversion occurs in the storage root retrieval path.",
+        "property_type": "pre-condition",
+        "severity": "High"
+      },
+      "phase2": {
+        "analysis": {
+          "mechanism": "In Besu's Java implementation, the Address(preimage) conversion concern from the property specification does not directly apply. The architecture differs from the Python reference implementation: (1) In Forest mode, accounts are tracked by Address objects throughout the update flow. The Address is obtained from the UpdateTrackingAccount which preserves the original 20-byte address. Storage root is obtained from PmtStateTrieAccountValue.getStorageRoot(), which returns the Hash field deserialized from the account's RLP encoding in the trie. No conversion from preimage to Address is needed. (2) In Bonsai mode, accounts are keyed by Address (from worldStateUpdater.getAccountsToUpdate()). The storage root comes from BonsaiAccount.getStorageRoot(). The address hash is computed via Address.addressHash() which calls keccak256 on the 20-byte address.",
+          "address_integrity_forest": "ForestMutableWorldState.Updater.getForMutation() (line 369-376) takes an Address parameter and uses address.addressHash() to look up the account in the trie. The returned WorldStateAccount preserves both the Address and the PmtStateTrieAccountValue (containing storageRoot). No address byte manipulation occurs.",
+          "address_integrity_bonsai": "BonsaiWorldState.updateAccountStorageState() receives Address objects from worldStateUpdater.getAccountsToUpdate(). addressHash is computed via updatedAddress.addressHash() (line 237). The storageRoot comes from accountOriginal.getStorageRoot() (line 256). No conversion between preimage bytes and Address occurs in this path. The Address object is constructed upstream when the account is first created/loaded.",
+          "preimage_handling": "In BonsaiWorldState, hashAndSavePreImage(accountKey) (lines 188, 197) hashes the account key (Address bytes) for trie key computation. This is the forward direction (address -> hash), not the reverse (preimage -> address). The preimage storage is used for bookkeeping, not for storage root lookups.",
+          "potential_concern": "BonsaiWorldState.clearStorage() (line 319-367): oldAccount is loaded via getWorldStateStorage().getAccount(address.addressHash()). The address used here is the original Address object from the update accumulator. BonsaiAccount.fromRLP() takes the address parameter and creates addressHash via address.addressHash(). No preimage-to-address conversion occurs.",
+          "address_size_safety": "Address in Besu extends DelegatingBytes20 (wrapping exactly 20 bytes). The addressHash() method calls keccak256 on these 20 bytes. There is no risk of truncation or extension because the Address type enforces exactly 20 bytes at construction time."
+        },
+        "verdict": "SAFE - No preimage-to-Address conversion occurs in the storage root retrieval path. Address objects are preserved throughout the account update flow. The Address type enforces 20-byte size at construction. Storage roots come directly from deserialized account values, not from address-based lookups."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The property concern about Address(preimage) conversion corrupting address bytes does not manifest in Besu's Java implementation. The architecture differs from the Python reference: (1) Address objects are strongly typed (DelegatingBytes20, exactly 20 bytes) and preserved throughout the account update flow, (2) Storage roots are obtained from deserialized PmtStateTrieAccountValue/BonsaiAccount objects, not through address-based lookups that would require preimage conversion, (3) addressHash() consistently applies keccak256 to the 20-byte address for trie key computation. No byte corruption, truncation, or extension pathways were identified.",
+        "residual_risk": "None identified. The Java type system enforces Address is exactly 20 bytes, and storage root retrieval does not involve address reconstruction from preimages.",
+        "recommendations": []
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 27,
+    "item_count": 4,
+    "timestamp": 1770365876,
+    "processed_ids": [
+      "CHK-PROP-0046-001",
+      "CHK-PROP-0047-001",
+      "CHK-PROP-0048-001",
+      "CHK-PROP-0050-001"
+    ]
+  }
+}
