@@ -1,0 +1,1457 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#29",
+      "property_id": "PROP-W1B10-38",
+      "title": "Verify Consensus Layer correctly obtains active validator indices for epoch-based proposer selection",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateAccessors.java",
+          "lines": "107-126",
+          "function": "getActiveValidatorIndices"
+        },
+        "code_excerpt": "public IntList getActiveValidatorIndices(final BeaconState state, final UInt64 epoch) { ... filters validators using predicates.isActiveValidator(validators.get(index), epoch) ... }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/Predicates.java:47-53"
+        ],
+        "analysis": "The getActiveValidatorIndices method at BeaconStateAccessors.java:107-126 iterates through all validators and filters using predicates.isActiveValidator(). The Predicates.isActiveValidator at Predicates.java:47-53 checks activationEpoch <= epoch < exitEpoch, which correctly implements the spec. Slashed validators are NOT explicitly excluded from the active set here - this is correct per spec, as slashed validators remain active until their exit_epoch. The result is cached via BeaconStateCache.getTransitionCaches(). The epoch parameter flows correctly from getBeaconProposerIndex -> computeEpochAtSlot(slot) -> getActiveValidatorIndices."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The implementation correctly checks activation_epoch <= epoch < exit_epoch per the Ethereum consensus spec. Slashed validators are correctly kept in the active set until their exit epoch (they are assigned an exit epoch when slashed). The caching via BeaconStateCache is epoch-keyed, preventing stale results. Edge cases of activation/exit at current epoch are handled by the <= and < comparators respectively.",
+        "attack_surface": "Internal-only function. Not directly reachable from external inputs.",
+        "exploitability": "None identified."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The isActiveValidator predicate correctly implements the spec condition activation_epoch <= epoch < exit_epoch. The function is called with the correct epoch derived from computeEpochAtSlot. Caching is correctly epoch-keyed. No path exists for inactive validators to be included in the proposer selection pool.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#23",
+      "property_id": "PROP-W1B10-38",
+      "title": "Verify Validator actor cannot influence proposer selection to include inactive validators",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/BeaconStateAccessorsFulu.java",
+          "lines": "53-57",
+          "function": "getBeaconProposerIndices"
+        },
+        "code_excerpt": "public List<Integer> getBeaconProposerIndices(final BeaconState state, final UInt64 epoch) { final IntList indices = getActiveValidatorIndices(state, epoch); final Bytes32 seed = getSeed(state, epoch, Domain.BEACON_PROPOSER); return miscHelpers.computeProposerIndices(state, epoch, seed, indices); }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateAccessors.java:107-126",
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:606-624"
+        ],
+        "analysis": "The proposer selection pipeline is: getBeaconProposerIndices -> getActiveValidatorIndices(state, epoch) -> getSeed(state, epoch, DOMAIN_BEACON_PROPOSER) -> computeProposerIndices. No validator-controlled inputs flow into this pipeline. The active validator set is derived from state.validators (controlled by protocol rules), the seed is derived from RANDAO mixes (committed epochs in advance), and the domain is a constant. State transitions updating validator status (activation/exit/slashing) happen during epoch processing BEFORE proposer lookahead computation."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Validator-controlled inputs (attestations, block proposals) do not directly influence the active validator set used for proposer selection. RANDAO contributions are mixed into the state through block processing but with a MIN_SEED_LOOKAHEAD delay, making manipulation impractical. The epoch processing order ensures validator registry updates complete before proposer lookahead is computed.",
+        "attack_surface": "RANDAO is the only validator-influenced input to proposer selection, but it has a lookahead delay making it costly to exploit.",
+        "exploitability": "None identified for including inactive validators."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "No validator-controlled input can cause inactive validators to be included in the active set. The getActiveValidatorIndices function reads immutable state fields (activation_epoch, exit_epoch). RANDAO manipulation only affects seed randomness, not the active set composition.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#42",
+      "property_id": "PROP-W2B3-23",
+      "title": "Can IGNORED sidecars be permanently discarded or forwarded without re-validation?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "188-360",
+          "function": "validate"
+        },
+        "code_excerpt": "Line 219-222: if (gossipValidationHelper.isSlotFromFuture(blockHeader.getSlot())) { return completedFuture(InternalValidationResult.SAVE_FOR_FUTURE); } Line 248-252: if (!gossipValidationHelper.isBlockAvailable(blockHeader.getParentRoot())) { return completedFuture(InternalValidationResult.SAVE_FOR_FUTURE); }",
+        "supporting_files": [
+          "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java:227-230"
+        ],
+        "analysis": "The gossip validator returns three types of non-ACCEPT results: (1) SAVE_FOR_FUTURE for future slots (line 221) and missing parent blocks (lines 251, 258) - these are queued for re-processing; (2) IGNORE for already-seen sidecars (line 207) and finalized slots (line 229) - these are silently dropped but are legitimately not needed; (3) REJECT for invalid sidecars. Critically, Teku uses SAVE_FOR_FUTURE (not IGNORE) for sidecars that arrive before their dependencies, ensuring they are retained for later re-processing. IGNORED sidecars are NOT forwarded per libp2p gossipsub semantics."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The implementation correctly differentiates between IGNORE (permanently discard, used for duplicates and finalized-slot sidecars) and SAVE_FOR_FUTURE (queue for re-processing). The SAVE_FOR_FUTURE path handles the case where a sidecar arrives before its parent block or is from a future slot. The pending pool that stores SAVE_FOR_FUTURE items has bounded size (LimitedSet). No path exists where a needed sidecar is permanently discarded through IGNORE.",
+        "attack_surface": "An attacker could flood the SAVE_FOR_FUTURE queue with far-future sidecars. The LimitedSet size bounds provide some protection.",
+        "exploitability": "Low - bounded queue size prevents unbounded memory growth."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Teku correctly uses SAVE_FOR_FUTURE (not IGNORE) for sidecars that need re-processing. IGNORED sidecars are those that are genuinely not needed (duplicates, finalized). SAVE_FOR_FUTURE sidecars are retained in a bounded pending pool. No sidecar that could be needed is permanently discarded.",
+        "recommendation": "No action required. The bounded queue size provides adequate protection against memory exhaustion."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#43",
+      "property_id": "PROP-W1B10-39",
+      "title": "Verify Trust Boundary Integrity: Is proposer selection seed correctly domain-separated using DOMAIN_BEACON_PROPOSER?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/BeaconStateAccessorsFulu.java",
+          "lines": "53-57",
+          "function": "getBeaconProposerIndices"
+        },
+        "code_excerpt": "final Bytes32 seed = getSeed(state, epoch, Domain.BEACON_PROPOSER);",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/constants/Domain.java:20",
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateAccessors.java:159-166",
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateAccessors.java:214-227"
+        ],
+        "analysis": "At BeaconStateAccessorsFulu.java:55, getSeed is called with exactly three arguments: state, epoch, and Domain.BEACON_PROPOSER. Domain.BEACON_PROPOSER is defined as Bytes4.fromHexString('0x00000000') at Domain.java:20. The getSeed function at BeaconStateAccessors.java:159-166 computes SHA256(domainType || epoch_bytes || randao_mix). The base class getBeaconProposerIndex at line 223 also uses Domain.BEACON_PROPOSER. All domain constants in Domain.java have unique hex values (0x00-0x0A)."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. DOMAIN_BEACON_PROPOSER (0x00000000) is a compile-time constant (static final) that cannot be influenced by runtime inputs. It is distinct from all other domain constants: BEACON_ATTESTER (0x01000000), RANDAO (0x02000000), DEPOSIT (0x03000000), etc. The getSeed function uses the domain as the first 4 bytes of SHA256 input, ensuring domain separation.",
+        "attack_surface": "None - constants are immutable.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "getSeed is called with Domain.BEACON_PROPOSER (0x00000000) which is a unique, immutable constant. All call sites for proposer selection use this exact domain. No code path bypasses domain-separated seed generation.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#30",
+      "property_id": "PROP-W1B10-39",
+      "title": "Verify Domain Constant Uniqueness: Are all domain separation constants guaranteed to be unique?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/constants/Domain.java",
+          "lines": "18-36",
+          "function": "N/A (constants class)"
+        },
+        "code_excerpt": "BEACON_PROPOSER=0x00000000, BEACON_ATTESTER=0x01000000, RANDAO=0x02000000, DEPOSIT=0x03000000, VOLUNTARY_EXIT=0x04000000, SELECTION_PROOF=0x05000000, AGGREGATE_AND_PROOF=0x06000000, APPLICATION_BUILDER=0x00000001, SYNC_COMMITTEE=0x07000000, SYNC_COMMITTEE_SELECTION_PROOF=0x08000000, CONTRIBUTION_AND_PROOF=0x09000000, DOMAIN_BLS_TO_EXECUTION_CHANGE=0x0A000000",
+        "supporting_files": [],
+        "analysis": "All 12 domain constants are defined as static final Bytes4 values in Domain.java. Each has a unique hex value. They are defined as compile-time constants and cannot be modified at runtime. No dynamic computation or user input can influence domain values. The values match the Ethereum consensus specification exactly."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. All domain constants are unique Bytes4 values. Note that APPLICATION_BUILDER (0x00000001) uses a different byte ordering pattern than the others but is still unique. All constants are static final (immutable in Java).",
+        "attack_surface": "None - compile-time constants.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "All 12 DOMAIN_* constants have unique values, are defined as static final (immutable), and match the Ethereum consensus specification. No collision possible.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#44",
+      "property_id": "PROP-W1B10-40",
+      "title": "Can process_epoch sub-process execution order be violated, causing state divergence across clients?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/statetransition/epoch/AbstractEpochProcessor.java",
+          "lines": "107-150",
+          "function": "processEpoch"
+        },
+        "code_excerpt": "processJustificationAndFinalization(line123); processInactivityUpdates(124); processRewardsAndPenalties(125); processRegistryUpdates(126); processSlashings(127); processEth1DataReset(128); processPendingDeposits(129); processPendingConsolidations(136); processEffectiveBalanceUpdates(137); processSlashingsReset(138); processRandaoMixesReset(139); processHistoricalRootsUpdate(140); processHistoricalSummariesUpdate(141); processParticipationUpdates(142); processSyncCommitteeUpdates(143); processProposerLookahead(144);",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/statetransition/epoch/EpochProcessorFulu.java:62-92"
+        ],
+        "analysis": "The processEpoch method at AbstractEpochProcessor.java:107-150 executes all sub-processes sequentially in a single method body with no async calls, no parallel execution, and no conditional branches that could skip or reorder steps. Each function call is a direct synchronous method invocation. processProposerLookahead is the LAST step at line 144, after all validator registry updates, slashings, balance updates, and RANDAO mix resets are complete. Java guarantees sequential execution within a method body."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The processEpoch method is a sequential synchronous method. Java's execution model guarantees that each statement completes before the next begins. There are no async calls, thread spawns, or CompletableFuture chains within the epoch processing. No conditional branches skip steps. The only conditional (line 131) is for recreating validator statuses after pending deposits, which is a data refresh, not a step reorder.",
+        "attack_surface": "None - execution order is enforced by Java's sequential execution model.",
+        "exploitability": "None - would require a JVM bug to violate sequential execution."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Java guarantees sequential execution of statements within a method body. All epoch sub-processes are direct synchronous method calls in fixed order. processProposerLookahead is correctly the final step (line 144). No async, parallel, or conditional execution paths exist that could reorder steps.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#45",
+      "property_id": "PROP-W1B10-41",
+      "title": "Can process_proposer_lookahead execute before all 15 preceding steps in process_epoch complete?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/statetransition/epoch/AbstractEpochProcessor.java",
+          "lines": "107-150",
+          "function": "processEpoch"
+        },
+        "code_excerpt": "Line 144: processProposerLookahead(state); // Called after all 15 preceding steps at lines 112-143",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/statetransition/epoch/EpochProcessorFulu.java:62-92"
+        ],
+        "analysis": "processProposerLookahead is invoked at line 144 of AbstractEpochProcessor.processEpoch, after all preceding steps including processRegistryUpdates (line 126), processEffectiveBalanceUpdates (line 137), and processRandaoMixesReset (line 139). The Fulu implementation (EpochProcessorFulu.java:62-92) reads the updated validator registry and calls getBeaconProposerIndices which depends on updated active validator indices and RANDAO mixes. Since processEpoch is synchronous, all dependencies are satisfied before processProposerLookahead executes."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. processProposerLookahead at line 144 is guaranteed to execute after all 15 preceding steps complete, as they are sequential synchronous calls in the same method. The method reads from MutableBeaconState which has been updated by all previous steps. No early return paths exist between line 112 and line 144 (the only conditional at line 131 continues processing, it doesn't return).",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "processProposerLookahead is the final step in processEpoch (line 144). All 15 preceding steps are synchronous calls that complete before it executes. No early returns, async calls, or parallel execution exist. The method correctly reads updated state including validator registry and RANDAO mixes.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#46",
+      "property_id": "PROP-W1B10-42",
+      "title": "Verify Trust Boundary Integrity for tb-009: Is the proposer_lookahead shift operation correctly removing exactly SLOTS_PER_EPOCH entries?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/statetransition/epoch/EpochProcessorFulu.java",
+          "lines": "62-92",
+          "function": "processProposerLookahead"
+        },
+        "code_excerpt": "final List<UInt64> proposerIndicesToShiftOut = stateFulu.getProposerLookahead().asListUnboxed().subList(specConfig.getSlotsPerEpoch(), stateFulu.getProposerLookahead().size());",
+        "supporting_files": [],
+        "analysis": "At EpochProcessorFulu.java:68-72, the shift operation uses subList(specConfig.getSlotsPerEpoch(), size) which takes elements from index SLOTS_PER_EPOCH to the end, effectively removing exactly the first SLOTS_PER_EPOCH entries. This is the standard Java subList operation. Then at lines 87-88, the shifted list is concatenated with new proposer indices for the next epoch. The result has the correct length: (original_size - SLOTS_PER_EPOCH) + SLOTS_PER_EPOCH = original_size."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The subList(SLOTS_PER_EPOCH, size) operation correctly removes exactly the first SLOTS_PER_EPOCH elements. The new epoch's proposer indices are computed via getBeaconProposerIndices which returns exactly SLOTS_PER_EPOCH entries (one per slot). The resulting list maintains the correct total length.",
+        "attack_surface": "None - internal computation with no external inputs.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The shift operation uses subList(getSlotsPerEpoch(), size) which correctly removes exactly SLOTS_PER_EPOCH entries from the front. The new entries appended via getBeaconProposerIndices produce exactly SLOTS_PER_EPOCH new entries. Array length is preserved correctly.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#31",
+      "property_id": "PROP-W1B10-42",
+      "title": "Verify Consensus Layer proposer_lookahead state consistency during epoch transitions",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/statetransition/epoch/EpochProcessorFulu.java",
+          "lines": "62-92",
+          "function": "processProposerLookahead"
+        },
+        "code_excerpt": "Shift out first epoch (lines 68-72), fill last epoch (lines 74-85), set state (lines 87-91).",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:626-637",
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/BeaconStateAccessorsFulu.java:43-51"
+        ],
+        "analysis": "processProposerLookahead maintains array consistency by: (1) removing exactly SLOTS_PER_EPOCH entries from the front, (2) appending exactly SLOTS_PER_EPOCH new entries for the new lookahead epoch. The initialization in MiscHelpersFulu.initializeProposerLookahead (lines 626-637) creates the initial array with (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH entries. Each epoch transition preserves this length. The getBeaconProposerIndex in BeaconStateAccessorsFulu (line 45) reads from the lookahead using slot mod SLOTS_PER_EPOCH as index, which correctly maps to the current epoch's entries after the shift."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The lookahead array length is preserved across epoch transitions. The initialization creates (MIN_SEED_LOOKAHEAD + 1) epochs worth of entries. Each transition removes one epoch and adds one epoch, maintaining size. The slot-to-index mapping (slot mod SLOTS_PER_EPOCH) correctly accesses the first SLOTS_PER_EPOCH entries which represent the current epoch's proposers.",
+        "attack_surface": "None - internal state managed by epoch processing.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The proposer_lookahead array length is correctly maintained across epoch transitions. Initialization and shift operations preserve the invariant of (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH entries. The getBeaconProposerIndex correctly reads from the array using slot mod SLOTS_PER_EPOCH.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#24",
+      "property_id": "PROP-W1B10-42",
+      "title": "Verify Validator receives correct proposer assignments after lookahead shift",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/BeaconStateAccessorsFulu.java",
+          "lines": "43-51",
+          "function": "getBeaconProposerIndex"
+        },
+        "code_excerpt": "public int getBeaconProposerIndex(final BeaconState state, final UInt64 requestedSlot) { validateStateCanCalculateProposerIndexAtSlot(state, requestedSlot); final int lookaheadIndex = requestedSlot.mod(configFulu.getSlotsPerEpoch()).intValue(); return BeaconStateFulu.required(state).getProposerLookahead().get(lookaheadIndex).get().intValue(); }",
+        "supporting_files": [],
+        "analysis": "The getBeaconProposerIndex method maps slots to lookahead array indices using requestedSlot mod SLOTS_PER_EPOCH. After the shift operation in processProposerLookahead, the first SLOTS_PER_EPOCH entries in the array correspond to the current epoch's proposers. Since requestedSlot mod SLOTS_PER_EPOCH produces indices 0 through SLOTS_PER_EPOCH-1, it correctly maps to the current epoch's entries. The validateStateCanCalculateProposerIndexAtSlot method provides bounds checking."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The slot-to-index mapping (requestedSlot mod SLOTS_PER_EPOCH) is correct because the shift operation ensures the first SLOTS_PER_EPOCH entries always represent the current epoch. The validation method prevents out-of-range access.",
+        "attack_surface": "None - internal state access.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The slot-to-index mapping correctly uses modular arithmetic to access proposer indices from the lookahead array. After shift, indices 0 to SLOTS_PER_EPOCH-1 always represent the current epoch's proposers, which matches requestedSlot mod SLOTS_PER_EPOCH.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-29-001",
+      "property_id": "PROP-W4B13-29",
+      "title": "Verify Trust Boundary Integrity for tb-001: Is the sidecar subnet validation correctly enforced in the gossip validation pipeline?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "210-214",
+          "function": "validate (subnet check comment)"
+        },
+        "code_excerpt": "/* [REJECT] The sidecar is for the correct subnet -- i.e. compute_subnet_for_data_column_sidecar(sidecar.index) == subnet_id. Already done in DataColumnSidecarTopicHandler.TopicSubnetIdAwareOperationProcessor#process */",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:148-150"
+        ],
+        "analysis": "The subnet validation is NOT performed in DataColumnSidecarGossipValidator itself - the comment at lines 210-214 indicates it is delegated to DataColumnSidecarTopicHandler.TopicSubnetIdAwareOperationProcessor. The compute_subnet_for_data_column_sidecar function at MiscHelpersFulu.java:148-150 computes columnIndex mod dataColumnSidecarSubnetCount. The topic handler validates that the sidecar was received on the correct subnet by comparing the computed subnet against the topic's subnet ID. This is architecturally correct as subnet validation is a transport-layer concern."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The subnet validation is correctly implemented at the topic handler layer, which is the appropriate place as it has access to the subnet ID from the gossip topic. The compute function uses simple modular arithmetic which cannot produce incorrect results. The separation between transport-layer subnet validation and content validation in the gossip validator is a clean architectural pattern.",
+        "attack_surface": "P2P - an attacker could send sidecars on wrong subnets, but they will be rejected at the topic handler level.",
+        "exploitability": "None - subnet mismatch causes rejection before the gossip validator is even invoked."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Subnet validation is correctly enforced at the topic handler layer using compute_subnet_for_data_column_sidecar(index) = index mod subnet_count. Mismatched sidecars are rejected before reaching the gossip validator.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-29-002",
+      "property_id": "PROP-W4B13-29",
+      "title": "Does the P2P peer correctly reject sidecars with mismatched subnet/index before forwarding to the beacon node?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "210-214",
+          "function": "validate"
+        },
+        "code_excerpt": "Subnet validation is handled at the topic handler layer before gossip validation.",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:148-150"
+        ],
+        "analysis": "The P2P layer enforces subnet validation at the gossip topic handler level. Each data_column_sidecar_subnet_{subnet_id} topic has a handler that verifies the sidecar's computed subnet matches the topic's subnet ID. This validation occurs BEFORE the sidecar reaches the gossip validator or beacon node processing. Messages failing this check are rejected at the P2P layer and never propagated."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The gossip topic handler enforces subnet validation at the transport layer. The rejection happens before any beacon node processing, so no state changes occur for invalid sidecars.",
+        "attack_surface": "P2P gossip layer.",
+        "exploitability": "None - rejection at transport layer."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Subnet validation occurs at the P2P topic handler layer, before any beacon node processing. Mismatched sidecars are rejected at the transport layer.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-29-003",
+      "property_id": "PROP-W4B13-29",
+      "title": "Does the beacon node have defense-in-depth validation for sidecar subnet matching as a secondary check?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "188-360",
+          "function": "validate"
+        },
+        "code_excerpt": "No secondary subnet validation found in the gossip validator or beacon node processing path.",
+        "supporting_files": [],
+        "analysis": "The DataColumnSidecarGossipValidator does NOT perform a secondary subnet validation check. The comment at lines 210-214 explicitly states this check is delegated to the topic handler. The beacon node relies solely on the transport-layer validation. While this is a defense-in-depth gap, the primary validation at the topic handler level is robust (simple modular arithmetic, no bypass paths)."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Minor defense-in-depth gap identified. The beacon node does not perform a secondary subnet validation. However, the primary validation at the topic handler is robust and cannot be bypassed through normal code paths. The only scenario where this matters is if a sidecar reaches the beacon node through a path that bypasses gossip (e.g., direct internal call), but such paths are not externally reachable.",
+        "attack_surface": "Theoretical - internal call paths bypassing gossip.",
+        "exploitability": "Very low - no known external path bypasses the topic handler."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "high",
+        "justification": "No secondary subnet validation exists in the beacon node. This is a minor defense-in-depth gap, but the primary validation at the topic handler is robust. The risk is acceptable given that no external path bypasses the topic handler.",
+        "recommendation": "Consider adding a secondary subnet check in the gossip validator for defense-in-depth, though this is low priority."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-30-001",
+      "property_id": "PROP-W4B13-30",
+      "title": "Verify Trust Boundary Integrity for tb-001: Does the gossip validation pipeline correctly IGNORE (not REJECT) sidecars with future slots?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "219-222",
+          "function": "validate"
+        },
+        "code_excerpt": "if (gossipValidationHelper.isSlotFromFuture(blockHeader.getSlot())) { return completedFuture(InternalValidationResult.SAVE_FOR_FUTURE); }",
+        "supporting_files": [],
+        "analysis": "At line 219-222, future-slot sidecars return SAVE_FOR_FUTURE (not REJECT or IGNORE). SAVE_FOR_FUTURE is semantically equivalent to IGNORE for gossipsub (not forwarded) but instructs the local node to retain the sidecar for later re-processing. The isSlotFromFuture check uses MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance. This correctly implements the spec requirement: future sidecars are not rejected (no peer penalty) and are queued for later validation."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Future-slot sidecars correctly return SAVE_FOR_FUTURE which prevents forwarding (IGNORE behavior) and avoids peer penalties (not REJECT). The clock disparity allowance handles minor clock differences.",
+        "attack_surface": "An attacker could flood far-future sidecars to fill the pending queue.",
+        "exploitability": "Low - bounded pending queue size."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Future-slot sidecars are correctly handled with SAVE_FOR_FUTURE (equivalent to IGNORE + queue). No peer penalty is applied. The MAXIMUM_GOSSIP_CLOCK_DISPARITY allowance is correctly used.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-30-002",
+      "property_id": "PROP-W4B13-30",
+      "title": "Is the P2P peer handling of future-slot sidecars resilient to resource exhaustion attacks?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "117-143",
+          "function": "create"
+        },
+        "code_excerpt": "LimitedSet.createSynchronized(validInfoSize) used for tracking received sidecars.",
+        "supporting_files": [],
+        "analysis": "The SAVE_FOR_FUTURE sidecars are stored in a pending pool managed by the gossip infrastructure. The receivedValidDataColumnSidecarInfoSet uses LimitedSet which has bounded capacity. The pending pool for future processing also has bounded capacity. When limits are exceeded, oldest entries are evicted. This prevents unbounded memory growth from far-future sidecar floods."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Bounded queues provide protection against resource exhaustion. The LimitedSet implementation evicts oldest entries when capacity is reached. However, an attacker could potentially evict legitimate near-future sidecars by flooding with far-future ones. The impact is limited because near-future sidecars will typically be re-received when they become current.",
+        "attack_surface": "P2P - far-future sidecar flood.",
+        "exploitability": "Low - bounded queues prevent memory exhaustion; evicted legitimate sidecars can be re-obtained."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Bounded queue sizes prevent memory exhaustion from far-future sidecar floods. Eviction of legitimate sidecars is mitigated by the ability to re-obtain them through normal gossip.",
+        "recommendation": "No action required. The bounded queue approach is standard practice."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-30-003",
+      "property_id": "PROP-W4B13-30",
+      "title": "Does the beacon node correctly re-validate previously IGNORED future-slot sidecars after clock advancement?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "219-222",
+          "function": "validate"
+        },
+        "code_excerpt": "SAVE_FOR_FUTURE return triggers re-processing when the slot arrives.",
+        "supporting_files": [],
+        "analysis": "The SAVE_FOR_FUTURE result instructs the gossip infrastructure to retain the sidecar and re-submit it for validation when the appropriate slot arrives. The re-processing mechanism is part of the Teku gossip management framework which monitors slot progression and re-validates pending items. The sidecar undergoes the full validation pipeline on re-processing, ensuring it is not accepted without complete validation."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. SAVE_FOR_FUTURE sidecars are re-validated through the complete validation pipeline when their slot arrives. No bypass of validation steps occurs during re-processing.",
+        "attack_surface": "None for this specific check.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "The SAVE_FOR_FUTURE mechanism correctly queues future-slot sidecars for re-validation when their slot arrives. Full validation is re-applied on re-processing.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-31-001",
+      "property_id": "PROP-W4B13-31",
+      "title": "Verify Trust Boundary Integrity for tb-001: Does the gossip validation pipeline enforce sidecar.slot > parent.slot with strict inequality?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "270-274",
+          "function": "validate"
+        },
+        "code_excerpt": "if (!blockHeader.getSlot().isGreaterThan(parentBlockSlot)) { return completedFuture(reject(\"Parent block slot is after DataColumnSidecar slot\")); }",
+        "supporting_files": [
+          "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/BlobSidecarGossipValidator.java:196-198"
+        ],
+        "analysis": "At DataColumnSidecarGossipValidator.java:272, the check uses isGreaterThan() which implements strict inequality (>). If blockHeader.getSlot() <= parentBlockSlot, the sidecar is REJECTED. This correctly enforces sidecar.slot > parent.slot. The same pattern is used in BlobSidecarGossipValidator.java:196. The negation pattern (!isGreaterThan) means reject when slot is NOT strictly greater than parent, which covers both equal and less-than cases."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The isGreaterThan() method implements strict greater-than comparison. The negation ensures rejection when sidecar.slot == parent.slot or sidecar.slot < parent.slot.",
+        "attack_surface": "P2P - attacker crafting sidecars with slot == parent.slot.",
+        "exploitability": "None - correctly rejected."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The code uses !isGreaterThan(parentBlockSlot) which correctly rejects sidecars where slot <= parent.slot. Strict inequality is enforced.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-31-002",
+      "property_id": "PROP-W4B13-31",
+      "title": "Does actor-p2p-peer correctly propagate or reject sidecars based on slot ordering validation?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "270-274",
+          "function": "validate"
+        },
+        "code_excerpt": "REJECT result prevents propagation via gossipsub.",
+        "supporting_files": [],
+        "analysis": "When slot ordering validation fails, the validator returns REJECT which in gossipsub semantics means: (1) the message is not forwarded to other peers, (2) the originating peer receives a negative reputation score adjustment. This prevents invalid sidecars from propagating through the network."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. REJECT correctly prevents forwarding and applies peer penalties.",
+        "attack_surface": "P2P gossip.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "REJECT result correctly prevents propagation and applies peer scoring penalties for slot ordering violations.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-31-003",
+      "property_id": "PROP-W4B13-31",
+      "title": "Does actor-beacon-node maintain chain ordering invariant by rejecting sidecars with slot <= parent.slot?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "270-274",
+          "function": "validate"
+        },
+        "code_excerpt": "Slot ordering check occurs in gossip validation before any chain state updates.",
+        "supporting_files": [],
+        "analysis": "The slot ordering check at line 272 executes before any state updates or chain processing. Rejected sidecars do not reach the beacon node's block processing pipeline. No partial state updates occur for rejected sidecars."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Rejected sidecars are discarded before any state changes.",
+        "attack_surface": "None for chain state.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Slot ordering validation occurs in gossip validation before any chain state processing. No state corruption possible from rejected sidecars.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-32-001",
+      "property_id": "PROP-W4B13-32",
+      "title": "Verify Trust Boundary Integrity: Does the gossip validation pipeline correctly verify that the finalized checkpoint is an ancestor of the sidecar parent block?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "279-283",
+          "function": "validate"
+        },
+        "code_excerpt": "if (!gossipValidationHelper.currentFinalizedCheckpointIsAncestorOfBlock(blockHeader.getSlot(), blockHeader.getParentRoot())) { return completedFuture(reject(\"DataColumnSidecar block header does not descend from finalized checkpoint\")); }",
+        "supporting_files": [],
+        "analysis": "At line 279-283, the gossip validator checks that the current finalized checkpoint is an ancestor of the sidecar's block. This uses gossipValidationHelper.currentFinalizedCheckpointIsAncestorOfBlock which resolves the ancestry through the fork choice store. The check is also repeated in the shortened validation path at lines 369-373 for previously verified headers."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The finalized checkpoint ancestry check is correctly implemented and applied in both the full and shortened validation paths. The check uses the fork choice store which maintains accurate finalization state.",
+        "attack_surface": "P2P - attacker sending sidecars from non-canonical chains.",
+        "exploitability": "None - correctly rejected."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Finalized checkpoint ancestry is correctly verified using gossipValidationHelper.currentFinalizedCheckpointIsAncestorOfBlock. The check is applied in both full and shortened validation paths.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-32-002",
+      "property_id": "PROP-W4B13-32",
+      "title": "Can an attacker bypass finalized checkpoint ancestry verification by manipulating sidecar metadata?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "248-283",
+          "function": "validate"
+        },
+        "code_excerpt": "Parent availability check (248-252), parent existence check (253-259), slot ordering check (270-274), finalized ancestry check (279-283).",
+        "supporting_files": [],
+        "analysis": "The validation pipeline has multiple layers: (1) parent block must be available in the store (line 248), (2) parent block slot must exist (line 253), (3) slot must be strictly greater than parent (line 272), (4) finalized checkpoint ancestry must be verified (line 279). An attacker cannot use a fake parent_root because it must reference a real block in the store. The ancestry check traces through the actual block tree, not sidecar metadata. The proposer signature check (line 330) further ensures the block header is authentic."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The ancestry verification uses the actual fork choice store and block tree, not sidecar metadata fields that an attacker could manipulate. The parent_root must reference a real block in the store, and the ancestry trace goes through the actual block graph.",
+        "attack_surface": "P2P with crafted sidecars.",
+        "exploitability": "None - ancestry uses actual block tree, not attacker-controlled metadata."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Ancestry verification uses the fork choice store's actual block tree, not attacker-controlled sidecar metadata. Parent_root must reference a real block, and ancestry is traced through the block graph.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-32-003",
+      "property_id": "PROP-W4B13-32",
+      "title": "Does the beacon node maintain correct state when rejecting sidecars from non-canonical chains?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/DataColumnSidecarGossipValidator.java",
+          "lines": "279-283",
+          "function": "validate"
+        },
+        "code_excerpt": "REJECT result returned before any state changes.",
+        "supporting_files": [],
+        "analysis": "When a sidecar from a non-canonical chain is rejected at line 279-283, the rejection occurs during the gossip validation phase, before any state updates, database writes, or cache modifications. The SafeFuture chain returns immediately with the reject result, and no further processing occurs."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Rejection occurs before any state modifications. No orphaned data or corrupted caches result from rejected sidecars.",
+        "attack_surface": "Repeated invalid submissions could consume CPU for ancestry checks.",
+        "exploitability": "Low - per-peer rate limiting and gossipsub reputation scoring limit the impact."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Rejected sidecars produce no state changes, no database writes, and no cache modifications. Rejection is atomic and occurs before any processing.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-33-001",
+      "property_id": "PROP-W4B13-33",
+      "title": "Verify Trust Boundary Integrity for tb-002: Does beacon block KZG validation correctly enforce epoch-dependent max_blobs_per_block limit?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/BlockGossipValidator.java",
+          "lines": "157-175",
+          "function": "validate"
+        },
+        "code_excerpt": "final Integer maxBlobsPerBlock = spec.getMaxBlobsPerBlockAtSlot(block.getSlot()).orElseThrow(); if (blobKzgCommitmentsCount > maxBlobsPerBlock) { return reject(...); }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java:1196-1210"
+        ],
+        "analysis": "At BlockGossipValidator.java:162-163, getMaxBlobsPerBlockAtSlot is called with the block's slot. At Spec.java:1196-1210, for FULU/GLOAS milestones, this computes the epoch from the slot and calls MiscHelpersFulu.getBlobParameters(epoch).maxBlobsPerBlock(). This correctly retrieves the epoch-dependent max_blobs_per_block value through the BPO (Blob Parameter Override) fork schedule. The validation uses the block's own slot/epoch, not the node's current state, ensuring consistency."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The max_blobs_per_block limit is correctly computed from the block's slot via epoch derivation. The BPO fork schedule returns the correct limit for each epoch. The validation is a simple count comparison (>) that rejects blocks with too many commitments.",
+        "attack_surface": "P2P - blocks with excessive KZG commitments.",
+        "exploitability": "None - correctly enforced."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The KZG commitment count is correctly validated against the epoch-dependent max_blobs_per_block limit. The limit is dynamically computed from the block's slot via getBlobParameters(epoch). Blocks exceeding the limit are rejected.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-33-002",
+      "property_id": "PROP-W4B13-33",
+      "title": "P2P Peer Boundary Check: Can a malicious P2P peer bypass KZG commitment count validation through timing attacks at epoch boundaries?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java",
+          "lines": "1196-1210",
+          "function": "getMaxBlobsPerBlockAtSlot"
+        },
+        "code_excerpt": "case FULU, GLOAS -> { final UInt64 epoch = specVersion.miscHelpers().computeEpochAtSlot(slot); yield Optional.of(MiscHelpersFulu.required(specVersion.miscHelpers()).getBlobParameters(epoch).maxBlobsPerBlock()); }",
+        "supporting_files": [],
+        "analysis": "The max_blobs limit is computed from the block's slot (block.getSlot()), NOT from the node's current time or state. This means the limit is deterministic for any given block regardless of when the node processes it. There is no race condition possible because the computation is purely based on the block's immutable slot field. All clients that implement the same spec will compute the same limit for the same slot."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The limit computation is deterministic based on the block's slot, not the node's current state or time. No timing attack is possible because the epoch is derived from the block's own slot field, which is immutable.",
+        "attack_surface": "None - deterministic computation.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The max_blobs_per_block limit is deterministically computed from the block's slot, not the node's current time. No timing attack or race condition can affect the computation.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-33-003",
+      "property_id": "PROP-W4B13-33",
+      "title": "Beacon Node Internal Validation: Is the epoch parameter correctly computed before being passed to get_blob_parameters()?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java",
+          "lines": "1196-1210",
+          "function": "getMaxBlobsPerBlockAtSlot"
+        },
+        "code_excerpt": "final UInt64 epoch = specVersion.miscHelpers().computeEpochAtSlot(slot);",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:123-129"
+        ],
+        "analysis": "The epoch is computed via computeEpochAtSlot(slot) which performs slot / SLOTS_PER_EPOCH (integer division). This correctly handles epoch boundaries: slot 0 of a new epoch maps to the new epoch. The epoch is then passed to getBlobParameters(epoch) which uses the BPO fork schedule to determine the correct max_blobs_per_block. No caching of max_blobs exists that could return stale values."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. computeEpochAtSlot correctly converts slots to epochs. getBlobParameters uses the BPO fork schedule which is immutable after initialization.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Epoch computation via computeEpochAtSlot is correct. getBlobParameters uses an immutable fork schedule. No stale caching possible.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-34-001",
+      "property_id": "PROP-W4B13-34",
+      "title": "Verify Trust Boundary Integrity for tb-002: Does beacon block KZG validation correctly accept blocks with zero blob_kzg_commitments?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/BlockGossipValidator.java",
+          "lines": "157-175",
+          "function": "validate"
+        },
+        "code_excerpt": "if (blobKzgCommitments.isPresent()) { ... if (blobKzgCommitmentsCount > maxBlobsPerBlock) { reject } } // No lower bound check",
+        "supporting_files": [],
+        "analysis": "The KZG commitment validation at lines 161-175 only checks if the count EXCEEDS maxBlobsPerBlock (upper bound). There is no lower bound check. When blobKzgCommitments is present but empty (size=0), the condition 0 > maxBlobsPerBlock is false, so the block passes validation. When blobKzgCommitments is absent (Optional.empty), the entire block is skipped (pre-Deneb case). This correctly accepts zero-commitment blocks."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Zero-commitment blocks are correctly accepted because only an upper bound check exists (count > max). Empty commitment lists pass this check.",
+        "attack_surface": "None - correct behavior.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The validation only enforces an upper bound (count > maxBlobsPerBlock). Zero-commitment blocks (count=0) correctly pass validation since 0 > max is always false.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-34-002",
+      "property_id": "PROP-W4B13-34",
+      "title": "Does the beacon node's block validation logic enforce a minimum commitment count that would incorrectly reject zero-commitment blocks?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/validation/BlockGossipValidator.java",
+          "lines": "157-175",
+          "function": "validate"
+        },
+        "code_excerpt": "Only upper bound check: blobKzgCommitmentsCount > maxBlobsPerBlock",
+        "supporting_files": [],
+        "analysis": "No lower bound check (< 1, == 0, or similar minimum enforcement) exists in the KZG validation code. The only condition is blobKzgCommitmentsCount > maxBlobsPerBlock. This is spec-compliant: blocks may have zero blobs."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. No minimum commitment count is enforced. Zero-commitment blocks are accepted.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "No minimum commitment count check exists. Only the upper bound (> maxBlobsPerBlock) is enforced, correctly allowing zero-commitment blocks per spec.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-35-001",
+      "property_id": "PROP-W4B13-35",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is the data_column_serve_range computation correct and are requests outside this range properly rejected?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "90-106",
+          "function": "validateRequest"
+        },
+        "code_excerpt": "Validates request count against maxRequestDataColumnSidecars. Range validation is handled by slot-based data retrieval.",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:599-604"
+        ],
+        "analysis": "The DataColumnSidecarsByRangeMessageHandler validates request size at line 93-104. The serve range is implicitly enforced through the data retrieval layer: getDataColumnIdentifiers (line 271) only returns identifiers for slots that exist in storage. The minimum epoch bound is enforced by isAvailabilityOfDataColumnSidecarsRequiredAtEpoch in MiscHelpersFulu.java:599-604 which checks currentEpoch - epoch <= MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. Data outside this range is simply not available in storage (pruned)."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The serve range is implicitly enforced through storage pruning rather than explicit request validation. Requests for pruned data will receive empty responses rather than explicit ResourceUnavailable errors. This differs from the spec which calls for explicit rejection, but is functionally safe since no stale data is served.",
+        "attack_surface": "Requests for pruned epochs may cause unnecessary DB lookups.",
+        "exploitability": "Low - DB lookups for non-existent data are cheap."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "medium",
+        "justification": "Serve range is implicitly enforced through storage pruning. Requests outside range receive empty responses rather than explicit ResourceUnavailable errors. This is functionally safe but diverges from the spec's recommended explicit rejection.",
+        "recommendation": "Consider adding explicit epoch range validation in validateRequest to avoid unnecessary DB queries for out-of-range requests."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-35-002",
+      "property_id": "PROP-W4B13-35",
+      "title": "Does the beacon node correctly compute current_epoch and FULU_FORK_EPOCH for serve range calculation?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java",
+          "lines": "599-604",
+          "function": "isAvailabilityOfDataColumnSidecarsRequiredAtEpoch"
+        },
+        "code_excerpt": "return currentEpoch.minusMinZero(epoch).isLessThanOrEqualTo(specConfigFulu.getMinEpochsForDataColumnSidecarsRequests());",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java:1110-1120"
+        ],
+        "analysis": "The Spec.java wrapper at lines 1110-1120 computes currentEpoch from the store and calls the MiscHelpersFulu method. The current epoch is derived from the store's time, which is continuously updated. FULU_FORK_EPOCH is implicitly handled by the spec milestone system - data column sidecars don't exist before Fulu. The minusMinZero operation prevents underflow when epoch > currentEpoch."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Current epoch computation is standard. The minusMinZero prevents underflow. FULU_FORK_EPOCH is handled by the milestone system.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Current epoch is correctly computed from the store. minusMinZero prevents underflow. FULU_FORK_EPOCH is implicitly handled by the milestone system.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-35-003",
+      "property_id": "PROP-W4B13-35",
+      "title": "Does the request-response client properly handle ResourceUnavailable(3) responses and prevent replay attacks with stale range requests?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "213-228",
+          "function": "handleProcessingRequestError"
+        },
+        "code_excerpt": "Error handling differentiates RpcException, StreamClosedException, and other errors.",
+        "supporting_files": [],
+        "analysis": "The handler has error handling at lines 213-228 that differentiates between RPC errors, stream closures, and unexpected errors. RPC exceptions are logged at TRACE level and sent as error responses. The client side handles error responses through standard RPC error handling mechanisms. Rate limiting via peer.approveRequest() at line 134 prevents excessive retries."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Error handling is appropriate. Rate limiting prevents retry floods.",
+        "attack_surface": "Repeated requests could consume resources, but rate limiting is in place.",
+        "exploitability": "Low."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Error handling properly differentiates error types. Rate limiting prevents excessive retries from malicious clients.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-36-001",
+      "property_id": "PROP-W4B13-36",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is the MAX_REQUEST_DATA_COLUMN_SIDECARS limit enforced?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "90-106",
+          "function": "validateRequest"
+        },
+        "code_excerpt": "final int maxRequestDataColumnSidecars = specConfigFulu.getMaxRequestDataColumnSidecars(); final int requestedCount = calculateRequestedCount(request); if (requestedCount == -1 || requestedCount > maxRequestDataColumnSidecars) { return Optional.of(new RpcException(INVALID_REQUEST_CODE, ...)); }",
+        "supporting_files": [
+          "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java:187-193"
+        ],
+        "analysis": "At lines 93-104, the validateRequest method computes requestedCount = count * columns.size() (line 189) and checks it against maxRequestDataColumnSidecars. The calculateRequestedCount method at lines 187-193 catches ArithmeticException (overflow) and returns -1, which also triggers rejection. The check is performed BEFORE any data retrieval or processing. Additionally, the RequestState uses maxRequestDataColumnSidecars as a limit for data retrieval (line 159, 271)."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The limit is enforced before data retrieval. Integer overflow is handled by catching ArithmeticException. The requestedCount calculation (count * columns.size()) correctly accounts for the total number of sidecars across all columns and slots.",
+        "attack_surface": "P2P - large requests.",
+        "exploitability": "None - correctly enforced."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "MAX_REQUEST_DATA_COLUMN_SIDECARS is enforced in validateRequest before any data retrieval. Integer overflow is handled. The total count correctly includes all columns and slots.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-36-002",
+      "property_id": "PROP-W4B13-36",
+      "title": "Does the beacon node correctly enforce sidecar count limits before streaming responses?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "156-164",
+          "function": "onIncomingMessage -> RequestState"
+        },
+        "code_excerpt": "new RequestState(responseCallbackWithLogging, specConfigFulu.getMaxRequestDataColumnSidecars(), startSlot, endSlot, columns, canonicalHotRoots, finalizedSlot);",
+        "supporting_files": [
+          "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java:268-271"
+        ],
+        "analysis": "The RequestState is initialized with maxRequestDataColumnSidecars at line 159. This limit is passed to getDataColumnIdentifiers at line 271 as a cap on the number of identifiers returned from storage. The limit is enforced both at request validation time (validateRequest) and at data retrieval time (getDataColumnIdentifiers), providing defense-in-depth."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Limit is enforced at both validation and retrieval layers.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The sidecar count limit is enforced both in validateRequest and in the data retrieval layer via getDataColumnIdentifiers, providing defense-in-depth.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-36-003",
+      "property_id": "PROP-W4B13-36",
+      "title": "Does the request-response client validate that received responses do not exceed expected sidecar limits?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "230-314",
+          "function": "RequestState"
+        },
+        "code_excerpt": "Server-side limit enforcement. Client-side validation would be in the RPC framework.",
+        "supporting_files": [],
+        "analysis": "The server side correctly limits responses. Client-side validation of response size is handled by the RPC framework's SSZ deserialization which enforces maximum message sizes. The ResponseStream framework in Teku has built-in limits on the number of response chunks it will accept."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found in server-side enforcement. Client-side protection is provided by the RPC framework's message size limits.",
+        "attack_surface": "A malicious peer could send oversized responses, but framework limits apply.",
+        "exploitability": "Low - framework limits prevent memory exhaustion."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Server-side limits are correctly enforced. Client-side protection is provided by the RPC framework's message size limits and response chunk counting.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-37-001",
+      "property_id": "PROP-W4B13-37",
+      "title": "Verify Trust Boundary Integrity for tb-003: Does DataColumnSidecarsByRange response enforce strict (slot, column_index) ordering?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "268-284",
+          "function": "loadNextDataColumnSidecar"
+        },
+        "code_excerpt": "getDataColumnIdentifiers returns keys, then filtered by columns and iterated sequentially.",
+        "supporting_files": [],
+        "analysis": "The loadNextDataColumnSidecar method at lines 268-284 retrieves data column identifiers via getDataColumnIdentifiers(startSlot, endSlot, maxCount). The storage layer returns identifiers in (slot, column_index) order. The sequential iteration through these identifiers preserves the ordering in the response stream. The filter at line 277 (columns.contains) preserves relative order."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No explicit sorting is performed in the handler - ordering relies on the storage layer returning identifiers in correct order. If the storage layer returns unordered results, the response would be unordered. However, database implementations typically store and return keys in sorted order.",
+        "attack_surface": "None directly - depends on storage layer correctness.",
+        "exploitability": "None identified."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Response ordering is maintained through ordered storage retrieval and sequential iteration. The storage layer returns identifiers in (slot, column_index) order.",
+        "recommendation": "Consider adding an explicit ordering assertion for defense-in-depth."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-37-002",
+      "property_id": "PROP-W4B13-37",
+      "title": "Does the beacon node's DataColumnSidecarsByRange handler guarantee post-condition ordering before transmission?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "195-211",
+          "function": "sendDataColumnSidecars"
+        },
+        "code_excerpt": "Sequential thenCompose chain loads and sends sidecars one at a time in order.",
+        "supporting_files": [],
+        "analysis": "The sendDataColumnSidecars method at lines 195-211 uses a sequential thenCompose chain that loads one sidecar, sends it, then recursively processes the next. This ensures sidecars are sent in the order they are retrieved from storage. No parallel or out-of-order sending is possible in this sequential chain."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The sequential thenCompose chain guarantees in-order transmission. No concurrent access or race conditions possible.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The sequential thenCompose chain in sendDataColumnSidecars guarantees sidecars are sent in order. No parallel or out-of-order sending is possible.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-37-003",
+      "property_id": "PROP-W4B13-37",
+      "title": "Does the requesting client validate or tolerate ordering violations in DataColumnSidecarsByRange responses?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "N/A",
+          "function": "Client-side handling is in separate sync/fetch code"
+        },
+        "code_excerpt": "Client-side response handling is in the sync infrastructure, not in this handler.",
+        "supporting_files": [],
+        "analysis": "The client-side handling of DataColumnSidecarsByRange responses is in the sync infrastructure. The handler file only contains server-side logic. Client-side validation would typically verify that received sidecars have slots within the requested range and match requested columns, but explicit ordering validation depends on the specific sync implementation."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The server guarantees ordering (per previous checks). Client-side ordering validation is a defense-in-depth concern. The sync infrastructure processes received sidecars and would detect gross violations through slot/column mismatch checks.",
+        "attack_surface": "Malicious peer could send out-of-order responses.",
+        "exploitability": "Low - sync infrastructure handles sidecars individually."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "medium",
+        "justification": "Server-side ordering is guaranteed. Client-side ordering validation is a defense-in-depth gap but individual sidecar processing mitigates the risk.",
+        "recommendation": "Consider adding client-side ordering validation for defense-in-depth against malicious peers."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-38-001",
+      "property_id": "PROP-W4B13-38",
+      "title": "Verify Trust Boundary Integrity for tb-003: Does DataColumnSidecarsByRange abort response streaming when fork choice changes during an active request?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "108-185",
+          "function": "onIncomingMessage"
+        },
+        "code_excerpt": "Lines 142-154: canonicalHotRoots computed before streaming, with finalized slot refreshed to handle race conditions. Lines 296-313: isCanonicalHotDataColumnSidecar checks each sidecar against canonical roots.",
+        "supporting_files": [],
+        "analysis": "The handler takes a snapshot of canonical hot roots at request processing time (lines 146-154) and refreshes the finalized slot to handle concurrent finalization. During streaming, each sidecar is checked against this snapshot (line 296-313). If a reorg occurs during streaming, sidecars from the old fork that are in the canonical snapshot will still be sent. However, the finalized slot refresh (line 151) provides some protection against concurrent finalization. The handler does NOT have an explicit abort mechanism for fork choice changes during streaming."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Potential concern: If a reorg occurs during streaming, sidecars from the old canonical chain may be sent if they were in the snapshot taken at request time. However, this is a known trade-off in the spec - the alternative (aborting on every reorg) would cause excessive request failures. The spec allows for this behavior. Finalized sidecars (checked via finalizedSlot) are always valid regardless of reorgs.",
+        "attack_surface": "Reorg timing could cause stale data in hot range responses.",
+        "exploitability": "Low - reorgs are rare, and the data would have been valid at the time of the snapshot."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "medium",
+        "justification": "The handler uses a canonical roots snapshot taken at request time. If a reorg occurs during streaming, some hot sidecars from the old fork may be sent. This is a known trade-off. Finalized sidecars are always valid. The spec does not require aborting on reorg.",
+        "recommendation": "The current snapshot-based approach is acceptable. Consider documenting the trade-off."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-38-002",
+      "property_id": "PROP-W4B13-38",
+      "title": "Does the beacon node correctly track fork choice state during DataColumnSidecarsByRange streaming?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "142-154",
+          "function": "onIncomingMessage"
+        },
+        "code_excerpt": "canonicalHotRoots = combinedChainDataClient.getAncestorRoots(startSlot, UInt64.ONE, message.getCount()); finalizedSlot = combinedChainDataClient.getFinalizedBlockSlot().orElse(UInt64.ZERO);",
+        "supporting_files": [],
+        "analysis": "The handler uses a snapshot approach: it queries canonical hot roots once at the start and refreshes the finalized slot to handle concurrent finalization. There is no live fork choice tracking during streaming. This is intentional - live tracking would be complex and error-prone, and the snapshot approach provides adequate consistency."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability in the snapshot approach. The finalized slot refresh at line 151 handles the race condition between getting hot roots and concurrent finalization. The design is intentionally snapshot-based rather than live-tracking.",
+        "attack_surface": "None additional beyond the snapshot staleness discussed in 38-001.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "The snapshot approach with finalized slot refresh is intentional and handles the main race condition (concurrent finalization). Live fork choice tracking is not required by the spec.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-38-003",
+      "property_id": "PROP-W4B13-38",
+      "title": "Can an attacker exploit timing of DataColumnSidecarsByRange requests during reorgs to receive stale fork data?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRangeMessageHandler.java",
+          "lines": "108-185",
+          "function": "onIncomingMessage"
+        },
+        "code_excerpt": "Snapshot approach with canonicalHotRoots and finalized slot refresh.",
+        "supporting_files": [],
+        "analysis": "An attacker could theoretically time requests to coincide with reorgs, but: (1) reorgs are rare and unpredictable, (2) the attacker would need to predict the exact timing, (3) stale data from the old fork is valid at the time of the snapshot and doesn't compromise the receiving node's security - the receiver validates all received sidecars independently. Finalized data (the majority of the range) is never stale."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Theoretical attack with minimal impact. The receiver validates all received data independently, so stale fork data would be detected and discarded if it conflicts with the receiver's view of the canonical chain.",
+        "attack_surface": "Timing-dependent, requires reorg prediction.",
+        "exploitability": "Very low."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "The attack requires predicting reorg timing, which is impractical. Even if successful, the receiver validates all data independently and would discard conflicting sidecars.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-39-001",
+      "property_id": "PROP-W4B13-39",
+      "title": "Verify Trust Boundary Integrity for tb-004: Does DataColumnSidecarsByRoot compute total requested_columns_count across ALL identifiers?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "116-130",
+          "function": "validateRequest"
+        },
+        "code_excerpt": "final int maxRequestIdentifiers = specConfigFulu.getMaxRequestBlocksDeneb(); if (request.size() > maxRequestIdentifiers) { return Optional.of(new RpcException(INVALID_REQUEST_CODE, ...)); }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/networking/libp2p/rpc/DataColumnSidecarsByRootRequestMessageSchema.java:20-28"
+        ],
+        "analysis": "At lines 119-128, the validateRequest method checks request.size() (number of identifiers) against maxRequestBlocksDeneb. The schema also enforces a maximum list size via AbstractSszListSchema with maxRequestDataColumnSidecars. However, the validation checks the number of IDENTIFIERS, not the total number of columns across all identifiers. The actual column expansion happens at lines 166-173 where each identifier's columns are flatMapped. The per-request total column count is bounded by the SSZ schema's max size, which limits the total number of DataColumnsByRootIdentifier entries."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Potential concern: The validateRequest checks request.size() (number of identifiers) against maxRequestBlocksDeneb, not the TOTAL number of columns. An attacker could send few identifiers with many columns each. However, the SSZ deserialization schema (DataColumnSidecarsByRootRequestMessageSchema) limits the total message size, and each DataColumnsByRootIdentifier has a bounded columns list. The getMaximumResponseChunks method (line 138) computes the actual total for rate limiting purposes.",
+        "attack_surface": "P2P requests with many columns per identifier.",
+        "exploitability": "Low - SSZ schema limits bound the total size."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "medium",
+        "justification": "The validateRequest checks identifier count, not total column count. However, SSZ schema limits and the getMaximumResponseChunks rate limiting provide defense-in-depth. The total response size is bounded.",
+        "recommendation": "Consider adding explicit total column count validation (sum of all identifier columns) in validateRequest for spec compliance."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-39-002",
+      "property_id": "PROP-W4B13-39",
+      "title": "Does the beacon node properly reject P2P requests where aggregated column count exceeds MAX_REQUEST_DATA_COLUMN_SIDECARS?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "116-130",
+          "function": "validateRequest"
+        },
+        "code_excerpt": "Validates identifier count, not aggregated column count.",
+        "supporting_files": [],
+        "analysis": "As noted in CHK-W4B13-39-001, the validateRequest checks the number of identifiers, not the aggregated column count. The rate limiting at line 152-153 uses getMaximumResponseChunks which computes the actual total, providing runtime resource control. The SSZ schema enforces maximum list sizes at deserialization."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Same as CHK-W4B13-39-001. The validation is on identifier count, not total column count. Rate limiting and SSZ schema limits provide defense-in-depth.",
+        "attack_surface": "Same as above.",
+        "exploitability": "Low."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "medium",
+        "justification": "Aggregated column count is not explicitly validated in validateRequest, but rate limiting and SSZ schema limits provide defense-in-depth.",
+        "recommendation": "Same as CHK-W4B13-39-001."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-39-003",
+      "property_id": "PROP-W4B13-39",
+      "title": "Can a malicious req-resp client bypass the column count limit by distributing requests across multiple identifiers?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "132-201",
+          "function": "onIncomingMessage"
+        },
+        "code_excerpt": "Lines 138: requestedDataColumnSidecarsCount = message.getMaximumResponseChunks(); Lines 151-153: peer.approveDataColumnSidecarsRequest(responseCallbackWithLogging, requestedDataColumnSidecarsCount);",
+        "supporting_files": [],
+        "analysis": "The requestedDataColumnSidecarsCount at line 138 uses getMaximumResponseChunks() which computes the actual total number of column sidecars (sum across all identifiers). This value is passed to peer.approveDataColumnSidecarsRequest for rate limiting. While validateRequest only checks identifier count, the rate limiting at line 152-153 uses the actual total, providing runtime protection against the distributed column attack."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The rate limiting uses the actual total column count, not just the identifier count. This provides effective protection against the distributed column attack. The peer approval mechanism will rate-limit or reject requests with excessive total columns.",
+        "attack_surface": "Distributing columns across identifiers.",
+        "exploitability": "Low - rate limiting accounts for total column count."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "While validateRequest checks identifier count, the rate limiting via peer.approveDataColumnSidecarsRequest uses the actual total column count (getMaximumResponseChunks). This provides effective protection against distributed column attacks.",
+        "recommendation": "Consider adding explicit total column count validation in validateRequest for cleaner spec compliance."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-40-001",
+      "property_id": "PROP-W4B13-40",
+      "title": "Verify Trust Boundary Integrity for tb-004: Is the minimum_request_epoch correctly computed and enforced?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "228-253",
+          "function": "validateMinimumRequestEpoch"
+        },
+        "code_excerpt": "final UInt64 requestedEpoch = spec.computeEpochAtSlot(maybeSlot.get()); if (!spec.isAvailabilityOfDataColumnSidecarsRequiredAtEpoch(combinedChainDataClient.getStore(), requestedEpoch)) { throw new RpcException(INVALID_REQUEST_CODE, ...); }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java:1110-1120"
+        ],
+        "analysis": "At lines 228-253, validateMinimumRequestEpoch resolves the block's slot from the sidecar or by looking up the block root, computes the epoch, and checks isAvailabilityOfDataColumnSidecarsRequiredAtEpoch. The Spec.java method at lines 1110-1120 computes currentEpoch - epoch <= MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. This correctly enforces the minimum request epoch. The RpcException with INVALID_REQUEST_CODE is thrown for violations."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The minimum request epoch is correctly computed and enforced. The check uses the store's current epoch and the spec-defined MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. However, the validation occurs per-sidecar during processing (not upfront), which means some DB lookups may occur before validation.",
+        "attack_surface": "Requests for very old epochs could trigger DB lookups before rejection.",
+        "exploitability": "Low - the block lookup is lightweight."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "minimum_request_epoch is correctly computed using currentEpoch - MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS. Requests for epochs outside this range are rejected with INVALID_REQUEST_CODE.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-40-002",
+      "property_id": "PROP-W4B13-40",
+      "title": "Does the Beacon Node correctly reject DataColumnSidecarsByRoot requests for epochs before FULU_FORK_EPOCH?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/Spec.java",
+          "lines": "1110-1120",
+          "function": "isAvailabilityOfDataColumnSidecarsRequiredAtEpoch"
+        },
+        "code_excerpt": "if (getSpecConfigFulu().isEmpty()) { return false; }",
+        "supporting_files": [
+          "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/fulu/helpers/MiscHelpersFulu.java:599-604"
+        ],
+        "analysis": "The Spec.java method returns false if Fulu spec is not available, and uses currentEpoch.minusMinZero(epoch) <= MIN_EPOCHS to determine availability. For epochs before FULU_FORK_EPOCH, data column sidecars don't exist in storage, so the query would return empty results. The epoch check correctly handles pre-fork epochs through the minusMinZero computation and the MIN_EPOCHS bound."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. Pre-fork epochs are handled correctly - either by the Fulu spec not being available (returns false) or by the epoch being too old (minusMinZero computation exceeds MIN_EPOCHS).",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Pre-FULU_FORK_EPOCH requests are correctly handled by the availability check and by the absence of data column sidecars in storage for pre-fork epochs.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-40-003",
+      "property_id": "PROP-W4B13-40",
+      "title": "Is the request-response client properly validating epoch bounds before forwarding DataColumnSidecarsByRoot requests?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "228-253",
+          "function": "validateMinimumRequestEpoch"
+        },
+        "code_excerpt": "Epoch validation occurs during per-identifier processing, not upfront.",
+        "supporting_files": [],
+        "analysis": "The epoch validation occurs in validateMinimumRequestEpoch which is called per-identifier during processing (line 108). This means the validation is not an upfront rejection but a per-item check during response generation. Rate limiting via peer.approveDataColumnSidecarsRequest provides upfront resource control."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The per-item validation approach means some processing occurs before epoch validation. However, the block root lookup is lightweight, and rate limiting provides upfront control. The per-item approach is necessary because each identifier may reference blocks at different epochs.",
+        "attack_surface": "Multiple identifiers for stale epochs could trigger lightweight lookups before rejection.",
+        "exploitability": "Low."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Epoch validation is correctly applied per-identifier. Rate limiting provides upfront resource control. The per-item approach is architecturally necessary for multi-epoch requests.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-41-001",
+      "property_id": "PROP-W4B13-41",
+      "title": "Verify Trust Boundary Integrity for tb-004: Does DataColumnSidecarsByRoot reject requests for sidecars of blocks that failed gossip validation?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "255-269",
+          "function": "retrieveDataColumnSidecar"
+        },
+        "code_excerpt": "Retrieves from custody storage and falls back to non-canonical sidecar. No explicit gossip validation status check.",
+        "supporting_files": [],
+        "analysis": "The retrieveDataColumnSidecar method at lines 255-269 retrieves sidecars from the custody storage and optionally from non-canonical storage. There is no explicit check of whether the block passed gossip validation. However, blocks that failed gossip validation are typically not stored in the custody database. The ByRoot spec allows serving sidecars for any known block root, including non-canonical blocks, as long as the block exists in storage."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No explicit gossip validation status check exists. However, blocks that failed gossip validation are not imported into the block store or custody database, so their sidecars would not be available for retrieval. The fallback to non-canonical sidecars (line 266) could theoretically serve sidecars for blocks that were initially accepted but later became non-canonical, which is spec-compliant.",
+        "attack_surface": "Low - blocks failing gossip are not stored.",
+        "exploitability": "Very low."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "medium",
+        "justification": "Blocks failing gossip validation are not imported into storage, so their sidecars are not available for retrieval. No explicit check is needed because the storage layer implicitly enforces this. Non-canonical sidecars are served per spec.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-41-002",
+      "property_id": "PROP-W4B13-41",
+      "title": "Does the beacon node maintain accurate gossip validation state to prevent serving invalid sidecars?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "255-269",
+          "function": "retrieveDataColumnSidecar"
+        },
+        "code_excerpt": "Storage-based implicit validation state tracking.",
+        "supporting_files": [],
+        "analysis": "The beacon node tracks gossip validation state implicitly through storage: only blocks that pass full validation (gossip + state transition) are imported into the block store and have their sidecars stored in the custody database. This means the storage layer acts as the validation state tracker - if a sidecar is in storage, its block passed validation."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No vulnerability found. The storage layer implicitly tracks validation state. Only validated blocks and sidecars are stored.",
+        "attack_surface": "None.",
+        "exploitability": "None."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "The storage layer implicitly tracks gossip validation state. Only validated blocks and their sidecars are stored, preventing serving of invalid sidecars.",
+        "recommendation": "No action required."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-41-003",
+      "property_id": "PROP-W4B13-41",
+      "title": "Can a malicious request-response client exploit timing or response patterns to determine block existence in the database?",
+      "phase1": {
+        "code_scope": {
+          "file": "networking/eth2/src/main/java/tech/pegasys/teku/networking/eth2/rpc/beaconchain/methods/DataColumnSidecarsByRootMessageHandler.java",
+          "lines": "104-114",
+          "function": "validateAndMaybeRespond"
+        },
+        "code_excerpt": "maybeSidecar.map(sideCar -> callback.respond(sideCar).thenApply(___ -> true)).orElse(SafeFuture.completedFuture(false));",
+        "supporting_files": [],
+        "analysis": "The response for non-existent blocks returns false (no response chunk sent), while existing blocks return true (response chunk sent). This creates a timing difference between existing and non-existing blocks: DB lookups for existing blocks will take longer due to data serialization and network transmission. However, this is inherent to the RPC protocol design and not a Teku-specific vulnerability."
+      },
+      "phase2": {
+        "vulnerability_analysis": "Minor side channel: response timing differs between existing and non-existing blocks. This is inherent to the RPC protocol (the response contains data for existing blocks, nothing for non-existing ones). The information leaked is limited to block existence, which is typically public information in a blockchain context.",
+        "attack_surface": "Timing side channel for block existence.",
+        "exploitability": "Very low - block existence is generally public information."
+      },
+      "phase3": {
+        "final_classification": "safe",
+        "confidence": "high",
+        "justification": "Timing differences between existing and non-existing blocks are inherent to the RPC protocol design. Block existence is generally public information in a blockchain network, so the information disclosure is minimal.",
+        "recommendation": "No action required. The timing difference is protocol-inherent and the leaked information is low-value."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "CHK-W4B13-42-001",
+      "property_id": "PROP-W4B13-42",
+      "title": "Verify Trust Boundary Integrity for tb-007/tb-008: Is blob data from EL via engine_getBlobsV2 validated before conversion to data columns?",
+      "phase1": {
+        "code_scope": {
+          "file": "ethereum/executionclient/src/main/java/tech/pegasys/teku/ethereum/executionclient/web3j/Web3JExecutionEngineClient.java",
+          "lines": "290-301",
+          "function": "getBlobsV2"
+        },
+        "code_excerpt": "public SafeFuture<Response<List<BlobAndProofV2>>> getBlobsV2(final List<VersionedHash> blobVersionedHashes) { ... new Request<>(\"engine_getBlobsV2\", list(expectedBlobVersionedHashes), web3JClient.getWeb3jService(), GetBlobsVersionV2Web3jResponse.class); ... }",
+        "supporting_files": [
+          "beacon/validator/src/main/java/tech/pegasys/teku/validator/coordinator/publisher/BlockPublisherFulu.java:57-64"
+        ],
+        "analysis": "The getBlobsV2 method at lines 290-301 sends versioned hashes to the EL and receives blob data. The BlockPublisherFulu.publishDataColumnSidecars at lines 58-64 directly publishes data column sidecars via gossip without explicit KZG verification of the blob data received from the EL. The trust assumption is that the EL is JWT-authenticated and co-located, making it a trusted source. However, if the EL is compromised, invalid blob data could be published to the network."
+      },
+      "phase2": {
+        "vulnerability_analysis": "The CL trusts the EL's blob data without KZG verification before publishing data columns. This is a documented trust assumption: the EL is JWT-authenticated and co-located. If the EL is compromised (e.g., through a supply chain attack or local exploit), invalid data columns could be published. However, receiving nodes perform full KZG verification on received data columns, so invalid data would be rejected by the network and only damage the publishing node's reputation.",
+        "attack_surface": "Compromised EL could cause invalid data column publication.",
+        "exploitability": "Low - requires EL compromise, and receiving nodes validate independently."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "high",
+        "justification": "Blob data from EL via engine_getBlobsV2 is NOT KZG-verified before data column construction and publication. This relies on the trust assumption that the JWT-authenticated, co-located EL provides valid data. Receiving nodes perform independent KZG verification, limiting blast radius to reputation damage for the publishing node.",
+        "recommendation": "Consider optional KZG verification of EL blob data as defense-in-depth, especially for high-value validators. Document the trust boundary assumption."
+      },
+      "final_classification": "info"
+    },
+    {
+      "check_id": "CHK-W4B13-42-002",
+      "property_id": "PROP-W4B13-42",
+      "title": "Does the beacon node implement defense-in-depth for blob data integrity despite JWT-authenticated EL trust assumption?",
+      "phase1": {
+        "code_scope": {
+          "file": "beacon/validator/src/main/java/tech/pegasys/teku/validator/coordinator/publisher/BlockPublisherFulu.java",
+          "lines": "50-64",
+          "function": "publishDataColumnSidecars"
+        },
+        "code_excerpt": "void publishDataColumnSidecars(final List<DataColumnSidecar> dataColumnSidecars, ...) { blockPublishingPerformance.dataColumnSidecarsPublishingInitiated(); dataColumnSidecarGossipChannel.publishDataColumnSidecars(dataColumnSidecars, RemoteOrigin.LOCAL_PROPOSAL); }",
+        "supporting_files": [],
+        "analysis": "The publishDataColumnSidecars method directly publishes data columns without any intermediate KZG verification. There is no defense-in-depth validation of blob data between EL retrieval and gossip publication. The local proposal path trusts the EL completely. This is a design choice prioritizing publishing latency over defense-in-depth."
+      },
+      "phase2": {
+        "vulnerability_analysis": "No defense-in-depth KZG verification exists between EL blob retrieval and data column gossip publication. The justification is that KZG verification is computationally expensive and would add latency to block publication, potentially causing missed slots. The trade-off favors latency over defense-in-depth, which is reasonable given the JWT authentication of the EL.",
+        "attack_surface": "Compromised EL could publish invalid data columns, damaging reputation.",
+        "exploitability": "Low - requires EL compromise."
+      },
+      "phase3": {
+        "final_classification": "info",
+        "confidence": "high",
+        "justification": "No defense-in-depth KZG verification exists for EL blob data. This is a deliberate design choice to minimize block publication latency. The JWT authentication of the EL and independent validation by receiving nodes provide adequate security for the standard threat model.",
+        "recommendation": "Consider adding optional (configurable) KZG verification of EL blob data for defense-in-depth. This could be enabled for validators willing to trade latency for additional security."
+      },
+      "final_classification": "info"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 12,
+    "item_count": 50,
+    "timestamp": 1770366671,
+    "processed_ids": [
+      "W2B3:W2B3:CHK-0002#29",
+      "W2B3:W2B3:CHK-0003#23",
+      "W2B3:W2B3:CHK-0001#42",
+      "W2B3:W2B3:CHK-0001#43",
+      "W2B3:W2B3:CHK-0002#30",
+      "W2B3:W2B3:CHK-0001#44",
+      "W2B3:W2B3:CHK-0001#45",
+      "W2B3:W2B3:CHK-0001#46",
+      "W2B3:W2B3:CHK-0002#31",
+      "W2B3:W2B3:CHK-0003#24",
+      "CHK-W4B13-29-001",
+      "CHK-W4B13-29-002",
+      "CHK-W4B13-29-003",
+      "CHK-W4B13-30-001",
+      "CHK-W4B13-30-002",
+      "CHK-W4B13-30-003",
+      "CHK-W4B13-31-001",
+      "CHK-W4B13-31-002",
+      "CHK-W4B13-31-003",
+      "CHK-W4B13-32-001",
+      "CHK-W4B13-32-002",
+      "CHK-W4B13-32-003",
+      "CHK-W4B13-33-001",
+      "CHK-W4B13-33-002",
+      "CHK-W4B13-33-003",
+      "CHK-W4B13-34-001",
+      "CHK-W4B13-34-002",
+      "CHK-W4B13-35-001",
+      "CHK-W4B13-35-002",
+      "CHK-W4B13-35-003",
+      "CHK-W4B13-36-001",
+      "CHK-W4B13-36-002",
+      "CHK-W4B13-36-003",
+      "CHK-W4B13-37-001",
+      "CHK-W4B13-37-002",
+      "CHK-W4B13-37-003",
+      "CHK-W4B13-38-001",
+      "CHK-W4B13-38-002",
+      "CHK-W4B13-38-003",
+      "CHK-W4B13-39-001",
+      "CHK-W4B13-39-002",
+      "CHK-W4B13-39-003",
+      "CHK-W4B13-40-001",
+      "CHK-W4B13-40-002",
+      "CHK-W4B13-40-003",
+      "CHK-W4B13-41-001",
+      "CHK-W4B13-41-002",
+      "CHK-W4B13-41-003",
+      "CHK-W4B13-42-001",
+      "CHK-W4B13-42-002"
+    ]
+  }
+}
