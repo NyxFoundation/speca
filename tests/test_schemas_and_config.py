@@ -821,33 +821,37 @@ class TestLogAnomalyDetector:
         assert anomalies == []
 
     def test_detects_rate_limit(self):
+        """Actual API rate limit errors (type=error) should be detected."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write('{"type": "error", "message": "429 Too Many Requests"}\n')
+            f.write('{"type": "error", "error": {"type": "rate_limit_error", "message": "429 Too Many Requests"}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
         assert any("rate_limit_error" in a for a in anomalies)
 
     def test_detects_context_overflow(self):
+        """Actual API context overflow errors should be detected."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write('{"type": "error", "message": "context length exceeded maximum context window"}\n')
+            f.write('{"type": "error", "error": {"type": "invalid_request_error", "message": "context length exceeded maximum context window"}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
         assert any("context_overflow" in a for a in anomalies)
 
-    def test_detects_repeated_errors(self):
+    def test_detects_api_error(self):
+        """APIError / InternalServerError should be detected."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write('error occurred error again error third\n')
+            f.write('{"type": "error", "error": {"type": "api_error", "message": "APIError: InternalServerError"}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
-        assert any("repeated_error" in a for a in anomalies)
+        assert any("api_error" in a for a in anomalies)
 
     def test_detects_excessive_tool_calls(self):
+        """More than 50 tool_use blocks should be flagged."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for _ in range(60):
-                f.write('{"tool_calls": [{"name": "bash"}]}\n')
+                f.write('{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
@@ -856,7 +860,7 @@ class TestLogAnomalyDetector:
     def test_below_tool_call_threshold_no_anomaly(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             for _ in range(10):
-                f.write('{"tool_calls": [{"name": "bash"}]}\n')
+                f.write('{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
@@ -876,6 +880,49 @@ class TestLogAnomalyDetector:
             anomalies = LogAnomalyDetector.scan_log(Path(f.name))
         os.unlink(f.name)
         assert anomalies == []
+
+    def test_no_false_positive_from_checklist_content(self):
+        """Content inside tool_result (e.g. checklist data with '429' line numbers)
+        should NOT trigger false positives."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            # Simulate a real Phase03 log line: user message with tool_result
+            # containing checklist data that has "429" as a JSON line number
+            line = json.dumps({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01HRU8tvMj9La1aEyyUu177d",
+                        "content": '{\n  "worker_id": 7,\n  "phase": "03",\n  429: {"check_id": "CHK-W4B13-48"},\n  "rate_limit_test": "rate limit overrun and consensus failure.",\n  "timeout_test": "block processing timeout thresholds",\n  "error_test": "error handling error recovery error reporting"\n}'
+                    }]
+                }
+            })
+            f.write(line + "\n")
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        # Should NOT detect any anomalies from user content
+        assert anomalies == [], f"False positive detected: {anomalies}"
+
+    def test_no_false_positive_from_assistant_text(self):
+        """Assistant text content mentioning errors should NOT trigger anomalies."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            line = json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "text",
+                        "text": "I found a rate limit vulnerability on line 429. The timeout error handling has error recovery issues."
+                    }]
+                }
+            })
+            f.write(line + "\n")
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert anomalies == [], f"False positive detected: {anomalies}"
 
 
 # =========================================================================
@@ -1041,7 +1088,103 @@ from orchestrator.watchdog import (
     CostTracker,
     BudgetExceeded,
     extract_token_usage_from_log,
+    _extract_scannable_text,
 )
+
+
+class TestExtractScannableText:
+    """Unit tests for _extract_scannable_text — the core JSON parsing logic."""
+
+    def test_error_event_extracted(self):
+        """type=error lines should return the error text for scanning."""
+        line = json.dumps({
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "429 Too Many Requests"}
+        })
+        text, is_tool = _extract_scannable_text(line)
+        assert text is not None
+        assert "rate_limit_error" in text
+        assert "429" in text
+        assert is_tool is False
+
+    def test_user_tool_result_skipped(self):
+        """User messages with tool_result should NOT return scannable text."""
+        line = json.dumps({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "content": '{"429": "rate limit", "timeout": true, "error error error": 1}'
+                }]
+            }
+        })
+        text, is_tool = _extract_scannable_text(line)
+        assert text is None
+        assert is_tool is False
+
+    def test_assistant_text_skipped(self):
+        """Assistant text messages should NOT return scannable text."""
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Found 429 rate limit errors and timeout issues"}]
+            }
+        })
+        text, is_tool = _extract_scannable_text(line)
+        assert text is None
+        assert is_tool is False
+
+    def test_assistant_tool_use_detected(self):
+        """Assistant tool_use blocks should set is_tool_use=True."""
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "name": "bash", "input": {"command": "ls"}}]
+            }
+        })
+        text, is_tool = _extract_scannable_text(line)
+        assert text is None  # No error text to scan
+        assert is_tool is True
+
+    def test_system_message_scanned(self):
+        """System messages should have subtype+content scanned."""
+        line = json.dumps({
+            "type": "system",
+            "message": {"subtype": "rate_limited", "content": "You are being rate limited"}
+        })
+        text, is_tool = _extract_scannable_text(line)
+        assert text is not None
+        assert "rate_limited" in text
+
+    def test_non_json_line_scanned_as_fallback(self):
+        """Non-JSON lines (e.g. stderr) should be scanned as-is."""
+        line = "Error: connection timed out after 30s"
+        text, is_tool = _extract_scannable_text(line)
+        assert text is not None
+        assert "timed out" in text
+
+    def test_plain_message_skipped(self):
+        """Normal message/result types should return None."""
+        line = json.dumps({"type": "message", "content": "Processing..."})
+        text, is_tool = _extract_scannable_text(line)
+        assert text is None
+        assert is_tool is False
+
+    def test_top_level_error_field_non_user(self):
+        """Top-level error field on non-user/assistant types should be scanned."""
+        line = json.dumps({"error": "ServiceUnavailable: overloaded"})
+        text, is_tool = _extract_scannable_text(line)
+        assert text is not None
+        assert "ServiceUnavailable" in text
+
+    def test_top_level_error_field_on_user_type_skipped(self):
+        """Top-level error field on user type should be skipped."""
+        line = json.dumps({"type": "user", "error": "429 rate limit"})
+        text, is_tool = _extract_scannable_text(line)
+        assert text is None
 
 
 class TestLogWatcher:
@@ -1074,12 +1217,15 @@ class TestLogWatcher:
             assert watcher.lines_scanned >= 2
 
     def test_rate_limit_triggers_anomaly(self):
-        """Rate limit errors should be detected as anomalies."""
+        """Rate limit errors (type=error with error object) should be detected."""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "ratelimit.log.jsonl")
             with open(log_path, "w") as f:
                 for i in range(5):
-                    f.write(f'{{"type": "error", "message": "429 Too Many Requests attempt {i}"}}\n')
+                    f.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "rate_limit_error", "message": f"429 Too Many Requests attempt {i}"}
+                    }) + "\n")
 
             watcher = LogWatcher(
                 log_path,
@@ -1106,7 +1252,10 @@ class TestLogWatcher:
             log_path = os.path.join(tmpdir, "overflow.log.jsonl")
             with open(log_path, "w") as f:
                 for i in range(4):
-                    f.write(f'{{"error": "context length exceeded maximum context window {i}"}}\n')
+                    f.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": f"context length exceeded maximum context window {i}"}
+                    }) + "\n")
 
             watcher = LogWatcher(
                 log_path,
@@ -1132,7 +1281,7 @@ class TestLogWatcher:
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "below.log.jsonl")
             with open(log_path, "w") as f:
-                f.write('{"error": "429 Too Many Requests"}\n')
+                f.write(json.dumps({"type": "error", "error": {"type": "rate_limit_error", "message": "429 Too Many Requests"}}) + "\n")
                 f.write('{"type": "message", "content": "OK"}\n')
 
             watcher = LogWatcher(
@@ -1210,7 +1359,10 @@ class TestLogWatcher:
             log_path = os.path.join(tmpdir, "apierror.log.jsonl")
             with open(log_path, "w") as f:
                 for i in range(4):
-                    f.write(f'{{"error": "APIError: InternalServerError {i}"}}\n')
+                    f.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": f"APIError: InternalServerError {i}"}
+                    }) + "\n")
 
             watcher = LogWatcher(
                 log_path,
@@ -1230,6 +1382,58 @@ class TestLogWatcher:
 
             assert watcher.should_stop is True
             assert any("api_error" in a for a in watcher.anomalies)
+
+    def test_no_false_positive_from_tool_result_content(self):
+        """LogWatcher should NOT trigger on '429', 'rate limit', 'timeout' etc.
+        when they appear inside tool_result user content (e.g. checklist data)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "false_positive.log.jsonl")
+            with open(log_path, "w") as f:
+                # Simulate real Phase03 log: user message with tool_result
+                line = json.dumps({
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_01HRU8tvMj9La1aEyyUu177d",
+                            "content": json.dumps({
+                                "worker_id": 7,
+                                "phase": "03",
+                                "items": [
+                                    {"line": 429, "check_id": "CHK-W4B13-48"},
+                                    {"description": "rate limit overrun and consensus failure."},
+                                    {"description": "block processing timeout thresholds"},
+                                    {"description": "error handling error recovery error reporting"}
+                                ]
+                            })
+                        }]
+                    }
+                })
+                # Write it multiple times to exceed any threshold
+                for _ in range(10):
+                    f.write(line + "\n")
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05, anomaly_threshold=2),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is False, (
+                f"False positive! Anomalies: {watcher.anomalies}"
+            )
+            assert len(watcher.anomalies) == 0
 
 
 # =========================================================================

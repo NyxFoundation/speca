@@ -142,19 +142,24 @@ class LogAnomalyDetector:
     Detects patterns that indicate the LLM is stuck in a retry loop,
     producing garbage output, or otherwise behaving anomalously.
 
+    **Important**: This scanner parses each log line as JSON and only
+    inspects structural/error fields — NOT user content embedded in
+    ``tool_result`` or ``text`` blocks — to avoid false positives from
+    domain-specific terms like "429", "rate limit", "timeout" etc.
+
     Note: For real-time monitoring during execution, use ``LogWatcher``
     from the ``watchdog`` module instead.
     """
 
-    # Patterns that suggest the worker is stuck
+    # Patterns applied to extracted error text only
     _ANOMALY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-        ("excessive_tool_calls", re.compile(r'"tool_calls":\s*\[', re.IGNORECASE)),
         ("rate_limit_error", re.compile(r"rate.?limit|429|too many requests", re.IGNORECASE)),
         ("context_overflow", re.compile(r"context.?length|token.?limit|maximum.?context", re.IGNORECASE)),
-        ("repeated_error", re.compile(r"error.*error.*error", re.IGNORECASE)),
+        ("api_error", re.compile(r"APIError|InternalServerError|ServiceUnavailable|overloaded", re.IGNORECASE)),
+        ("timeout_error", re.compile(r"timed?\s*out|deadline exceeded|ETIMEDOUT", re.IGNORECASE)),
     ]
 
-    # If the log contains more than this many tool_call blocks it's likely looping
+    # If the log contains more than this many tool_use blocks it's likely looping
     TOOL_CALL_THRESHOLD = 50
 
     @classmethod
@@ -162,8 +167,13 @@ class LogAnomalyDetector:
         """
         Scan a log file and return a list of anomaly descriptions.
 
+        Parses each line as JSON and only inspects error/system fields
+        to avoid false positives from user content.
+
         Returns an empty list if no anomalies are found.
         """
+        from .watchdog import _extract_scannable_text
+
         if not isinstance(log_path, Path):
             log_path = Path(log_path)
         if not log_path.exists():
@@ -175,18 +185,21 @@ class LogAnomalyDetector:
         try:
             with open(log_path, errors="replace") as f:
                 for line in f:
-                    for name, pattern in cls._ANOMALY_PATTERNS:
-                        if pattern.search(line):
-                            if name == "excessive_tool_calls":
-                                tool_call_count += 1
-                            else:
-                                anomalies.append(f"{name}: {line.strip()[:200]}")
+                    text_to_scan, is_tool_use = _extract_scannable_text(line)
+
+                    if is_tool_use:
+                        tool_call_count += 1
+
+                    if text_to_scan:
+                        for name, pattern in cls._ANOMALY_PATTERNS:
+                            if pattern.search(text_to_scan):
+                                anomalies.append(f"{name}: {text_to_scan.strip()[:200]}")
         except Exception:
             pass
 
         if tool_call_count > cls.TOOL_CALL_THRESHOLD:
             anomalies.append(
-                f"excessive_tool_calls: {tool_call_count} tool_call blocks "
+                f"excessive_tool_calls: {tool_call_count} tool_use blocks "
                 f"(threshold={cls.TOOL_CALL_THRESHOLD})"
             )
 

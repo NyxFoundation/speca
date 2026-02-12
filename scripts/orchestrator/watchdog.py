@@ -10,6 +10,11 @@ execution to detect anomalies early and prevent runaway costs:
     exceed a configurable threshold the watcher sets an asyncio Event
     that the caller can check.
 
+    **Important**: The watcher parses each line as JSON (Claude CLI
+    stream-json format) and only inspects *structural* fields — top-level
+    ``type``, ``error``, and ``subtype`` — to avoid false positives from
+    user content embedded in ``tool_result`` or ``text`` blocks.
+
   - **CostTracker**: Accumulates per-batch token usage (input + output)
     and estimated dollar cost.  Raises ``BudgetExceeded`` when the
     cumulative cost crosses the configured ceiling.
@@ -48,16 +53,95 @@ class LogWatcherConfig:
     max_lines: int = 100_000
 
 
-# Pre-compiled anomaly patterns (shared across all watchers)
+# Pre-compiled anomaly patterns applied ONLY to extracted error text,
+# NOT to raw log lines (which contain embedded user content).
 _ANOMALY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("rate_limit_error", re.compile(r"rate.?limit|429|too many requests", re.IGNORECASE)),
     ("context_overflow", re.compile(r"context.?length|token.?limit|maximum.?context", re.IGNORECASE)),
-    ("repeated_error", re.compile(r"error.*error.*error", re.IGNORECASE)),
-    ("api_error", re.compile(r"APIError|InternalServerError|ServiceUnavailable", re.IGNORECASE)),
+    ("api_error", re.compile(r"APIError|InternalServerError|ServiceUnavailable|overloaded", re.IGNORECASE)),
     ("timeout_error", re.compile(r"timed?\s*out|deadline exceeded|ETIMEDOUT", re.IGNORECASE)),
 ]
 
-_TOOL_CALL_PATTERN = re.compile(r'"tool_calls":\s*\[', re.IGNORECASE)
+_TOOL_CALL_PATTERN = re.compile(r'"type"\s*:\s*"tool_use"')
+
+
+def _extract_scannable_text(line: str) -> tuple[str | None, bool]:
+    """
+    Parse a stream-json log line and extract ONLY structural/error text
+    that should be scanned for anomalies.
+
+    Returns:
+        (text_to_scan, is_tool_use)
+        - text_to_scan: a short string to match against anomaly patterns,
+          or None if this line should be skipped entirely.
+        - is_tool_use: True if this line represents a tool_use event.
+
+    The key insight is that Claude CLI stream-json logs embed the full
+    conversation — including user-provided content like security checklists
+    — inside ``message.content[].text`` and ``tool_result.content`` fields.
+    These fields naturally contain words like "429", "rate limit", "timeout",
+    "error" etc. as part of the audit domain language, causing false positives
+    when scanning raw lines.
+
+    We therefore restrict scanning to:
+      1. Lines with ``"type": "error"`` — actual API/system errors
+      2. The ``subtype`` field of ``"type": "system"`` messages
+      3. Top-level ``error`` objects (API error responses)
+    """
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        # Not valid JSON — scan the raw line as a fallback
+        # (e.g. stderr output mixed into the log)
+        return (line.strip()[:500], False)
+
+    if not isinstance(obj, dict):
+        return (None, False)
+
+    msg_type = obj.get("type", "")
+
+    # 1. Actual error events from Claude CLI
+    if msg_type == "error":
+        error_obj = obj.get("error", {})
+        if isinstance(error_obj, dict):
+            # e.g. {"type": "error", "error": {"type": "rate_limit_error", "message": "..."}}
+            error_text = f"{error_obj.get('type', '')} {error_obj.get('message', '')}"
+            return (error_text, False)
+        return (str(error_obj)[:500], False)
+
+    # 2. System messages — check subtype for rate limit / overloaded signals
+    if msg_type == "system":
+        msg = obj.get("message", {})
+        if isinstance(msg, dict):
+            subtype = msg.get("subtype", "")
+            content = msg.get("content", "")
+            # Only scan the subtype and a short prefix of content
+            if isinstance(content, str):
+                return (f"{subtype} {content[:300]}", False)
+            return (subtype, False)
+
+    # 3. Top-level error field (some API responses)
+    if "error" in obj and msg_type not in ("assistant", "user"):
+        error_val = obj["error"]
+        if isinstance(error_val, dict):
+            return (f"{error_val.get('type', '')} {error_val.get('message', '')}", False)
+        if isinstance(error_val, str):
+            return (error_val[:500], False)
+
+    # 4. Check for tool_use (for excessive tool call counting)
+    is_tool_use = False
+    if msg_type == "assistant":
+        msg = obj.get("message", {})
+        if isinstance(msg, dict):
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        is_tool_use = True
+                        break
+
+    # For assistant/user/result messages, do NOT scan content for anomalies
+    return (None, is_tool_use)
 
 
 class LogWatcher:
@@ -152,14 +236,23 @@ class LogWatcher:
             await asyncio.sleep(self.cfg.poll_interval)
 
     def _scan_line(self, line: str) -> None:
-        """Scan a single line for anomaly patterns."""
-        for name, pattern in _ANOMALY_PATTERNS:
-            if pattern.search(line):
-                desc = f"{name}: {line.strip()[:200]}"
-                self.anomalies.append(desc)
+        """
+        Scan a single log line for anomaly patterns.
 
-        if _TOOL_CALL_PATTERN.search(line):
+        Uses ``_extract_scannable_text()`` to parse the JSON structure and
+        only inspect error/system fields — NOT user content that may contain
+        domain-specific terms like "429", "rate limit", "timeout" etc.
+        """
+        text_to_scan, is_tool_use = _extract_scannable_text(line)
+
+        if is_tool_use:
             self.tool_call_count += 1
+
+        if text_to_scan:
+            for name, pattern in _ANOMALY_PATTERNS:
+                if pattern.search(text_to_scan):
+                    desc = f"{name}: {text_to_scan.strip()[:200]}"
+                    self.anomalies.append(desc)
 
     def _check_threshold(self) -> bool:
         """Check if anomaly counts exceed thresholds.  Returns True to stop."""
