@@ -29,8 +29,8 @@ def fmt_seconds(value: float | int | None) -> str:
 def build_branch_env_table(summary: dict, collection: dict) -> list[str]:
     manifests = {entry.get("branch"): entry for entry in collection.get("branches", [])}
     lines = [
-        "| Branch | Commit | Phase 03 Runtime | Tokens (in/out/total) | Files |",
-        "| --- | --- | --- | --- | --- |",
+        "| Branch | Commit | Phase 03 Runtime | Tokens (in/out/total) | Num Turns | Files |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for branch in summary.get("branches", {}).keys():
         manifest = manifests.get(branch, {})
@@ -38,6 +38,8 @@ def build_branch_env_table(summary: dict, collection: dict) -> list[str]:
         commit = target_info.get("target_commit_short") or manifest.get("commit_short") or manifest.get("commit") or "n/a"
         timing = manifest.get("phase_log_timing") or {}
         runtime = fmt_seconds(timing.get("estimated_total_seconds"))
+        num_turns = timing.get("num_turns")
+        num_turns_cell = str(num_turns) if isinstance(num_turns, (int, float)) else "n/a"
         tokens = timing.get("tokens") or {}
         token_in = tokens.get("input_tokens") or tokens.get("prompt_tokens") or 0
         token_out = tokens.get("output_tokens") or tokens.get("completion_tokens") or 0
@@ -45,24 +47,25 @@ def build_branch_env_table(summary: dict, collection: dict) -> list[str]:
         token_total = tokens.get("total_tokens") or (token_in + token_out + token_cache)
         token_cell = f"{token_in}/{token_out}/{token_total}" if token_total else "n/a"
         files = str(len(manifest.get("files", []))) if manifest else "n/a"
-        lines.append(f"| {branch} | {commit} | {runtime} | {token_cell} | {files} |")
+        lines.append(f"| {branch} | {commit} | {runtime} | {token_cell} | {num_turns_cell} | {files} |")
     return lines
 
 
 def build_results_table(summary: dict) -> list[str]:
     lines = [
-        "| Branch | Items | Matched | Overlap | Issues Matched | Issue Recall | New | LLM Calls |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Branch | Items | Matched | Overlap | Issues | Issues Matched | Issue Recall | New | LLM Calls |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for branch, stats in summary.get("branches", {}).items():
         overlap = f"{stats.get('overlap_rate', 0.0):.3f}"
         recall = f"{stats.get('issue_recall', 0.0):.3f}"
         lines.append(
-            "| {branch} | {items_total} | {matched_total} | {overlap} | {issues_matched_total} | {recall} | {new_total} | {llm_calls} |".format(
+            "| {branch} | {items_total} | {matched_total} | {overlap} | {issues_total} | {issues_matched_total} | {recall} | {new_total} | {llm_calls} |".format(
                 branch=branch,
                 items_total=stats.get("items_total", 0),
                 matched_total=stats.get("matched_total", 0),
                 overlap=overlap,
+                issues_total=stats.get("issues_total", 0),
                 issues_matched_total=stats.get("issues_matched_total", 0),
                 recall=recall,
                 new_total=stats.get("new_total", 0),
@@ -90,6 +93,29 @@ def main() -> None:
     lines.append(f"- Generated at (UTC): {summary.get('generated_at', 'unknown')}")
     dataset = summary.get("dataset", {})
     lines.append(f"- Dataset: {dataset.get('path', 'unknown')} ({dataset.get('issues', 0)} issues)")
+    filtered_total = summary.get("issues_total")
+    if filtered_total and filtered_total != dataset.get("issues", 0):
+        lines.append(f"- Filtered issues (union of branches): {filtered_total}")
+    audit_filter = summary.get("audit_item_filter", {})
+    if audit_filter:
+        lines.append(
+            "- Audit item filter: "
+            + ", ".join(
+                f"{key}={value}"
+                for key, value in audit_filter.items()
+                if value is not None and value != ""
+            )
+        )
+    issue_filter = summary.get("issue_filter", {})
+    if issue_filter:
+        lines.append(
+            "- Issue filter: "
+            + ", ".join(
+                f"{key}={value}"
+                for key, value in issue_filter.items()
+                if value is not None and value != ""
+            )
+        )
     lines.append("")
 
     lines.append("## Experiment Environment")
@@ -108,7 +134,7 @@ def main() -> None:
         "- Keyword matching against CSV issues selects candidate issues; LLM judges semantic similarity for final match."
     )
     lines.append(
-        "- Recall definition: issue_recall = unique_issue_ids_matched / total_issues_in_csv (per branch)."
+        "- Recall definition: issue_recall = unique_issue_ids_matched / total_issues_in_scope (per branch)."
     )
     lines.append(
         "- unique_issue_ids_matched is computed from matched audit items' issue_id values."
@@ -130,7 +156,7 @@ def main() -> None:
     if "issue_recall" in summary:
         lines.append(
             f"- Overall issue recall (union of branches): {summary.get('issue_recall', 0.0):.3f} "
-            f"({summary.get('issues_matched_total', 0)}/{dataset.get('issues', 0)})"
+            f"({summary.get('issues_matched_total', 0)}/{summary.get('issues_total', dataset.get('issues', 0))})"
         )
     lines.append("")
 

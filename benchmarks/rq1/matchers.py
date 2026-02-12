@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,7 @@ class AuditItem:
     text: str
     normalized: str
     tokens: set[str]
+    classification: str | None = None
 
 
 def normalize_text(text: str) -> str:
@@ -76,7 +79,7 @@ def load_csv_issues(path: Path) -> list[Issue]:
     return issues
 
 
-def build_audit_text(raw: dict) -> tuple[str, str, str, str, str]:
+def build_audit_text(raw: dict) -> tuple[str, str, str, str, str, str | None]:
     item_id = str(raw.get("id") or raw.get("check_id") or "")
     description = str(raw.get("description") or raw.get("summary") or "")
     snippet = str(raw.get("snippet") or "")
@@ -88,10 +91,62 @@ def build_audit_text(raw: dict) -> tuple[str, str, str, str, str]:
 
     text_parts = [description, scope_desc, snippet, file, line]
     text = "\n".join(part for part in text_parts if part).strip()
-    return item_id, description, snippet, file, line if line else "", text
+    classification = None
+    for key in ("final_classification", "classification", "verdict", "risk_classification"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            classification = value.strip()
+            break
+    return item_id, description, snippet, file, line if line else "", text, classification
 
 
-def extract_audit_items(files: Iterable[Path]) -> list[AuditItem]:
+def extract_classifications(raw: dict) -> set[str]:
+    values: set[str] = set()
+    for key in (
+        "final_classification",
+        "classification",
+        "verdict",
+        "risk_classification",
+        "exploitability_classification",
+    ):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().lower())
+    severity = raw.get("severity")
+    if isinstance(severity, str) and severity.strip():
+        values.add(severity.strip().lower())
+    severity_hint = raw.get("severity_hint")
+    if isinstance(severity_hint, str) and severity_hint.strip():
+        values.add(severity_hint.strip().lower())
+    severity_class = raw.get("severity_classification")
+    if isinstance(severity_class, dict):
+        for key in ("bug_bounty_severity", "severity", "classification"):
+            value = severity_class.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value.strip().lower())
+    return values
+
+
+def is_selected_audit_item(
+    raw: dict,
+    classification_filter: set[str] | None,
+    include_bug_bounty: bool,
+) -> bool:
+    if classification_filter is None and not include_bug_bounty:
+        return True
+    if include_bug_bounty and raw.get("bug_bounty_eligible") is True:
+        return True
+    if classification_filter is None:
+        return False
+    classifications = extract_classifications(raw)
+    return bool(classifications & classification_filter)
+
+
+def extract_audit_items(
+    files: Iterable[Path],
+    classification_filter: set[str] | None = None,
+    include_bug_bounty: bool = False,
+) -> list[AuditItem]:
     items: list[AuditItem] = []
     for path in files:
         try:
@@ -109,10 +164,24 @@ def extract_audit_items(files: Iterable[Path]) -> list[AuditItem]:
             continue
 
         for raw in raw_items:
-            item_id, description, snippet, file, line, text = build_audit_text(raw)
+            if not is_selected_audit_item(raw, classification_filter, include_bug_bounty):
+                continue
+            item_id, description, snippet, file, line, text, classification = build_audit_text(raw)
             normalized = normalize_text(text)
             tokens = tokenize(text)
-            items.append(AuditItem(item_id, description, snippet, file, line, text, normalized, tokens))
+            items.append(
+                AuditItem(
+                    item_id,
+                    description,
+                    snippet,
+                    file,
+                    line,
+                    text,
+                    normalized,
+                    tokens,
+                    classification=classification,
+                )
+            )
     return items
 
 
@@ -133,9 +202,28 @@ def select_keyword_candidates(
     return [issue for overlap, score, issue in scored[:top_k]]
 
 
-def call_claude(prompt: str) -> str:
+def call_llm(prompt: str) -> str:
+    command_override = os.environ.get("LLM_COMMAND")
+    if command_override:
+        base = shlex.split(command_override)
+        command = base + [prompt]
+    else:
+        provider = os.environ.get("LLM_PROVIDER", "claude").strip().lower()
+        if provider == "codex":
+            command = [
+                "codex",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                prompt,
+            ]
+        else:
+            command = ["claude", "--output-format", "json", "-p", prompt]
+
     result = subprocess.run(
-        ["claude", "--output-format", "json", "-p", prompt],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -180,7 +268,7 @@ def extract_json_from_text(text: str) -> dict | None:
     return None
 
 
-def llm_match(audit_item: AuditItem, candidates: list[Issue]) -> tuple[bool, str | None, float]:
+def llm_match(audit_item: AuditItem, candidates: list[Issue], llm_id: str) -> tuple[bool, str | None, float]:
     if not candidates:
         return False, None, 0.0
 
@@ -200,7 +288,9 @@ def llm_match(audit_item: AuditItem, candidates: list[Issue]) -> tuple[bool, str
         + "\n"
     )
 
-    raw = call_claude(prompt)
+    print(f"[rq1] {llm_id}: llm_match start (candidates={len(candidates)})")
+    raw = call_llm(prompt)
+    print(f"[rq1] {llm_id}: llm_match done (bytes={len(raw) if raw else 0})")
     payload = extract_json_from_text(raw) or {}
     match = bool(payload.get("match"))
     idx = payload.get("candidate_index")
@@ -278,7 +368,8 @@ def match_items(
             if not candidates:
                 continue
             llm_calls += 1
-            matched, issue_id, confidence = llm_match(item, candidates)
+            llm_id = item.item_id or f"item_{llm_calls}"
+            matched, issue_id, confidence = llm_match(item, candidates, llm_id)
             if matched and issue_id:
                 matches[item.item_id] = {
                     "stage": "stage3",

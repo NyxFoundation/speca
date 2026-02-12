@@ -7,7 +7,7 @@ from pathlib import Path
 
 from benchmarks.rq1.evaluate import evaluate_branches, parse_branches
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
@@ -43,9 +43,44 @@ def main() -> None:
     parser.add_argument("--human-labels", type=str, default="", help="Human labels JSONL path")
     parser.add_argument("--human-labels-report", type=str, default="", help="Validation report output path (JSON)")
     parser.add_argument("--metadata", type=str, default="", help="Run metadata JSON to include in summary")
+    parser.add_argument(
+        "--audit-classifications",
+        type=str,
+        default="",
+        help="Comma-separated audit classifications to include (e.g., exploitable,defense-in-depth)",
+    )
+    parser.add_argument(
+        "--audit-include-bug-bounty",
+        action="store_true",
+        help="Include items marked bug_bounty_eligible regardless of classification filter",
+    )
+    parser.add_argument(
+        "--client-filter",
+        type=str,
+        default="none",
+        choices=["none", "auto", "keywords"],
+        help="Filter issues to client-specific subset (auto infers from branch/target info)",
+    )
+    parser.add_argument(
+        "--client-keywords",
+        type=str,
+        default="",
+        help="Comma-separated keywords for issue filtering (used when client-filter=keywords or to override auto)",
+    )
     args = parser.parse_args()
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
+    audit_classifications = {
+        item.strip().lower()
+        for item in args.audit_classifications.split(",")
+        if item.strip()
+    }
+    if not audit_classifications:
+        audit_classifications = None
+    client_keywords = [item.strip() for item in args.client_keywords.split(",") if item.strip()]
+    client_filter = args.client_filter
+    if client_filter == "keywords" and not client_keywords:
+        client_filter = "none"
 
     evaluate_branches(
         branches=parse_branches(args.branches),
@@ -67,6 +102,10 @@ def main() -> None:
         human_labels=Path(args.human_labels) if args.human_labels else None,
         human_labels_report=Path(args.human_labels_report) if args.human_labels_report else None,
         metadata_path=Path(args.metadata) if args.metadata else None,
+        audit_classifications=audit_classifications,
+        audit_include_bug_bounty=args.audit_include_bug_bounty,
+        client_filter=client_filter,
+        client_keywords=client_keywords,
     )
 
 

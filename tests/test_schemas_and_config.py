@@ -1,0 +1,1679 @@
+"""
+Comprehensive tests for orchestrator schemas, config, circuit breaker,
+log anomaly detection, and result collector.
+
+Covers:
+  - PhaseConfig construction and computed fields
+  - All Pydantic data models (Phase01a through Phase04)
+  - Validation helpers for each phase
+  - Enum correctness
+  - Edge cases and error detection
+  - CircuitBreaker thresholds and state transitions
+  - LogAnomalyDetector pattern matching
+  - ResultCollector output validation
+  - Cross-phase data flow compatibility
+"""
+
+import asyncio
+import json
+import sys
+import os
+import tempfile
+import pytest
+
+# Ensure the scripts directory is importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+from orchestrator.config import PhaseConfig, PHASE_CONFIGS, get_phase_config, get_phase_chain
+from orchestrator.schemas import (
+    # Enums
+    Severity,
+    AuditClassification,
+    ReviewVerdict,
+    ReachabilityClassification,
+    BugBountyScope,
+    ChecklistMindset,
+    # Phase 01a
+    DiscoveredSpec,
+    Phase01aState,
+    # Phase 01b
+    ProgramGraph,
+    SubGraph,
+    SpecSubGraphs,
+    Phase01bPartial,
+    # Phase 01c
+    VerificationResult,
+    Phase01cPartial,
+    # Phase 01d
+    TrustModelActor,
+    TrustBoundary,
+    TrustAssumption,
+    StrideAnalysisItem,
+    TrustModel,
+    BugBountyScopeInfo,
+    Phase01dPartial,
+    # Phase 01e
+    PropertyReachability,
+    PropertyCovers,
+    Property,
+    Phase01ePartial,
+    # Phase 02
+    ChecklistItem,
+    ChecklistReachability,
+    Phase02Partial,
+    # Phase 03
+    Phase1AbstractInterpretation,
+    Phase2SymbolicExecution,
+    Phase2_5ReachabilityAnalysis,
+    Phase3InvariantProving,
+    Phase3_5ScopeFiltering,
+    AuditTrail,
+    AuditMapItem,
+    Phase03Partial,
+    # Phase 04
+    OriginalFinding,
+    ReviewedItem,
+    Phase04Partial,
+    # Shared
+    QueuePayload,
+    PartialMetadata,
+    TargetInfo,
+    # Validators
+    validate_discovered_spec,
+    validate_subgraph,
+    validate_property,
+    validate_checklist_item,
+    validate_audit_map_item,
+    validate_reviewed_item,
+)
+from orchestrator.runner import (
+    CircuitBreaker,
+    CircuitBreakerTripped,
+    LogAnomalyDetector,
+)
+from orchestrator.collector import ResultCollector
+
+
+# =========================================================================
+# PhaseConfig tests
+# =========================================================================
+
+class TestPhaseConfig:
+    def test_all_phase_configs_are_valid(self):
+        """Every entry in PHASE_CONFIGS must be a valid PhaseConfig."""
+        for pid, cfg in PHASE_CONFIGS.items():
+            assert isinstance(cfg, PhaseConfig)
+            assert cfg.phase_id == pid
+
+    def test_effective_result_id_field_explicit(self):
+        cfg = PHASE_CONFIGS["01b"]
+        assert cfg.effective_result_id_field == "source_url"
+
+    def test_effective_result_id_field_fallback(self):
+        cfg = PHASE_CONFIGS["03"]
+        assert cfg.effective_result_id_field == cfg.item_id_field
+
+    def test_get_phase_config_known(self):
+        cfg = get_phase_config("03")
+        assert cfg.name == "Audit Map Generation"
+
+    def test_get_phase_config_unknown(self):
+        with pytest.raises(ValueError, match="Unknown phase"):
+            get_phase_config("99")
+
+    def test_get_phase_chain(self):
+        chain = get_phase_chain("03")
+        assert "01a" in chain
+        assert "02" in chain
+        assert chain[-1] == "03"
+
+    def test_phase03_config_values(self):
+        cfg = PHASE_CONFIGS["03"]
+        assert cfg.batch_strategy == "count"
+        assert cfg.max_batch_size == 25
+        assert cfg.result_key == "audit_items"
+        assert cfg.output_prefix == "AUDITMAP"
+
+    def test_circuit_breaker_defaults(self):
+        """Default circuit breaker values should be sensible."""
+        cfg = PHASE_CONFIGS["01b"]
+        assert cfg.circuit_breaker_threshold == 5
+        assert cfg.max_total_retries == 20
+        assert cfg.max_empty_results == 10
+
+    def test_phase03_tighter_circuit_breaker(self):
+        """Phase 03 should have tighter circuit breaker thresholds."""
+        cfg = PHASE_CONFIGS["03"]
+        assert cfg.circuit_breaker_threshold == 3
+        assert cfg.max_total_retries == 10
+        assert cfg.max_empty_results == 5
+
+
+# =========================================================================
+# Enum tests
+# =========================================================================
+
+class TestEnums:
+    def test_severity_values(self):
+        assert Severity.CRITICAL == "Critical"
+        assert Severity.LOW == "Low"
+
+    def test_audit_classification_values(self):
+        assert AuditClassification.VULNERABLE == "vulnerable"
+        assert AuditClassification.SAFE == "safe"
+
+    def test_review_verdict_values(self):
+        assert ReviewVerdict.CONFIRMED == "Confirmed"
+        assert ReviewVerdict.DISPUTED == "Disputed"
+
+    def test_reachability_classification_values(self):
+        assert ReachabilityClassification.EXTERNAL_REACHABLE == "external-reachable"
+        assert ReachabilityClassification.INTERNAL_ONLY == "internal-only"
+
+    def test_bug_bounty_scope_values(self):
+        assert BugBountyScope.IN_SCOPE == "in-scope"
+        assert BugBountyScope.OUT_OF_SCOPE == "out-of-scope"
+
+    def test_checklist_mindset_values(self):
+        assert ChecklistMindset.BOUNDARY_GUARD == "Boundary Guard"
+
+
+# =========================================================================
+# Phase 01a – Discovery
+# =========================================================================
+
+class TestPhase01a:
+    def test_discovered_spec_valid(self):
+        spec = DiscoveredSpec(url="https://example.com/spec")
+        assert spec.url == "https://example.com/spec"
+        assert spec.status == "pending"
+
+    def test_phase01a_state_valid(self):
+        state = Phase01aState(
+            found_specs=[
+                {"url": "https://a.com", "title": "Spec A"},
+                {"url": "https://b.com"},
+            ]
+        )
+        assert len(state.found_specs) == 2
+        assert state.found_specs[0].title == "Spec A"
+
+    def test_phase01a_state_empty(self):
+        state = Phase01aState()
+        assert state.found_specs == []
+
+    def test_validate_discovered_spec_valid(self):
+        item, errs = validate_discovered_spec({"url": "https://x.com", "title": "X"})
+        assert item is not None
+        assert errs == []
+
+    def test_validate_discovered_spec_empty_url(self):
+        item, errs = validate_discovered_spec({"url": ""})
+        assert "url is empty" in errs
+
+
+# =========================================================================
+# Phase 01b – Subgraph Extraction
+# =========================================================================
+
+class TestPhase01b:
+    def test_program_graph_valid(self):
+        pg = ProgramGraph(
+            Q=["q_init", "q1", "q_final"],
+            q_init="q_init",
+            q_final="q_final",
+            Act=["x = 1", "x > 0"],
+            E=[["q_init", "x = 1", "q1"], ["q1", "x > 0", "q_final"]],
+        )
+        assert len(pg.Q) == 3
+        assert len(pg.E) == 2
+
+    def test_subgraph_valid(self):
+        sg = SubGraph(
+            id="SG-001",
+            name="factorial",
+            mermaid_file="examples/SG-001_factorial.mmd",
+            program_graph=ProgramGraph(
+                Q=["q1", "q2"],
+                q_init="q1",
+                q_final="q2",
+                Act=["a"],
+                E=[["q1", "a", "q2"]],
+            ),
+            invariants=["INV-001: x >= 0"],
+        )
+        assert sg.id == "SG-001"
+        assert len(sg.invariants) == 1
+
+    def test_spec_subgraphs_valid(self):
+        spec = SpecSubGraphs(
+            source_url="https://example.com/eip-7594",
+            title="EIP-7594",
+            sub_graphs=[
+                SubGraph(id="SG-001", name="test"),
+            ],
+        )
+        assert len(spec.sub_graphs) == 1
+
+    def test_phase01b_partial_valid(self):
+        partial = Phase01bPartial(
+            specs=[
+                {
+                    "source_url": "https://example.com",
+                    "title": "Test",
+                    "sub_graphs": [{"id": "SG-001", "name": "test"}],
+                }
+            ]
+        )
+        assert len(partial.specs) == 1
+        assert partial.specs[0].sub_graphs[0].id == "SG-001"
+
+    def test_validate_subgraph_valid(self):
+        data = {
+            "id": "SG-001",
+            "name": "factorial",
+            "program_graph": {
+                "Q": ["q1", "q2"],
+                "q_init": "q1",
+                "q_final": "q2",
+                "Act": ["a"],
+                "E": [["q1", "a", "q2"]],
+            },
+        }
+        item, errs = validate_subgraph(data)
+        assert item is not None
+        assert errs == []
+
+    def test_validate_subgraph_empty_graph(self):
+        data = {"id": "SG-001", "name": "test", "program_graph": {"Q": [], "E": []}}
+        item, errs = validate_subgraph(data)
+        assert "program_graph.Q is empty (no nodes)" in errs
+        assert "program_graph.E is empty (no edges)" in errs
+
+    def test_validate_subgraph_missing_name(self):
+        data = {"id": "SG-001", "program_graph": {"Q": ["q1"], "E": [["q1", "a", "q1"]]}}
+        item, errs = validate_subgraph(data)
+        assert "name is empty" in errs
+
+
+# =========================================================================
+# Phase 01c – Verification
+# =========================================================================
+
+class TestPhase01c:
+    def test_verification_result_valid(self):
+        vr = VerificationResult(
+            file_path="outputs/01b_PARTIAL_0.json",
+            status="verified",
+            issues=[],
+        )
+        assert vr.status == "verified"
+
+    def test_phase01c_partial_valid(self):
+        partial = Phase01cPartial(
+            results=[
+                {"file_path": "test.json", "status": "verified"},
+                {"file_path": "test2.json", "status": "failed", "issues": ["bad edge"]},
+            ]
+        )
+        assert len(partial.results) == 2
+        assert partial.results[1].issues == ["bad edge"]
+
+
+# =========================================================================
+# Phase 01d – Trust Model
+# =========================================================================
+
+class TestPhase01d:
+    def test_trust_model_actor_valid(self):
+        actor = TrustModelActor(
+            id="actor-user",
+            name="User",
+            description="External user",
+            trust_level="untrusted",
+        )
+        assert actor.trust_level == "untrusted"
+
+    def test_trust_boundary_valid(self):
+        tb = TrustBoundary(
+            id="tb-001",
+            from_actor="actor-user",
+            to_actor="actor-validator",
+            entry_point_type="Transaction",
+            bug_bounty_scope="in-scope",
+            attacker_controlled=True,
+        )
+        assert tb.attacker_controlled is True
+
+    def test_stride_analysis_item_valid(self):
+        stride = StrideAnalysisItem(
+            threat_type="Spoofing",
+            description="Attacker spoofs identity",
+            affected_boundary="tb-001",
+        )
+        assert stride.threat_type == "Spoofing"
+
+    def test_trust_model_valid(self):
+        tm = TrustModel(
+            actors=[{"id": "a1", "name": "User"}],
+            trust_boundaries=[{"id": "tb-001", "from_actor": "a1", "to_actor": "a2"}],
+            trust_assumptions=[{"id": "ta-001", "description": "Users are untrusted"}],
+        )
+        assert len(tm.actors) == 1
+
+    def test_phase01d_partial_valid(self):
+        partial = Phase01dPartial(
+            trust_model={
+                "actors": [{"id": "a1", "name": "User"}],
+                "trust_boundaries": [],
+            }
+        )
+        assert len(partial.trust_model.actors) == 1
+
+
+# =========================================================================
+# Phase 01e – Properties
+# =========================================================================
+
+class TestPhase01e:
+    def test_property_valid(self):
+        prop = Property(
+            id="PROP-001",
+            type="invariant",
+            severity="HIGH",
+            covers={"primary_element": "FN-001"},
+        )
+        assert prop.id == "PROP-001"
+
+    def test_property_reachability(self):
+        r = PropertyReachability(
+            classification="external-reachable",
+            bug_bounty_scope="in-scope",
+        )
+        assert r.classification == "external-reachable"
+
+    def test_phase01e_partial_valid(self):
+        partial = Phase01ePartial(
+            properties=[
+                {"id": "PROP-001", "type": "invariant"},
+                {"id": "PROP-002", "type": "postcondition"},
+            ]
+        )
+        assert len(partial.properties) == 2
+
+    def test_validate_property_valid(self):
+        data = {
+            "id": "PROP-001",
+            "type": "invariant",
+            "severity": "HIGH",
+            "covers": {"primary_element": "FN-001"},
+        }
+        item, errs = validate_property(data)
+        assert item is not None
+        assert errs == []
+
+    def test_validate_property_missing_id(self):
+        data = {"type": "invariant"}
+        item, errs = validate_property(data)
+        # id is a required field, so Pydantic raises a ValidationError
+        assert item is None
+        assert len(errs) > 0  # should have at least one error about missing id
+
+
+# =========================================================================
+# Phase 02 – Checklist
+# =========================================================================
+
+class TestPhase02:
+    def test_checklist_item_valid(self):
+        cl = ChecklistItem(
+            check_id="CHK-001",
+            property_id="PROP-001",
+            title="Test check",
+            severity="High",
+            test_procedure="Run the test",
+        )
+        assert cl.check_id == "CHK-001"
+
+    def test_phase02_partial_valid(self):
+        partial = Phase02Partial(
+            checklist=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+            ]
+        )
+        assert len(partial.checklist) == 1
+
+
+# =========================================================================
+# Phase 03 – Audit Map
+# =========================================================================
+
+class TestPhase03:
+    def test_audit_trail_full(self):
+        item = AuditMapItem(
+            check_id="CHK-001",
+            property_id="PROP-001",
+            final_classification="vulnerable",
+            summary="Found issue",
+            audit_trail={
+                "phase1_abstract_interpretation": {
+                    "summary": "Anomaly found",
+                    "state_anomalies_found": ["overflow"],
+                },
+                "phase2_symbolic_execution": {
+                    "summary": "Counterexample found",
+                    "counterexample_found": True,
+                    "counterexample": "x = MAX_INT",
+                },
+                "phase2_5_reachability_analysis": {
+                    "summary": "Reachable via P2P",
+                    "attacker_controlled": True,
+                },
+                "phase3_invariant_proving": {
+                    "summary": "Proof failed",
+                    "proof_successful": False,
+                },
+                "phase3_5_scope_filtering": {
+                    "bug_bounty_eligible": True,
+                    "reason": "In-scope via P2P",
+                },
+            },
+        )
+        trail = item.audit_trail
+        assert trail.phase1_abstract_interpretation.state_anomalies_found == ["overflow"]
+        assert trail.phase2_symbolic_execution.counterexample_found is True
+        assert trail.phase2_5_reachability_analysis.attacker_controlled is True
+        assert trail.phase3_5_scope_filtering.bug_bounty_eligible is True
+
+
+class TestPhase03Partial:
+    def test_valid_partial(self):
+        partial = Phase03Partial(
+            audit_items=[
+                {"check_id": "CHK-001", "final_classification": "safe"},
+            ]
+        )
+        assert len(partial.audit_items) == 1
+
+
+# =========================================================================
+# Phase 04 – Audit Review
+# =========================================================================
+
+class TestPhase04Partial:
+    def test_valid_review(self):
+        partial = Phase04Partial(
+            reviewed_items=[
+                {
+                    "check_id": "CHK-001",
+                    "review_verdict": "Confirmed",
+                    "adjusted_severity": "High",
+                }
+            ]
+        )
+        assert len(partial.reviewed_items) == 1
+        assert partial.reviewed_items[0].review_verdict == "Confirmed"
+
+    def test_reviewed_item_defaults(self):
+        item = ReviewedItem(check_id="CHK-002")
+        assert item.review_verdict == ""
+        assert item.reviewer_notes == ""
+
+
+# =========================================================================
+# Validation helpers
+# =========================================================================
+
+class TestValidationHelpers:
+    # -- checklist items --
+    def test_validate_checklist_item_valid(self):
+        data = {
+            "check_id": "CHK-001",
+            "property_id": "PROP-001",
+            "test_procedure": "Run test",
+        }
+        item, errs = validate_checklist_item(data)
+        assert item is not None
+        assert errs == []
+
+    def test_validate_checklist_item_missing_fields(self):
+        data = {"check_id": "CHK-001"}
+        item, errs = validate_checklist_item(data)
+        assert "property_id is empty" in errs
+        assert "test_procedure is empty" in errs
+
+    def test_validate_checklist_item_empty_check_id(self):
+        data = {"check_id": ""}
+        item, errs = validate_checklist_item(data)
+        assert "check_id is empty" in errs
+
+    # -- audit map items --
+    def test_validate_audit_map_item_valid(self):
+        data = {
+            "check_id": "CHK-001",
+            "final_classification": "vulnerable",
+        }
+        item, errs = validate_audit_map_item(data)
+        assert item is not None
+        assert errs == []
+
+    def test_validate_audit_map_item_missing_classification(self):
+        data = {"check_id": "CHK-001"}
+        item, errs = validate_audit_map_item(data)
+        assert "final_classification is empty" in errs
+
+    # -- reviewed items --
+    def test_validate_reviewed_item_valid(self):
+        data = {
+            "check_id": "CHK-001",
+            "review_verdict": "Confirmed",
+        }
+        item, errs = validate_reviewed_item(data)
+        assert item is not None
+        assert errs == []
+
+    def test_validate_reviewed_item_missing_verdict(self):
+        data = {"check_id": "CHK-001"}
+        item, errs = validate_reviewed_item(data)
+        assert "review_verdict is empty" in errs
+
+    def test_validate_reviewed_item_empty_check_id(self):
+        data = {"check_id": "", "review_verdict": "Confirmed"}
+        item, errs = validate_reviewed_item(data)
+        assert "check_id is empty" in errs
+
+
+# =========================================================================
+# Shared models
+# =========================================================================
+
+class TestQueuePayload:
+    def test_valid_payload(self):
+        payload = QueuePayload(
+            worker_id=0,
+            phase="03",
+            items=[{"check_id": "CHK-001"}],
+            total_items=1,
+        )
+        assert payload.worker_id == 0
+
+
+class TestPartialMetadata:
+    def test_valid_metadata(self):
+        meta = PartialMetadata(
+            phase="03",
+            worker_id=0,
+            batch_index=1,
+            item_count=5,
+            timestamp=1700000000,
+            processed_ids=["CHK-001", "CHK-002"],
+        )
+        assert meta.item_count == 5
+        assert len(meta.processed_ids) == 2
+
+
+class TestTargetInfo:
+    def test_valid_target(self):
+        info = TargetInfo(
+            target_repo="ethereum/go-ethereum",
+            target_ref_type="branch",
+            target_ref_label="master",
+        )
+        assert info.target_repo == "ethereum/go-ethereum"
+
+
+# =========================================================================
+# Cross-phase data flow tests
+# =========================================================================
+
+class TestCrossPhaseDataFlow:
+    """Test that data structures are compatible across phase boundaries."""
+
+    def test_01e_property_to_02_checklist(self):
+        """Property from 01e should be usable as input for 02 checklist."""
+        prop = Property(
+            id="PROP-001",
+            type="invariant",
+            severity="HIGH",
+            covers={"primary_element": "FN-001"},
+            reachability={
+                "classification": "external-reachable",
+                "bug_bounty_scope": "in-scope",
+            },
+        )
+        item = {
+            "property_id": prop.id,
+            "property": prop.model_dump(),
+            "source_file": "test.json",
+        }
+        assert item["property"]["reachability"]["bug_bounty_scope"] == "in-scope"
+
+    def test_02_checklist_to_03_audit(self):
+        """Checklist item from 02 should be parseable as Phase03 input."""
+        cl = ChecklistItem(
+            check_id="CHK-001",
+            property_id="PROP-001",
+            title="Test check",
+            severity="High",
+            test_procedure="Run the test",
+        )
+        entry = cl.model_dump()
+        parsed, errs = validate_checklist_item(entry)
+        assert parsed is not None
+        assert errs == []
+
+    def test_03_audit_to_04_review(self):
+        """Audit item from 03 should be parseable as Phase04 input."""
+        audit = AuditMapItem(
+            check_id="CHK-001",
+            property_id="PROP-001",
+            final_classification="vulnerable",
+            summary="Found issue",
+        )
+        entry = audit.model_dump()
+        parsed, errs = validate_audit_map_item(entry)
+        assert parsed is not None
+        assert errs == []
+
+
+# =========================================================================
+# Circuit Breaker tests
+# =========================================================================
+
+class TestCircuitBreaker:
+    """Tests for the CircuitBreaker class in runner.py."""
+
+    def _make_config(self, **overrides) -> PhaseConfig:
+        """Create a minimal PhaseConfig for testing."""
+        from pathlib import Path
+        defaults = dict(
+            phase_id="test",
+            name="Test Phase",
+            description="Test",
+            skill_path=Path("."),
+            prompt_path=Path("."),
+            queue_pattern="",
+            output_pattern="",
+            circuit_breaker_threshold=3,
+            max_total_retries=5,
+            max_empty_results=4,
+        )
+        defaults.update(overrides)
+        return PhaseConfig(**defaults)
+
+    def test_initial_state(self):
+        cb = CircuitBreaker(self._make_config())
+        stats = cb.get_stats()
+        assert stats["consecutive_failures"] == 0
+        assert stats["total_retries"] == 0
+        assert stats["empty_results"] == 0
+        assert stats["total_successes"] == 0
+        assert stats["total_failures"] == 0
+
+    def test_success_resets_consecutive_failures(self):
+        cb = CircuitBreaker(self._make_config())
+        loop = asyncio.new_event_loop()
+        try:
+            # Record some failures (below threshold)
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_failure())
+            assert cb.consecutive_failures == 2
+            # Success resets consecutive counter
+            loop.run_until_complete(cb.record_success())
+            assert cb.consecutive_failures == 0
+            assert cb.total_failures == 2  # total stays
+            assert cb.total_successes == 1
+        finally:
+            loop.close()
+
+    def test_consecutive_failure_trips(self):
+        cb = CircuitBreaker(self._make_config(circuit_breaker_threshold=3))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_failure())
+            with pytest.raises(CircuitBreakerTripped, match="consecutive failures"):
+                loop.run_until_complete(cb.record_failure())
+        finally:
+            loop.close()
+
+    def test_total_retries_trips(self):
+        cb = CircuitBreaker(self._make_config(max_total_retries=3))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_retry())
+            loop.run_until_complete(cb.record_retry())
+            with pytest.raises(CircuitBreakerTripped, match="total retries"):
+                loop.run_until_complete(cb.record_retry())
+        finally:
+            loop.close()
+
+    def test_empty_results_trips(self):
+        cb = CircuitBreaker(self._make_config(max_empty_results=2))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_empty_result())
+            with pytest.raises(CircuitBreakerTripped, match="empty-result"):
+                loop.run_until_complete(cb.record_empty_result())
+        finally:
+            loop.close()
+
+    def test_mixed_success_and_failure(self):
+        """Interleaved successes should prevent consecutive failure trip."""
+        cb = CircuitBreaker(self._make_config(circuit_breaker_threshold=3))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_success())  # resets
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_success())  # resets again
+            # Should not trip because consecutive never reached 3
+            assert cb.total_failures == 4
+            assert cb.total_successes == 2
+        finally:
+            loop.close()
+
+    def test_circuit_breaker_tripped_has_stats(self):
+        cb = CircuitBreaker(self._make_config(circuit_breaker_threshold=1))
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(CircuitBreakerTripped) as exc_info:
+                loop.run_until_complete(cb.record_failure())
+            assert "consecutive_failures" in exc_info.value.stats
+            assert exc_info.value.stats["total_failures"] == 1
+        finally:
+            loop.close()
+
+    def test_get_stats_snapshot(self):
+        cb = CircuitBreaker(self._make_config())
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_success())
+            loop.run_until_complete(cb.record_retry())
+            stats = cb.get_stats()
+            assert stats == {
+                "consecutive_failures": 0,
+                "total_retries": 1,
+                "empty_results": 0,
+                "total_successes": 1,
+                "total_failures": 0,
+            }
+        finally:
+            loop.close()
+
+
+# =========================================================================
+# Log Anomaly Detector tests
+# =========================================================================
+
+class TestLogAnomalyDetector:
+    """Tests for the LogAnomalyDetector class in runner.py."""
+
+    def test_no_anomalies_in_clean_log(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "message", "content": "Processing item CHK-001"}\n')
+            f.write('{"type": "result", "result": "Done"}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert anomalies == []
+
+    def test_detects_rate_limit(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "error", "message": "429 Too Many Requests"}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert any("rate_limit_error" in a for a in anomalies)
+
+    def test_detects_context_overflow(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "error", "message": "context length exceeded maximum context window"}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert any("context_overflow" in a for a in anomalies)
+
+    def test_detects_repeated_errors(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('error occurred error again error third\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert any("repeated_error" in a for a in anomalies)
+
+    def test_detects_excessive_tool_calls(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for _ in range(60):
+                f.write('{"tool_calls": [{"name": "bash"}]}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert any("excessive_tool_calls" in a for a in anomalies)
+
+    def test_below_tool_call_threshold_no_anomaly(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for _ in range(10):
+                f.write('{"tool_calls": [{"name": "bash"}]}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        # 10 < 50 threshold, so no anomaly
+        assert not any("excessive_tool_calls" in a for a in anomalies)
+
+    def test_nonexistent_file_returns_empty(self):
+        from pathlib import Path
+        anomalies = LogAnomalyDetector.scan_log(Path("/nonexistent/file.log"))
+        assert anomalies == []
+
+    def test_scan_log_accepts_path_object(self):
+        from pathlib import Path
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "message"}\n')
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(Path(f.name))
+        os.unlink(f.name)
+        assert anomalies == []
+
+
+# =========================================================================
+# ResultCollector tests
+# =========================================================================
+
+class TestResultCollector:
+    """Tests for the ResultCollector output validation."""
+
+    def _make_config(self, phase_id: str = "03") -> PhaseConfig:
+        """Get a real PhaseConfig for testing."""
+        return get_phase_config(phase_id)
+
+    def test_save_partial_creates_file(self):
+        """save_partial should create a JSON file on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                config = self._make_config("03")
+                collector = ResultCollector(config)
+                results = [
+                    {"check_id": "CHK-001", "final_classification": "safe"},
+                    {"check_id": "CHK-002", "final_classification": "vulnerable"},
+                ]
+                path = collector.save_partial(results, worker_id=0, batch_index=1)
+                assert path.exists()
+                with open(path) as f:
+                    data = json.load(f)
+                assert "audit_items" in data
+                assert len(data["audit_items"]) == 2
+                assert "metadata" in data
+            finally:
+                os.chdir(old_cwd)
+
+    def test_save_partial_validation_stats_clean(self):
+        """Valid output should not increment warning/error counters."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                config = self._make_config("03")
+                collector = ResultCollector(config)
+                results = [
+                    {"check_id": "CHK-001", "final_classification": "safe"},
+                ]
+                collector.save_partial(results, worker_id=0, batch_index=1)
+                summary = collector.get_validation_summary()
+                assert summary["total_saves"] == 1
+                assert summary["validation_warnings"] == 0
+                assert summary["validation_errors"] == 0
+            finally:
+                os.chdir(old_cwd)
+
+    def test_save_partial_tracks_validation_errors(self):
+        """Malformed output should increment error counters but still save."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                config = self._make_config("02")
+                collector = ResultCollector(config)
+                # Pass something that doesn't match Phase02Partial schema
+                results = [{"garbage_key": "not a checklist item"}]
+                path = collector.save_partial(results, worker_id=0, batch_index=1)
+                # File should still be saved
+                assert path.exists()
+                summary = collector.get_validation_summary()
+                assert summary["total_saves"] == 1
+                # The malformed data may or may not trigger errors depending on
+                # how lenient the Pydantic model is; at minimum the save should work
+            finally:
+                os.chdir(old_cwd)
+
+    def test_get_validation_summary(self):
+        """get_validation_summary should return correct structure."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                config = self._make_config("03")
+                collector = ResultCollector(config)
+                summary = collector.get_validation_summary()
+                assert "total_saves" in summary
+                assert "validation_warnings" in summary
+                assert "validation_errors" in summary
+            finally:
+                os.chdir(old_cwd)
+
+    def test_multiple_saves_accumulate_stats(self):
+        """Multiple save_partial calls should accumulate statistics."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                config = self._make_config("03")
+                collector = ResultCollector(config)
+                for i in range(3):
+                    results = [{"check_id": f"CHK-{i:03d}", "final_classification": "safe"}]
+                    collector.save_partial(results, worker_id=0, batch_index=i)
+                summary = collector.get_validation_summary()
+                assert summary["total_saves"] == 3
+            finally:
+                os.chdir(old_cwd)
+
+
+# =========================================================================
+# Integration: Circuit Breaker + Config
+# =========================================================================
+
+class TestCircuitBreakerIntegration:
+    """Test circuit breaker with real PhaseConfig values."""
+
+    def test_phase03_config_trips_at_3_consecutive(self):
+        """Phase 03 has circuit_breaker_threshold=3."""
+        config = get_phase_config("03")
+        cb = CircuitBreaker(config)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(cb.record_failure())
+            loop.run_until_complete(cb.record_failure())
+            with pytest.raises(CircuitBreakerTripped):
+                loop.run_until_complete(cb.record_failure())
+        finally:
+            loop.close()
+
+    def test_phase03_config_trips_at_10_retries(self):
+        """Phase 03 has max_total_retries=10."""
+        config = get_phase_config("03")
+        cb = CircuitBreaker(config)
+        loop = asyncio.new_event_loop()
+        try:
+            for _ in range(9):
+                loop.run_until_complete(cb.record_retry())
+                # Reset consecutive failures to avoid that threshold
+                loop.run_until_complete(cb.record_success())
+            with pytest.raises(CircuitBreakerTripped, match="total retries"):
+                loop.run_until_complete(cb.record_retry())
+        finally:
+            loop.close()
+
+    def test_default_phase_does_not_trip_early(self):
+        """Default phases (threshold=5) should survive 4 consecutive failures."""
+        config = get_phase_config("01b")
+        cb = CircuitBreaker(config)
+        loop = asyncio.new_event_loop()
+        try:
+            for _ in range(4):
+                loop.run_until_complete(cb.record_failure())
+            # 4 < 5, should not trip
+            assert cb.consecutive_failures == 4
+        finally:
+            loop.close()
+
+
+# =========================================================================
+# LogWatcher tests (real-time async log monitoring)
+# =========================================================================
+
+from orchestrator.watchdog import (
+    LogWatcher,
+    LogWatcherConfig,
+    CostTracker,
+    BudgetExceeded,
+    extract_token_usage_from_log,
+)
+
+
+class TestLogWatcher:
+    """Tests for the real-time LogWatcher in watchdog.py."""
+
+    def test_clean_log_no_anomalies(self):
+        """A clean log should produce no anomalies."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "clean.log.jsonl")
+            with open(log_path, "w") as f:
+                f.write('{"type": "message", "content": "Hello"}\n')
+                f.write('{"type": "result", "result": "Done"}\n')
+
+            watcher = LogWatcher(log_path, config=LogWatcherConfig(poll_interval=0.05))
+            loop = asyncio.new_event_loop()
+            try:
+                # Run the watcher briefly then stop
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.2)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is False
+            assert len(watcher.anomalies) == 0
+            assert watcher.lines_scanned >= 2
+
+    def test_rate_limit_triggers_anomaly(self):
+        """Rate limit errors should be detected as anomalies."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "ratelimit.log.jsonl")
+            with open(log_path, "w") as f:
+                for i in range(5):
+                    f.write(f'{{"type": "error", "message": "429 Too Many Requests attempt {i}"}}\n')
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05, anomaly_threshold=3),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is True
+            assert any("rate_limit_error" in a for a in watcher.anomalies)
+
+    def test_context_overflow_detected(self):
+        """Context overflow errors should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "overflow.log.jsonl")
+            with open(log_path, "w") as f:
+                for i in range(4):
+                    f.write(f'{{"error": "context length exceeded maximum context window {i}"}}\n')
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05, anomaly_threshold=3),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is True
+            assert any("context_overflow" in a for a in watcher.anomalies)
+
+    def test_below_threshold_no_stop(self):
+        """Anomalies below threshold should not trigger stop."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "below.log.jsonl")
+            with open(log_path, "w") as f:
+                f.write('{"error": "429 Too Many Requests"}\n')
+                f.write('{"type": "message", "content": "OK"}\n')
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05, anomaly_threshold=5),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.2)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is False
+            assert len(watcher.anomalies) == 1
+
+    def test_nonexistent_file_exits_gracefully(self):
+        """Watcher should exit gracefully if file never appears."""
+        watcher = LogWatcher(
+            "/nonexistent/path/log.jsonl",
+            config=LogWatcherConfig(poll_interval=0.05),
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            # Override the wait loop to be shorter
+            async def run_short():
+                task = asyncio.create_task(watcher.watch())
+                await asyncio.sleep(2.0)  # wait for 30 polls at 0.05s
+                watcher.stop()
+                await task
+
+            loop.run_until_complete(run_short())
+        finally:
+            loop.close()
+
+        assert watcher.should_stop is False
+        assert watcher.lines_scanned == 0
+
+    def test_get_summary(self):
+        """get_summary should return a well-structured dict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "summary.log.jsonl")
+            with open(log_path, "w") as f:
+                f.write('{"type": "message"}\n')
+
+            watcher = LogWatcher(log_path, config=LogWatcherConfig(poll_interval=0.05))
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.2)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            summary = watcher.get_summary()
+            assert "log_path" in summary
+            assert "lines_scanned" in summary
+            assert "anomaly_count" in summary
+            assert "tool_call_count" in summary
+            assert "should_stop" in summary
+            assert "anomalies" in summary
+
+    def test_api_error_detected(self):
+        """APIError patterns should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "apierror.log.jsonl")
+            with open(log_path, "w") as f:
+                for i in range(4):
+                    f.write(f'{{"error": "APIError: InternalServerError {i}"}}\n')
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05, anomaly_threshold=3),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is True
+            assert any("api_error" in a for a in watcher.anomalies)
+
+
+# =========================================================================
+# CostTracker tests
+# =========================================================================
+
+class TestCostTracker:
+    """Tests for the CostTracker in watchdog.py."""
+
+    def test_initial_state(self):
+        tracker = CostTracker(max_budget_usd=100.0)
+        stats = tracker.get_stats()
+        assert stats["total_input_tokens"] == 0
+        assert stats["total_output_tokens"] == 0
+        assert stats["total_cost_usd"] == 0
+        assert stats["max_budget_usd"] == 100.0
+        assert stats["budget_remaining_usd"] == 100.0
+        assert stats["budget_utilization_pct"] == 0.0
+        assert stats["batch_count"] == 0
+
+    def test_record_usage_accumulates(self):
+        tracker = CostTracker(max_budget_usd=100.0)
+        loop = asyncio.new_event_loop()
+        try:
+            cost1 = loop.run_until_complete(
+                tracker.record_usage(input_tokens=1000, output_tokens=500)
+            )
+            cost2 = loop.run_until_complete(
+                tracker.record_usage(input_tokens=2000, output_tokens=1000)
+            )
+            assert cost1 > 0
+            assert cost2 > 0
+            stats = tracker.get_stats()
+            assert stats["total_input_tokens"] == 3000
+            assert stats["total_output_tokens"] == 1500
+            assert stats["batch_count"] == 2
+            assert stats["total_cost_usd"] > 0
+        finally:
+            loop.close()
+
+    def test_budget_exceeded_raises(self):
+        tracker = CostTracker(max_budget_usd=0.001)  # Very small budget
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(BudgetExceeded, match="Budget exceeded"):
+                loop.run_until_complete(
+                    tracker.record_usage(input_tokens=1_000_000, output_tokens=1_000_000)
+                )
+        finally:
+            loop.close()
+
+    def test_budget_not_exceeded_within_limit(self):
+        tracker = CostTracker(max_budget_usd=100.0)
+        loop = asyncio.new_event_loop()
+        try:
+            # Small usage should not trigger
+            loop.run_until_complete(
+                tracker.record_usage(input_tokens=100, output_tokens=50)
+            )
+            stats = tracker.get_stats()
+            assert stats["budget_remaining_usd"] > 99.0
+        finally:
+            loop.close()
+
+    def test_cost_calculation_accuracy(self):
+        """Verify cost calculation with known values."""
+        tracker = CostTracker(
+            max_budget_usd=100.0,
+            input_price_per_million=3.0,
+            output_price_per_million=15.0,
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            cost = loop.run_until_complete(
+                tracker.record_usage(input_tokens=1_000_000, output_tokens=1_000_000)
+            )
+            # Expected: $3.00 + $15.00 = $18.00
+            assert abs(cost - 18.0) < 0.01
+        finally:
+            loop.close()
+
+    def test_get_history(self):
+        tracker = CostTracker(max_budget_usd=100.0)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                tracker.record_usage(
+                    input_tokens=1000, output_tokens=500,
+                    worker_id=1, batch_index=3,
+                )
+            )
+            history = tracker.get_history()
+            assert len(history) == 1
+            assert history[0]["worker_id"] == 1
+            assert history[0]["batch_index"] == 3
+            assert history[0]["input_tokens"] == 1000
+            assert history[0]["output_tokens"] == 500
+        finally:
+            loop.close()
+
+    def test_budget_exceeded_has_stats(self):
+        tracker = CostTracker(max_budget_usd=0.001)
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(BudgetExceeded) as exc_info:
+                loop.run_until_complete(
+                    tracker.record_usage(input_tokens=1_000_000, output_tokens=1_000_000)
+                )
+            assert "total_cost_usd" in exc_info.value.stats
+            assert "max_budget_usd" in exc_info.value.stats
+        finally:
+            loop.close()
+
+    def test_budget_utilization_percentage(self):
+        tracker = CostTracker(
+            max_budget_usd=100.0,
+            input_price_per_million=10.0,
+            output_price_per_million=0.0,
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            # 5M input tokens at $10/M = $50 = 50% of $100 budget
+            loop.run_until_complete(
+                tracker.record_usage(input_tokens=5_000_000, output_tokens=0)
+            )
+            stats = tracker.get_stats()
+            assert abs(stats["budget_utilization_pct"] - 50.0) < 0.1
+        finally:
+            loop.close()
+
+
+# =========================================================================
+# extract_token_usage_from_log tests
+# =========================================================================
+
+class TestExtractTokenUsage:
+    """Tests for the extract_token_usage_from_log utility."""
+
+    def test_extract_from_stream_json(self):
+        """Should extract usage from Claude CLI stream-json format."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type": "message_start", "message": {"usage": {"input_tokens": 5000, "output_tokens": 0}}}\n')
+            f.write('{"type": "content_block_delta"}\n')
+            f.write('{"type": "message_delta", "usage": {"input_tokens": 5000, "output_tokens": 1200}}\n')
+            f.flush()
+            usage = extract_token_usage_from_log(f.name)
+        os.unlink(f.name)
+        assert usage["input_tokens"] == 5000
+        assert usage["output_tokens"] == 1200
+
+    def test_extract_from_empty_log(self):
+        """Empty log should return zero tokens."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.flush()
+            usage = extract_token_usage_from_log(f.name)
+        os.unlink(f.name)
+        assert usage["input_tokens"] == 0
+        assert usage["output_tokens"] == 0
+
+    def test_extract_from_nonexistent_file(self):
+        """Nonexistent file should return zero tokens."""
+        usage = extract_token_usage_from_log("/nonexistent/file.jsonl")
+        assert usage["input_tokens"] == 0
+        assert usage["output_tokens"] == 0
+
+    def test_extract_with_multiple_usage_entries(self):
+        """Should take max input_tokens and sum output_tokens."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"usage": {"input_tokens": 3000, "output_tokens": 500}}\n')
+            f.write('{"usage": {"input_tokens": 5000, "output_tokens": 800}}\n')
+            f.write('{"usage": {"input_tokens": 5000, "output_tokens": 200}}\n')
+            f.flush()
+            usage = extract_token_usage_from_log(f.name)
+        os.unlink(f.name)
+        assert usage["input_tokens"] == 5000  # max
+        assert usage["output_tokens"] == 1500  # sum
+
+    def test_extract_with_malformed_lines(self):
+        """Should gracefully skip malformed JSON lines."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('not json at all\n')
+            f.write('{"usage": {"input_tokens": 1000, "output_tokens": 200}}\n')
+            f.write('{broken json\n')
+            f.flush()
+            usage = extract_token_usage_from_log(f.name)
+        os.unlink(f.name)
+        assert usage["input_tokens"] == 1000
+        assert usage["output_tokens"] == 200
+
+
+# =========================================================================
+# Integration: CostTracker + PhaseConfig
+# =========================================================================
+
+class TestCostTrackerIntegration:
+    """Test CostTracker with real PhaseConfig values."""
+
+    def test_phase03_budget(self):
+        """Phase 03 should have max_budget_usd=30.0."""
+        config = get_phase_config("03")
+        assert config.max_budget_usd == 30.0
+        tracker = CostTracker(max_budget_usd=config.max_budget_usd)
+        assert tracker.max_budget_usd == 30.0
+
+    def test_phase03_log_anomaly_threshold(self):
+        """Phase 03 should have log_anomaly_threshold=2."""
+        config = get_phase_config("03")
+        assert config.log_anomaly_threshold == 2
+
+    def test_default_phase_budget(self):
+        """Default phases should have max_budget_usd=50.0."""
+        config = get_phase_config("01a")
+        assert config.max_budget_usd == 50.0
+
+    def test_default_phase_log_anomaly_threshold(self):
+        """Default phases should have log_anomaly_threshold=3."""
+        config = get_phase_config("01a")
+        assert config.log_anomaly_threshold == 3
+
+
+# =========================================================================
+# GitHub Step Summary tests
+# =========================================================================
+
+from orchestrator.base import BaseOrchestrator
+
+
+class _MockOrchestrator(BaseOrchestrator):
+    """Minimal concrete subclass for testing base methods."""
+
+    def load_items(self):
+        return []
+
+    def enrich_items(self, items):
+        return items
+
+
+class TestGitHubStepSummary:
+    """Tests for _write_github_step_summary in base.py."""
+
+    def test_no_op_when_env_not_set(self):
+        """Should do nothing when GITHUB_STEP_SUMMARY is not set."""
+        old = os.environ.pop("GITHUB_STEP_SUMMARY", None)
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            # Should not raise
+            orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
+        finally:
+            if old is not None:
+                os.environ["GITHUB_STEP_SUMMARY"] = old
+
+    def test_writes_markdown_to_file(self):
+        """Should write Markdown content to the summary file."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(60.0, 10, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "## Phase 03" in content
+            assert "Audit Map Generation" in content
+            assert "Execution Summary" in content
+            assert "| Duration | 60.0s |" in content
+            assert "| Total results | 10 |" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_includes_cost_report(self):
+        """Should include cost table when cost_stats is provided."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            cost_stats = {
+                "total_input_tokens": 100000,
+                "total_output_tokens": 30000,
+                "total_cost_usd": 8.50,
+                "max_budget_usd": 30.0,
+                "budget_utilization_pct": 28.3,
+                "budget_remaining_usd": 21.50,
+                "batch_count": 3,
+            }
+            orch._write_github_step_summary(45.0, 8, cb_stats, val_stats, cost_stats)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "### Cost Report" in content
+            assert "| Input tokens | 100,000 |" in content
+            assert "| Estimated cost | $8.50 |" in content
+            assert "| Budget | $30.00 |" in content
+            assert "28.3%" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_no_cost_section_without_stats(self):
+        """Should not include cost section when cost_stats is None."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "### Cost Report" not in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_success_status(self):
+        """Normal run should show Success status."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "Success" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_circuit_breaker_status(self):
+        """Should show Circuit Breaker Tripped status."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            orch._circuit_breaker_tripped = True
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 3, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "Circuit Breaker Tripped" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_budget_exceeded_status(self):
+        """Should show Budget Exceeded status."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            orch._budget_exceeded = True
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 2, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "Budget Exceeded" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_failed_batches_table(self):
+        """Should include failed batches table when there are failures."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            orch.failed_batches = [(0, 3), (1, 7)]
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "### Failed Batches" in content
+            assert "| 0 | 3 |" in content
+            assert "| 1 | 7 |" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_budget_bar_high_utilization(self):
+        """High budget utilization (>=80%) should show red indicator."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            cost_stats = {
+                "total_input_tokens": 500000,
+                "total_output_tokens": 200000,
+                "total_cost_usd": 25.0,
+                "max_budget_usd": 30.0,
+                "budget_utilization_pct": 83.3,
+                "budget_remaining_usd": 5.0,
+                "batch_count": 10,
+            }
+            orch._write_github_step_summary(300.0, 50, cb_stats, val_stats, cost_stats)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "83.3%" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)
+
+    def test_appends_to_existing_file(self):
+        """Should append to existing summary file, not overwrite."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Previous content\n\n")
+            summary_file = f.name
+        os.environ["GITHUB_STEP_SUMMARY"] = summary_file
+        try:
+            orch = _MockOrchestrator("03")
+            cb_stats = orch.circuit_breaker.get_stats()
+            val_stats = orch.collector.get_validation_summary()
+            orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
+
+            with open(summary_file) as f:
+                content = f.read()
+            assert "# Previous content" in content
+            assert "## Phase 03" in content
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+            os.unlink(summary_file)

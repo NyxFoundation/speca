@@ -51,7 +51,8 @@ def filter_output_files(files: Iterable[str], globs: list[str]) -> list[str]:
 
 
 _TS_RE = re.compile(r"_W(?P<worker>\d+)_(?P<ts>\d{9,})_(?P<seq>\d+)\.json$")
-_LOG_TS_RE = re.compile(r"^(?P<phase>\d+)_w(?P<worker>\d+)b(?P<batch>\d+)_(?P<ts>\d{9,})\.log\.jsonl$")
+_LOG_PHASE_RE = re.compile(r"^(?P<phase>\d+)_.*\.jsonl$", re.IGNORECASE)
+_LOG_TS_RE = re.compile(r"(?P<ts>\d{9,})")
 
 
 def estimate_phase_timing(files: Iterable[str]) -> dict:
@@ -93,7 +94,7 @@ def list_log_files(branch: str, logs_dir: str) -> list[str]:
     except subprocess.CalledProcessError:
         return []
     files = [line.strip() for line in output.splitlines() if line.strip()]
-    return [f for f in files if f.endswith(".log.jsonl")]
+    return [f for f in files if f.endswith(".jsonl")]
 
 
 def parse_epoch(value: object) -> float | None:
@@ -120,6 +121,7 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
     min_ts = None
     max_ts = None
     duration_candidates: list[float] = []
+    num_turns = None
     token_totals = {
         "input_tokens": 0,
         "output_tokens": 0,
@@ -163,14 +165,9 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
                 token_totals["cache_read_input_tokens"] += int(cache_read)
             if isinstance(cache_create, (int, float)):
                 token_totals["cache_creation_input_tokens"] += int(cache_create)
-    for line in log_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+
+    def process_payload(payload: dict) -> None:
+        nonlocal min_ts, max_ts, num_turns
         for key in ("timestamp", "ts", "time", "created_at", "created", "event_time"):
             ts = parse_epoch(payload.get(key))
             if ts is None:
@@ -181,6 +178,8 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
             value = payload.get(key)
             if isinstance(value, (int, float)):
                 duration_candidates.append(float(value))
+        if isinstance(payload.get("num_turns"), (int, float)):
+            num_turns = max(int(payload["num_turns"]), num_turns or 0)
         usage = payload.get("usage") if isinstance(payload, dict) else None
         if isinstance(usage, dict):
             add_usage(usage)
@@ -194,6 +193,36 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
             value = payload.get(key)
             if isinstance(value, (int, float)):
                 token_totals[key] += int(value)
+
+    parsed_any = False
+    for line in log_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            process_payload(payload)
+            parsed_any = True
+        elif isinstance(payload, list):
+            for entry in payload:
+                if isinstance(entry, dict):
+                    process_payload(entry)
+                    parsed_any = True
+
+    if not parsed_any:
+        try:
+            payload = json.loads(log_text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            process_payload(payload)
+        elif isinstance(payload, list):
+            for entry in payload:
+                if isinstance(entry, dict):
+                    process_payload(entry)
     if min_ts is None or max_ts is None:
         min_ts = float(filename_ts)
         max_ts = float(filename_ts)
@@ -201,14 +230,15 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
     else:
         source = "log_event_timestamps"
     estimated_seconds = max(0.0, max_ts - min_ts)
-    if duration_candidates and estimated_seconds == 0.0:
+    if duration_candidates:
         candidate = max(duration_candidates)
         if candidate > 10_000_000_000:
             candidate = candidate / 1000.0
         elif candidate > 10000:
             candidate = candidate / 1000.0
-        estimated_seconds = max(estimated_seconds, float(candidate))
-        source = "log_duration_field"
+        if float(candidate) > estimated_seconds:
+            estimated_seconds = float(candidate)
+            source = "log_duration_field"
     if token_totals["total_tokens"] == 0:
         token_totals["total_tokens"] = (
             token_totals["input_tokens"]
@@ -222,6 +252,7 @@ def extract_log_timing(log_text: str, filename_ts: int) -> dict:
         "estimated_seconds": estimated_seconds,
         "source": source,
         "tokens": token_totals,
+        "num_turns": num_turns,
     }
 
 
@@ -235,12 +266,14 @@ def collect_phase_logs(branch: str, logs_dir: str, phase_id: str) -> dict:
         "prompt_tokens": 0,
         "completion_tokens": 0,
     }
+    total_num_turns = 0
 
     for name in files:
-        match = _LOG_TS_RE.match(name)
-        if not match or match.group("phase") != phase_id:
+        phase_match = _LOG_PHASE_RE.match(name)
+        if not phase_match or phase_match.group("phase") != phase_id:
             continue
-        ts = int(match.group("ts"))
+        ts_match = _LOG_TS_RE.search(name)
+        ts = int(ts_match.group("ts")) if ts_match else 0
         try:
             content = run_git(["show", f"{branch}:{logs_dir}/{name}"])
         except subprocess.CalledProcessError:
@@ -251,6 +284,8 @@ def collect_phase_logs(branch: str, logs_dir: str, phase_id: str) -> dict:
             value = tokens.get(key)
             if isinstance(value, (int, float)):
                 total_tokens[key] += int(value)
+        if isinstance(timing.get("num_turns"), (int, float)):
+            total_num_turns += int(timing["num_turns"])
         phase_logs.append({"file": name, **timing})
 
     if not phase_logs:
@@ -259,15 +294,19 @@ def collect_phase_logs(branch: str, logs_dir: str, phase_id: str) -> dict:
     starts = [entry["estimated_start_ts"] for entry in phase_logs if entry.get("estimated_start_ts") is not None]
     ends = [entry["estimated_end_ts"] for entry in phase_logs if entry.get("estimated_end_ts") is not None]
     sources = {entry.get("source") for entry in phase_logs if entry.get("source")}
+    estimated_total_seconds = max((entry.get("estimated_seconds", 0.0) for entry in phase_logs), default=0.0)
+    if starts and ends:
+        estimated_total_seconds = max(estimated_total_seconds, max(ends) - min(starts))
     return {
         "phase_id": phase_id,
         "log_files": len(phase_logs),
         "estimated_start_ts": min(starts) if starts else None,
         "estimated_end_ts": max(ends) if ends else None,
-        "estimated_total_seconds": max(ends) - min(starts) if starts and ends else 0.0,
+        "estimated_total_seconds": estimated_total_seconds,
         "sources": sorted(sources),
         "per_log": phase_logs,
         "tokens": total_tokens,
+        "num_turns": total_num_turns,
         "source": "logs",
     }
 

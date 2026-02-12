@@ -3,42 +3,52 @@ Phase Configuration Module
 
 Defines the configuration for each phase of the security audit pipeline.
 This centralizes all phase-specific settings in one place.
+
+PhaseConfig is a Pydantic BaseModel, providing:
+  - Type-safe field access with IDE autocompletion
+  - Automatic validation when constructing instances
+  - Immutability by default (frozen model)
 """
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Any
 
+from pydantic import BaseModel, Field, computed_field, ConfigDict
 
-@dataclass
-class PhaseConfig:
+
+class PhaseConfig(BaseModel):
     """Configuration for a single phase of the audit pipeline."""
-    
+
+    model_config = ConfigDict(
+        frozen=False,          # allow mutation for early_exit callbacks set after init
+        arbitrary_types_allowed=True,  # allow Callable types
+    )
+
     # Basic identification
     phase_id: str
     name: str
     description: str
-    
+
     # File paths
     skill_path: Path
     prompt_path: Path
     queue_pattern: str
     output_pattern: str
-    
+
     # Dependencies
-    depends_on: list[str] = field(default_factory=list)
-    input_patterns: list[str] = field(default_factory=list)
-    
+    depends_on: list[str] = Field(default_factory=list)
+    input_patterns: list[str] = Field(default_factory=list)
+
     # Batching configuration
     batch_strategy: str = "token"
     max_context_tokens: int = 190_000
     base_prompt_tokens: int = 5_000
     max_batch_size: int = 10
-    
+
     # Execution configuration
     workdir: str | None = None
     timeout_seconds: int = 3600
-    
+
     # Queue item configuration
     item_id_field: str = "check_id"
     result_id_field: str = ""  # ID field in result items (falls back to item_id_field)
@@ -46,17 +56,38 @@ class PhaseConfig:
     # Result parsing
     result_key: str = "items"
 
-    # Output naming: semantic prefix for PARTIAL files (e.g., "TRUSTMODEL" → 01d_TRUSTMODEL_PARTIAL_W...)
+    # Output naming: semantic prefix for PARTIAL files
+    # (e.g., "TRUSTMODEL" → 01d_TRUSTMODEL_PARTIAL_W...)
     output_prefix: str = ""
 
     # Output mode: "file" (default) writes a single JSON; "directory" writes
     # .mmd graphs + index.json under outputs/graphs/<batch>/
     output_mode: str = "file"
-    
+
     # Early exit conditions
     early_exit_check: Callable[[dict], bool] | None = None
     early_exit_builder: Callable[[dict], dict] | None = None
 
+    # ---- Circuit breaker / anomaly detection ----
+    # Maximum consecutive batch failures before the orchestrator aborts.
+    circuit_breaker_threshold: int = 5
+    # Cooldown in seconds after circuit breaker trips before allowing retry.
+    circuit_breaker_cooldown: int = 60
+    # Maximum total retries across all batches before aborting.
+    max_total_retries: int = 20
+    # Maximum empty-result batches (LLM returned nothing useful) before abort.
+    max_empty_results: int = 10
+
+    # ---- Cost tracking ----
+    # Maximum budget in USD for a single phase run.  The CostTracker will
+    # abort execution when the estimated cumulative cost exceeds this value.
+    # Set to 0 to disable cost tracking.
+    max_budget_usd: float = 50.0
+    # Log watcher anomaly threshold — number of anomaly hits in a single
+    # batch log before the watcher recommends aborting.
+    log_anomaly_threshold: int = 3
+
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def effective_result_id_field(self) -> str:
         """ID field name in result items. Falls back to item_id_field."""
@@ -78,7 +109,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=1,
         item_id_field="url",
     ),
-    
+
     "01b": PhaseConfig(
         phase_id="01b",
         name="Subgraph Extraction",
@@ -181,6 +212,12 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="check_id",
         result_key="audit_items",
         output_prefix="AUDITMAP",
+        # Phase 03 is the most expensive — tighter circuit breaker
+        circuit_breaker_threshold=3,
+        max_total_retries=10,
+        max_empty_results=5,
+        max_budget_usd=30.0,
+        log_anomaly_threshold=2,
     ),
 
     "04": PhaseConfig(
@@ -213,13 +250,13 @@ def get_phase_chain(target_phase: str) -> list[str]:
     """Get the ordered list of phases needed to reach the target phase."""
     config = get_phase_config(target_phase)
     chain = []
-    
+
     # Recursively build dependency chain
     for dep in config.depends_on:
         chain.extend(get_phase_chain(dep))
-    
+
     chain.append(target_phase)
-    
+
     # Remove duplicates while preserving order
     seen = set()
     return [p for p in chain if not (p in seen or seen.add(p))]

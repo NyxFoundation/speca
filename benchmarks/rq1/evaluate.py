@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 import random
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from benchmarks.bench_utils import normalize_bool
@@ -20,6 +21,61 @@ def parse_branches(value: str) -> list[str]:
 
 def sanitize_branch(branch: str) -> str:
     return branch.replace("/", "__")
+
+
+_CLIENT_ALIASES = {
+    "nimbus-eth2": ["nimbus", "nimbus-eth2", "status-im"],
+    "lighthouse": ["lighthouse", "sigp"],
+    "lodestar": ["lodestar", "chainsafe"],
+    "teku": ["teku", "consensys"],
+    "prysm": ["prysm", "prysmatic"],
+    "grandine": ["grandine"],
+}
+
+
+def load_target_info(results_dir: Path, sanitized_branch: str) -> dict:
+    target_path = results_dir / sanitized_branch / "03_TARGET_INFO.json"
+    if not target_path.exists():
+        return {}
+    try:
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def infer_client_keywords(branch: str, target_info: dict) -> list[str]:
+    keywords: set[str] = set()
+    match = re.match(r"^audit_([^_]+)", branch)
+    if match:
+        slug = match.group(1).strip().lower()
+        if slug:
+            keywords.add(slug)
+            keywords.update(re.split(r"[-_.]+", slug))
+            keywords.update(_CLIENT_ALIASES.get(slug, []))
+
+    repo = target_info.get("target_repo") if isinstance(target_info, dict) else None
+    if isinstance(repo, str) and repo:
+        repo_name = repo.split("/")[-1].strip().lower()
+        if repo_name:
+            keywords.add(repo_name)
+            keywords.update(re.split(r"[-_.]+", repo_name))
+            keywords.update(_CLIENT_ALIASES.get(repo_name, []))
+
+    keywords.discard("")
+    return sorted(keywords)
+
+
+def filter_issues_by_keywords(issues: list[Issue], keywords: list[str]) -> list[Issue]:
+    if not keywords:
+        return issues
+    lowered = [kw.lower() for kw in keywords if kw]
+    filtered: list[Issue] = []
+    for issue in issues:
+        text = f"{issue.title}\n{issue.description}".lower()
+        if any(kw in text for kw in lowered):
+            filtered.append(issue)
+    return filtered
 
 
 def extract_human_label(record: dict) -> bool | None:
@@ -49,11 +105,19 @@ def match_branch(
     stage2_threshold: float,
     keyword_min_overlap: int,
     candidate_top_k: int,
+    audit_classifications: set[str] | None,
+    audit_include_bug_bounty: bool,
 ) -> tuple[dict, list[AuditItem]]:
     sanitized = sanitize_branch(branch)
     branch_dir = results_dir / sanitized
     files = sorted(branch_dir.glob("03_*.json"))
-    audit_items = extract_audit_items(files)
+    print(f"[rq1] {branch}: {len(files)} audit files found")
+    audit_items = extract_audit_items(
+        files,
+        classification_filter=audit_classifications,
+        include_bug_bounty=audit_include_bug_bounty,
+    )
+    print(f"[rq1] {branch}: {len(audit_items)} audit items after filter")
 
     matches, stage_counts, llm_calls = match_items(
         audit_items,
@@ -93,6 +157,10 @@ def match_branch(
 
     detail_path = results_dir / f"evaluation_{sanitized}.json"
     detail_path.write_text(json.dumps(detail, indent=2), encoding="utf-8")
+    print(
+        f"[rq1] {branch}: matched {matched_total}/{total} items "
+        f"(issues matched {issues_matched_total}/{len(issues)})"
+    )
     return detail, audit_items
 
 
@@ -116,6 +184,10 @@ def evaluate_branches(
     human_labels: Path | None,
     human_labels_report: Path | None,
     metadata_path: Path | None,
+    audit_classifications: set[str] | None,
+    audit_include_bug_bounty: bool,
+    client_filter: str,
+    client_keywords: list[str],
 ) -> dict:
     issues = load_csv_issues(csv_path)
     issue_map = {issue.issue_id: issue for issue in issues}
@@ -132,6 +204,14 @@ def evaluate_branches(
             "llm_max": llm_max,
             "llm_used": use_llm,
         },
+        "audit_item_filter": {
+            "classifications": sorted(audit_classifications) if audit_classifications else None,
+            "include_bug_bounty": audit_include_bug_bounty,
+        },
+        "issue_filter": {
+            "mode": client_filter,
+            "keywords": client_keywords if client_keywords else None,
+        },
     }
     if metadata_path and metadata_path.exists():
         try:
@@ -143,11 +223,24 @@ def evaluate_branches(
     human_lookup: dict[tuple[str, str], dict] = {}
 
     overall_matched_issue_ids: set[str] = set()
+    overall_issue_candidates: set[str] = set()
 
     for branch in branches:
+        sanitized = sanitize_branch(branch)
+        target_info = load_target_info(results_dir, sanitized)
+        branch_keywords = client_keywords
+        if client_filter == "auto" and not client_keywords:
+            branch_keywords = infer_client_keywords(branch, target_info)
+
+        filtered_issues = issues
+        if client_filter != "none" and branch_keywords:
+            filtered_issues = filter_issues_by_keywords(issues, branch_keywords)
+        print(f"[rq1] {branch}: issues in scope {len(filtered_issues)} (filter={client_filter})")
+
+        overall_issue_candidates.update(issue.issue_id for issue in filtered_issues)
         detail, audit_items = match_branch(
             branch,
-            issues,
+            filtered_issues,
             results_dir,
             use_llm,
             llm_max,
@@ -155,6 +248,8 @@ def evaluate_branches(
             stage2_threshold,
             keyword_min_overlap,
             candidate_top_k,
+            audit_classifications,
+            audit_include_bug_bounty,
         )
 
         matched_flags = [item.item_id in detail["matches"] for item in audit_items]
@@ -200,11 +295,17 @@ def evaluate_branches(
             "new_rate": detail["new_rate"],
             "issues_matched_total": detail["issues_matched_total"],
             "issue_recall": detail["issue_recall"],
+            "issues_total": len(filtered_issues),
             "overlap_rate_ci": overlap_ci,
             "new_rate_ci": new_ci,
             "stage_counts": detail["stage_counts"],
             "llm_used": detail["llm_used"],
             "llm_calls": detail["llm_calls"],
+            "issue_filter": {
+                "mode": client_filter,
+                "keywords": branch_keywords if branch_keywords else None,
+                "target_repo": target_info.get("target_repo") if isinstance(target_info, dict) else None,
+            },
         }
         if baseline_stats:
             summary["branches"][branch]["baseline_comparison"] = baseline_stats
@@ -237,7 +338,10 @@ def evaluate_branches(
             human_lookup[(branch, item.item_id)] = record
 
     summary["issues_matched_total"] = len(overall_matched_issue_ids)
-    summary["issue_recall"] = len(overall_matched_issue_ids) / len(issues) if issues else 0.0
+    summary["issues_total"] = len(overall_issue_candidates) if overall_issue_candidates else len(issues)
+    summary["issue_recall"] = (
+        len(overall_matched_issue_ids) / summary["issues_total"] if summary["issues_total"] else 0.0
+    )
 
     summary_path = results_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

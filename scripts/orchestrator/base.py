@@ -13,14 +13,53 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from tqdm import tqdm
 
 from .config import PhaseConfig, get_phase_config
 from .queue import QueueManager
 from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
-from .runner import ClaudeRunner
+from .runner import ClaudeRunner, CircuitBreaker, CircuitBreakerTripped, BudgetExceeded
+from .watchdog import CostTracker
 from .collector import ResultCollector
 from .resume import ResumeManager
+from .schemas import (
+    ChecklistItem,
+    Phase01aState,
+    Phase01bPartial,
+    Phase01cPartial,
+    Phase01dPartial,
+    Phase01ePartial,
+    Phase02Partial,
+    Phase03Partial,
+    AuditMapItem,
+    validate_checklist_item,
+    validate_audit_map_item,
+    validate_subgraph,
+    validate_property,
+    validate_reviewed_item,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helper: log Pydantic validation warnings
+# ---------------------------------------------------------------------------
+
+def _log_validation_warning(
+    filepath: str,
+    ve: ValidationError,
+    *,
+    prefix: str = "",
+) -> None:
+    """Print structured Pydantic validation warnings to stderr."""
+    label = f"{prefix} " if prefix else ""
+    print(
+        f"⚠️  {label}Schema validation warning for {filepath}: "
+        f"{ve.error_count()} error(s)",
+        file=sys.stderr,
+    )
+    for err in ve.errors():
+        print(f"    {err['loc']}: {err['msg']}", file=sys.stderr)
 
 
 class BaseOrchestrator(ABC):
@@ -32,6 +71,8 @@ class BaseOrchestrator(ABC):
     - Batch creation
     - Parallel Claude execution
     - Result collection
+    - **Circuit breaker** for anomaly detection and cost control
+    - **Cost tracking** with automatic budget enforcement
     
     Subclasses can override specific methods for phase-specific behavior.
     """
@@ -47,10 +88,25 @@ class BaseOrchestrator(ABC):
         self.max_concurrent = max(1, max_concurrent)
         self.semaphore = asyncio.Semaphore(max_concurrent)
         
+        # Shared circuit breaker for all workers in this phase
+        self.circuit_breaker = CircuitBreaker(self.config)
+
+        # Cost tracker — shared across all workers
+        self.cost_tracker: CostTracker | None = None
+        if self.config.max_budget_usd > 0:
+            self.cost_tracker = CostTracker(
+                max_budget_usd=self.config.max_budget_usd,
+            )
+
         # Components
         self.queue_manager = QueueManager(self.config)
         self.batch_strategy = self._create_batch_strategy()
-        self.runner = ClaudeRunner(self.config, self.semaphore)
+        self.runner = ClaudeRunner(
+            self.config,
+            self.semaphore,
+            circuit_breaker=self.circuit_breaker,
+            cost_tracker=self.cost_tracker,
+        )
         self.collector = ResultCollector(self.config)
         self.resume_manager = ResumeManager(self.config)
         
@@ -58,6 +114,8 @@ class BaseOrchestrator(ABC):
         self.results: list[dict[str, Any]] = []
         self.failed_batches: list[tuple[int, int]] = []
         self._batch_counter = 0
+        self._circuit_breaker_tripped = False
+        self._budget_exceeded = False
     
     def _create_batch_strategy(self) -> BatchStrategy:
         """Create the appropriate batch strategy based on config."""
@@ -80,6 +138,7 @@ class BaseOrchestrator(ABC):
         3. Create batches
         4. Execute batches in parallel
         5. Collect and save results
+        6. Report circuit breaker / validation statistics
         """
         print(f"\n{'='*60}")
         print(f"Phase {self.config.phase_id}: {self.config.name}")
@@ -125,8 +184,29 @@ class BaseOrchestrator(ABC):
         
         duration = time.time() - start_time
         total_results = len(early_exit_results) + len(self.results)
+
+        # Step 6: Print statistics
+        self._print_run_statistics(duration, total_results)
         
-        # Step 6: Report failures
+        # Step 7: Report failures
+        if self._budget_exceeded:
+            print(
+                f"\n\U0001f6d1 Phase {self.config.phase_id} ABORTED — budget exceeded "
+                f"after {duration:.1f}s",
+                file=sys.stderr,
+            )
+            print(f"   Saved results so far: {total_results}")
+            sys.exit(2)
+
+        if self._circuit_breaker_tripped:
+            print(
+                f"\n🛑 Phase {self.config.phase_id} ABORTED by circuit breaker "
+                f"after {duration:.1f}s",
+                file=sys.stderr,
+            )
+            print(f"   Saved results so far: {total_results}")
+            sys.exit(2)
+
         if self.failed_batches:
             print(f"\n⚠️  {len(self.failed_batches)} batch(es) failed (successful results saved as partials)", file=sys.stderr)
             for worker_id, batch_index in self.failed_batches:
@@ -136,7 +216,137 @@ class BaseOrchestrator(ABC):
         
         print(f"\n✅ Phase {self.config.phase_id} completed in {duration:.1f}s")
         print(f"   Total results: {total_results}")
-    
+
+    def _print_run_statistics(self, duration: float, total_results: int) -> None:
+        """Print circuit breaker and validation statistics."""
+        cb_stats = self.circuit_breaker.get_stats()
+        val_stats = self.collector.get_validation_summary()
+
+        print(f"\n{'─'*40}")
+        print(f"Run Statistics (Phase {self.config.phase_id})")
+        print(f"{'─'*40}")
+        print(f"  Duration:              {duration:.1f}s")
+        print(f"  Total results:         {total_results}")
+        print(f"  Batch successes:       {cb_stats['total_successes']}")
+        print(f"  Batch failures:        {cb_stats['total_failures']}")
+        print(f"  Total retries:         {cb_stats['total_retries']}")
+        print(f"  Empty results:         {cb_stats['empty_results']}")
+        print(f"  Validation warnings:   {val_stats['validation_warnings']}")
+        print(f"  Validation errors:     {val_stats['validation_errors']}")
+
+        # Cost statistics
+        cost_stats = None
+        if self.cost_tracker:
+            cost_stats = self.cost_tracker.get_stats()
+            print(f"  ---- Cost ----")
+            print(f"  Input tokens:          {cost_stats['total_input_tokens']:,}")
+            print(f"  Output tokens:         {cost_stats['total_output_tokens']:,}")
+            print(f"  Estimated cost:        ${cost_stats['total_cost_usd']:.2f}")
+            print(f"  Budget:                ${cost_stats['max_budget_usd']:.2f}")
+            print(f"  Budget utilization:    {cost_stats['budget_utilization_pct']:.1f}%")
+        _sep = '\u2500' * 40
+        print(_sep)
+
+        # Write to GitHub Step Summary if running in GitHub Actions
+        self._write_github_step_summary(
+            duration, total_results, cb_stats, val_stats, cost_stats,
+        )
+
+    def _write_github_step_summary(
+        self,
+        duration: float,
+        total_results: int,
+        cb_stats: dict[str, Any],
+        val_stats: dict[str, Any],
+        cost_stats: dict[str, Any] | None,
+    ) -> None:
+        """
+        Write a Markdown summary to ``$GITHUB_STEP_SUMMARY``.
+
+        This renders a rich table in the GitHub Actions "Summary" tab for
+        each workflow run, making it easy to spot anomalies at a glance.
+        If the environment variable is not set (i.e. running locally),
+        this method is a no-op.
+        """
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if not summary_path:
+            return
+
+        # Determine status emoji
+        if self._budget_exceeded:
+            status = "\U0001f6d1 Budget Exceeded"
+        elif self._circuit_breaker_tripped:
+            status = "\U0001f6d1 Circuit Breaker Tripped"
+        elif self.failed_batches:
+            status = "\u26a0\ufe0f Partial Failure"
+        else:
+            status = "\u2705 Success"
+
+        lines: list[str] = []
+        lines.append(f"## Phase {self.config.phase_id}: {self.config.name}")
+        lines.append("")
+        lines.append(f"**Status:** {status}")
+        lines.append("")
+
+        # --- Execution summary table ---
+        lines.append("### Execution Summary")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("| :--- | ---: |")
+        lines.append(f"| Duration | {duration:.1f}s |")
+        lines.append(f"| Total results | {total_results} |")
+        lines.append(f"| Batch successes | {cb_stats['total_successes']} |")
+        lines.append(f"| Batch failures | {cb_stats['total_failures']} |")
+        lines.append(f"| Total retries | {cb_stats['total_retries']} |")
+        lines.append(f"| Empty results | {cb_stats['empty_results']} |")
+        lines.append(f"| Validation warnings | {val_stats['validation_warnings']} |")
+        lines.append(f"| Validation errors | {val_stats['validation_errors']} |")
+        lines.append("")
+
+        # --- Cost table (if available) ---
+        if cost_stats:
+            lines.append("### Cost Report")
+            lines.append("")
+            lines.append("| Metric | Value |")
+            lines.append("| :--- | ---: |")
+            lines.append(f"| Input tokens | {cost_stats['total_input_tokens']:,} |")
+            lines.append(f"| Output tokens | {cost_stats['total_output_tokens']:,} |")
+            lines.append(f"| Estimated cost | ${cost_stats['total_cost_usd']:.2f} |")
+            lines.append(f"| Budget | ${cost_stats['max_budget_usd']:.2f} |")
+            lines.append(f"| Budget utilization | {cost_stats['budget_utilization_pct']:.1f}% |")
+            lines.append("")
+
+            # Budget bar (visual indicator)
+            pct = min(cost_stats['budget_utilization_pct'], 100.0)
+            filled = int(pct / 5)  # 20 chars = 100%
+            bar = '\u2588' * filled + '\u2591' * (20 - filled)
+            if pct >= 80:
+                lines.append(f"> \U0001f534 **Budget: [{bar}] {pct:.1f}%**")
+            elif pct >= 50:
+                lines.append(f"> \U0001f7e1 Budget: [{bar}] {pct:.1f}%")
+            else:
+                lines.append(f"> \U0001f7e2 Budget: [{bar}] {pct:.1f}%")
+            lines.append("")
+
+        # --- Failed batches detail ---
+        if self.failed_batches:
+            lines.append("### Failed Batches")
+            lines.append("")
+            lines.append("| Worker | Batch |")
+            lines.append("| :---: | :---: |")
+            for worker_id, batch_index in self.failed_batches:
+                lines.append(f"| {worker_id} | {batch_index} |")
+            lines.append("")
+
+        md = "\n".join(lines)
+
+        try:
+            with open(summary_path, "a") as f:
+                f.write(md)
+                f.write("\n")
+        except OSError as e:
+            print(f"Warning: could not write to GITHUB_STEP_SUMMARY: {e}", file=sys.stderr)
+
     def load_items(self) -> list[dict[str, Any]]:
         """Load items from input sources. Override for custom loading logic."""
         return self.queue_manager.load_all_items()
@@ -174,7 +384,13 @@ class BaseOrchestrator(ABC):
         return items
     
     async def execute_batches(self, batches: list[list[dict[str, Any]]]) -> None:
-        """Execute all batches in parallel with progress tracking."""
+        """
+        Execute all batches in parallel with progress tracking.
+
+        Integrates circuit breaker: if ``CircuitBreakerTripped`` is raised by
+        any worker, all remaining tasks are cancelled and partial results are
+        preserved.
+        """
 
         async def _run_with_meta(
             batch: list[dict[str, Any]],
@@ -185,7 +401,7 @@ class BaseOrchestrator(ABC):
             result = await self.runner.run_batch(batch, worker_id, batch_index)
             return result, worker_id, batch_index, len(batch)
 
-        tasks = []
+        tasks: list[asyncio.Task] = []
         for batch in batches:
             worker_id = self._batch_counter % self.num_workers
             self._batch_counter += 1
@@ -208,6 +424,36 @@ class BaseOrchestrator(ABC):
                         self.results.extend(result)
                         if result:
                             self.collector.save_partial(result, worker_id, batch_index)
+                except CircuitBreakerTripped as cb:
+                    self._circuit_breaker_tripped = True
+                    print(
+                        f"\n\U0001f6d1 Circuit breaker tripped: {cb.reason}",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"   Stats: {cb.stats}",
+                        file=sys.stderr,
+                    )
+                    # Cancel all remaining tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    break
+                except BudgetExceeded as be:
+                    self._budget_exceeded = True
+                    print(
+                        f"\n\U0001f4b8 Budget exceeded: {be}",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"   Stats: {be.stats}",
+                        file=sys.stderr,
+                    )
+                    # Cancel all remaining tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    break
                 except Exception as e:
                     print(f"Task failed with error: {e}", file=sys.stderr)
                     self.failed_batches.append((0, 0))
@@ -216,46 +462,194 @@ class BaseOrchestrator(ABC):
     
 
 
-
 class Phase01Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 01 (Specification Analysis) sub-phases."""
 
     def load_items(self) -> list[dict[str, Any]]:
         """
-        Load items for Phase 01.
+        Load items for Phase 01 with Pydantic validation at phase boundaries.
+
         - 01a: Returns a single seed item (no input file).
-        - 01c/01d: Loads file paths as items.
+        - 01b: Loads discovered specs from 01a_STATE.json with validation.
+        - 01c/01d: Loads file paths as items with structural validation.
+        - 01e: Loads trust model outputs with validation.
         - Others: Standard queue loading.
         """
         if self.config.phase_id == "01a":
             return [{"id": "seed", "source": "manual"}]
-        
-        if self.config.phase_id in ("01c", "01d"):
-            return self._load_file_path_items()
-            
+
+        if self.config.phase_id == "01b":
+            return self._load_01b_items()
+
+        if self.config.phase_id == "01c":
+            return self._load_01c_items()
+
+        if self.config.phase_id == "01d":
+            return self._load_01d_items()
+
+        if self.config.phase_id == "01e":
+            return self._load_01e_items()
+
         return super().load_items()
 
-    def _load_file_path_items(self) -> list[dict[str, Any]]:
-        """Load each matching file as a single work item (file_path = item)."""
+    # -- Phase 01b: load discovered specs from 01a output ----------------
+
+    def _load_01b_items(self) -> list[dict[str, Any]]:
+        """Load discovered specs from 01a_STATE.json with Pydantic validation."""
         import glob as glob_mod
 
-        items = []
+        items: list[dict[str, Any]] = []
         for pattern in self.config.input_patterns:
             for filepath in sorted(glob_mod.glob(pattern)):
-                items.append({"file_path": filepath})
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+
+                    # Validate 01a output structure
+                    try:
+                        state = Phase01aState.model_validate(data)
+                        print(
+                            f"  ✓ {filepath}: {len(state.found_specs)} specs validated"
+                        )
+                    except ValidationError as ve:
+                        _log_validation_warning(filepath, ve, prefix="01a→01b")
+                        # Fall through to raw parsing
+
+                    for spec in data.get("found_specs", []):
+                        if isinstance(spec, dict) and spec.get("url"):
+                            items.append(spec)
+                except Exception as e:
+                    print(
+                        f"Warning: Failed to load {filepath}: {e}",
+                        file=sys.stderr,
+                    )
+        return items
+
+    # -- Phase 01c: load subgraph files for verification -----------------
+
+    def _load_01c_items(self) -> list[dict[str, Any]]:
+        """Load subgraph files for verification with Pydantic validation."""
+        import glob as glob_mod
+
+        items: list[dict[str, Any]] = []
+        validation_warnings = 0
+
+        for pattern in self.config.input_patterns:
+            for filepath in sorted(glob_mod.glob(pattern)):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+
+                    # Validate 01b partial structure
+                    try:
+                        partial = Phase01bPartial.model_validate(data)
+                        for spec in partial.specs:
+                            for sg in spec.sub_graphs:
+                                _, errs = validate_subgraph(sg.model_dump())
+                                if errs:
+                                    for err in errs:
+                                        print(
+                                            f"    ⚠️  {filepath} subgraph {sg.id}: {err}",
+                                            file=sys.stderr,
+                                        )
+                    except ValidationError as ve:
+                        _log_validation_warning(filepath, ve, prefix="01b→01c")
+                        validation_warnings += 1
+
+                    # Regardless of validation, load file path items
+                    items.append({"file_path": filepath})
+                except Exception as e:
+                    print(
+                        f"Warning: Failed to load {filepath}: {e}",
+                        file=sys.stderr,
+                    )
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01b→01c)",
+                file=sys.stderr,
+            )
+        return items
+
+    # -- Phase 01d: load subgraph files for trust model analysis ---------
+
+    def _load_01d_items(self) -> list[dict[str, Any]]:
+        """Load subgraph files for trust model analysis with Pydantic validation."""
+        import glob as glob_mod
+
+        items: list[dict[str, Any]] = []
+        validation_warnings = 0
+
+        for pattern in self.config.input_patterns:
+            for filepath in sorted(glob_mod.glob(pattern)):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+
+                    # Validate 01b partial structure
+                    try:
+                        Phase01bPartial.model_validate(data)
+                    except ValidationError as ve:
+                        _log_validation_warning(filepath, ve, prefix="01b→01d")
+                        validation_warnings += 1
+
+                    items.append({"file_path": filepath})
+                except Exception as e:
+                    print(
+                        f"Warning: Failed to load {filepath}: {e}",
+                        file=sys.stderr,
+                    )
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01b→01d)",
+                file=sys.stderr,
+            )
+        return items
+
+    # -- Phase 01e: load trust model outputs for property generation -----
+
+    def _load_01e_items(self) -> list[dict[str, Any]]:
+        """Load trust model outputs for property generation with Pydantic validation."""
+        import glob as glob_mod
+
+        items: list[dict[str, Any]] = []
+        validation_warnings = 0
+
+        for pattern in self.config.input_patterns:
+            for filepath in sorted(glob_mod.glob(pattern)):
+                try:
+                    with open(filepath) as f:
+                        data = json.load(f)
+
+                    # Validate 01d partial structure
+                    try:
+                        Phase01dPartial.model_validate(data)
+                    except ValidationError as ve:
+                        _log_validation_warning(filepath, ve, prefix="01d→01e")
+                        validation_warnings += 1
+
+                    items.append({"file_path": filepath})
+                except Exception as e:
+                    print(
+                        f"Warning: Failed to load {filepath}: {e}",
+                        file=sys.stderr,
+                    )
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01d→01e)",
+                file=sys.stderr,
+            )
         return items
 
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich items with necessary context."""
         if self.config.phase_id == "01a":
             # For 01a, we need to ensure KEYWORDS and SPEC_URLS are available
-            # We don't necessarily modify the item, as env vars are handled in runner
-            # But we can validate here
             keywords = os.environ.get("KEYWORDS")
             spec_urls = os.environ.get("SPEC_URLS")
             if not keywords or not spec_urls:
-                 # Fallback defaults if not set (mirroring Makefile defaults)
-                 # These should ideally be passed from run_phase.py or env
                  print("Warning: KEYWORDS or SPEC_URLS not set, using defaults")
             return items
 
@@ -268,14 +662,12 @@ class Phase01Orchestrator(BaseOrchestrator):
         items: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         """Add subgraph data to items."""
-        # Load subgraph cache
         subgraph_cache: dict[str, dict] = {}
         
         enriched = []
         for item in items:
             enriched_item = item.copy()
             
-            # Load relevant subgraph if referenced
             subgraph_file = item.get("subgraph_file")
             if subgraph_file:
                 if subgraph_file not in subgraph_cache:
@@ -301,16 +693,39 @@ class Phase02Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 02 (Checklist Generation)."""
     
     def load_items(self) -> list[dict[str, Any]]:
-        """Load properties from 01e partials efficiently with deduplication."""
+        """Load properties from 01e partials with Pydantic validation and deduplication."""
         import glob
         
         items = {}  # Deduplication map
+        validation_warnings = 0
+
         for filepath in sorted(glob.glob("outputs/01e_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
+
+                # Validate 01e partial structure
+                try:
+                    partial = Phase01ePartial.model_validate(data)
+                    print(
+                        f"  ✓ {filepath}: {len(partial.properties)} properties validated"
+                    )
+                except ValidationError as ve:
+                    _log_validation_warning(filepath, ve, prefix="01e→02")
+                    validation_warnings += 1
+
                 for prop in data.get("properties", []):
                     if isinstance(prop, dict):
+                        # Validate individual properties
+                        parsed, errs = validate_property(prop)
+                        if errs:
+                            prop_id_raw = prop.get("id", "<unknown>")
+                            for err in errs:
+                                print(
+                                    f"    ⚠️  {filepath} property {prop_id_raw}: {err}",
+                                    file=sys.stderr,
+                                )
+
                         prop_id = prop.get("id")
                         if prop_id and prop_id not in items:
                             # Keep first occurrence
@@ -321,6 +736,12 @@ class Phase02Orchestrator(BaseOrchestrator):
                             }
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01e→02)",
+                file=sys.stderr,
+            )
         
         return list(items.values())
 
@@ -373,21 +794,43 @@ class Phase03Orchestrator(BaseOrchestrator):
         self.property_subgraph_map: dict[str, tuple[str | None, str]] = {}
     
     def load_items(self) -> list[dict[str, Any]]:
-        """Load checklist items from 02 partials."""
+        """Load checklist items from 02 partials with Pydantic validation."""
         import glob
         
         # Build property to subgraph mapping
         self._build_property_subgraph_map()
         
         items = {}
+        validation_warnings = 0
         for filepath in sorted(glob.glob("outputs/02_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
-                entries = data.get("checklist_items") or data.get("checklist") or []
-                for entry in entries:
+
+                # Validate the partial file structure using Pydantic
+                try:
+                    partial = Phase02Partial.model_validate(data)
+                    entries_raw = data.get("checklist_items") or data.get("checklist") or []
+                except ValidationError as ve:
+                    _log_validation_warning(filepath, ve, prefix="02→03")
+                    validation_warnings += 1
+                    # Fall back to raw dict parsing
+                    entries_raw = data.get("checklist_items") or data.get("checklist") or []
+
+                for entry in entries_raw:
                     if not isinstance(entry, dict):
                         continue
+
+                    # Validate individual checklist items
+                    parsed_item, item_errors = validate_checklist_item(entry)
+                    if item_errors:
+                        check_id_raw = entry.get("check_id", "<unknown>")
+                        for err in item_errors:
+                            print(
+                                f"    ⚠️  {filepath} item {check_id_raw}: {err}",
+                                file=sys.stderr,
+                            )
+
                     check_id = entry.get("check_id")
                     if not check_id:
                         continue
@@ -409,6 +852,12 @@ class Phase03Orchestrator(BaseOrchestrator):
                     items[check_id] = item
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (02→03)",
+                file=sys.stderr,
+            )
         
         return list(items.values())
     
@@ -547,17 +996,34 @@ class Phase04Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 04 (Audit Review)."""
     
     def load_items(self) -> list[dict[str, Any]]:
-        """Load audit results from 03 partials."""
+        """Load audit results from 03 partials with Pydantic validation."""
         import glob
         
         items = []
+        validation_warnings = 0
         for filepath in sorted(glob.glob("outputs/03_AUDITMAP_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
+
+                # Validate the partial file structure using Pydantic
+                try:
+                    Phase03Partial.model_validate(data)
+                except ValidationError as ve:
+                    _log_validation_warning(filepath, ve, prefix="03→04")
+                    validation_warnings += 1
+
                 audit_items = data.get("audit_items", [])
                 for item in audit_items:
                     if isinstance(item, dict) and item.get("check_id"):
+                        # Validate individual audit items
+                        parsed, errs = validate_audit_map_item(item)
+                        if errs:
+                            for err in errs:
+                                print(
+                                    f"    ⚠️  {filepath} item {item.get('check_id', '?')}: {err}",
+                                    file=sys.stderr,
+                                )
                         items.append({
                             "check_id": item.get("check_id"),
                             "audit_result": item,
@@ -565,5 +1031,11 @@ class Phase04Orchestrator(BaseOrchestrator):
                         })
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (03→04)",
+                file=sys.stderr,
+            )
         
         return items
