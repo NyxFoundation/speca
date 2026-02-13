@@ -1,0 +1,1097 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-W4B13-27-003",
+      "property_id": "PROP-W4B13-27",
+      "title": "Verify Proposer Index Validation Against Expected Proposer",
+      "code_scope": {
+        "file": "beacon-chain/verification/data_column.go",
+        "lines": "356-428",
+        "function": "SidecarProposerExpected"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "proposer_validation",
+        "abstract_state": "The function SidecarProposerExpected verifies the proposer_index against expected proposer from shuffling. It uses forkchoice TargetRootForEpoch to get the correct checkpoint, then either looks up the cached proposer or computes it from parent state. The comparison at line ~427 'if idx != dataColumn.ProposerIndex()' enforces exact equality.",
+        "invariants_checked": [
+          "proposer_index == expected_proposer_from_shuffling",
+          "epoch_computation_uses_slot_epoch_minus_1",
+          "target_root_resolved_from_forkchoice"
+        ],
+        "potential_issues": [
+          "The epoch computation subtracts 1 (dataColumnEpoch - 1) which could underflow at epoch 0, but is guarded by 'if dataColumnEpoch > 0'",
+          "Cache miss path requires parent state retrieval which depends on state availability"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via P2P gossip validateDataColumn -> verifier.SidecarProposerExpected",
+        "paths_analyzed": 3,
+        "path_details": [
+          "cached proposer hit path: checkpoint lookup -> idx comparison -> accept/reject",
+          "cached proposer miss path: parent state retrieval -> ComputeProposer -> idx comparison",
+          "error path: TargetRootForEpoch fails -> error propagation"
+        ],
+        "symbolic_constraints": "proposer_index is attacker-controlled uint64 from sidecar; expected proposer is deterministically computed from shuffling seed + active validators",
+        "attack_surface": "Attacker can set arbitrary proposer_index in sidecar, but the check enforces exact match against computed value"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "For every accepted data column sidecar, sidecar.proposer_index == compute_proposer_index(state, slot)",
+        "proof_sketch": "The validation pipeline in validateDataColumn (validate_data_column.go:165-170) calls verifier.SidecarProposerExpected(ctx) which returns error on mismatch, causing REJECT. The IGNORE path for future epochs where shuffling isn't computed is handled by the spec note, but in Prysm this path propagates errors rather than IGNORE, which is stricter than spec.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: P2P entry point, attacker-controlled proposer_index field"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.9,
+      "reasoning": "Proposer index validation is correctly implemented via exact equality check against computed expected proposer. The epoch calculation includes proper guard against underflow at epoch 0. The check occurs before acceptance in the gossip validation pipeline."
+    },
+    {
+      "check_id": "CHK-W4B13-27-004",
+      "property_id": "PROP-W4B13-27",
+      "title": "Verify P2P Peer Trust Boundary",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_data_column.go",
+        "lines": "30-196",
+        "function": "validateDataColumn"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "trust_boundary_enforcement",
+        "abstract_state": "The validateDataColumn function is the gossip validation entry point. It performs: (1) self-message bypass, (2) initial sync ignore, (3) topic validation, (4) message decode, (5) type check, then delegates to verifier for all spec-required checks. Each check returns REJECT or IGNORE on failure.",
+        "invariants_checked": [
+          "all_sidecars_pass_gossip_validation_before_acceptance",
+          "no_processing_before_validation",
+          "validation_applied_to_all_incoming_sidecars"
+        ],
+        "potential_issues": [
+          "Self-message bypass at line 37 (pid == s.cfg.p2p.PeerID()) accepts without validation, which is correct per spec for own messages",
+          "Initial sync IGNORE at line 42 skips validation but doesn't process, which is correct"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable: P2P gossip message -> pubsub handler -> validateDataColumn",
+        "paths_analyzed": 4,
+        "path_details": [
+          "self-message: immediate accept (correct, own validator)",
+          "initial sync: immediate ignore (correct, no processing)",
+          "nil topic: immediate reject",
+          "full validation path: all 12 GossipDataColumnSidecarRequirements checked sequentially"
+        ],
+        "symbolic_constraints": "No code path allows sidecar data to be processed (stored, forwarded) before all validation checks pass",
+        "attack_surface": "A malicious peer sends a crafted DataColumnSidecar; the function validates every field before setting msg.ValidatorData"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "No sidecar data is processed or forwarded before complete gossip validation",
+        "proof_sketch": "The function follows a linear validation pipeline: decode -> verify fields -> verify subnet -> time checks -> parent checks -> signature -> inclusion proof -> KZG proof -> proposer check. Only after all checks pass is msg.ValidatorData set (line 186), which is what downstream subscribers consume. The operationNotifier at line 193 also fires only after full validation.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: P2P trust boundary, attacker-controlled sidecar data"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.92,
+      "reasoning": "The gossip validation pipeline correctly enforces all required checks before accepting any sidecar. No fast-path or cache-hit scenarios skip validation. The operationNotifier fires only post-validation. Self-message bypass is intentional and correct."
+    },
+    {
+      "check_id": "CHK-W4B13-28-001",
+      "property_id": "PROP-W4B13-28",
+      "title": "Verify Trust Boundary Integrity: Proposer signature verification",
+      "code_scope": {
+        "file": "beacon-chain/verification/data_column.go",
+        "lines": "234-275",
+        "function": "ValidProposerSignature"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "signature_verification",
+        "abstract_state": "ValidProposerSignature extracts signatureData from each data column (root, parent, signature, proposer, slot), then checks the signature cache. On cache miss, it retrieves parent state and calls VerifySignature which: (1) computes fork for the slot's epoch, (2) constructs domain with DomainBeaconProposer + genesis_validators_root, (3) looks up public key via ValidatorAtIndex(proposer), (4) verifies BLS signature.",
+        "invariants_checked": [
+          "signature_verified_with_correct_public_key",
+          "signing_domain_includes_correct_fork_version",
+          "signing_domain_includes_genesis_validators_root"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable: P2P gossip -> validateDataColumn -> verifier.ValidProposerSignature",
+        "paths_analyzed": 3,
+        "path_details": [
+          "cache hit valid: skip full verification (correct, already verified)",
+          "cache hit invalid: return error immediately",
+          "cache miss: full BLS signature verification via sigCache.VerifySignature"
+        ],
+        "symbolic_constraints": "The signature is verified against the proposer's public key from the validator registry using the correct signing domain (DomainBeaconProposer + fork version + genesis_validators_root)",
+        "attack_surface": "Attacker can forge signature, but BLS verification will fail. Attacker cannot bypass the check as it's required in GossipDataColumnSidecarRequirements."
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "For every accepted sidecar, the proposer signature is valid with respect to proposer_index public key and correct signing domain",
+        "proof_sketch": "In cache.go:85-120, VerifySignature: (1) gets fork from slot epoch, (2) computes domain with DomainBeaconProposer + genesis_validators_root, (3) gets validator's PublicKey via ValidatorAtIndex, (4) verifies BLS signature. The RequireValidProposerSignature is included in GossipDataColumnSidecarRequirements and must be satisfied for VerifiedRODataColumns() to succeed.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: Critical P2P trust boundary, BLS signature verification"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.95,
+      "reasoning": "Proposer signature verification is correctly implemented: uses proposer_index to look up public key, constructs correct signing domain with fork version and genesis_validators_root, performs BLS verification. Cache mechanism is sound - caches both valid and invalid results."
+    },
+    {
+      "check_id": "CHK-W4B13-28-002",
+      "property_id": "PROP-W4B13-28",
+      "title": "Correct proposer public key retrieval from validator registry",
+      "code_scope": {
+        "file": "beacon-chain/verification/cache.go",
+        "lines": "85-120",
+        "function": "sigCache.VerifySignature"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "key_lookup",
+        "abstract_state": "VerifySignature calls v.ValidatorAtIndex(sig.Proposer) where sig.Proposer is the proposer_index from the sidecar. ValidatorAtIndex performs bounds checking inherently (returns error if index >= validator count). The public key from the returned validator is used for signature verification.",
+        "invariants_checked": [
+          "bounds_checking_on_proposer_index",
+          "correct_state_used_for_key_lookup",
+          "public_key_matches_proposer_index"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via ValidProposerSignature -> VerifySignature",
+        "paths_analyzed": 2,
+        "path_details": [
+          "valid index: validator found, public key extracted, signature verified",
+          "out-of-bounds index: ValidatorAtIndex returns error, propagated up"
+        ],
+        "symbolic_constraints": "proposer_index must be < len(state.Validators) or error is returned",
+        "attack_surface": "Out-of-bounds proposer_index causes rejection; valid index triggers correct key lookup"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Public key retrieval correctly uses proposer_index with bounds checking",
+        "proof_sketch": "ValidatorAtIndex in state implementations (e.g. beaconState) checks bounds before array access. The parent state used for lookup is retrieved via parentState() which uses the sidecar's parent_root to get the appropriate state.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: proposer key lookup on P2P input"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.93,
+      "reasoning": "Public key retrieval from validator registry is correctly bounded and uses appropriate state. Out-of-bounds proposer_index results in error propagation and rejection."
+    },
+    {
+      "check_id": "CHK-W4B13-28-003",
+      "property_id": "PROP-W4B13-28",
+      "title": "Signing domain construction with fork version and genesis_validators_root",
+      "code_scope": {
+        "file": "beacon-chain/verification/cache.go",
+        "lines": "94-99",
+        "function": "sigCache.VerifySignature (domain construction)"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "domain_construction",
+        "abstract_state": "Domain construction at cache.go:94-99: (1) epoch from slot via slots.ToEpoch, (2) fork from epoch via getFork, (3) domain computed via signing.Domain(fork, epoch, DomainBeaconProposer, c.valRoot). The genesis_validators_root (c.valRoot) is set during cache initialization and is constant.",
+        "invariants_checked": [
+          "domain_type_is_DomainBeaconProposer",
+          "fork_version_corresponds_to_sidecar_slot_epoch",
+          "genesis_validators_root_correctly_incorporated"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via signature verification path",
+        "paths_analyzed": 2,
+        "path_details": [
+          "normal: epoch -> fork lookup -> domain computation -> signature verification",
+          "fork boundary: epoch transition changes fork version, correctly picked up by getFork"
+        ],
+        "symbolic_constraints": "signing.Domain combines fork.CurrentVersion, epoch, DomainBeaconProposer, and genesis_validators_root into a 32-byte domain",
+        "attack_surface": "A signature valid for different fork or domain will fail verification"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Signing domain is correctly constructed with appropriate fork version and genesis_validators_root",
+        "proof_sketch": "The signing.Domain function (signing_root.go) correctly combines: (1) domain type (DomainBeaconProposer = 0x00000000), (2) fork version from the epoch's fork schedule, (3) genesis_validators_root. This matches the Ethereum consensus spec's compute_domain.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: Critical cryptographic domain construction"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.94,
+      "reasoning": "Domain construction follows the spec: uses DomainBeaconProposer, correct fork version for the epoch, and genesis_validators_root. The signing.Domain function implements compute_domain per spec."
+    },
+    {
+      "check_id": "CHK-W4B13-28-004",
+      "property_id": "PROP-W4B13-28",
+      "title": "Signature verification bypass via race conditions or early-exit",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_data_column.go",
+        "lines": "30-196",
+        "function": "validateDataColumn (full pipeline)"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "bypass_analysis",
+        "abstract_state": "The validation pipeline is sequential: each check must pass before proceeding. RequireValidProposerSignature is in GossipDataColumnSidecarRequirements and is enforced by VerifiedRODataColumns() which calls results.allSatisfied(). The only early-exit paths are: self-message (pid==self), initial sync (syncing), and nil topic - none of which bypass signature verification for external messages.",
+        "invariants_checked": [
+          "no_early_exit_bypasses_signature",
+          "no_TOCTOU_between_verify_and_accept",
+          "cache_mechanism_is_sound"
+        ],
+        "potential_issues": [
+          "The signature cache could theoretically be poisoned, but cache entries are keyed by signatureData (root+parent+signature+proposer+slot) which is sufficiently unique"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via P2P gossip",
+        "paths_analyzed": 5,
+        "path_details": [
+          "self-message: bypass is intentional, only for own peer ID",
+          "initial sync: IGNORE, no processing or forwarding",
+          "nil topic: REJECT before any processing",
+          "decode failure: REJECT before validation",
+          "normal flow: all requirements must be satisfied including signature"
+        ],
+        "symbolic_constraints": "msg.ValidatorData is only set at line 186, after all validation passes. This is what pubsub uses for forwarding.",
+        "attack_surface": "No concurrent submission attacks possible as validateDataColumn is called per-message by pubsub. The seenDataColumnCache is checked after signature verification."
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "No code path allows signature verification bypass for externally-received sidecars",
+        "proof_sketch": "The GossipDataColumnSidecarRequirements list includes RequireValidProposerSignature. VerifiedRODataColumns() checks allSatisfied() which requires all requirements to be recorded as passing. Without signature verification, the result cannot be marked as satisfied, and the function returns error at line 87.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: Critical bypass analysis"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.93,
+      "reasoning": "No bypass paths exist for signature verification. The requirement tracking system ensures all GossipDataColumnSidecarRequirements including signature verification must be satisfied. The self-message bypass is intentional and only applies to the node's own peer ID."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001",
+      "property_id": "PROP-W1B10-34",
+      "title": "Verify seed uniqueness in compute_proposer_indices",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/beacon_committee.go",
+        "lines": "676-699",
+        "function": "PrecomputeProposerIndices"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "seed_derivation",
+        "abstract_state": "PrecomputeProposerIndices derives seeds as: seed_i = hash(base_seed || uint64_to_bytes(start_slot + i)) for i in [0, SLOTS_PER_EPOCH). The base seed is derived from Seed(state, epoch, DomainBeaconProposer). Since each slot value is unique within an epoch, and the hash function (SHA256) produces unique outputs for unique inputs with overwhelmingly high probability, seeds are unique per slot.",
+        "invariants_checked": [
+          "seed_derivation_uses_unique_slot_offsets",
+          "hash_function_is_SHA256",
+          "base_seed_is_epoch_specific"
+        ],
+        "potential_issues": [
+          "Integer overflow in uint64(slot)+i is practically impossible as slot values are bounded far below uint64 max"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: called during epoch processing and proposer computation",
+        "paths_analyzed": 1,
+        "path_details": [
+          "loop from i=0 to SLOTS_PER_EPOCH-1: each iteration produces seedWithSlot = seed[:] + Bytes8(slot+i), then hashes it"
+        ],
+        "symbolic_constraints": "For any two distinct slots s1 != s2 within same epoch: hash(seed||s1) != hash(seed||s2) with probability 1 - 2^(-256)",
+        "attack_surface": "internal-only: no external input can influence seed computation"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Each seed in PrecomputeProposerIndices is uniquely derived from base seed and slot offset",
+        "proof_sketch": "The seed derivation at line 689: seedWithSlot = append(seed[:], bytesutil.Bytes8(uint64(slot)+i)...) produces distinct inputs for distinct i values since uint64(slot)+i is strictly monotonically increasing. SHA256 is collision-resistant, so distinct inputs produce distinct outputs with overwhelming probability.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: consensus-critical seed computation"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.96,
+      "reasoning": "Seed uniqueness is guaranteed by the unique slot offset appended before hashing. SHA256 collision resistance ensures distinct seeds for distinct slots. The implementation matches the spec's compute_proposer_indices."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002",
+      "property_id": "PROP-W1B10-34",
+      "title": "Verify seed collisions cannot bias validator selection",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "398-440",
+        "function": "ComputeProposerIndex"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "proposer_selection",
+        "abstract_state": "ComputeProposerIndex uses the seed for shuffling (ComputeShuffledIndex) and then applies effective balance weighting. Each slot's proposer is independently determined by its unique seed (proven in CHK-0001). No caching or memoization occurs at the individual proposer computation level that could reuse seeds.",
+        "invariants_checked": [
+          "independent_proposer_per_slot",
+          "no_seed_reuse_across_slots",
+          "effective_balance_weighting_correct"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: called from PrecomputeProposerIndices",
+        "paths_analyzed": 1,
+        "path_details": [
+          "loop: shuffled candidate index -> balance check -> accept or continue"
+        ],
+        "symbolic_constraints": "Each seed produces independent shuffling; proposer selection depends only on seed + active validator set + balances",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Each slot's proposer is independently determined by its unique seed",
+        "proof_sketch": "Since seeds are unique per slot (CHK-0001), and ComputeProposerIndex is a deterministic function of (seed, activeIndices, balances), each slot's proposer selection is independent.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: consensus-critical proposer selection"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.94,
+      "reasoning": "Proposer selection is independently determined per slot due to unique seeds. No caching or memoization can cause seed reuse across slots."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#2",
+      "property_id": "PROP-W1B10-43",
+      "title": "Verify proposer lookahead epoch calculation (N + MIN_SEED_LOOKAHEAD + 1)",
+      "code_scope": {
+        "file": "beacon-chain/core/fulu/transition.go",
+        "lines": "22-47",
+        "function": "ProcessProposerLookahead"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "epoch_calculation",
+        "abstract_state": "ProcessProposerLookahead computes lastEpoch = slots.ToEpoch(state.Slot()) + params.BeaconConfig().MinSeedLookahead + 1. This matches the spec requirement: epoch N + MIN_SEED_LOOKAHEAD + 1. The computed proposer indices for this epoch are placed in the last SLOTS_PER_EPOCH positions of the lookahead array.",
+        "invariants_checked": [
+          "lastEpoch == current_epoch + MIN_SEED_LOOKAHEAD + 1",
+          "proposers_placed_in_last_SLOTS_PER_EPOCH_positions",
+          "correct_RANDAO_mix_used"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: called during epoch processing via ProcessEpoch",
+        "paths_analyzed": 1,
+        "path_details": [
+          "get lookahead -> shift left by SLOTS_PER_EPOCH -> compute new proposers for lastEpoch -> fill last positions"
+        ],
+        "symbolic_constraints": "lastEpoch = ToEpoch(Slot()) + MinSeedLookahead + 1; this is exactly N + MIN_SEED_LOOKAHEAD + 1 when called at epoch boundary",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Proposer lookahead is computed for epoch N + MIN_SEED_LOOKAHEAD + 1",
+        "proof_sketch": "Line 36: lastEpoch = slots.ToEpoch(state.Slot()) + params.BeaconConfig().MinSeedLookahead + 1. This directly implements the spec formula. The shift operation at line 34 (copy(lookAhead[:lastEpochStart], lookAhead[SlotsPerEpoch:])) removes the oldest epoch's proposers and the fill at line 44 (copy(lookAhead[lastEpochStart:], lastEpochProposers)) places new proposers at the end.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: EIP-7917 proposer lookahead computation"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.95,
+      "reasoning": "The epoch calculation lastEpoch = N + MIN_SEED_LOOKAHEAD + 1 directly matches the spec. The shift-and-fill operation correctly maintains the lookahead array structure."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#2",
+      "property_id": "PROP-W1B10-43",
+      "title": "Verify correct population of proposer lookahead array positions",
+      "code_scope": {
+        "file": "beacon-chain/core/fulu/transition.go",
+        "lines": "32-46",
+        "function": "ProcessProposerLookahead (array operations)"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "array_manipulation",
+        "abstract_state": "The function: (1) computes lastEpochStart = len(lookAhead) - SlotsPerEpoch, (2) shifts existing data left by SlotsPerEpoch positions via copy, (3) computes new proposer indices for the target epoch, (4) copies them into positions [lastEpochStart:]. This produces exactly SLOTS_PER_EPOCH new entries appended at the end.",
+        "invariants_checked": [
+          "exactly_SLOTS_PER_EPOCH_new_indices",
+          "correct_array_positions",
+          "old_indices_properly_shifted"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 1,
+        "path_details": [
+          "shift: copy(lookAhead[:lastEpochStart], lookAhead[SlotsPerEpoch:]) moves all but first epoch left; fill: copy(lookAhead[lastEpochStart:], lastEpochProposers) fills last epoch"
+        ],
+        "symbolic_constraints": "PrecomputeProposerIndices returns exactly SlotsPerEpoch indices; these are placed in the last SlotsPerEpoch positions",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Exactly SLOTS_PER_EPOCH new proposer indices are computed and placed in the correct positions",
+        "proof_sketch": "PrecomputeProposerIndices (line 678) creates proposerIndices of length SlotsPerEpoch. The copy at line 44 places these into lookAhead[lastEpochStart:], which has exactly SlotsPerEpoch slots available.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.94,
+      "reasoning": "Array population is correct: exactly SLOTS_PER_EPOCH new indices computed and placed in the last positions. The shift operation correctly removes the oldest epoch's data."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003",
+      "property_id": "PROP-W1B10-43",
+      "title": "Verify Validator receives correct proposer assignments from lookahead",
+      "code_scope": {
+        "file": "beacon-chain/rpc/endpoints.go",
+        "lines": "988-997",
+        "function": "GetProposerLookahead endpoint"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "api_endpoint",
+        "abstract_state": "The GetProposerLookahead API endpoint exposes the proposer_lookahead array via /eth/v1/beacon/states/{state_id}/proposer_lookahead. Validators query this endpoint to determine their proposal duties. The endpoint reads from the beacon state's ProposerLookahead field, which is maintained by ProcessProposerLookahead.",
+        "invariants_checked": [
+          "endpoint_reads_from_correct_state_field",
+          "slot_to_index_mapping_correct"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: validator client queries via REST API",
+        "paths_analyzed": 1,
+        "path_details": [
+          "HTTP GET -> state lookup -> ProposerLookahead() -> response"
+        ],
+        "symbolic_constraints": "The lookahead array index corresponds to slot offset within the covered epoch range",
+        "attack_surface": "internal-only: authenticated API"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Validators receive correct proposer assignments from the lookahead",
+        "proof_sketch": "The API endpoint reads directly from state.ProposerLookahead(), which is maintained by ProcessProposerLookahead. The array indices correspond to slot positions across (MIN_SEED_LOOKAHEAD + 1) epochs.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.9,
+      "reasoning": "The API correctly exposes the proposer lookahead array. Validators can determine their proposal slots by checking the array indices corresponding to their validator index."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#3",
+      "property_id": "PROP-W1B10-44",
+      "title": "Verify proposer_lookahead array length preservation",
+      "code_scope": {
+        "file": "beacon-chain/core/fulu/transition.go",
+        "lines": "22-47",
+        "function": "ProcessProposerLookahead"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "array_length_invariant",
+        "abstract_state": "ProcessProposerLookahead performs a shift-and-fill operation: copy(lookAhead[:lastEpochStart], lookAhead[SlotsPerEpoch:]) followed by copy(lookAhead[lastEpochStart:], lastEpochProposers). Both operations use the existing slice without append/pop/resize. The slice length remains unchanged throughout.",
+        "invariants_checked": [
+          "no_append_operations",
+          "no_resize_operations",
+          "length_preserved_through_copy"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 1,
+        "path_details": [
+          "get lookahead (fixed length) -> copy within same slice -> copy new values into same slice -> set on state"
+        ],
+        "symbolic_constraints": "len(lookAhead) is constant = (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH = 2 * 32 = 64",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Array length of state.proposer_lookahead is preserved after ProcessProposerLookahead",
+        "proof_sketch": "The function gets the existing slice via state.ProposerLookahead() (length 64 per SSZ constraint), performs only copy operations (which don't change length), and calls state.SetProposerLookahead(lookAhead) with the same slice. The SSZ serialization enforces length 64 (fulu.ssz.go:1014).",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: array bounds safety"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.96,
+      "reasoning": "The array length is preserved because only copy operations are used (no append, delete, or resize). The SSZ layer additionally enforces the exact length of 64 during serialization/deserialization."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#3",
+      "property_id": "PROP-W1B10-44",
+      "title": "Verify callers of get_beacon_proposer_index are protected against OOB",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/beacon_committee.go",
+        "lines": "656-672",
+        "function": "InitializeProposerLookahead"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "bounds_safety",
+        "abstract_state": "The proposer lookahead array has a fixed size of (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH = 64. InitializeProposerLookahead creates it with this exact size. ProcessProposerLookahead preserves the size. Callers that access the array must use appropriate slot-to-index mapping.",
+        "invariants_checked": [
+          "array_always_has_fixed_size_64",
+          "SSZ_enforces_exact_size",
+          "bounds_checking_at_access_points"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 2,
+        "path_details": [
+          "initialization: creates array of exact size (MIN_SEED_LOOKAHEAD+1)*SLOTS_PER_EPOCH",
+          "update: ProcessProposerLookahead preserves size via copy-only operations"
+        ],
+        "symbolic_constraints": "Array size is constant and enforced by SSZ",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "All callers of the proposer lookahead are protected against out-of-bounds access due to constant array size",
+        "proof_sketch": "The SSZ layer enforces size == 64 at fulu.ssz.go:1014 and 1935. The array size cannot deviate from this value. Any access using slot indices within the valid range (2 epochs) will be in bounds.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.93,
+      "reasoning": "Array size invariant is enforced at multiple levels: SSZ serialization (exact size 64), initialization (exact size), and update (copy-only). OOB access is prevented."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#4",
+      "property_id": "PROP-W1B10-45",
+      "title": "Verify proposer lookahead populated with epoch N+1 assignments at epoch N start",
+      "code_scope": {
+        "file": "beacon-chain/core/fulu/transition.go",
+        "lines": "15-47",
+        "function": "ProcessEpoch -> ProcessProposerLookahead"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "epoch_transition",
+        "abstract_state": "ProcessEpoch calls ProcessProposerLookahead at each epoch boundary. ProcessProposerLookahead computes proposers for epoch N + MIN_SEED_LOOKAHEAD + 1. Since MIN_SEED_LOOKAHEAD = 1, at epoch N the lookahead is updated with epoch N+2 proposers. The existing lookahead already contains epoch N and N+1 proposers from previous updates.",
+        "invariants_checked": [
+          "lookahead_contains_N_and_N+1_proposers_at_epoch_N",
+          "epoch_transition_triggers_update",
+          "deterministic_computation"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: epoch processing pipeline",
+        "paths_analyzed": 1,
+        "path_details": [
+          "epoch boundary -> electra.ProcessEpoch -> fulu.ProcessProposerLookahead -> shift + fill"
+        ],
+        "symbolic_constraints": "At epoch N start, lookahead contains proposers for epochs N through N+MIN_SEED_LOOKAHEAD",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "At epoch N start, the proposer lookahead contains valid epoch N+1 assignments",
+        "proof_sketch": "The lookahead array spans (MIN_SEED_LOOKAHEAD+1) epochs = 2 epochs. After ProcessProposerLookahead at epoch N-1, the array contains proposers for epochs N and N+1. At epoch N start, ProcessProposerLookahead shifts out epoch N-1 and adds epoch N+2, leaving epochs N and N+1 available.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: EIP-7917 availability guarantee"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.92,
+      "reasoning": "The proposer lookahead correctly contains N+1 assignments at epoch N start due to the rolling update mechanism. The MIN_SEED_LOOKAHEAD+1 epoch span ensures at least one epoch of future assignments."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#4",
+      "property_id": "PROP-W1B10-45",
+      "title": "Verify Consensus Layer correctly computes and exposes proposer lookahead",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/beacon_committee.go",
+        "lines": "656-699",
+        "function": "InitializeProposerLookahead + PrecomputeProposerIndices"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "lookahead_computation",
+        "abstract_state": "InitializeProposerLookahead creates the initial array by computing proposers for (MIN_SEED_LOOKAHEAD+1) consecutive epochs. PrecomputeProposerIndices uses the RANDAO seed from the correct epoch boundary. The deterministic nature of seed derivation ensures cross-client consistency.",
+        "invariants_checked": [
+          "deterministic_proposer_selection",
+          "correct_RANDAO_mix_usage",
+          "correct_active_validator_set_per_epoch"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 1,
+        "path_details": [
+          "initialization: loop over epochs -> ActiveValidatorIndices -> PrecomputeProposerIndices -> append to lookahead"
+        ],
+        "symbolic_constraints": "Uses deterministic inputs only: RANDAO, validator set, epoch",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Proposer lookahead is deterministically computed from beacon state",
+        "proof_sketch": "Seed(state, epoch, DomainBeaconProposer) uses get_seed which combines RANDAO mix with epoch. PrecomputeProposerIndices uses this seed with deterministic shuffling (ComputeShuffledIndex). All inputs are deterministic from beacon state.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.92,
+      "reasoning": "The computation is fully deterministic, using only RANDAO mix, epoch, and validator set as inputs. No external entropy sources are used."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#2",
+      "property_id": "PROP-W1B10-45",
+      "title": "Verify Validator can reliably access proposer lookahead one epoch in advance",
+      "code_scope": {
+        "file": "beacon-chain/rpc/endpoints.go",
+        "lines": "988-997",
+        "function": "GetProposerLookahead"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "api_availability",
+        "abstract_state": "The GetProposerLookahead endpoint reads from the beacon state which is updated at every epoch boundary. Since the lookahead spans 2 epochs (MIN_SEED_LOOKAHEAD+1), validators can query it at epoch N to see proposers for epoch N+1.",
+        "invariants_checked": [
+          "endpoint_available_at_epoch_start",
+          "lookahead_covers_next_epoch",
+          "timing_satisfies_preparation_needs"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: validator REST API",
+        "paths_analyzed": 1,
+        "path_details": [
+          "validator client -> REST GET -> state.ProposerLookahead() -> response with all proposer assignments"
+        ],
+        "symbolic_constraints": "Available after epoch transition completes",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Validators can access proposer lookahead at least one epoch in advance",
+        "proof_sketch": "The lookahead array always contains proposers for the current and next epoch. The REST API reads directly from state, which is updated atomically at epoch boundaries.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.9,
+      "reasoning": "The API endpoint correctly exposes the proposer lookahead, which spans 2 epochs. Validators can reliably access it after epoch transition."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#5",
+      "property_id": "PROP-W1B10-46",
+      "title": "Verify proposer lookahead computation is deterministic across clients",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/beacon_committee.go",
+        "lines": "676-699",
+        "function": "PrecomputeProposerIndices"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "cross_client_determinism",
+        "abstract_state": "The proposer lookahead computation uses: (1) SHA256 hashing (deterministic), (2) integer arithmetic on uint64 (platform-independent), (3) ComputeShuffledIndex (spec-defined swap-or-not shuffle), (4) effective balance comparison (integer only). No floating-point operations, no platform-dependent behavior.",
+        "invariants_checked": [
+          "no_floating_point_operations",
+          "SHA256_is_platform_independent",
+          "integer_arithmetic_is_deterministic",
+          "shuffle_algorithm_is_spec_defined"
+        ],
+        "potential_issues": [
+          "The ComputeProposerIndex function uses different weighting logic post-Electra (16-bit random value from SHA256 output) vs pre-Electra (single byte). Both are deterministic."
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 1,
+        "path_details": [
+          "Seed derivation (SHA256) -> slot offset concatenation -> SHA256 hash -> ComputeShuffledIndex (swap-or-not) -> balance check"
+        ],
+        "symbolic_constraints": "All operations are integer-only and follow the Ethereum consensus spec. Same state input produces same output.",
+        "attack_surface": "internal-only: consensus-critical"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Proposer lookahead computation is deterministic across all spec-compliant implementations",
+        "proof_sketch": "The computation chain is: get_seed(SHA256 of RANDAO+epoch+domain) -> compute_proposer_indices(SHA256 hash per slot) -> compute_proposer_index(shuffle+balance). All operations are integer-only, use spec-defined algorithms (swap-or-not shuffle), and SHA256 which is platform-independent. Prysm's implementation uses Go's crypto/sha256 and uint64 arithmetic, which are deterministic.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: consensus safety critical"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.91,
+      "reasoning": "The computation is fully deterministic: SHA256 hashing, integer arithmetic, spec-defined shuffle algorithm. No floating-point or platform-dependent operations. Cross-client determinism is ensured by following the consensus spec."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#5",
+      "property_id": "PROP-W1B10-46",
+      "title": "Verify deterministic seed computation for proposer selection",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/beacon_committee.go",
+        "lines": "680-690",
+        "function": "PrecomputeProposerIndices (seed computation)"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "seed_determinism",
+        "abstract_state": "Seed computation: Seed(state, epoch, DomainBeaconProposer) retrieves the RANDAO mix from state (deterministic), combines with epoch and domain type, and hashes. The RANDAO reveal is deterministic for a given chain state. No external entropy sources are used.",
+        "invariants_checked": [
+          "seed_from_deterministic_inputs_only",
+          "no_external_entropy",
+          "RANDAO_mix_from_state"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only",
+        "paths_analyzed": 1,
+        "path_details": [
+          "Seed: get RANDAO mix for epoch -> combine with epoch bytes and domain -> SHA256 -> 32-byte seed"
+        ],
+        "symbolic_constraints": "Seed = hash(epoch_bytes || domain_bytes || randao_mix); all inputs from deterministic state",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Seed computation uses only deterministic inputs",
+        "proof_sketch": "The Seed function combines: (1) epoch (from state slot), (2) DomainBeaconProposer (constant), (3) RANDAO mix (from state, deterministic for a given chain). No system time, RNG, or external inputs.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.94,
+      "reasoning": "Seed computation is deterministic: uses only RANDAO mix from state, epoch, and constant domain type. No external entropy sources."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#3",
+      "property_id": "PROP-W1B10-46",
+      "title": "Verify validator client correctly consumes proposer lookahead",
+      "code_scope": {
+        "file": "api/server/structs/conversions_state.go",
+        "lines": "926-972",
+        "function": "state conversion for API"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "api_consumption",
+        "abstract_state": "The validator client reads the proposer_lookahead from the beacon state via the REST API. The conversion (conversions_state.go:926) reads st.ProposerLookahead() and converts to string representation. No re-computation or modification occurs.",
+        "invariants_checked": [
+          "no_re_computation_of_lookahead",
+          "direct_read_from_state",
+          "no_non_deterministic_transformation"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: API serialization",
+        "paths_analyzed": 1,
+        "path_details": [
+          "state.ProposerLookahead() -> uint64 to string conversion -> JSON response"
+        ],
+        "symbolic_constraints": "Read-only access, no transformation that could introduce non-determinism",
+        "attack_surface": "internal-only"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Validator client correctly consumes the proposer lookahead without introducing non-determinism",
+        "proof_sketch": "The API layer performs a simple type conversion (uint64 to string) on the lookahead data. No re-computation, caching, or modification occurs. The validator reads the data as-is from the consensus layer.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.9,
+      "reasoning": "The API layer correctly passes through the proposer lookahead without modification. No non-deterministic transformations are applied."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#6",
+      "property_id": "PROP-W1B10-48",
+      "title": "Verify versioned_hashes correctly computed from blob KZG commitments",
+      "code_scope": {
+        "file": "beacon-chain/blockchain/execution_engine.go",
+        "lines": "449-461",
+        "function": "kzgCommitmentsToVersionedHashes"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "versioned_hash_computation",
+        "abstract_state": "kzgCommitmentsToVersionedHashes iterates over all blob KZG commitments in order, applying ConvertKzgCommitmentToVersionedHash (SHA256 + version byte). The result preserves ordering: versionedHashes[i] corresponds to commitments[i]. ConvertKzgCommitmentToVersionedHash at kzg.go:11-15: SHA256(commitment), then sets byte[0] = 0x01.",
+        "invariants_checked": [
+          "ordering_preserved",
+          "correct_hash_algorithm_SHA256",
+          "version_byte_0x01_set",
+          "one_to_one_mapping"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable: block processing -> NewPayload request to EL",
+        "paths_analyzed": 1,
+        "path_details": [
+          "body.BlobKzgCommitments() -> iterate in order -> SHA256(commitment) -> set version byte -> append to result"
+        ],
+        "symbolic_constraints": "For each i: versionedHashes[i] = 0x01 || SHA256(commitments[i])[1:32]",
+        "attack_surface": "A malicious proposer's commitments are hashed; the EL validates the result"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "versioned_hashes[i] == kzg_commitment_to_versioned_hash(commitments[i]) for all i, preserving order",
+        "proof_sketch": "The loop at execution_engine.go:457-458 iterates with index i, setting versionedHashes[i] = ConvertKzgCommitmentToVersionedHash(commitments[i]). ConvertKzgCommitmentToVersionedHash computes SHA256(commitment) and sets byte 0 to 0x01, matching the spec.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: CL-EL interface, data availability"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.95,
+      "reasoning": "Versioned hash computation correctly applies SHA256 to each commitment, sets version byte 0x01, and preserves ordering. Implementation matches spec."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#6",
+      "property_id": "PROP-W1B10-48",
+      "title": "Verify CL-to-EL trust boundary for versioned_hashes",
+      "code_scope": {
+        "file": "beacon-chain/blockchain/execution_engine.go",
+        "lines": "449-461",
+        "function": "kzgCommitmentsToVersionedHashes (CL side)"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "CL_EL_trust_boundary",
+        "abstract_state": "The CL computes versioned_hashes from KZG commitments and sends them to the EL via NewPayload. The EL-side validation is outside Prysm's codebase (handled by the execution client). From Prysm's perspective, the CL correctly computes the hashes; the EL is expected to validate them against blob transaction data.",
+        "invariants_checked": [
+          "CL_correctly_computes_versioned_hashes",
+          "hashes_sent_to_EL_via_NewPayload"
+        ],
+        "potential_issues": [
+          "The EL validation is outside Prysm's control - this is by design as the EL is a separate client"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via block processing pipeline",
+        "paths_analyzed": 1,
+        "path_details": [
+          "block processing -> kzgCommitmentsToVersionedHashes -> NewPayload request with versioned_hashes to EL"
+        ],
+        "symbolic_constraints": "CL sends correctly computed versioned_hashes; EL validates independently",
+        "attack_surface": "The EL must independently validate - this is the execution client's responsibility"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "CL correctly computes and transmits versioned_hashes to EL",
+        "proof_sketch": "Prysm correctly computes versioned_hashes via kzgCommitmentsToVersionedHashes and passes them in the NewPayload request. The EL-side validation is outside Prysm's codebase but is required by the Engine API spec.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope for CL-side computation; EL validation is out-of-scope for Prysm audit"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.88,
+      "reasoning": "CL correctly computes versioned_hashes and sends to EL. EL-side validation is the execution client's responsibility and outside Prysm's scope."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#4",
+      "property_id": "PROP-W1B10-48",
+      "title": "Verify post-condition: blob commitments correctly bound to versioned hashes",
+      "code_scope": {
+        "file": "consensus-types/primitives/kzg.go",
+        "lines": "11-15",
+        "function": "ConvertKzgCommitmentToVersionedHash"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "cryptographic_binding",
+        "abstract_state": "ConvertKzgCommitmentToVersionedHash: (1) SHA256(commitment) produces a 32-byte hash, (2) byte[0] is set to 0x01 (version KZG). The binding is cryptographic: SHA256 is collision-resistant, so different commitments produce different versioned hashes.",
+        "invariants_checked": [
+          "SHA256_collision_resistance",
+          "version_byte_correctly_set",
+          "commitment_to_hash_binding"
+        ],
+        "potential_issues": [
+          "No length validation on commitment input, but this is validated at SSZ decode level (96 bytes for KZG commitment)"
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable via block processing",
+        "paths_analyzed": 1,
+        "path_details": [
+          "commitment bytes -> sha256.Sum256 -> set version byte -> return hash"
+        ],
+        "symbolic_constraints": "versioned_hash = 0x01 || SHA256(commitment)[1:32]; this is a one-way binding",
+        "attack_surface": "Commitment is from block body (attacker-controlled for proposer), but the hash binding is cryptographically sound"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "For each commitment C[i]: versioned_hashes[i] == 0x01 || SHA256(C[i])[1:32]",
+        "proof_sketch": "kzgCommitmentsToVersionedHashes (execution_engine.go:456-459) iterates over all commitments in order, applying ConvertKzgCommitmentToVersionedHash. The length invariant len(versionedHashes) == len(commitments) is ensured by pre-allocation (line 456: make([]common.Hash, len(commitments))).",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: cryptographic binding correctness"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.95,
+      "reasoning": "The cryptographic binding between commitments and versioned hashes is correctly implemented using SHA256. Length invariant is maintained by pre-allocation. Implementation matches spec."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#7",
+      "property_id": "PROP-W1B10-49",
+      "title": "Verify process_execution_payload correctly updates latest_execution_payload_header",
+      "code_scope": {
+        "file": "beacon-chain/core/blocks/payload.go",
+        "lines": "43-52",
+        "function": "ValidatePayloadWhenMergeCompletes and related header update"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "state_update",
+        "abstract_state": "The execution payload processing updates state.latest_execution_payload_header with a header derived from the accepted payload. This is handled in the state transition function. ValidatePayloadWhenMergeCompletes at payload.go:129 verifies payload.parent_hash == state.latest_execution_payload_header.block_hash, ensuring correct chaining.",
+        "invariants_checked": [
+          "header_updated_after_payload_acceptance",
+          "parent_hash_chaining_verified",
+          "field_by_field_mapping_correct"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "internal-only: state transition processing",
+        "paths_analyzed": 1,
+        "path_details": [
+          "block processing -> payload validation -> header derivation from payload -> state update"
+        ],
+        "symbolic_constraints": "latest_execution_payload_header reflects the most recently accepted payload",
+        "attack_surface": "internal-only: payload is validated before header update"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "After process_execution_payload succeeds, latest_execution_payload_header accurately reflects the accepted payload",
+        "proof_sketch": "The state transition function updates the header after successful payload validation. The parent_hash check at ValidatePayloadWhenMergeCompletes ensures the chain is maintained. Subsequent blocks verify their payload.parent_hash against the updated header.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: execution payload chaining"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.88,
+      "reasoning": "Execution payload header is correctly updated after successful processing. The parent_hash chaining verification ensures integrity across blocks."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#8",
+      "property_id": "PROP-W1B10-50",
+      "title": "Verify fork digest validation during P2P block gossip",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "45-240",
+        "function": "validateBeaconBlockPubSub"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "fork_digest_validation",
+        "abstract_state": "Fork digest validation in Prysm is handled at the pubsub subscription level rather than within validateBeaconBlockPubSub. The subscribe function in subscriber.go:204 passes the fork digest as a topic parameter. Messages on incorrect fork digest topics are not routed to the handler at all. The block gossip topic includes the fork digest in its topic string (e.g., /eth2/<fork_digest>/beacon_block/ssz_snappy).",
+        "invariants_checked": [
+          "fork_digest_in_topic_string",
+          "pubsub_routing_by_topic",
+          "fork_digest_computed_at_subscription"
+        ],
+        "potential_issues": [
+          "Fork digest validation is implicit via topic routing rather than explicit in the handler. This is the standard approach for libp2p pubsub."
+        ]
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable: P2P gossip block messages",
+        "paths_analyzed": 2,
+        "path_details": [
+          "correct fork: message routed to handler via matching topic",
+          "incorrect fork: message not routed (pubsub topic mismatch)"
+        ],
+        "symbolic_constraints": "Fork digest is embedded in the pubsub topic string; only messages on subscribed topics reach the handler",
+        "attack_surface": "An attacker on a different fork's topic cannot reach this handler. An attacker on the same topic already has the correct fork digest."
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Blocks with mismatched fork digests are filtered before reaching the validation handler",
+        "proof_sketch": "subscriber.go:204 subscribes with s.subscribe(p2p.BlockSubnetTopicFormat, ..., digest) which creates a topic string containing the fork digest. libp2p pubsub only routes messages that match subscribed topics. Fork transitions trigger re-subscription with new digest via registerSubscribers. Additionally, validateBellatrixBeaconBlock checks parentState.Version() == blk.Version() ensuring fork consistency.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: P2P trust boundary"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.89,
+      "reasoning": "Fork digest validation is implemented at the pubsub topic routing level, which is the standard approach for Ethereum CL clients. Messages with wrong fork digest never reach the handler. Additionally, version checks in validateBellatrixBeaconBlock provide defense in depth."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#7",
+      "property_id": "PROP-W1B10-50",
+      "title": "Verify consensus layer rejects blocks with invalid fork digests",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "203-240",
+        "function": "validateBeaconBlock -> validateBellatrixBeaconBlock"
+      },
+      "phase1_abstract_interpretation": {
+        "status": "completed",
+        "domain": "fork_version_enforcement",
+        "abstract_state": "validateBellatrixBeaconBlock checks that parentState.Version() == blk.Version() at line 213. This ensures the block's fork version matches the expected fork for its epoch. Additionally, the pubsub topic routing ensures only correctly fork-digested messages arrive. The p2p fork validation (p2p/fork.go) further validates peer fork schedules.",
+        "invariants_checked": [
+          "version_check_before_processing",
+          "topic_routing_enforcement",
+          "peer_fork_schedule_validation"
+        ],
+        "potential_issues": []
+      },
+      "phase2_symbolic_execution": {
+        "status": "completed",
+        "reachability": "external-reachable: P2P gossip messages",
+        "paths_analyzed": 2,
+        "path_details": [
+          "version match: proceed with validation",
+          "version mismatch: return error -> REJECT"
+        ],
+        "symbolic_constraints": "Block version must match parent state version (which reflects the correct fork)",
+        "attack_surface": "Fork digest mismatch is filtered at topic level; version mismatch is caught at validation level"
+      },
+      "phase3_invariant_proof": {
+        "status": "completed",
+        "invariant": "Blocks with invalid fork digests/versions are rejected before state transition",
+        "proof_sketch": "Defense in depth: (1) pubsub topic routing filters by fork digest, (2) validateBellatrixBeaconBlock checks version consistency, (3) p2p/fork.go validates peer fork schedules. All layers must pass for a block to be processed.",
+        "counterexample_found": false,
+        "scope_filter": "in-scope: P2P trust boundary"
+      },
+      "final_classification": "no-finding",
+      "confidence": 0.9,
+      "reasoning": "Multiple layers of fork digest/version validation ensure blocks from wrong forks are rejected. Topic routing provides the primary filter, with version checks as defense in depth."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 14,
+    "item_count": 25,
+    "timestamp": 1770952344,
+    "processed_ids": [
+      "CHK-W4B13-27-003",
+      "CHK-W4B13-27-004",
+      "CHK-W4B13-28-001",
+      "CHK-W4B13-28-002",
+      "CHK-W4B13-28-003",
+      "CHK-W4B13-28-004",
+      "W2B3:W2B3:CHK-0001",
+      "W2B3:W2B3:CHK-0002",
+      "W2B3:W2B3:CHK-0001#2",
+      "W2B3:W2B3:CHK-0002#2",
+      "W2B3:W2B3:CHK-0003",
+      "W2B3:W2B3:CHK-0001#3",
+      "W2B3:W2B3:CHK-0002#3",
+      "W2B3:W2B3:CHK-0001#4",
+      "W2B3:W2B3:CHK-0002#4",
+      "W2B3:W2B3:CHK-0003#2",
+      "W2B3:W2B3:CHK-0001#5",
+      "W2B3:W2B3:CHK-0002#5",
+      "W2B3:W2B3:CHK-0003#3",
+      "W2B3:W2B3:CHK-0001#6",
+      "W2B3:W2B3:CHK-0002#6",
+      "W2B3:W2B3:CHK-0003#4",
+      "W2B3:W2B3:CHK-0001#7",
+      "W2B3:W2B3:CHK-0001#8",
+      "W2B3:W2B3:CHK-0002#7"
+    ]
+  }
+}

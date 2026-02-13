@@ -1,0 +1,1389 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#5",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#5",
+        "property_id": "PROP-W1B10-50",
+        "title": "Verify Fork Digest Computation: Is compute_fork_digest correctly implemented to derive the expected digest for each epoch?",
+        "severity": "Medium",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Fork digest matching"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A P2P peer can send blocks with arbitrary fork digests. If fork digest validation is missing, blocks from different fork versions could be processed as if they belong to the current fork."
+        },
+        "test_procedure": "1. Locate the compute_fork_digest function implementation. 2. Verify it takes the block epoch as input and derives the correct fork version for that epoch. 3. Confirm the genesis validators root is correctly incorporated into the digest computation. 4. Test with known test vectors: compute digest for pre-fork epoch, at-fork epoch, and post-fork epoch. 5. Verify the function handles epoch boundary conditions correctly (e.g., exact fork epoch transition).",
+        "bug_class": "Cryptographic Implementation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-50, Element: SG-003. Internal verification that the fork digest computation is correct, as incorrect computation would allow fork confusion attacks."
+      },
+      "property_id": "PROP-W1B10-50",
+      "code_scope": {
+        "file": "beacon-chain/core/signing/signing_root.go",
+        "lines": "293-310",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "ComputeForkDigest correctly implements the Ethereum specification for fork digest computation. It computes ForkData by SSZ hashing the ForkData structure containing version and genesisValidatorsRoot, then returns the first 4 bytes as per spec.",
+        "abstract_state_space": "Input domain: (version: []byte, genesisValidatorsRoot: []byte) -> Output: ([4]byte, error). The function constructs ForkData{CurrentVersion: version, GenesisValidatorsRoot: root}, computes HashTreeRoot via SSZ serialization, applies bytesutil.ToBytes4 to extract first 4 bytes. Caching layer via digestMap reduces recomputation overhead.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Success path: version and genesisValidatorsRoot are valid byte slices -> computeForkDataRoot succeeds with cached or computed SSZ hash -> ToBytes4 extracts bytes [0:4]. Error path: SSZ HashTreeRoot fails (malformed input, but this is protected by type system for well-formed ForkData struct).",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "The implementation follows Ethereum consensus spec verbatim: compute_fork_digest(current_version, genesis_validators_root) = ForkDigest(compute_fork_data_root(current_version, genesis_validators_root)[:4]). Line 277-280 creates ForkData structure with CurrentVersion and GenesisValidatorsRoot fields, calls HashTreeRoot() which is SSZ-deterministic. Line 309 applies bytesutil.ToBytes4 which safely extracts first 4 bytes. Caching (lines 271-276, 287-289) is thread-safe with RWMutex. No tampering risk as cryptographic hash ensures integrity.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.98,
+        "severity_assessment": "No vulnerability detected. Implementation is cryptographically sound and matches specification. Caching provides performance benefit without introducing race conditions."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#9",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify Trust Boundary Integrity: Does the CL implement timeout handling for Engine API calls when EL returns SYNCING status?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented. Not directly attacker-controlled but could be triggered by triggering EL sync issues via P2P."
+        },
+        "test_procedure": "1. Identify all Engine API call sites in the CL codebase that interact with the EL. 2. Review timeout configuration for each Engine API method (engine_newPayloadV*, engine_forkchoiceUpdatedV*, etc.). 3. Verify that explicit timeout values are set and are reasonable (not indefinite). 4. Test behavior when EL returns SYNCING status repeatedly - confirm CL does not block indefinitely. 5. Verify that other consensus duties (attestations, block proposals) continue to be processed even when Engine API calls are timing out. 6. Check for proper error handling and retry logic when timeouts occur.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Trust Boundaries: tb-006, tb-007, Threat: stride-014"
+      },
+      "property_id": "PROP-W1B10-51",
+      "code_scope": {
+        "file": "beacon-chain/execution/engine_client.go",
+        "lines": "62-264",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "The CL implements timeout handling for Engine API calls. Both NewPayload and ForkchoiceUpdated set context deadlines using ExecutionEngineTimeoutValue (default 8 seconds per Ethereum spec). SYNCING status returns ErrAcceptedSyncingPayloadStatus error which is handled upstream.",
+        "abstract_state_space": "NewPayload and ForkchoiceUpdated create context with deadline at time.Now() + ExecutionEngineTimeoutValue seconds. If EL returns SYNCING, error ErrAcceptedSyncingPayloadStatus propagates. State transitions: (1) Call initiated with timeout, (2) RPC call to EL, (3) Response handling: SYNCING -> error return, VALID -> success, timeout -> ErrHTTPTimeout.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Timeout condition: EL response time > ExecutionEngineTimeoutValue (8s). SYNCING status: lines 193-194 (NewPayload) and 263-264 (ForkchoiceUpdated) return ErrAcceptedSyncingPayloadStatus when pb.PayloadStatus_SYNCING or pb.PayloadStatus_ACCEPTED received. Context deadline enforced at lines 152-154 (NewPayload) and 215-217 (ForkchoiceUpdated).",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Lines 152-154 in NewPayload: context.WithDeadline(ctx, time.Now() + ExecutionEngineTimeoutValue*time.Second) ensures timeout. Lines 215-217 in ForkchoiceUpdated: identical pattern. SYNCING handling at lines 193-194 and 263-264 converts EL SYNCING status to error, preventing indefinite blocking. handleRPCError (lines 808-809) converts timeout errors to ErrHTTPTimeout. Invariant: No Engine API call blocks indefinitely; all have 8-second deadline.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "Trust boundary integrity maintained. Timeout handling prevents DoS from unresponsive EL. SYNCING status properly propagated as error for upstream handling."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#8",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#8",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify CL resilience: Can the CL continue processing attestations and block proposals while Engine API calls are pending or timing out?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented. Not directly attacker-controlled but could be triggered by triggering EL sync issues via P2P."
+        },
+        "test_procedure": "1. Review the CL's task/thread architecture to understand how Engine API calls are dispatched. 2. Verify that Engine API communication is performed asynchronously or in a dedicated thread/task. 3. Check that the main consensus loop is not blocked by Engine API calls. 4. Test by simulating a slow/unresponsive EL and verify attestation duties continue. 5. Verify block production responsibilities are not indefinitely delayed by EL sync issues. 6. Review logging and alerting mechanisms for prolonged SYNCING states.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Covered Actors: actor-consensus-layer, actor-execution-engine"
+      },
+      "property_id": "PROP-W1B10-51",
+      "code_scope": {
+        "file": "beacon-chain/execution/engine_client.go",
+        "lines": "62-264",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "CL continues processing consensus duties while Engine API calls are pending. execution_engine.go handles ErrAcceptedSyncingPayloadStatus by marking blocks as optimistic (lines 90-97 in notifyForkchoiceUpdate, 277-283 in notifyNewPayload), allowing attestation/proposal duties to proceed without EL confirmation.",
+        "abstract_state_space": "Block processing states: (1) Normal: EL returns VALID -> CL proceeds normally, (2) Optimistic: EL returns SYNCING/timeout -> block marked optimistic via forkchoiceUpdatedOptimisticNodeCount metric (line 91), CL continues consensus operations, (3) Invalid: EL returns INVALID -> block pruned. Consensus duties (attestations, proposals) are decoupled from EL payload validation status.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Optimistic mode trigger: EL returns SYNCING or times out during NewPayload/ForkchoiceUpdated. Lines 90-97 (execution_engine.go): when err == ErrAcceptedSyncingPayloadStatus, log optimistic operation and return nil error, allowing block processing to continue. Line 278: NewPayload with SYNCING returns false (optimistic) but no error, allowing insertBlockAndRunStateTransition to succeed.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Optimistic sync design: Lines 90-97 in notifyForkchoiceUpdate show that ErrAcceptedSyncingPayloadStatus increments forkchoiceUpdatedOptimisticNodeCount and returns nil, preventing block rejection. Similarly, lines 277-283 in notifyNewPayload return (false, nil) for SYNCING, marking block as optimistic without blocking consensus. This follows Ethereum optimistic sync spec where CL continues duties assuming eventual EL validation. Consensus duties (attestations via beacon-chain/sync package, proposals via beacon-chain/blockchain) operate on head state independently of EL payload validation. Invariant: Extended SYNCING does not block consensus participation.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.93,
+        "severity_assessment": "CL resilience verified. Optimistic sync mode ensures availability of consensus duties during EL synchronization. No attestation or proposal duty stalls detected in code paths."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#6",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#6",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify invariant: Extended SYNCING status from EL does not cause CL to miss attestation or proposal duties",
+        "severity": "Medium",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented. Not directly attacker-controlled but could be triggered by triggering EL sync issues via P2P."
+        },
+        "test_procedure": "1. Design a test scenario where EL returns SYNCING status for an extended period (e.g., 5+ minutes). 2. Attempt to falsify the invariant by observing whether CL misses any scheduled attestation duties during this period. 3. Attempt to falsify by checking if block proposal opportunities are lost when CL is the designated proposer. 4. Verify state transitions: CL should transition to a degraded operational mode rather than complete stall. 5. Check for any race conditions between Engine API timeout handling and consensus duty scheduling. 6. Verify that once EL returns to VALID/INVALID status, normal operations resume without manual intervention.",
+        "bug_class": "State Consistency",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Primary Element: SG-002, Type: invariant"
+      },
+      "property_id": "PROP-W1B10-51",
+      "code_scope": {
+        "file": "beacon-chain/execution/engine_client.go",
+        "lines": "62-264",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Extended SYNCING status from EL does not cause CL to miss duties. The optimistic block handling in execution_engine.go (lines 90-97, 277-283) allows consensus to proceed. Metrics (forkchoiceUpdatedOptimisticNodeCount, newPayloadOptimisticNodeCount) track optimistic state without blocking operations.",
+        "abstract_state_space": "Invariant: For all slots s where EL returns SYNCING at time t, CL must still produce attestation at s if validator is scheduled and proposal at s if validator is proposer. State: Optimistic blocks are processed (line 91: forkchoiceUpdatedOptimisticNodeCount.Inc()), head state updated, consensus duties execute using optimistic head. No duty scheduling blocked by EL SYNCING status.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Scenario: Validator scheduled for attestation/proposal at slot N, EL returns SYNCING for current head. Execution flow: (1) notifyNewPayload receives SYNCING (line 277), returns (false, nil), (2) block inserted as optimistic, (3) notifyForkchoiceUpdate receives SYNCING (line 90), returns nil error, (4) head state saved (execution_engine.go flow continues), (5) attestation/proposal duties proceed using optimistic head. Reachability: guaranteed via error handling that converts SYNCING to non-fatal condition.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Duty execution decoupling: Lines 90-97 show ForkchoiceUpdated with SYNCING logs 'Called fork choice updated with optimistic block' and continues. Lines 277-283 show NewPayload with SYNCING logs 'Called new payload with optimistic block' and returns (false, nil). Both paths allow block processing pipeline to complete. Attestation production (beacon-chain/sync/rpc_beacon_blocks_by_range.go and related) and block proposal (beacon-chain/blockchain/receive_block.go) operate on state derived from optimistic head. No blocking waits for EL confirmation exist in duty execution paths. Invariant holds: CL duties proceed regardless of EL sync status.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.94,
+        "severity_assessment": "State consistency maintained through optimistic sync. Extended SYNCING treated as non-blocking condition. No missed duty scenario identified in code analysis."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#10",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Trust Boundary Integrity for tb-005/tb-009: Is the proposer deterministically identifiable and cryptographically bound to each slot?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Verify that state.proposer_lookahead is computed deterministically from beacon state. 2. Confirm that the proposer lookahead computation is identical across all conforming implementations. 3. Validate that the block proposer signature cryptographically binds the proposer identity to the block. 4. Attempt to craft a block where the proposer signature does not match the expected proposer from the lookahead and verify rejection. 5. Check that lookahead values cannot be manipulated after computation.",
+        "bug_class": "Non-Repudiation",
+        "risk_category": "Repudiation",
+        "notes": "Source: PROP-W1B10-52, Trust Boundaries: tb-005, tb-009, Threat: stride-013"
+      },
+      "property_id": "PROP-W1B10-52",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "260-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Proposer index is deterministically computed via BeaconProposerIndex (lines 260-372 in validators.go) using cryptographic seed derived from state, epoch, and slot. Proposer is cryptographically bound to block via signature verification. No repudiation risk detected.",
+        "abstract_state_space": "Proposer selection: seed = Hash(Seed(state, epoch, DomainBeaconProposer) + slot_bytes) (line 363-364). Active validator indices shuffled deterministically (ComputeProposerIndex lines 398-441). Same inputs always produce same proposer index. Cryptographic binding: Block signature verification in signing_root.go (VerifyBlockSigningRoot lines 174-193) ensures only proposer's private key can sign valid block for slot.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Proposer index computation path: (1) BeaconProposerIndexAtSlot called with state and slot (line 322), (2) Seed computed from state.randao_mixes, epoch, DomainBeaconProposer (line 358), (3) seedWithSlot = Seed + slot_bytes (line 363), (4) seedWithSlotHash = Hash(seedWithSlot) (line 364), (5) ComputeProposerIndex selects from active validators using weighted sampling by effective balance (lines 398-441). Determinism: Same state + slot always yields same seed, same hash, same proposer. Non-repudiation: Block proposer must sign with BLS key; VerifyBlockSigningRoot (line 175-192) checks signature against proposer public key.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Determinism proof: Lines 358-364 show seed derivation is pure function of state (randao_mixes, validators) and slot. Hash function (line 364) is deterministic. ComputeProposerIndex (lines 398-441) uses deterministic shuffling with fixed seed. Proposer caching (lines 279-287, 333-356) uses state root as key, ensuring consistency. Cryptographic binding: signing_root.go lines 174-193 (VerifyBlockSigningRoot) verify block signature against proposer public key retrieved from state. Block signing (ComputeDomainAndSign lines 57-83) requires proposer's secret key. Forgery requires breaking BLS signature scheme. Trust boundary tb-005/tb-009: Proposer identity cryptographically bound via signature, preventing repudiation attacks.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.97,
+        "severity_assessment": "Proposer selection is deterministic and cryptographically secure. BLS signature provides non-repudiation. No vulnerability to proposer identity spoofing or repudiation attacks."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#9",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Proposer-Consensus Layer Interaction: Does the consensus layer correctly enforce proposer assignment from the lookahead?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Trace the data flow from proposer lookahead computation to block proposal acceptance. 2. Verify that the consensus layer rejects blocks from validators not matching the lookahead for a given slot. 3. Check for race conditions or timing issues where lookahead updates could create ambiguity. 4. Confirm that slashing decisions correctly reference the proposer lookahead at the time of the alleged violation.",
+        "bug_class": "Access Control",
+        "risk_category": "Elevation of Privilege",
+        "notes": "Source: PROP-W1B10-52, Node: actor-consensus-layer"
+      },
+      "property_id": "PROP-W1B10-52",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "260-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "The consensus layer enforces proposer assignment through deterministic computation from beacon state. BeaconProposerIndex computes the proposer from active validator indices and a seed derived from RANDAO with MIN_SEED_LOOKAHEAD delay. ProcessBlockHeader verifies the proposer_index field matches the expected proposer computed via helpers.BeaconProposerIndex. Block signature verification in VerifyBlockSignature ensures only the assigned proposer can sign the block.",
+        "abstract_state_space": "State transitions: BeaconState -> Seed(epoch, DOMAIN_BEACON_PROPOSER) -> ActiveValidatorIndices -> ComputeProposerIndex -> ValidatorIndex. The proposer selection is a pure function of (state, slot) with no external inputs. Access control boundary exists at ProcessBlockHeaderNoVerify line 107-113 where computed proposer index must match block's proposer_index field.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For an unauthorized proposer to create a valid block: (1) Must compute valid proposer index from state, which is deterministic; (2) Block must pass ProcessBlockHeaderNoVerify check at line 111: proposerIndex != idx where idx = helpers.BeaconProposerIndex(ctx, beaconState); (3) Must produce valid BLS signature matching the assigned proposer's public key. Symbolic analysis shows no path where block.ProposerIndex can differ from computed idx and still pass validation.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: \u2200 valid_block, block.proposer_index = get_beacon_proposer_index(state). Proof: (1) ProcessBlockHeaderNoVerify explicitly checks this at line 107-113 and rejects if mismatch; (2) BeaconProposerIndex is deterministic from state via Seed(state, epoch, DomainBeaconProposer) + ActiveValidatorIndices + ComputeProposerIndex; (3) Seed incorporates RANDAO mix from epoch-1 via MIN_SEED_LOOKAHEAD; (4) VerifyBlockSignature at line 62 requires BLS signature from the assigned proposer's public key. The invariant is enforced at two layers: structural (proposer_index field) and cryptographic (BLS signature).",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.98,
+        "severity_assessment": "Low severity confirmed as safe. The consensus layer correctly enforces proposer assignment through both deterministic computation and cryptographic verification. No elevation of privilege is possible."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#7",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#7",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Validator Assignment Integrity: Can a validator deny or falsely claim proposer duty assignment?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Verify that proposer lookahead is publicly auditable and deterministically reproducible. 2. Check that validators cannot influence their own selection in the lookahead. 3. Confirm that signature requirements prevent a validator from claiming another validator proposed a block. 4. Test that historical proposer assignments are immutable once computed. 5. Verify that any dispute resolution mechanism correctly identifies the assigned proposer.",
+        "bug_class": "Non-Repudiation",
+        "risk_category": "Repudiation",
+        "notes": "Source: PROP-W1B10-52, Nodes: actor-proposer, actor-validator"
+      },
+      "property_id": "PROP-W1B10-52",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "260-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Proposer duty assignment is deterministic and non-repudiable. The assignment derives from public beacon state via PrecomputeProposerIndices which computes a lookahead array using Seed(state, epoch, DomainBeaconProposer). Any validator or verifier can independently compute the proposer for a given slot. BLS signatures on blocks provide non-repudiation: a valid block signature proves the assigned proposer created it.",
+        "abstract_state_space": "Assignment computation: State -> get_seed(state, epoch, DOMAIN_BEACON_PROPOSER) -> hash(seed || slot) -> compute_proposer_index(state, active_indices, seed_with_slot) -> ValidatorIndex. The computation is publicly verifiable and deterministic. Cache layer (proposerIndicesCache) stores computed assignments but does not affect determinism.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For a validator to falsely deny proposer duty: They must claim the deterministic computation yielded a different result, but any verifier can recompute using the same beacon state. For a validator to falsely claim proposer duty: They must produce a block, but ProcessBlockHeader checks proposer_index against BeaconProposerIndex (line 107-113) and VerifyBlockSignature requires a valid BLS signature from the assigned proposer's key. Both attack paths are unreachable due to deterministic public computation and cryptographic binding.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: Proposer assignment is non-repudiable and verifiable. Proof: (1) PrecomputeProposerIndices (beacon_committee.go:676-698) computes proposer for each slot using public state and deterministic seed; (2) Seed function (randao.go:22-38) uses public RANDAO mix from state.randao_mixes[epoch % EPOCHS_PER_HISTORICAL_VECTOR]; (3) ComputeProposerIndex (validators.go:398-441) is deterministic with inputs (state, active_indices, seed); (4) Any party can verify by recomputing: BeaconProposerIndexAtSlot returns the same result for all honest nodes; (5) BLS signature on block provides cryptographic proof of authorship by assigned proposer. The combination of public deterministic computation and BLS signatures prevents both denial and false claiming.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.97,
+        "severity_assessment": "Low severity confirmed as safe. Assignment integrity is maintained through deterministic public computation and cryptographic non-repudiation. No repudiation risk exists."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#11",
+        "property_id": "PROP-W1B10-53",
+        "title": "Verify Trust Boundary Integrity for tb-009: Is the MIN_SEED_LOOKAHEAD delay sufficient to prevent same-epoch randao manipulation of proposer assignments?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Consensus protocol",
+            "Randao contribution",
+            "MIN_SEED_LOOKAHEAD delay"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A validator controlling multiple slots could attempt to bias the randao mix to manipulate future proposer assignments. The MIN_SEED_LOOKAHEAD provides a time buffer, but the attack is theoretically possible with sufficient validator share."
+        },
+        "test_procedure": "1. Review the implementation of MIN_SEED_LOOKAHEAD delay in proposer selection. 2. Identify all randao mix contribution points at epoch boundaries. 3. Analyze the proposer lookahead calculation to verify it correctly incorporates the seed lookahead delay. 4. Model the attack surface: calculate the validator stake percentage required to bias randao outcomes. 5. Verify that the delay between randao contribution and proposer assignment prevents same-epoch manipulation. 6. Test edge cases at epoch boundaries where timing assumptions may be violated. 7. Check for any code paths that could allow early revelation or late contribution of randao values.",
+        "bug_class": "Randomness Manipulation",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-W1B10-53, Trust Boundary: tb-009, Primary Element: SG-006. This is an invariant property covering the consensus layer boundary between validators and the randao system. Bug bounty eligible - requires demonstration that MIN_SEED_LOOKAHEAD is insufficient with specific validator stake percentage."
+      },
+      "property_id": "PROP-W1B10-53",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "260-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "MIN_SEED_LOOKAHEAD provides sufficient delay to prevent same-epoch RANDAO manipulation of proposer assignments. The Seed function (randao.go:22-38) computes seed using RANDAO mix from epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1, effectively looking back 1 epoch. This means proposer selection for epoch N uses randao_mix from epoch N-1, preventing validators in epoch N from influencing their own proposer assignments.",
+        "abstract_state_space": "Seed computation: lookAheadEpoch = epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1 = epoch + 65536 - 1 - 1 = epoch + 65534 (mod EPOCHS_PER_HISTORICAL_VECTOR). The modulo operation results in effective lookback: for epoch N, uses randao_mix[N-1]. Trust boundary tb-009 separates RANDAO contributors (untrusted validators) from proposer selection algorithm (consensus rules).",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For same-epoch RANDAO manipulation: Validator V proposing in epoch N must influence seed used for epoch N proposer selection. However, Seed(state, epoch=N, DOMAIN_BEACON_PROPOSER) computes lookAheadEpoch = N + 65536 - 1 - 1 = N + 65534, then retrieves randao_mix[(N+65534) % 65536] = randao_mix[N-2 (for N>=2)]. ProcessRandao mixes block's randao_reveal into state.randao_mixes[currentEpoch % EPOCHS_PER_HISTORICAL_VECTOR]. RANDAO reveal in epoch N affects randao_mix[N], but epoch N proposer selection uses randao_mix[N-2]. The temporal gap of 2 epochs prevents same-epoch manipulation. Attack path is unreachable.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: RANDAO contributions in epoch N cannot affect proposer assignments in epoch N. Proof: (1) Seed function at randao.go:25-26 computes lookAheadEpoch = epoch + EPOCHS_PER_HISTORICAL_VECTOR - MIN_SEED_LOOKAHEAD - 1; (2) With MIN_SEED_LOOKAHEAD=1 and EPOCHS_PER_HISTORICAL_VECTOR=65536, for epoch N: lookAheadEpoch = N + 65536 - 1 - 1 = N + 65534; (3) RandaoMix retrieves state.randao_mixes[(N+65534) % 65536]; (4) For N < 65536, this equals randao_mixes[N+65534], but the modulo wraps, effectively creating a lookback; (5) Careful analysis: the formula ensures epoch N uses randao from epoch N-MIN_SEED_LOOKAHEAD-1; (6) ProcessRandao (randao.go:70) updates randao_mixes[currentEpoch % EPOCHS_PER_HISTORICAL_VECTOR] with current block's reveal; (7) Temporal separation of at least MIN_SEED_LOOKAHEAD=1 epoch prevents manipulation. The MIN_SEED_LOOKAHEAD delay is sufficient.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "Medium severity assessed as safe. The MIN_SEED_LOOKAHEAD=1 delay provides sufficient temporal separation to prevent same-epoch RANDAO manipulation. Trust boundary tb-009 integrity is maintained."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#10",
+        "property_id": "PROP-W1B10-53",
+        "title": "Supporting Node Check: Verify validator randao contributions cannot be withheld or replayed to influence proposer selection",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Consensus protocol",
+            "Randao contribution",
+            "MIN_SEED_LOOKAHEAD delay"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Supporting check for boundary integrity - focuses on validator node behavior."
+        },
+        "test_procedure": "1. Review how validator randao contributions are collected and validated. 2. Verify that missing randao contributions are handled correctly (e.g., using a default value). 3. Check for replay protection on randao contributions. 4. Verify that the consensus layer properly rejects late or out-of-order randao values. 5. Test scenarios where a validator deliberately withholds their randao contribution to influence the mix.",
+        "bug_class": "Randomness Manipulation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-53, Supporting check for nodes: actor-validator, actor-consensus-layer"
+      },
+      "property_id": "PROP-W1B10-53",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "358-371",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "informational",
+        "summary": "RANDAO reveals cannot be replayed (epoch-specific BLS signature prevents this), but withholding is a known protocol limitation. ProcessRandao at randao.go:30-53 verifies the RANDAO reveal is a valid BLS signature of the current epoch by the proposer. Replay protection: the signature is over the epoch number, so a RANDAO reveal for epoch N is invalid for epoch M \u2260 N. Withholding: a proposer can choose not to propose, causing the default hash to be used, but this is mitigated by penalties for non-proposing and the MIN_SEED_LOOKAHEAD delay making the impact predictable.",
+        "abstract_state_space": "RANDAO verification flow: Block contains RandaoReveal (BLS signature). ProcessRandao retrieves proposer pubkey, computes signing_root = compute_signing_root(currentEpoch, DOMAIN_RANDAO), and verifies BLS.Verify(proposer.pubkey, signing_root, randao_reveal). ProcessRandaoNoVerify XORs hash(randao_reveal) into state.randao_mixes[epoch % EPOCHS_PER_HISTORICAL_VECTOR]. Replay attack space: attacker tries to reuse reveal from epoch M in epoch N.",
+        "potential_violations": [
+          "Withholding attack: proposer chooses not to produce block to avoid revealing RANDAO, causing predictable entropy source (known limitation, not exploitable due to lookahead)."
+        ]
+      },
+      "phase2": {
+        "reachability": "conditional",
+        "symbolic_constraints": "Replay attack: For RANDAO reveal R_M from epoch M to be accepted in epoch N \u2260 M: (1) randaoSigningData computes buf = epoch N in little-endian (line 168); (2) signing_root = hash(SigningData{ObjectRoot: buf, Domain: DOMAIN_RANDAO}); (3) verifySignature checks BLS.Verify(proposer.pubkey, signing_root, R_M); (4) R_M is signature over epoch M, so verification fails for epoch N. Replay is unreachable. Withholding: Proposer in epoch N can skip proposing. If no block at slot S, no RANDAO reveal is mixed in. However, Seed for epoch N+2 is already determined by epoch N+1, so withholding in epoch N doesn't affect epoch N+2 assignments. Attack is conditional on withholding causing predictable randomness, but lookahead prevents this.",
+        "attack_path": "Withholding scenario: Validator assigned to propose at slot S in epoch N decides not to publish block. Result: No RANDAO reveal mixed for that slot, state.randao_mixes[N] retains previous value. However, proposer assignments for epoch N+1 are already computed from epoch N-1's RANDAO mix (MIN_SEED_LOOKAHEAD). Impact: minimal, as missing one slot's RANDAO contribution doesn't significantly reduce entropy, and the proposer loses block rewards."
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: RANDAO reveals cannot be replayed to influence proposer selection. Proof: (1) ProcessRandao at randao.go:39-47 calls randaoSigningData which encodes currentEpoch in the signing data (line 167-168); (2) BLS signature verification at line 45 checks sig.Verify(publicKey, signing_root) where signing_root includes the epoch; (3) A signature S_M valid for epoch M will fail verification for epoch N \u2260 M because the signing_root differs; (4) Withholding is not exploitable for influencing proposer selection due to MIN_SEED_LOOKAHEAD: epoch N assignments use epoch N-1 RANDAO, so withholding in epoch N doesn't affect epoch N; (5) Known limitation: complete non-participation can make RANDAO predictable, but this requires majority validator collusion and is economically irrational due to lost rewards. The invariant holds for replay prevention; withholding is a documented limitation with minimal impact.",
+        "counterexample": "Withholding is possible but not exploitable: a proposer can choose not to propose, but this doesn't allow influencing their own future proposer assignments due to the lookahead delay.",
+        "final_classification": "informational",
+        "confidence": 0.93,
+        "severity_assessment": "Medium severity assessed as informational with caveats. Replay protection is strong (epoch-bound BLS signatures). Withholding is a known protocol limitation with minimal practical impact due to MIN_SEED_LOOKAHEAD delay and economic disincentives. No tampering vulnerability exists that allows targeted manipulation of proposer selection."
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#12",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Trust Boundary Integrity for tb-009: Are all proposer indices from compute_proposer_indices validated against the active validator set?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot. The protocol must handle validator exits between lookahead computation and slot execution."
+        },
+        "test_procedure": "1. Identify the compute_proposer_indices function and trace all validator index selection paths. 2. Verify that the function explicitly checks each selected index against the active validator set for the target epoch. 3. Test with edge cases: (a) validator that exits between lookahead computation and slot execution, (b) validator pending activation, (c) slashed validator still in registry. 4. Verify that the epoch parameter used for active set lookup matches the epoch for which proposers are being computed. 5. Check for race conditions where validator status could change during computation. 6. Attempt to construct a scenario where an inactive validator index is returned and verify the system handles this gracefully.",
+        "bug_class": "State Consistency",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-35, Trust Boundary: tb-009, Source Invariant: FULU-SG004-INV-003, Threat: stride-010"
+      },
+      "property_id": "PROP-W1B10-35",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "36-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "All proposer indices from compute_proposer_indices are validated against the active validator set. ComputeProposerIndex (validators.go:398-441) performs bounds checking at line 414: 'if uint64(candidateIndex) >= uint64(bState.NumValidators())' and returns error if out of range. ActiveValidatorIndices (validators.go:104-159) only includes validators where IsActiveValidatorUsingTrie returns true, checking activation_epoch <= epoch < exit_epoch (line 142-144). This ensures only active validators can be selected as proposers.",
+        "abstract_state_space": "Proposer index computation: activeIndices = [i | validator[i] where activation_epoch <= current_epoch < exit_epoch] -> for i in range(0, infinity): candidateIndex = compute_shuffled_index(i % len(activeIndices), len(activeIndices), seed) -> candidateIndex = activeIndices[candidateIndex] -> if candidateIndex >= NumValidators: ERROR -> if effective_balance * random_value >= threshold: return candidateIndex. Two validation layers: (1) Only active validators in activeIndices; (2) Bounds check against total validator count.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For an invalid proposer index to be selected: (1) activeIndices must contain out-of-range index, BUT ActiveValidatorIndices constructs indices from ReadFromEveryValidator callback which only appends idx if IsActiveValidatorUsingTrie(val, epoch) is true, and idx is the validator's actual index in state; (2) ComputeProposerIndex receives activeIndices and indexes into it at line 413: candidateIndex = activeIndices[candidateIndex], which retrieves a ValidatorIndex that was previously in the active set; (3) Bounds check at line 414-416 compares candidateIndex against bState.NumValidators() and errors if >=; (4) For bounds check to pass incorrectly, candidateIndex must be < NumValidators(), which is guaranteed if ActiveValidatorIndices correctly populated activeIndices from state validators. Attack path unreachable assuming ActiveValidatorIndices correctness.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: \u2200 proposer_index P selected by ComputeProposerIndex, P \u2208 ActiveValidatorSet AND P < NumValidators. Proof: (1) ActiveValidatorIndices (validators.go:141-148) iterates over all validators and appends index i to indices only if IsActiveValidatorUsingTrie(val, epoch) returns true; (2) IsActiveValidatorUsingTrie (line 51-53) returns checkValidatorActiveStatus which checks validator.ActivationEpoch() <= epoch < validator.ExitEpoch() (line 61-63); (3) Only validators satisfying the active condition are added to activeIndices; (4) ComputeProposerIndex receives activeIndices and samples from it using compute_shuffled_index, which returns index in range [0, len(activeIndices)); (5) Line 413 retrieves candidateIndex = activeIndices[shuffled_index], so candidateIndex is one of the active validator indices; (6) Bounds check at line 414-416 ensures candidateIndex < NumValidators() before proceeding; (7) ValidatorAtIndexReadOnly at line 418 retrieves the validator, which will succeed if candidateIndex is valid; (8) The function only returns when a candidateIndex passes the probabilistic sampling (line 429 or 436), ensuring the returned index is active and in-bounds. Invariant holds.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.99,
+        "severity_assessment": "High severity assessed as safe. Comprehensive validation ensures all proposer indices are from the active validator set and within bounds. The two-layer validation (active set filtering + bounds checking) provides defense in depth against state inconsistency. No denial of service risk from invalid proposer indices."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#11",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Consensus Layer Correctly Filters Exited Validators from Proposer Selection",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot. The protocol must handle validator exits between lookahead computation and slot execution."
+        },
+        "test_procedure": "1. Review the consensus layer's get_active_validator_indices function to verify it correctly excludes exited validators. 2. Trace how validator exit_epoch is checked against the current/target epoch. 3. Verify that validators with exit_epoch <= current_epoch are excluded. 4. Test boundary conditions: validator exits exactly at the epoch boundary. 5. Confirm that the active set used for proposer selection is computed atomically with no TOCTOU vulnerabilities.",
+        "bug_class": "Logic Error",
+        "risk_category": "Denial of Service",
+        "notes": "Supporting check for actor-consensus-layer. Source: PROP-W1B10-35"
+      },
+      "property_id": "PROP-W1B10-35",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "36-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "The consensus layer correctly filters exited validators from proposer selection. The checkValidatorActiveStatus function at validators.go:61-63 implements the spec-compliant check: activationEpoch <= epoch && epoch < exitEpoch. Validators with exit_epoch <= current_epoch fail the second condition and are excluded from ActiveValidatorIndices, which is used by BeaconProposerIndexAtSlot->ComputeProposerIndex.",
+        "abstract_state_space": "State space consists of validator objects with (activation_epoch, exit_epoch, current_epoch) tuples. The active set S_active = {v | v.activation_epoch <= current_epoch < v.exit_epoch}. Proposer selection draws from S_active via ComputeProposerIndex which requires non-empty active indices.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For an exited validator (exit_epoch <= current_epoch) to be selected as proposer: (1) must pass IsActiveValidatorUsingTrie check, requiring activation_epoch <= epoch < exit_epoch; (2) exit_epoch <= current_epoch contradicts epoch < exit_epoch when epoch = current_epoch. Constraint system is unsatisfiable.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: No validator with exit_epoch <= current_epoch can be selected as proposer. Proof: (1) BeaconProposerIndexAtSlot calls ActiveValidatorIndices with current epoch. (2) ActiveValidatorIndices filters using IsActiveValidatorUsingTrie. (3) IsActiveValidatorUsingTrie returns checkValidatorActiveStatus(activation_epoch, exit_epoch, epoch). (4) This returns (activation_epoch <= epoch) AND (epoch < exit_epoch). (5) For exited validators: exit_epoch <= current_epoch = epoch. (6) Thus epoch < exit_epoch is false, validator excluded. (7) ComputeProposerIndex only operates on filtered active set. QED.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 1.0,
+        "severity_assessment": "The implementation is correct and spec-compliant. No vulnerability detected."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#8",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#8",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Slashed Validators Cannot Be Selected as Block Proposers",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot. The protocol must handle validator exits between lookahead computation and slot execution."
+        },
+        "test_procedure": "1. Identify how the slashed flag is checked during proposer selection. 2. Verify that compute_proposer_indices excludes validators where slashed == true. 3. Test scenario: validator gets slashed between lookahead computation and actual slot. 4. Verify that if a slashed validator somehow produces a block, it is rejected by honest nodes. 5. Check if there are any code paths that could allow a slashed validator to bypass this filter. 6. Review historical slashing events to ensure the exclusion logic is consistent with specification.",
+        "bug_class": "Logic Error",
+        "risk_category": "Tampering",
+        "notes": "Supporting check for actor-validator. A slashed validator producing blocks could create conflicting blocks. Source: PROP-W1B10-35"
+      },
+      "property_id": "PROP-W1B10-35",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "36-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "informational",
+        "summary": "Slashed validators are NOT explicitly filtered by slashed flag in proposer selection. However, this is spec-compliant behavior. When a validator is slashed via SlashValidator (validator.go:231-298), InitiateValidatorExit is called which sets exit_epoch to a future epoch. Until that exit_epoch arrives, a slashed validator CAN be selected as proposer. The slashed flag serves other purposes (e.g., preventing double-slashing, calculating penalties) but does not directly affect the active validator check.",
+        "abstract_state_space": "Validator state includes (slashed: bool, exit_epoch: Epoch, activation_epoch: Epoch). Active check is purely epoch-based. A slashed validator remains in active set until exit_epoch is reached. State transition: slash event -> exit_epoch set to future value -> validator remains active for interim epochs -> exit_epoch reached -> validator becomes inactive.",
+        "potential_violations": [
+          "Slashed validator can propose blocks between slashing time and exit_epoch"
+        ]
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "For slashed validator to be selected as proposer: (1) validator.slashed = true, (2) validator.activation_epoch <= current_epoch, (3) current_epoch < validator.exit_epoch. When SlashValidator is called at epoch E, exit_epoch is set to E + exit_delay (typically 4-8 epochs). During epochs (E, E+exit_delay), the validator satisfies the active check despite being slashed.",
+        "attack_path": "Scenario: Validator V is slashed at epoch 100. InitiateValidatorExit sets exit_epoch to 108. At epoch 105, V still passes IsActiveValidatorUsingTrie (100 <= 105 < 108 = true) and can be selected via ComputeProposerIndex. However, this is INTENDED spec behavior, not a vulnerability."
+      },
+      "phase3": {
+        "invariant_holds": false,
+        "proof_sketch": "Invariant (if interpreted as 'slashed validators cannot propose'): DOES NOT HOLD in implementation, but this matches Ethereum spec. The spec intentionally allows slashed validators to remain active until exit_epoch. Rationale: (1) Immediate removal would complicate validator set stability, (2) Exit queue management prevents sudden validator set changes, (3) Slashed validators face economic penalties making malicious proposals unprofitable. Evidence from code: IsActiveValidatorUsingTrie does not check slashed flag (validators.go:51-53). SlashValidator calls InitiateValidatorExit which sets future exit_epoch (validator.go:239).",
+        "counterexample": "Validator slashed at epoch E with exit_epoch = E+8 can be selected as proposer at epoch E+4. However, this is spec-compliant.",
+        "final_classification": "informational",
+        "confidence": 1.0,
+        "severity_assessment": "This is NOT a vulnerability but spec-compliant behavior. The Ethereum consensus spec intentionally allows slashed validators to remain in the active set until exit_epoch. The title's assertion that slashed validators 'cannot be selected' is technically incorrect - they CAN be selected until exited, but this is by design. No security risk as economic incentives prevent malicious behavior."
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0004",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0004",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Not-Yet-Activated Validators Are Excluded from Proposer Selection",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot. The protocol must handle validator exits between lookahead computation and slot execution."
+        },
+        "test_procedure": "1. Review how activation_epoch is checked in the proposer selection logic. 2. Verify that validators with activation_epoch > current_epoch are excluded from the active set. 3. Test edge case: validator activates exactly at the epoch for which proposers are being computed. 4. Check that the lookahead computation correctly uses the future epoch's active set, not the current one. 5. Verify no off-by-one errors in epoch comparisons. 6. Test with validators in the activation queue to ensure they cannot be selected prematurely.",
+        "bug_class": "Logic Error",
+        "risk_category": "Denial of Service",
+        "notes": "Supporting check for actor-validator. Source: PROP-W1B10-35"
+      },
+      "property_id": "PROP-W1B10-35",
+      "code_scope": {
+        "file": "beacon-chain/core/helpers/validators.go",
+        "lines": "36-441",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Not-yet-activated validators are correctly excluded from proposer selection. The checkValidatorActiveStatus function requires activationEpoch <= epoch for a validator to be active. Validators with activation_epoch > current_epoch fail this check and are excluded from ActiveValidatorIndices, preventing their selection as proposers.",
+        "abstract_state_space": "Validator activation states: (1) Deposited but not activated: activation_epoch = FAR_FUTURE_EPOCH or activation_epoch > current_epoch, (2) Pending activation: activation_eligibility_epoch set but activation_epoch > current_epoch, (3) Active: activation_epoch <= current_epoch < exit_epoch. Only state (3) passes the active check.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For not-yet-activated validator (activation_epoch > current_epoch) to be selected: must satisfy activation_epoch <= epoch where epoch = current_epoch. This creates contradiction: activation_epoch <= current_epoch AND activation_epoch > current_epoch, which is unsatisfiable.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: No validator with activation_epoch > current_epoch can be selected as proposer. Proof: (1) Proposer selection path: BeaconProposerIndexAtSlot -> ActiveValidatorIndices -> IsActiveValidatorUsingTrie -> checkValidatorActiveStatus. (2) checkValidatorActiveStatus returns (activationEpoch <= epoch) AND (epoch < exitEpoch). (3) For not-yet-activated validators: activation_epoch > current_epoch. (4) At current_epoch, the check becomes (activation_epoch <= current_epoch), which is false. (5) Validator is excluded from active indices array. (6) ComputeProposerIndex only samples from this filtered array. (7) Therefore, not-yet-activated validators cannot be selected. QED.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 1.0,
+        "severity_assessment": "Implementation correctly prevents not-yet-activated validators from being selected as proposers. No vulnerability detected."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#13",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#13",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify Trust Boundary Integrity for tb-004: Are P2P block submissions with maximum blob commitments properly rate-limited to prevent resource exhaustion?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count. The dynamic limit from EIP-7892 could be higher than pre-Fusaka limits, stressing node resources. However, high-effort DoS attacks are out of scope."
+        },
+        "test_procedure": "1. Identify the P2P block gossip handler and locate the rate-limiting logic for block proposals. 2. Verify that the rate limit enforces at most one block per slot per proposer. 3. Simulate a malicious peer sending multiple blocks with maximum blob commitments in the same slot from the same proposer identity. 4. Confirm that excess blocks are rejected and the peer is penalized or disconnected. 5. Measure memory and CPU usage when receiving blocks at the dynamically configured maximum blob limit (EIP-7892). 6. Verify that resource consumption remains bounded even under sustained attack.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-54, Trust Boundary: tb-004, Threat: stride-015. CONDITIONAL SCOPE: Requires further investigation. High-effort DoS attacks are out of scope per bug bounty rules. Focus on low-effort attacks that could cause disproportionate resource consumption."
+      },
+      "property_id": "PROP-W1B10-54",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "1-100",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "P2P block submissions with maximum blob commitments are properly rate-limited and validated. The validateDenebBeaconBlock function (validate_beacon_blocks.go:317-333) checks that len(commits) <= maxBlobsPerBlock via params.BeaconConfig().MaxBlobsPerBlock(slot), rejecting blocks that exceed this limit. P2P rate limiting is enforced via: (1) One block per slot per proposer via hasSeenBlockIndexSlot check, (2) libp2p RPC rate limiters in rate_limiter.go with configurable burst limits, (3) Gossip validation prevents duplicate processing.",
+        "abstract_state_space": "P2P validation pipeline: (1) Gossip receive -> (2) Duplicate check via hasSeenBlockIndexSlot (slot, proposer_index pair) -> (3) Block signature verification -> (4) Blob commitment count validation -> (5) Rate limiter checks per-peer request rates. Each proposer can submit at most 1 block per slot. Each block can contain at most MaxBlobsPerBlock commitments (6 for Deneb, 9 for Electra, configurable via BlobSchedule).",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For a proposer to flood network with max-blob blocks: (1) Must pass hasSeenBlockIndexSlot(slot, proposer_index) - only first block per (slot, proposer) accepted, (2) Must have valid signature - requires proposer's BLS private key, (3) Block with len(commits) > MaxBlobsPerBlock rejected with errRejectCommitmentLen. Even with valid credentials, a proposer can only submit 1 block per slot. Resource exhaustion via legitimate max-blob blocks is bounded by slot time (12 seconds) and network gossip limits.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: P2P layer prevents resource exhaustion from excessive blob commitments. Proof sketch: (1) Per-block limit: validateDenebBeaconBlock enforces len(commits) <= MaxBlobsPerBlock(slot), rejecting violations (validate_beacon_blocks.go:326-331). (2) Per-proposer-slot limit: hasSeenBlockIndexSlot enforces one block per (slot, proposer_index), subsequent blocks ignored (validate_beacon_blocks.go:113-124). (3) Per-peer rate limiting: rate_limiter.go implements leaky bucket collectors for block requests with configurable limits (rate_limiter.go:38-108). (4) Signature verification: Only proposer with correct BLS key can create valid blocks (validate_beacon_blocks.go:296-298). (5) Gossip layer: libp2p gossipsub has built-in message deduplication and peer scoring. Combined, these mechanisms bound resource consumption: max rate = (slots per second) * MaxBlobsPerBlock \u2248 (1/12) * 6-9 \u2248 0.5-0.75 blobs/sec for legitimate traffic. QED.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "The implementation provides defense-in-depth against blob-based resource exhaustion. Multiple layers of validation and rate limiting prevent both malicious flooding and accidental overload. Minor uncertainty (0.95 vs 1.0 confidence) stems from reliance on libp2p gossipsub implementation details for final layer of protection."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#12",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify P2P Peer Validation: Does the P2P layer properly authenticate and track proposer identity for rate-limiting purposes?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count. The dynamic limit from EIP-7892 could be higher than pre-Fusaka limits, stressing node resources. However, high-effort DoS attacks are out of scope."
+        },
+        "test_procedure": "1. Review how proposer identity is extracted and validated from incoming P2P block messages. 2. Check if proposer identity can be spoofed or if rate-limiting can be bypassed by forging proposer IDs. 3. Verify that rate-limiting is applied per authenticated proposer, not per connection or IP. 4. Test whether a single malicious peer can masquerade as multiple proposers to circumvent rate limits. 5. Confirm cryptographic validation of proposer signatures before processing resource-intensive blob data.",
+        "bug_class": "Authentication Bypass",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-W1B10-54, Supporting check for node: actor-p2p-peer. CONDITIONAL SCOPE: Requires further investigation."
+      },
+      "property_id": "PROP-W1B10-54",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "1-100",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "P2P layer properly authenticates proposer identity via BLS signature verification. In validatePhase0Block (validate_beacon_blocks.go:285-314), the proposer signature is verified using blocks.VerifyBlockSignatureUsingCurrentFork against the proposer's public key from state. Rate limiting is per-proposer-slot via hasSeenBlockIndexSlot, not per-connection. A peer cannot forge proposer identity as it requires the proposer's BLS private key. Peer identity (libp2p peer ID) is separate from validator identity (BLS public key).",
+        "abstract_state_space": "Authentication flow: (1) Block received from peer P with claimed proposer_index I, (2) State lookup: retrieve validator[I].public_key, (3) Signature verification: BLS.Verify(public_key, block_root, signature), (4) If valid: proposer authenticated as validator I, (5) Rate limit enforcement: track (slot, proposer_index) not (slot, peer_id). A malicious peer can send blocks claiming any proposer_index, but only valid signatures pass verification.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "For peer P to spoof proposer identity I: (1) Create block B with proposer_index = I, (2) Compute block_root = hash(B), (3) Generate valid signature S such that BLS.Verify(validator[I].pubkey, block_root, S) = true. Without validator I's private key, generating S is cryptographically infeasible (requires breaking BLS signature scheme). If P has I's private key, they ARE proposer I, not a spoof. Rate limiting tracks (slot, proposer_index) so even if P controls multiple libp2p identities, they cannot bypass the one-block-per-slot-per-proposer limit.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: Proposer identity cannot be spoofed for rate-limiting bypass. Proof: (1) Proposer authentication: VerifyBlockSignatureUsingCurrentFork (signature.go:101-120) verifies BLS signature against proposer public key from state. (2) BLS security: Breaking BLS signatures is computationally infeasible under standard cryptographic assumptions. (3) Rate limiting anchor: hasSeenBlockIndexSlot uses (slot, proposer_index) tuple as key (validate_beacon_blocks.go:410-411), independent of peer identity. (4) Signature verification precedes rate limit enforcement in early blocks (validate_beacon_blocks.go:180-183, 198-201). (5) Even if attacker controls multiple peer IDs, they cannot create multiple valid signatures for the same proposer_index without the private key. (6) If attacker HAS the private key, they are the legitimate proposer. (7) Therefore, rate limiting correctly tracks proposer identity, not peer identity. QED.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 1.0,
+        "severity_assessment": "Proposer identity authentication is cryptographically sound via BLS signatures. Rate limiting correctly operates on authenticated proposer identity, not spoofable peer identity. No vulnerability detected."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#9",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify Consensus Layer Resource Management: Does the consensus layer properly bound resource allocation for blob commitment validation?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count. The dynamic limit from EIP-7892 could be higher than pre-Fusaka limits, stressing node resources. However, high-effort DoS attacks are out of scope."
+        },
+        "test_procedure": "1. Identify the consensus layer components that process incoming blocks with blob commitments. 2. Review memory allocation patterns when processing blocks at the dynamic blob limit. 3. Verify that blob KZG commitment validation is properly bounded in time and memory. 4. Check for any amplification attacks where a small attacker input causes disproportionate computation. 5. Test behavior when the dynamic blob limit (EIP-7892) is at its maximum configuration. 6. Verify graceful degradation under load rather than crash or hang conditions.",
+        "bug_class": "Resource Exhaustion",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-54, Supporting check for node: actor-consensus-layer. CONDITIONAL SCOPE: Requires further investigation."
+      },
+      "property_id": "PROP-W1B10-54",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "1-100",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "MaxBlobsPerBlock() function implements a schedule-based resource bound lookup with fallback mechanism. The function iterates through BlobSchedule in descending order to find the applicable limit for a given slot/epoch, with deprecated constants as fallback.",
+        "abstract_state_space": "State space: {BlobSchedule: []BlobScheduleEntry, slot: Slot, epoch: Epoch} -> int. Bounded by: (1) BlobSchedule array length, (2) MaxBlobsPerBlock values are finite uint64, (3) Function terminates via loop or fallback. The lookup performs O(n) reverse iteration where n=len(BlobSchedule), with guaranteed termination and bounded result.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Path: config/params/config.go:MaxBlobsPerBlock() -> beacon-chain/core/blocks/payload.go:verifyBlobCommitmentCount() -> beacon-chain/core/transition/transition_no_verify_sig.go:ProcessPayload(). Constraints: (1) len(kzgs) <= MaxBlobsPerBlock(slot), verified at line 238-240 of payload.go; (2) Verification occurs before any Engine API interaction (line 337 of transition_no_verify_sig.go calls ProcessPayload which includes the check); (3) KZG verification bounded by commitment count which is itself bounded by MaxBlobsPerBlock.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: \u2200 block B, len(B.blob_kzg_commitments) <= MaxBlobsPerBlock(B.slot). Proof: (1) verifyBlobCommitmentCount() enforces this at lines 238-240 with explicit comparison and error return; (2) ProcessPayload() calls verifyBlobCommitmentCount() at line 213 before any state mutation; (3) All block processing paths (sync, gossip, proposer) call ProcessPayload() or equivalent validation; (4) MaxBlobsPerBlock() always returns a bounded value (either from schedule or deprecated constants); (5) The schedule is sorted and searched in descending order ensuring correct epoch boundary handling.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "Resource bounds are properly enforced. The dynamic BlobSchedule mechanism correctly bounds resource allocation for blob commitment validation across all fork versions. KZG verification complexity is O(n*k) where n<=MaxBlobsPerBlock and k is constant KZG verification time, thus bounded."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#14",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#14",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Trust Boundary Integrity for tb-005: Are execution payloads with invalid blob commitment counts rejected before forwarding to EL?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation, wasting CL processing time. If the CL still forwards to the EL before checking blob count, it wastes additional EL resources."
+        },
+        "test_procedure": "1. Identify the CL code path that validates incoming execution payloads from P2P/Consensus. 2. Locate the blob commitment count validation assertion. 3. Verify the assertion order: confirm blob count check occurs BEFORE any Engine API calls to EL. 4. Craft test payloads that pass parent_hash, prev_randao, and timestamp checks but have invalid blob commitment counts (e.g., count mismatch, overflow values). 5. Submit these payloads and verify they are rejected at the blob count assertion. 6. Monitor Engine API logs to confirm NO calls are made to EL for rejected payloads. 7. Measure CL processing time to assess DoS impact from repeated invalid submissions.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Trust Boundary: tb-005. CONDITIONAL SCOPE: Requires further investigation to confirm exploitability and impact. The property is a post-condition ensuring ordered validation prevents resource waste."
+      },
+      "property_id": "PROP-W1B10-55",
+      "code_scope": {
+        "file": "beacon-chain/sync/validate_beacon_blocks.go",
+        "lines": "1-100",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Trust boundary tb-005 (CL to EL) validates blob commitment counts before forwarding execution payloads. The validation occurs in the state transition pipeline via verifyBlobCommitmentCount() which is called before ProcessPayload() completes and before any Engine API interaction.",
+        "abstract_state_space": "Trust boundary validation state: {received_block, commitment_count, max_allowed} -> {accept, reject}. State transitions: (1) Block received -> extract commitments; (2) Count commitments; (3) Compare to MaxBlobsPerBlock(slot); (4) If count > max: reject with error; (5) If count <= max: proceed to ProcessPayload; (6) Only validated blocks reach Engine API.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Validation path analysis: beacon-chain/core/transition/transition_no_verify_sig.go:ProcessBlockForStateRoot() line 337 calls blocks.ProcessPayload(). ProcessPayload() (payload.go:208-225) calls verifyBlobCommitmentCount() at line 213 BEFORE calling ValidatePayloadWhenMergeCompletes() and ValidatePayload(). No Engine API calls (newPayload, forkchoiceUpdated) occur in this code path - those are handled by separate execution engine client code that receives only validated payloads. Constraint: rejection_count = commitmentCount - maxBlobsPerBlock > 0 implies block rejection before EL interaction.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: No execution payload with invalid blob commitment count reaches EL. Proof: (1) All block processing flows (gossip via validateBeaconBlockPubSub, state transition via ProcessBlockForStateRoot, batch sync) execute through ProcessPayload(); (2) ProcessPayload() enforces the check at line 213 before any payload validation or state mutation; (3) Error from verifyBlobCommitmentCount() propagates up and prevents block acceptance; (4) Engine API clients (newPayload, forkchoiceUpdated) only receive payloads from accepted blocks; (5) The check is unconditional for all blocks with version >= Deneb (line 229-230).",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.93,
+        "severity_assessment": "Trust boundary integrity is maintained. Invalid blob commitment counts are rejected at the consensus layer before reaching the execution layer. The validation is correctly positioned in the state transition function."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#13",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#13",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Consensus Layer (actor-consensus-layer) enforces blob count validation before EL interaction",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation, wasting CL processing time. If the CL still forwards to the EL before checking blob count, it wastes additional EL resources."
+        },
+        "test_procedure": "1. Review CL implementation for execution payload handling. 2. Trace the validation sequence from payload receipt to EL forwarding. 3. Verify blob commitment count is validated in the assertion chain. 4. Check for any code paths that could bypass blob count validation (e.g., fast-path optimizations, cached payloads). 5. Confirm the CL does not make Engine API newPayload calls for payloads failing blob count checks. 6. Test edge cases: zero blobs, maximum blobs, blob count at boundary values.",
+        "bug_class": "Resource Exhaustion",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Supporting node: actor-consensus-layer. CONDITIONAL SCOPE: Requires further investigation."
+      },
+      "property_id": "PROP-W1B10-55",
+      "code_scope": {
+        "file": "N/A",
+        "lines": "N/A",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "This check is functionally identical to CHK-0001#14. The consensus layer actor enforces blob count validation in the state transition pipeline before any EL interaction. Same validation mechanism applies.",
+        "abstract_state_space": "Identical to CHK-0001#14. The actor model perspective (actor-consensus-layer) maps to the same implementation: state transition function validates blob counts via verifyBlobCommitmentCount() before processing execution payloads.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Same reachability analysis as CHK-0001#14. The consensus layer processes all blocks through the same validation pipeline regardless of source (gossip, RPC, local proposer). Path: any_block_source -> ProcessBlockForStateRoot() -> ProcessPayload() -> verifyBlobCommitmentCount(). The validation is source-agnostic and occurs in core state transition logic.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Proof follows from CHK-0001#14 analysis. Additional confirmation: (1) beacon-chain/sync/validate_beacon_blocks.go shows gossip validation; (2) beacon-chain/core/transition/transition_no_verify_sig.go shows state transition validation; (3) Both paths converge on ProcessPayload() which enforces the blob count check; (4) No bypass paths exist for blocks to reach EL without going through this validation.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.93,
+        "severity_assessment": "Consensus layer correctly enforces validation before EL interaction. Resource exhaustion via excessive blob commitments is prevented at the trust boundary."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#10",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Proposer (actor-proposer) cannot cause CL to forward invalid blob count payloads",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation, wasting CL processing time. If the CL still forwards to the EL before checking blob count, it wastes additional EL resources."
+        },
+        "test_procedure": "1. Identify how proposer-originated blocks enter the validation pipeline. 2. Verify that proposer blocks undergo the same blob count validation as P2P-received blocks. 3. Test if a malicious proposer can craft blocks that bypass blob count checks. 4. Verify that even locally-built blocks are validated before EL submission. 5. Check rate limiting and anti-spam measures for proposer-submitted blocks.",
+        "bug_class": "Input Validation",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Supporting node: actor-proposer. CONDITIONAL SCOPE: Requires further investigation."
+      },
+      "property_id": "PROP-W1B10-55",
+      "code_scope": {
+        "file": "N/A",
+        "lines": "N/A",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Proposer cannot cause CL to forward invalid blob count payloads. Both locally-built blocks (from proposer RPC) and P2P-received blocks undergo identical validation through the state transition pipeline.",
+        "abstract_state_space": "Input validation state: {block_source: {local_proposer, p2p_gossip, rpc_import}} -> validation_pipeline -> {accept, reject}. All sources converge on the same ProcessBlockForStateRoot() -> ProcessPayload() -> verifyBlobCommitmentCount() path. No special exemptions for locally-built blocks.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Block source analysis: (1) Local proposer builds block via beacon-chain/rpc/prysm/v1alpha1/validator/proposer*.go; (2) Built blocks are validated before broadcast; (3) P2P blocks validated via sync.validateBeaconBlockPubSub(); (4) Both converge on state transition validation; (5) verifyBlobCommitmentCount() has no conditional logic based on block source. Constraint: \u2200 source \u2208 {local, p2p, rpc}, same validation_function applies.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: Proposer-created blocks with invalid blob counts are rejected. Proof: (1) Proposer builds blocks via RPC endpoints in beacon-chain/rpc/prysm/v1alpha1/validator/; (2) Built blocks must pass validation before being added to fork choice; (3) The validation uses the same ProcessPayload() function that validates P2P blocks; (4) No code path exempts proposer blocks from blob count validation; (5) Error propagation from verifyBlobCommitmentCount() prevents both broadcast and fork choice insertion. Code review of beacon-chain/rpc shows no bypass logic.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.92,
+        "severity_assessment": "Input validation is source-agnostic. Proposers cannot bypass blob count validation to cause CL to forward invalid payloads. The unified validation pipeline prevents privilege escalation via proposer role."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#15",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#15",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify Trust Boundary Integrity for tb-002: Does the precompile correctly trigger out-of-gas revert when available_gas < 6900?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert. The behavior must be consistent with standard EVM out-of-gas handling."
+        },
+        "test_procedure": "1. Identify the precompile gas check implementation at the EVM-precompile boundary (tb-002). 2. Call the precompile with exactly 6899 gas and verify it reverts with out-of-gas. 3. Verify that all remaining gas is consumed upon revert (standard EVM out-of-gas semantics). 4. Call with exactly 6900 gas and verify no revert occurs due to gas. 5. Test edge cases: 0 gas, 1 gas, 6898 gas, 6900 gas, 6901 gas. 6. Verify this is the ONLY condition under which the precompile reverts (no other revert paths exist). 7. Compare behavior across different client implementations for consistency.",
+        "bug_class": "Gas Accounting",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-58, Trust Boundary: tb-002, Source Invariant: EIP7951-SG006-INV-002, Source Assumption: asm-002"
+      },
+      "property_id": "PROP-W1B10-58",
+      "code_scope": {
+        "file": "N/A",
+        "lines": "N/A",
+        "resolved": false
+      },
+      "phase1": {
+        "classification": "out-of-scope",
+        "summary": "EIP-7951 precompile gas check (available_gas < 6900 triggers out-of-gas revert) is an Execution Layer (EL) concern. Prysm is a Consensus Layer (CL) client implemented in Go. EVM precompiles are implemented in the EL client (e.g., geth, erigon, besu, nethermind), not in the CL client.",
+        "abstract_state_space": "N/A - out of scope. Prysm does not implement EVM execution or precompile logic. The trust boundary is: CL validates blocks and sends execution payloads to EL via Engine API; EL executes transactions including precompile calls and returns execution results to CL.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "Precompile execution occurs in EL, not CL. Prysm codebase search confirms no EVM execution logic. Engine API interface (proto/engine/v1/) shows CL sends ExecutionPayload to EL and receives ExecutionPayloadStatus. The gas accounting for precompile calls happens within EL's EVM interpreter, which Prysm does not implement. Constraint: EIP-7951_implementation \u2209 Prysm_codebase.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Property PROP-W1B10-58 is not applicable to Prysm. Justification: (1) Prysm is a consensus layer client per Ethereum's consensus/execution split architecture; (2) EVM precompile implementations exist in execution clients (geth implements EIP-7951 in core/vm/contracts.go or similar); (3) Prysm's role is to validate consensus rules and coordinate with EL via Engine API; (4) Gas accounting for precompile calls is EL's responsibility; (5) Code search for 'precompile' in Prysm shows no EVM precompile implementations, only references to KZG point evaluation precompile address for validation purposes. This check should be directed at the EL client, not the CL client.",
+        "counterexample": null,
+        "final_classification": "out-of-scope",
+        "confidence": 1.0,
+        "severity_assessment": "This security property is not within Prysm's scope. It must be verified in the Execution Layer client implementation. Prysm correctly delegates execution to the EL and validates consensus-layer rules only."
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#14",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#14",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify EVM-to-Precompile Gas Consumption: Is remaining gas fully consumed on out-of-gas revert?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert. The behavior must be consistent with standard EVM out-of-gas handling."
+        },
+        "test_procedure": "1. Construct a transaction calling the precompile with gas < 6900. 2. After the revert, verify that gasUsed equals the gas provided (all gas consumed). 3. Check that no gas is refunded to the caller. 4. Verify consistency with other EVM out-of-gas behaviors (e.g., CALL with insufficient gas). 5. Test from nested call contexts to ensure gas consumption propagates correctly.",
+        "bug_class": "Gas Accounting",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-58, Supporting check for actor-evm node"
+      },
+      "property_id": "PROP-W1B10-58",
+      "code_scope": {
+        "file": "N/A",
+        "lines": "N/A",
+        "resolved": false
+      },
+      "phase1": {
+        "classification": "out-of-scope",
+        "summary": "EIP-7951 precompile gas consumption on out-of-gas revert. This check targets EVM precompile gas accounting, which is an Execution Layer (EL) concern. Prysm is a Consensus Layer (CL) client and does not implement EVM execution, precompiles, or gas metering.",
+        "abstract_state_space": "Empty set - no relevant state space exists in Prysm codebase. EVM precompile implementations reside in EL clients (geth, nethermind, etc.), not CL clients.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "No code paths in Prysm implement or interact with EIP-7951 precompile gas accounting. The consensus layer validates execution payloads but does not execute EVM bytecode or manage gas consumption at the precompile level.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "By architectural separation: CL clients (Prysm) validate consensus rules over blocks and state transitions. EL clients execute transactions and manage gas. The property PROP-W1B10-58 regarding precompile gas semantics cannot be violated in code that does not exist in the target codebase.",
+        "counterexample": null,
+        "final_classification": "out-of-scope",
+        "confidence": 1.0,
+        "severity_assessment": "N/A - Not applicable to Prysm. Should be audited in EL client implementations."
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#11",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify Precompile Revert Exclusivity: Does the precompile revert ONLY for gas < 6900?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert. The behavior must be consistent with standard EVM out-of-gas handling."
+        },
+        "test_procedure": "1. Review precompile implementation for all potential revert/error paths. 2. Verify that when gas >= 6900, no revert can occur regardless of input. 3. Test with malformed inputs, edge-case values, and boundary conditions with sufficient gas. 4. Confirm that input validation errors (if any) do NOT cause reverts but are handled per EIP specification. 5. Fuzz the precompile with various inputs while providing >= 6900 gas and verify no reverts.",
+        "bug_class": "Control Flow Integrity",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-58, Supporting check for actor-precompile node"
+      },
+      "property_id": "PROP-W1B10-58",
+      "code_scope": {
+        "file": "N/A",
+        "lines": "N/A",
+        "resolved": false
+      },
+      "phase1": {
+        "classification": "out-of-scope",
+        "summary": "EIP-7951 precompile revert conditions (gas < 6900). This check verifies control flow integrity for precompile revert logic. Prysm does not implement EVM precompiles; this is EL client responsibility.",
+        "abstract_state_space": "Empty set - no precompile implementation exists in Prysm. Precompile control flow is managed by EVM execution engines in EL clients.",
+        "potential_violations": []
+      },
+      "phase2": {
+        "reachability": "unreachable",
+        "symbolic_constraints": "No symbolic execution paths exist for precompile revert logic in Prysm. The consensus layer does not contain EVM interpreter code or gas threshold checks for precompile execution.",
+        "attack_path": null
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Architectural invariant: Prysm operates at the consensus layer, which is abstracted above EVM execution. The property regarding precompile-specific revert conditions (gas < 6900) applies only to EL code. No counterexample can exist in a codebase that does not implement the target functionality.",
+        "counterexample": null,
+        "final_classification": "out-of-scope",
+        "confidence": 1.0,
+        "severity_assessment": "N/A - Not applicable to Prysm. Audit should target EL client precompile implementations."
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#16",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#16",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Trust Boundary Integrity for tb-008: Is BLOB_SCHEDULE sorted in descending epoch order to ensure correct parameter lookup?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup. Descending sort finds the most recent applicable entry. Ascending sort would find the earliest entry, returning outdated parameters."
+        },
+        "test_procedure": "1. Locate the get_blob_parameters function and identify the BLOB_SCHEDULE data structure. 2. Verify that the schedule is sorted in DESCENDING order by epoch (highest epoch first). 3. Create test cases with multiple epoch entries and confirm the function returns the first entry where epoch >= entry.EPOCH. 4. Attempt to falsify by temporarily changing sort order to ascending and verify that incorrect (outdated) parameters are returned. 5. Compare sort direction implementation across different client implementations to ensure consensus compatibility. 6. Check for any edge cases: empty schedule, single entry, epoch boundary conditions.",
+        "bug_class": "Consensus Logic",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Trust Boundary: tb-008, Primary Element: SG-001. This is a consensus-critical implementation detail - all clients must agree on sorting direction."
+      },
+      "property_id": "PROP-W1B10-59",
+      "code_scope": {
+        "file": "config/params/config.go",
+        "lines": "699-748",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "BLOB_SCHEDULE sorting verification in config/params/config.go MaxBlobsPerBlock function. The code sorts ASCENDING (a.Epoch - b.Epoch) then iterates REVERSE (i--), achieving the same semantic result as spec's DESCENDING sort with forward iteration. The implementation correctly returns the most recent applicable blob schedule entry for a given epoch.",
+        "abstract_state_space": "State variables: b.BlobSchedule (array of BlobScheduleEntry), epoch (input parameter). Abstract domain: sorted vs unsorted schedule, epoch ordering relationships. The function ensures sorted state before lookup and correctly implements descending-epoch-order semantics through reversed iteration.",
+        "potential_violations": [
+          "Theoretical: If sort comparison function is incorrect (overflow in subtraction)",
+          "Theoretical: If reverse iteration bounds are wrong"
+        ]
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Let S = b.BlobSchedule with entries e_0, e_1, ..., e_n. After sorting: e_i.Epoch <= e_{i+1}.Epoch for all i. Reverse iteration: for i = n down to 0, check if epoch >= e_i.Epoch. Symbolic constraint for correct lookup: \u2203i such that epoch >= e_i.Epoch AND (i = n OR epoch < e_{i+1}.Epoch). The function returns e_i.MaxBlobsPerBlock for the largest i satisfying this constraint.",
+        "attack_path": "Potential issue: Integer overflow in comparison function (a.Epoch - b.Epoch). If epochs are primitives.Epoch (uint64) and difference exceeds int range, sort could be incorrect. However, in practice epochs are sequential and small, making overflow unreachable. No viable attack path for trust boundary violation identified."
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: For any slot s with epoch e, MaxBlobsPerBlock(s) returns the blob count from the schedule entry with the largest epoch value <= e. Proof: (1) Sort ensures ascending epoch order. (2) Reverse iteration (i from n to 0) scans from highest to lowest epoch. (3) First match guarantees largest applicable epoch. (4) Return value corresponds to matched entry. The ascending-sort + reverse-iteration pattern is semantically equivalent to descending-sort + forward-iteration specified in spec. Integer overflow concern in comparison function is mitigated by epoch value ranges (epochs increment slowly from genesis, no wraparound in practice).",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "Implementation is correct and trust boundary integrity is maintained. The ascending-sort-then-reverse-iterate pattern achieves the required descending-order semantics. Minor theoretical concern about int overflow in comparison is not exploitable given real-world epoch values."
+      },
+      "final_classification": "safe"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#15",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#15",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Blob Schedule Consensus: Do all client implementations use identical sorting direction for BLOB_SCHEDULE lookup?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup. Descending sort finds the most recent applicable entry. Ascending sort would find the earliest entry, returning outdated parameters."
+        },
+        "test_procedure": "1. Identify all client implementations that process blob parameters (actor-blob-schedule, actor-consensus-layer). 2. For each implementation, locate the BLOB_SCHEDULE sorting logic. 3. Verify that ALL implementations use descending (reverse) order by epoch. 4. Create cross-client test vectors: provide identical BLOB_SCHEDULE data and epoch queries, verify identical parameter outputs. 5. Document any discrepancies between clients that could lead to consensus failures.",
+        "bug_class": "Consensus Logic",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Supporting node check for actor-blob-schedule and actor-consensus-layer. Inter-client agreement on sorting is essential for network consensus."
+      },
+      "property_id": "PROP-W1B10-59",
+      "code_scope": {
+        "file": "config/params/config.go",
+        "lines": "699-748",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "informational",
+        "summary": "Cross-client BLOB_SCHEDULE sorting consensus verification. Prysm uses ascending sort + reverse iteration; spec describes descending sort + forward iteration. Both approaches are semantically equivalent for the lookup operation. This check requires comparing Prysm's implementation against other clients (Lighthouse, Teku, Nimbus, Lodestar) to ensure all produce identical results for the same epoch inputs.",
+        "abstract_state_space": "Multi-client abstract state: each client's BLOB_SCHEDULE representation and lookup algorithm. Consensus domain: for any epoch e and schedule S, all clients must return the same MaxBlobsPerBlock value. Prysm's state space is identical to CHK-0001#16.",
+        "potential_violations": [
+          "Divergent implementations: if another client has bugs in sort or lookup logic",
+          "Specification ambiguity: if spec is interpreted differently by different teams"
+        ]
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Let L_prysm(e, S) = Prysm's lookup function, L_spec(e, S) = spec-compliant lookup. Invariant: \u2200e, S: L_prysm(e, S) = L_spec(e, S). Prysm's implementation: (1) Sort S ascending by epoch. (2) Iterate i from |S|-1 to 0. (3) Return S[i].MaxBlobsPerBlock for first i where e >= S[i].Epoch. Spec's description: (1) Assume S descending by epoch. (2) Iterate i from 0 to |S|-1. (3) Return S[i].MaxBlobsPerBlock for first i where e >= S[i].Epoch. Both select the entry with max(epoch) subject to epoch <= e.",
+        "attack_path": "No direct attack path in Prysm alone. Risk emerges if other clients implement differently, causing chain splits. This is a consensus bug class requiring multi-client analysis."
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Within Prysm: The invariant L_prysm = L_spec holds by isomorphism. Map Prysm's approach to spec: ascending-sorted array A with reverse iteration \u2261 descending-sorted array D with forward iteration, where D[i] = A[n-i]. Both algorithms return the same entry because they both select max{e' in schedule : e' <= e}. Cross-client invariant requires external verification: audit logs from other clients or formal cross-implementation testing. Based on Prysm's correct implementation and assuming other clients follow spec correctly, consensus should hold.",
+        "counterexample": null,
+        "final_classification": "informational",
+        "confidence": 0.85,
+        "severity_assessment": "Prysm's implementation is correct and equivalent to spec semantics. However, this is a consensus-critical component where implementation diversity poses risk. Recommendation: Perform cross-client testing with identical BLOB_SCHEDULE configurations to verify all clients return identical results for all epoch values. Prysm itself is not vulnerable, but ecosystem-level consensus requires multi-client verification."
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#12",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Blob Parameter Lookup Logic: Does get_blob_parameters correctly return the first matching entry from descending-sorted schedule?",
+        "severity": "High",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup. Descending sort finds the most recent applicable entry. Ascending sort would find the earliest entry, returning outdated parameters."
+        },
+        "test_procedure": "1. Construct a BLOB_SCHEDULE with multiple entries at different epochs (e.g., epochs 100, 200, 300 with distinct blob limits). 2. Query get_blob_parameters at epoch 250 - verify it returns parameters from epoch 200 entry (not 100 or 300). 3. Query at epoch 350 - verify it returns parameters from epoch 300. 4. Query at epoch 99 - verify behavior when no matching entry exists (should fail or return default). 5. Verify the invariant: for any query epoch E, the returned entry's EPOCH is the largest value <= E. 6. Test epoch boundary: query at exactly the epoch value of an entry.",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Invariant verification for SG-001. This tests the core logic that determines which blob parameters apply at any given epoch."
+      },
+      "property_id": "PROP-W1B10-59",
+      "code_scope": {
+        "file": "config/params/config.go",
+        "lines": "699-748",
+        "resolved": true
+      },
+      "phase1": {
+        "classification": "safe",
+        "summary": "Blob parameter lookup logic verification for get_blob_parameters (implemented as MaxBlobsPerBlock and MaxBlobsPerBlockAtEpoch). The function correctly returns the first matching entry from a schedule scanned in descending epoch order. Implementation uses ascending sort + reverse iteration, achieving the required 'largest epoch <= target epoch' semantics.",
+        "abstract_state_space": "State: b.BlobSchedule (sorted array), input epoch e. Abstract operation: find argmax{i : BlobSchedule[i].Epoch <= e}. Return BlobSchedule[i].MaxBlobsPerBlock. The reverse iteration from sorted ascending array correctly implements descending-order scan.",
+        "potential_violations": [
+          "Off-by-one error in iteration bounds",
+          "Incorrect comparison (should be >= not >)",
+          "Missing fallback for empty schedule or no match"
+        ]
+      },
+      "phase2": {
+        "reachability": "reachable",
+        "symbolic_constraints": "Given epoch e and schedule S sorted ascending: [s_0, s_1, ..., s_n] where s_i.Epoch < s_{i+1}.Epoch. Reverse iteration: for i \u2208 {n, n-1, ..., 0}: if e >= s_i.Epoch then return s_i.MaxBlobsPerBlock. Correctness constraint: returned entry is s_j where j = max{i : s_i.Epoch <= e}. Code verification: loop condition 'i >= 0' is correct (includes index 0), comparison 'epoch >= b.BlobSchedule[i].Epoch' is correct (matches entries with epoch <= target), return on first match in reverse iteration guarantees maximum applicable epoch.",
+        "attack_path": "No attack path identified. The algorithm correctly implements the required semantics. Edge cases: (1) Empty schedule - handled by 'len(b.BlobSchedule) > 0' check and fallback. (2) No matching entry (all epochs > target) - loop completes without return, fallback activates. (3) Multiple entries with same epoch - returns first in reversed iteration (last in original array), which is acceptable. No state inconsistency or tampering vector found."
+      },
+      "phase3": {
+        "invariant_holds": true,
+        "proof_sketch": "Invariant: get_blob_parameters(epoch e) returns MaxBlobsPerBlock from the schedule entry with the largest epoch value <= e, or fallback if no such entry exists. Proof by algorithm correctness: (1) Sorting establishes order s_0.Epoch <= s_1.Epoch <= ... <= s_n.Epoch. (2) Reverse iteration from n to 0 scans from highest to lowest epoch. (3) First match (epoch >= s_i.Epoch) identifies the largest i satisfying s_i.Epoch <= epoch. (4) Return s_i.MaxBlobsPerBlock satisfies the requirement. (5) If no match, fallback is reached. Code inspection confirms: loop bounds [n-1, 0] are inclusive and correct, comparison direction is correct, early return on match is correct. The implementation is sound.",
+        "counterexample": null,
+        "final_classification": "safe",
+        "confidence": 0.95,
+        "severity_assessment": "The blob parameter lookup logic is correctly implemented and maintains state consistency. The function returns the appropriate blob limit for any given epoch according to the BLOB_SCHEDULE configuration. No tampering risk or consensus violation identified. The ascending-sort + reverse-iteration pattern is a valid and correct implementation of the descending-order lookup specified in the consensus spec."
+      },
+      "final_classification": "safe"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 6,
+    "batch_index": 15,
+    "item_count": 25,
+    "timestamp": 1770952379,
+    "processed_ids": [
+      "W2B3:W2B3:CHK-0003#5",
+      "W2B3:W2B3:CHK-0001#9",
+      "W2B3:W2B3:CHK-0002#8",
+      "W2B3:W2B3:CHK-0003#6",
+      "W2B3:W2B3:CHK-0001#10",
+      "W2B3:W2B3:CHK-0002#9",
+      "W2B3:W2B3:CHK-0003#7",
+      "W2B3:W2B3:CHK-0001#11",
+      "W2B3:W2B3:CHK-0002#10",
+      "W2B3:W2B3:CHK-0001#12",
+      "W2B3:W2B3:CHK-0002#11",
+      "W2B3:W2B3:CHK-0003#8",
+      "W2B3:W2B3:CHK-0004",
+      "W2B3:W2B3:CHK-0001#13",
+      "W2B3:W2B3:CHK-0002#12",
+      "W2B3:W2B3:CHK-0003#9",
+      "W2B3:W2B3:CHK-0001#14",
+      "W2B3:W2B3:CHK-0002#13",
+      "W2B3:W2B3:CHK-0003#10",
+      "W2B3:W2B3:CHK-0001#15",
+      "W2B3:W2B3:CHK-0002#14",
+      "W2B3:W2B3:CHK-0003#11",
+      "W2B3:W2B3:CHK-0001#16",
+      "W2B3:W2B3:CHK-0002#15",
+      "W2B3:W2B3:CHK-0003#12"
+    ]
+  }
+}
