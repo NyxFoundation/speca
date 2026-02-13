@@ -48,6 +48,7 @@ class PhaseConfig(BaseModel):
     # Execution configuration
     workdir: str | None = None
     timeout_seconds: int = 3600
+    model: str | None = None
 
     # Queue item configuration
     item_id_field: str = "check_id"
@@ -208,10 +209,11 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         depends_on=["02"],
         input_patterns=["outputs/02_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=25,
+        max_batch_size=10,
         item_id_field="check_id",
         result_key="audit_items",
         output_prefix="AUDITMAP",
+        model="sonnet",
         # Phase 03 is the most expensive — tighter circuit breaker
         circuit_breaker_threshold=5,
         max_total_retries=20,

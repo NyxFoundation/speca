@@ -130,7 +130,7 @@ class TestPhaseConfig:
     def test_phase03_config_values(self):
         cfg = PHASE_CONFIGS["03"]
         assert cfg.batch_strategy == "count"
-        assert cfg.max_batch_size == 25
+        assert cfg.max_batch_size == 10
         assert cfg.result_key == "audit_items"
         assert cfg.output_prefix == "AUDITMAP"
 
@@ -2074,6 +2074,30 @@ class TestTryRecoverPartial(unittest.TestCase):
             log_path.unlink()
 
 
+class TestClaudeRunnerCommand(unittest.TestCase):
+    """Tests for ClaudeRunner command building."""
+
+    def test_includes_model_when_configured(self):
+        from orchestrator.runner import ClaudeRunner
+        from orchestrator.config import get_phase_config
+        config = get_phase_config("03")
+        sem = asyncio.Semaphore(1)
+        runner = ClaudeRunner(config, sem)
+        cmd = runner._build_cmd("hello")
+        assert "--model" in cmd
+        model_index = cmd.index("--model")
+        assert cmd[model_index + 1] == "sonnet"
+
+    def test_omits_model_when_not_configured(self):
+        from orchestrator.runner import ClaudeRunner
+        from orchestrator.config import get_phase_config
+        config = get_phase_config("02")
+        sem = asyncio.Semaphore(1)
+        runner = ClaudeRunner(config, sem)
+        cmd = runner._build_cmd("hello")
+        assert "--model" not in cmd
+
+
 # =========================================================================
 # Usage Limit Detection tests
 # =========================================================================
@@ -2326,4 +2350,3 @@ class TestUsageLimitDetection:
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
         assert anomalies == [], f"False positive from user content: {anomalies}"
-

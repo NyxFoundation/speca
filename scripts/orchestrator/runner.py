@@ -359,13 +359,7 @@ class ClaudeRunner:
         )
 
         # Build command
-        cmd = [
-            "claude",
-            "--dangerously-skip-permissions",
-            "--verbose",
-            "--output-format", "stream-json",
-            "-p", prompt_content,
-        ]
+        cmd = self._build_cmd(prompt_content)
 
         # Build environment
         env = self._build_env(
@@ -643,6 +637,19 @@ class ClaudeRunner:
         for key, value in kwargs.items():
             env[key.upper()] = str(value)
         return env
+
+    def _build_cmd(self, prompt_content: str) -> list[str]:
+        """Build the Claude CLI command."""
+        cmd = [
+            "claude",
+            "--dangerously-skip-permissions",
+            "--verbose",
+            "--output-format", "stream-json",
+            "-p", prompt_content,
+        ]
+        if self.config.model:
+            cmd.extend(["--model", self.config.model])
+        return cmd
 
     def _save_json(self, path: Path, data: Any) -> None:
         """Save JSON data to file."""
