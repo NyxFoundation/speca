@@ -144,8 +144,8 @@ class TestPhaseConfig:
     def test_phase03_tighter_circuit_breaker(self):
         """Phase 03 should have tighter circuit breaker thresholds."""
         cfg = PHASE_CONFIGS["03"]
-        assert cfg.circuit_breaker_threshold == 3
-        assert cfg.max_total_retries == 10
+        assert cfg.circuit_breaker_threshold == 5
+        assert cfg.max_total_retries == 20
         assert cfg.max_empty_results == 5
 
 
@@ -848,9 +848,9 @@ class TestLogAnomalyDetector:
         assert any("api_error" in a for a in anomalies)
 
     def test_detects_excessive_tool_calls(self):
-        """More than 50 tool_use blocks should be flagged."""
+        """More than 200 tool_use blocks should be flagged."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            for _ in range(60):
+            for _ in range(210):
                 f.write('{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
@@ -859,12 +859,12 @@ class TestLogAnomalyDetector:
 
     def test_below_tool_call_threshold_no_anomaly(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            for _ in range(10):
+            for _ in range(100):
                 f.write('{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]}}\n')
             f.flush()
             anomalies = LogAnomalyDetector.scan_log(f.name)
         os.unlink(f.name)
-        # 10 < 50 threshold, so no anomaly
+        # 100 < 200 threshold, so no anomaly
         assert not any("excessive_tool_calls" in a for a in anomalies)
 
     def test_nonexistent_file_returns_empty(self):
@@ -1036,26 +1036,26 @@ class TestResultCollector:
 class TestCircuitBreakerIntegration:
     """Test circuit breaker with real PhaseConfig values."""
 
-    def test_phase03_config_trips_at_3_consecutive(self):
-        """Phase 03 has circuit_breaker_threshold=3."""
+    def test_phase03_config_trips_at_5_consecutive(self):
+        """Phase 03 has circuit_breaker_threshold=5."""
         config = get_phase_config("03")
         cb = CircuitBreaker(config)
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(cb.record_failure())
-            loop.run_until_complete(cb.record_failure())
+            for _ in range(4):
+                loop.run_until_complete(cb.record_failure())
             with pytest.raises(CircuitBreakerTripped):
                 loop.run_until_complete(cb.record_failure())
         finally:
             loop.close()
 
-    def test_phase03_config_trips_at_10_retries(self):
-        """Phase 03 has max_total_retries=10."""
+    def test_phase03_config_trips_at_20_retries(self):
+        """Phase 03 has max_total_retries=20."""
         config = get_phase_config("03")
         cb = CircuitBreaker(config)
         loop = asyncio.new_event_loop()
         try:
-            for _ in range(9):
+            for _ in range(19):
                 loop.run_until_complete(cb.record_retry())
                 # Reset consecutive failures to avoid that threshold
                 loop.run_until_complete(cb.record_success())
@@ -1639,9 +1639,9 @@ class TestCostTrackerIntegration:
         assert tracker.max_budget_usd == 30.0
 
     def test_phase03_log_anomaly_threshold(self):
-        """Phase 03 should have log_anomaly_threshold=2."""
+        """Phase 03 should have log_anomaly_threshold=3."""
         config = get_phase_config("03")
-        assert config.log_anomaly_threshold == 2
+        assert config.log_anomaly_threshold == 3
 
     def test_default_phase_budget(self):
         """Default phases should have max_budget_usd=50.0."""
@@ -1881,3 +1881,449 @@ class TestGitHubStepSummary:
         finally:
             del os.environ["GITHUB_STEP_SUMMARY"]
             os.unlink(summary_file)
+
+
+# =====================================================================
+# Partial Result Recovery Tests
+# =====================================================================
+import unittest
+from pathlib import Path
+
+
+class TestCheckLogResultStatus(unittest.TestCase):
+    """Tests for ClaudeRunner._check_log_result_status."""
+
+    def test_returns_none_for_nonexistent_file(self):
+        """Should return None if the log file does not exist."""
+        from orchestrator.runner import ClaudeRunner
+        result = ClaudeRunner._check_log_result_status(Path("/nonexistent/file.jsonl"))
+        assert result is None
+
+    def test_returns_none_for_log_without_result(self):
+        """Should return None if the log has no result event."""
+        from orchestrator.runner import ClaudeRunner
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"assistant","message":{"content":"hello"}}\n')
+            f.write('{"type":"user","message":{"content":"world"}}\n')
+            log_path = Path(f.name)
+        try:
+            result = ClaudeRunner._check_log_result_status(log_path)
+            assert result is None
+        finally:
+            log_path.unlink()
+
+    def test_returns_result_event_success_no_error(self):
+        """Should return the result event for a normal success."""
+        from orchestrator.runner import ClaudeRunner
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"assistant","message":{"content":"working"}}\n')
+            f.write('{"type":"result","subtype":"success","is_error":false,"duration_ms":120000}\n')
+            log_path = Path(f.name)
+        try:
+            result = ClaudeRunner._check_log_result_status(log_path)
+            assert result is not None
+            assert result["subtype"] == "success"
+            assert result["is_error"] is False
+        finally:
+            log_path.unlink()
+
+    def test_returns_result_event_success_with_error(self):
+        """Should return the result event for is_error=true, subtype=success (max_turns)."""
+        from orchestrator.runner import ClaudeRunner
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"assistant","message":{"content":"working"}}\n')
+            f.write('{"type":"result","subtype":"success","is_error":true,"duration_ms":488000}\n')
+            log_path = Path(f.name)
+        try:
+            result = ClaudeRunner._check_log_result_status(log_path)
+            assert result is not None
+            assert result["subtype"] == "success"
+            assert result["is_error"] is True
+            assert result["duration_ms"] == 488000
+        finally:
+            log_path.unlink()
+
+    def test_returns_result_event_error_subtype(self):
+        """Should return the result event for subtype=error."""
+        from orchestrator.runner import ClaudeRunner
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"error","is_error":true,"duration_ms":5000}\n')
+            log_path = Path(f.name)
+        try:
+            result = ClaudeRunner._check_log_result_status(log_path)
+            assert result is not None
+            assert result["subtype"] == "error"
+        finally:
+            log_path.unlink()
+
+    def test_returns_last_result_when_multiple(self):
+        """Should return the last result event if multiple exist."""
+        from orchestrator.runner import ClaudeRunner
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"error","is_error":true,"duration_ms":1000}\n')
+            f.write('{"type":"result","subtype":"success","is_error":true,"duration_ms":488000}\n')
+            log_path = Path(f.name)
+        try:
+            result = ClaudeRunner._check_log_result_status(log_path)
+            assert result is not None
+            assert result["subtype"] == "success"
+            assert result["duration_ms"] == 488000
+        finally:
+            log_path.unlink()
+
+
+class TestTryRecoverPartial(unittest.TestCase):
+    """Tests for ClaudeRunner._try_recover_partial."""
+
+    def _make_runner(self):
+        from orchestrator.runner import ClaudeRunner
+        from orchestrator.config import get_phase_config
+        config = get_phase_config("03")
+        sem = asyncio.Semaphore(1)
+        return ClaudeRunner(config, sem)
+
+    def test_returns_none_when_no_result_in_log(self):
+        """Should return None if log has no result event (killed process)."""
+        runner = self._make_runner()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"assistant","message":{"content":"hello"}}\n')
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is None
+        finally:
+            log_path.unlink()
+
+    def test_returns_none_when_subtype_is_error(self):
+        """Should return None if subtype=error (genuine failure)."""
+        runner = self._make_runner()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"error","is_error":true,"duration_ms":5000}\n')
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is None
+        finally:
+            log_path.unlink()
+
+    def test_recovers_from_output_file(self):
+        """Should recover results from output file when subtype=success, is_error=true."""
+        runner = self._make_runner()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"success","is_error":true,"duration_ms":488000}\n')
+            log_path = Path(f.name)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"audit_items": [{"id": "A1", "status": "done"}]}, f)
+            result_path = Path(f.name)
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is not None
+            assert len(result) == 1
+            assert result[0]["id"] == "A1"
+        finally:
+            log_path.unlink()
+            if result_path.exists():
+                result_path.unlink()
+
+    def test_recovers_from_log_fallback(self):
+        """Should recover results from log inline response when output file missing."""
+        runner = self._make_runner()
+        result_json = json.dumps([{"id": "B1", "classification": "safe"}])
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"assistant","message":{"content":"working"}}\n')
+            f.write(json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": True,
+                "duration_ms": 488000,
+                "result": f"Here are the results:\n```json\n{result_json}\n```"
+            }) + "\n")
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is not None
+            assert len(result) == 1
+            assert result[0]["id"] == "B1"
+        finally:
+            log_path.unlink()
+
+    def test_returns_none_when_no_parseable_results(self):
+        """Should return None if subtype=success but no results can be parsed."""
+        runner = self._make_runner()
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"success","is_error":true,"duration_ms":488000}\n')
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is None
+        finally:
+            log_path.unlink()
+
+
+# =========================================================================
+# Usage Limit Detection tests
+# =========================================================================
+
+class TestUsageLimitDetection:
+    """Tests for usage limit detection across watchdog.py and runner.py.
+
+    When the Claude API quota is exhausted ("You're out of extra usage"),
+    the system should:
+      1. Detect the pattern in log lines (both real-time and post-hoc)
+      2. Treat it as a FATAL anomaly (immediate stop, no retries)
+      3. Trip the circuit breaker so all workers stop
+    """
+
+    # --- _extract_scannable_text: result event with usage limit ---
+
+    def test_extract_scannable_text_result_with_usage_limit(self):
+        """A result event with is_error=true containing usage limit text
+        should be returned as scannable text."""
+        from orchestrator.watchdog import _extract_scannable_text
+
+        line = json.dumps({
+            "type": "result",
+            "is_error": True,
+            "subtype": "success",
+            "result": "You're out of extra usage. Your usage resets February 14 at 12:00 AM."
+        })
+        text, is_tool_use = _extract_scannable_text(line)
+        assert text is not None
+        assert "out of extra usage" in text.lower() or "resets" in text.lower()
+        assert is_tool_use is False
+
+    def test_extract_scannable_text_result_no_error_not_scanned(self):
+        """A result event without is_error should NOT be scanned."""
+        from orchestrator.watchdog import _extract_scannable_text
+
+        line = json.dumps({
+            "type": "result",
+            "is_error": False,
+            "result": "You're out of extra usage."
+        })
+        text, _ = _extract_scannable_text(line)
+        # Non-error result should not be scanned
+        assert text is None
+
+    # --- _ANOMALY_PATTERNS: usage_limit pattern matching ---
+
+    def test_usage_limit_pattern_matches_out_of_extra_usage(self):
+        """The usage_limit pattern should match 'out of extra usage'."""
+        from orchestrator.watchdog import _ANOMALY_PATTERNS
+
+        usage_patterns = [(n, p) for n, p in _ANOMALY_PATTERNS if n == "usage_limit"]
+        assert len(usage_patterns) == 1
+        _, pattern = usage_patterns[0]
+        assert pattern.search("You're out of extra usage")
+
+    def test_usage_limit_pattern_matches_out_of_usage(self):
+        """The usage_limit pattern should match 'out of usage'."""
+        from orchestrator.watchdog import _ANOMALY_PATTERNS
+
+        usage_patterns = [(n, p) for n, p in _ANOMALY_PATTERNS if n == "usage_limit"]
+        _, pattern = usage_patterns[0]
+        assert pattern.search("You're out of usage")
+
+    def test_usage_limit_pattern_matches_resets(self):
+        """The usage_limit pattern should match 'resets February 14'."""
+        from orchestrator.watchdog import _ANOMALY_PATTERNS
+
+        usage_patterns = [(n, p) for n, p in _ANOMALY_PATTERNS if n == "usage_limit"]
+        _, pattern = usage_patterns[0]
+        assert pattern.search("Your usage resets February 14 at 12:00 AM")
+
+    def test_usage_limit_pattern_matches_usage_limit(self):
+        """The usage_limit pattern should match 'usage limit'."""
+        from orchestrator.watchdog import _ANOMALY_PATTERNS
+
+        usage_patterns = [(n, p) for n, p in _ANOMALY_PATTERNS if n == "usage_limit"]
+        _, pattern = usage_patterns[0]
+        assert pattern.search("usage limit exceeded")
+
+    # --- _FATAL_PATTERNS: usage_limit is fatal ---
+
+    def test_usage_limit_is_fatal(self):
+        """usage_limit should be in _FATAL_PATTERNS."""
+        from orchestrator.watchdog import _FATAL_PATTERNS
+
+        assert "usage_limit" in _FATAL_PATTERNS
+
+    # --- LogWatcher: fatal detection triggers immediate stop ---
+
+    def test_logwatcher_fatal_immediate_stop(self):
+        """A single usage_limit anomaly should trigger immediate stop
+        regardless of anomaly_threshold."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "usage_limit.log.jsonl")
+            with open(log_path, "w") as f:
+                # Only ONE usage limit result event — should still trigger stop
+                f.write(json.dumps({
+                    "type": "result",
+                    "is_error": True,
+                    "subtype": "success",
+                    "result": "You're out of extra usage. Your usage resets February 14 at 12:00 AM."
+                }) + "\n")
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(
+                    poll_interval=0.05,
+                    anomaly_threshold=100,  # Very high threshold — should still stop
+                ),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is True, (
+                f"Expected immediate stop for fatal anomaly. Anomalies: {watcher.anomalies}"
+            )
+            assert watcher._fatal_detected is True
+            assert any("usage_limit" in a for a in watcher.anomalies)
+
+    def test_logwatcher_summary_includes_fatal_flag(self):
+        """get_summary should include fatal_detected field."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "fatal_summary.log.jsonl")
+            with open(log_path, "w") as f:
+                f.write(json.dumps({
+                    "type": "result",
+                    "is_error": True,
+                    "subtype": "success",
+                    "result": "You're out of extra usage."
+                }) + "\n")
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(poll_interval=0.05),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            summary = watcher.get_summary()
+            assert "fatal_detected" in summary
+            assert summary["fatal_detected"] is True
+
+    def test_logwatcher_non_fatal_no_immediate_stop(self):
+        """Non-fatal anomalies (e.g. rate_limit_error) should NOT trigger
+        immediate stop when below threshold."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "non_fatal.log.jsonl")
+            with open(log_path, "w") as f:
+                # One rate limit error — not fatal, below threshold
+                f.write(json.dumps({
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "429 Too Many Requests"}
+                }) + "\n")
+
+            watcher = LogWatcher(
+                log_path,
+                config=LogWatcherConfig(
+                    poll_interval=0.05,
+                    anomaly_threshold=100,
+                ),
+            )
+            loop = asyncio.new_event_loop()
+            try:
+                async def run_and_stop():
+                    task = asyncio.create_task(watcher.watch())
+                    await asyncio.sleep(0.3)
+                    watcher.stop()
+                    await task
+
+                loop.run_until_complete(run_and_stop())
+            finally:
+                loop.close()
+
+            assert watcher.should_stop is False
+            assert watcher._fatal_detected is False
+
+    # --- LogAnomalyDetector: usage_limit detection ---
+
+    def test_log_anomaly_detector_detects_usage_limit(self):
+        """LogAnomalyDetector.scan_log should detect usage_limit in result events."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({
+                "type": "result",
+                "is_error": True,
+                "subtype": "success",
+                "result": "You're out of extra usage. Your usage resets February 14 at 12:00 AM."
+            }) + "\n")
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert any("usage_limit" in a for a in anomalies), f"Expected usage_limit anomaly, got: {anomalies}"
+
+    def test_log_anomaly_detector_has_fatal_anomaly_true(self):
+        """has_fatal_anomaly should return True for usage_limit anomalies."""
+        anomalies = [
+            "rate_limit_error: 429 Too Many Requests",
+            "usage_limit: You're out of extra usage. Your usage resets February 14",
+        ]
+        assert LogAnomalyDetector.has_fatal_anomaly(anomalies) is True
+
+    def test_log_anomaly_detector_has_fatal_anomaly_false(self):
+        """has_fatal_anomaly should return False when no fatal patterns present."""
+        anomalies = [
+            "rate_limit_error: 429 Too Many Requests",
+            "api_error: APIError: InternalServerError",
+        ]
+        assert LogAnomalyDetector.has_fatal_anomaly(anomalies) is False
+
+    def test_log_anomaly_detector_has_fatal_anomaly_empty(self):
+        """has_fatal_anomaly should return False for empty list."""
+        assert LogAnomalyDetector.has_fatal_anomaly([]) is False
+
+    # --- Integration: no false positive from user content ---
+
+    def test_usage_limit_not_triggered_by_user_content(self):
+        """User content mentioning 'usage limit' should NOT trigger detection."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            line = json.dumps({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_test",
+                        "content": "Check usage limit handling: verify that out of extra usage errors are caught"
+                    }]
+                }
+            })
+            f.write(line + "\n")
+            f.flush()
+            anomalies = LogAnomalyDetector.scan_log(f.name)
+        os.unlink(f.name)
+        assert anomalies == [], f"False positive from user content: {anomalies}"
+

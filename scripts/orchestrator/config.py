@@ -213,11 +213,11 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         result_key="audit_items",
         output_prefix="AUDITMAP",
         # Phase 03 is the most expensive — tighter circuit breaker
-        circuit_breaker_threshold=3,
-        max_total_retries=10,
+        circuit_breaker_threshold=5,
+        max_total_retries=20,
         max_empty_results=5,
         max_budget_usd=30.0,
-        log_anomaly_threshold=2,
+        log_anomaly_threshold=3,
     ),
 
     "04": PhaseConfig(
