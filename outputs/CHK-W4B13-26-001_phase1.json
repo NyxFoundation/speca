@@ -1,0 +1,154 @@
+{
+  "check_id": "CHK-W4B13-26-001",
+  "property_id": "PROP-W4B13-26",
+  "phase1_abstract_interpretation": {
+    "summary": "SECURE: The gossip deduplication logic for data_column_sidecar messages correctly uses the complete composite key (slot, proposer_index, sidecar.index) to prevent equivocation attacks. The implementation properly prevents acceptance of conflicting sidecars with identical keys.",
+    "code_location": {
+      "primary_file": "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/sync/validate_data_column.go",
+      "deduplication_check": "lines 151-155",
+      "cache_key_computation": "lines 233-238",
+      "cache_marking": "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/sync/subscriber_data_column_sidecar.go lines 73"
+    },
+    "abstract_domains_analysis": {
+      "variables": [
+        {
+          "name": "slot",
+          "type": "primitives.Slot (uint64)",
+          "domain": "[0, 2^64-1]",
+          "source": "roDataColumn.Slot() -> roDataColumn.SignedBlockHeader.Header.Slot",
+          "usage": "First component of composite deduplication key"
+        },
+        {
+          "name": "proposerIndex",
+          "type": "primitives.ValidatorIndex (uint64)",
+          "domain": "[0, 2^64-1]",
+          "source": "roDataColumn.ProposerIndex() -> roDataColumn.SignedBlockHeader.Header.ProposerIndex",
+          "usage": "Second component of composite deduplication key"
+        },
+        {
+          "name": "index",
+          "type": "uint64",
+          "domain": "[0, NumberOfColumns-1] where NumberOfColumns=128",
+          "source": "roDataColumn.DataColumnSidecar.Index (from protobuf field 'index')",
+          "usage": "Third component of composite deduplication key"
+        },
+        {
+          "name": "key",
+          "type": "string (byte array representation)",
+          "domain": "96-byte concatenation: Bytes32(slot) || Bytes32(proposerIndex) || Bytes32(index)",
+          "computation": "computeCacheKey(slot, proposerIndex, index)",
+          "usage": "Composite key for seenDataColumnCache lookup"
+        },
+        {
+          "name": "seenDataColumnCache",
+          "type": "*slotAwareCache",
+          "domain": "Map[string]bool with slot-based eviction",
+          "operations": [
+            "Get(key) -> (value, found)",
+            "Add(slot, key, true)"
+          ],
+          "usage": "Tracks seen data column sidecars to prevent duplicates"
+        }
+      ],
+      "data_flow": [
+        {
+          "step": 1,
+          "operation": "Extract components",
+          "details": "slot = roDataColumn.Slot(), proposerIndex = roDataColumn.ProposerIndex(), index = roDataColumn.DataColumnSidecar.Index"
+        },
+        {
+          "step": 2,
+          "operation": "Compute composite key",
+          "details": "key = computeCacheKey(slot, proposerIndex, index) = Bytes32(slot) || Bytes32(proposerIndex) || Bytes32(index)",
+          "key_size": "96 bytes total (32 bytes per component)"
+        },
+        {
+          "step": 3,
+          "operation": "Check cache",
+          "details": "hasSeenDataColumnIndex(slot, proposerIndex, index) -> seenDataColumnCache.Get(key)",
+          "result": "If found: return ValidationIgnore (line 154), else: continue validation"
+        },
+        {
+          "step": 4,
+          "operation": "Mark as seen (after validation)",
+          "details": "setSeenDataColumnIndex(slot, proposerIndex, index) called in receiveDataColumnSidecars (subscriber_data_column_sidecar.go:73)",
+          "timing": "Only after full validation passes, before sending to chain"
+        }
+      ]
+    },
+    "state_anomalies_found": [],
+    "security_properties_verified": [
+      {
+        "property": "Complete Composite Key Usage",
+        "status": "VERIFIED",
+        "evidence": "The computeCacheKey function at lines 233-238 correctly concatenates all three components: slot (line 236), proposerIndex (line 237), and index (line 238) using 32-byte encoding for each.",
+        "code_snippet": "func computeCacheKey(slot primitives.Slot, proposerIndex primitives.ValidatorIndex, index uint64) string {\n\tkey := make([]byte, 0, 96)\n\tkey = append(key, bytesutil.Bytes32(uint64(slot))...)\n\tkey = append(key, bytesutil.Bytes32(uint64(proposerIndex))...)\n\tkey = append(key, bytesutil.Bytes32(index)...)\n\treturn string(key)\n}"
+      },
+      {
+        "property": "Equivocation Prevention",
+        "status": "VERIFIED",
+        "evidence": "Two sidecars with identical (slot, proposerIndex, index) will produce identical cache keys. The first will pass validation and be marked as seen. The second will be caught by hasSeenDataColumnIndex check at line 153 and return ValidationIgnore.",
+        "attack_scenario_blocked": "If an attacker sends two different sidecars with same (slot, proposerIndex, index) but different content, the second will be ignored, preventing equivocation."
+      },
+      {
+        "property": "Distinct Indices Acceptance",
+        "status": "VERIFIED",
+        "evidence": "Two sidecars with same (slot, proposerIndex) but different index values will produce different cache keys due to the third component. Both will be accepted as they represent different data columns from the same block.",
+        "edge_case_handled": "Sidecars with indices i1 != i2 for same (slot, proposer) are correctly treated as distinct and both accepted."
+      },
+      {
+        "property": "Timing of Cache Marking",
+        "status": "VERIFIED",
+        "evidence": "The cache is marked AFTER full validation passes (see subscriber_data_column_sidecar.go:73 in receiveDataColumnSidecars), not during validation. This prevents partial state pollution from invalid sidecars.",
+        "validation_order": "Validation check (line 153) -> Full validation -> Cache marking (subscriber:73) -> Chain storage"
+      },
+      {
+        "property": "Spec Compliance",
+        "status": "VERIFIED",
+        "evidence": "Line 151-152 comment references the Ethereum consensus spec: '[IGNORE] The sidecar is the first sidecar for the tuple `(block_header.slot, block_header.proposer_index, sidecar.index)`'. The implementation matches this requirement exactly.",
+        "spec_reference": "https://github.com/ethereum/consensus-specs/blob/master/specs/fulu/p2p-interface.md#data_column_sidecar_subnet_id"
+      }
+    ],
+    "potential_issues": [],
+    "abstract_state_transitions": {
+      "initial_state": {
+        "cache": "Empty or contains previously seen (slot, proposerIndex, index) tuples",
+        "incoming_sidecar": "New data column sidecar with components (S, P, I)"
+      },
+      "state_transitions": [
+        {
+          "condition": "Sidecar has (S, P, I) already in cache",
+          "action": "Return ValidationIgnore immediately (line 154)",
+          "next_state": "Cache unchanged, sidecar rejected, no equivocation possible"
+        },
+        {
+          "condition": "Sidecar has novel (S, P, I) AND passes all validation checks",
+          "action": "Accept sidecar, mark (S, P, I) as seen, store in chain",
+          "next_state": "Cache contains (S, P, I), future duplicates will be ignored"
+        },
+        {
+          "condition": "Sidecar has novel (S, P, I) BUT fails validation",
+          "action": "Reject sidecar, do NOT mark as seen",
+          "next_state": "Cache unchanged, allows valid sidecar with same (S, P, I) to be accepted later"
+        }
+      ],
+      "invariants": [
+        "For any (S, P, I) tuple, at most one data column sidecar will be accepted and stored",
+        "Different indices I1 != I2 for same (S, P) are treated as independent entries",
+        "Cache key collision only occurs for exact (S, P, I) match due to 96-byte unique encoding"
+      ]
+    },
+    "comparison_with_blob_validation": {
+      "blob_sidecar_deduplication": "target_workspace/beacon-chain/sync/validate_blob.go lines 77-80",
+      "blob_cache_key": "Similar pattern using (slot, proposerIndex, blobIndex) composite key",
+      "consistency": "VERIFIED - Both blob and data column validation use identical three-component deduplication strategy",
+      "evidence": "Both use hasSeenBlobIndex and hasSeenDataColumnIndex with same parameter structure"
+    },
+    "formal_verification_notes": {
+      "key_uniqueness": "The 96-byte key (32 bytes × 3 components) ensures no collisions for distinct tuples due to fixed-size encoding via bytesutil.Bytes32",
+      "no_integer_overflow": "All components (slot, proposerIndex, index) are uint64, bounded by 2^64-1. Bytes32 conversion handles full range without overflow.",
+      "no_unbounded_growth": "Cache is slotAwareCache which evicts old entries by slot, preventing unbounded memory growth",
+      "atomicity": "Cache operations (Get/Add) are protected by the underlying cache implementation, no race conditions in deduplication check"
+    }
+  }
+}

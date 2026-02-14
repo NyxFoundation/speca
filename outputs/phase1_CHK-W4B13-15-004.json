@@ -1,0 +1,282 @@
+{
+  "check_id": "CHK-W4B13-15-004",
+  "property_id": "PROP-W4B13-15",
+  "title": "Does the beacon node correctly apply the epoch-dependent blob parameter limits during block validation?",
+  "phase1_abstract_interpretation": {
+    "summary": "The beacon node correctly implements epoch-dependent blob parameter limits through a NetworkSchedule-based lookup system. The validation correctly uses MaxBlobsPerBlock(slot) which internally converts slot to epoch and retrieves the appropriate limit from the network schedule. However, there is a potential race condition at epoch boundaries where the slot-to-epoch conversion and schedule lookup are not atomic, creating a small window for state space anomalies.",
+    "state_anomalies_found": [
+      {
+        "anomaly_type": "TOCTOU_RACE_CONDITION",
+        "severity": "MEDIUM",
+        "location": "validateDenebBeaconBlock function (beacon-chain/sync/validate_beacon_blocks.go:367-383)",
+        "description": "Epoch boundary race condition in blob limit validation",
+        "abstract_state_analysis": {
+          "variables": [
+            {
+              "name": "blk.Slot()",
+              "type": "primitives.Slot",
+              "domain": "ABSTRACT_RANGE",
+              "range": {
+                "min": "genesis_slot",
+                "max": "unbounded",
+                "constraints": ["monotonically_increasing", "uint64"]
+              }
+            },
+            {
+              "name": "epoch",
+              "type": "primitives.Epoch",
+              "domain": "DERIVED_VALUE",
+              "derivation": "slot.DivSlot(SlotsPerEpoch)",
+              "range": {
+                "min": "0",
+                "max": "unbounded",
+                "constraints": ["uint64"]
+              }
+            },
+            {
+              "name": "maxBlobsPerBlock",
+              "type": "int",
+              "domain": "SCHEDULE_LOOKUP",
+              "range": {
+                "min": "0",
+                "max": "network_schedule_max_blobs",
+                "constraints": ["epoch_dependent", "non_atomic_lookup"]
+              }
+            },
+            {
+              "name": "len(commits)",
+              "type": "int",
+              "domain": "ATTACKER_CONTROLLED",
+              "range": {
+                "min": "0",
+                "max": "unbounded_until_validation",
+                "constraints": ["controlled_by_block_proposer"]
+              }
+            }
+          ],
+          "operations": [
+            {
+              "operation": "MaxBlobsPerBlock(slot)",
+              "source": "beacon-chain/sync/validate_beacon_blocks.go:378",
+              "transformation": "slot -> epoch -> network_schedule_lookup -> max_blobs",
+              "atomicity": "NON_ATOMIC",
+              "steps": [
+                "slot.DivSlot(SlotsPerEpoch) -> epoch",
+                "networkSchedule.epochIdx(epoch) -> index",
+                "networkSchedule.safeIndex(index) -> NetworkScheduleEntry",
+                "NetworkScheduleEntry.MaxBlobsPerBlock -> limit"
+              ]
+            },
+            {
+              "operation": "len(commits) > maxBlobsPerBlock",
+              "source": "beacon-chain/sync/validate_beacon_blocks.go:379",
+              "transformation": "comparison",
+              "potential_anomaly": "If epoch boundary changes between slot calculation and schedule lookup, wrong limit may be used"
+            }
+          ]
+        },
+        "attack_scenario": {
+          "attacker_control": "Block at epoch boundary (slot N where N % SlotsPerEpoch == 0)",
+          "state_space_anomaly": "Non-atomic epoch-to-schedule lookup",
+          "exploitation_steps": [
+            "1. Attacker submits block at exact epoch boundary slot",
+            "2. Block arrives during validation while epoch transition occurs",
+            "3. slot.DivSlot(SlotsPerEpoch) calculates epoch E",
+            "4. Between epoch calculation and schedule lookup, network schedule might update",
+            "5. networkSchedule.forEpoch(E) retrieves parameters from potentially different epoch context",
+            "6. Blob count validation uses inconsistent limit"
+          ],
+          "impact": "Block with incorrect number of blobs could be accepted or rejected incorrectly",
+          "likelihood": "LOW (requires precise timing at epoch boundary)"
+        },
+        "code_flow_analysis": {
+          "entry_point": "validateBeaconBlockPubSub -> validateBeaconBlock -> validateDenebBeaconBlock",
+          "validation_flow": [
+            {
+              "step": 1,
+              "location": "validate_beacon_blocks.go:371",
+              "action": "Extract BlobKzgCommitments from block body",
+              "state": "commits = blk.Body().BlobKzgCommitments()"
+            },
+            {
+              "step": 2,
+              "location": "validate_beacon_blocks.go:378",
+              "action": "Calculate max blobs for block's slot",
+              "state": "maxBlobsPerBlock = MaxBlobsPerBlock(blk.Slot())",
+              "internal_flow": [
+                "config.go:711-714: MaxBlobsPerBlock(slot)",
+                "config.go:712: epoch = slot.DivSlot(SlotsPerEpoch)",
+                "config.go:713: return MaxBlobsPerBlockAtEpoch(epoch)",
+                "config.go:718: return networkSchedule.forEpoch(epoch).MaxBlobsPerBlock",
+                "config.go:493-495: forEpoch -> safeIndex(epochIdx(epoch))",
+                "config.go:451-458: epochIdx searches backwards through entries"
+              ]
+            },
+            {
+              "step": 3,
+              "location": "validate_beacon_blocks.go:379-381",
+              "action": "Compare commitment count to limit",
+              "state": "if len(commits) > maxBlobsPerBlock { REJECT }"
+            }
+          ],
+          "additional_validation_points": [
+            {
+              "location": "beacon-chain/blockchain/process_block.go:606-611",
+              "context": "missingBlobIndices function",
+              "validation": "MaxBlobsPerBlock(slot) used for DA check"
+            },
+            {
+              "location": "beacon-chain/verification/blob.go:111-116",
+              "context": "BlobIndexInBounds verification",
+              "validation": "MaxBlobsPerBlock(blob.Slot()) used for index bounds check"
+            },
+            {
+              "location": "api/client/builder/types.go",
+              "context": "Builder API validation",
+              "validation": "Uses both DeprecatedMaxBlobsPerBlock and MaxBlobsPerBlock(slot)"
+            }
+          ]
+        },
+        "mitigation_status": "PARTIAL",
+        "mitigation_notes": "The NetworkSchedule lookup is designed to be backward-compatible and uses a search algorithm that finds the appropriate entry for an epoch. The epochIdx function searches from newest to oldest entries and returns the first entry where entry.Epoch <= target_epoch. This makes it relatively safe but not completely atomic."
+      },
+      {
+        "anomaly_type": "DEPRECATED_PATH_COEXISTENCE",
+        "severity": "LOW",
+        "location": "api/client/builder/types.go",
+        "description": "Mixed use of deprecated and epoch-aware blob limits",
+        "abstract_state_analysis": {
+          "variables": [
+            {
+              "name": "DeprecatedMaxBlobsPerBlock",
+              "type": "int",
+              "domain": "CONSTANT",
+              "range": {
+                "value": "static_config_value",
+                "constraints": ["deprecated", "not_epoch_aware"]
+              }
+            },
+            {
+              "name": "MaxBlobsPerBlock(slot)",
+              "type": "int",
+              "domain": "SCHEDULE_LOOKUP",
+              "range": {
+                "value": "epoch_dependent_value",
+                "constraints": ["current", "epoch_aware"]
+              }
+            }
+          ],
+          "operations": [
+            {
+              "operation": "Deprecated limit check",
+              "source": "api/client/builder/types.go:line_with_DeprecatedMaxBlobsPerBlock",
+              "potential_anomaly": "Inconsistent validation between deprecated and new path"
+            }
+          ]
+        },
+        "attack_scenario": {
+          "attacker_control": "Block submitted through builder API",
+          "state_space_anomaly": "Different validation paths use different limits",
+          "exploitation_steps": [
+            "1. Attacker crafts block with blob count between old and new limits",
+            "2. Block passes deprecated limit check but fails epoch-aware check (or vice versa)",
+            "3. Validation inconsistency could lead to consensus issues"
+          ],
+          "impact": "Validation bypass if deprecated path is still reachable",
+          "likelihood": "VERY_LOW (deprecated code paths should be unreachable)"
+        },
+        "mitigation_status": "ACCEPTABLE",
+        "mitigation_notes": "The code shows both deprecated and new validation paths exist, but the actual reachability of deprecated paths needs verification. The comment indicates these are deprecated and should not be used."
+      },
+      {
+        "anomaly_type": "SCHEDULE_INITIALIZATION_ORDERING",
+        "severity": "LOW",
+        "location": "config/params/config.go:404-418 (InitializeForkSchedule)",
+        "description": "Network schedule must be initialized before blob validation",
+        "abstract_state_analysis": {
+          "variables": [
+            {
+              "name": "networkSchedule",
+              "type": "*NetworkSchedule",
+              "domain": "POINTER",
+              "range": {
+                "values": ["nil", "initialized"],
+                "constraints": ["must_be_non_nil_before_validation"]
+              }
+            }
+          ],
+          "operations": [
+            {
+              "operation": "InitializeForkSchedule",
+              "transformation": "nil -> initialized_schedule",
+              "ordering_requirement": "MUST_HAPPEN_BEFORE(InitializeForkSchedule, MaxBlobsPerBlock)"
+            }
+          ]
+        },
+        "attack_scenario": {
+          "attacker_control": "None (initialization ordering issue)",
+          "state_space_anomaly": "Uninitialized schedule access",
+          "exploitation_steps": [
+            "1. If schedule not initialized, forEpoch returns genesis default",
+            "2. Genesis default might have incorrect blob limits",
+            "3. Early blocks could be validated with wrong limits"
+          ],
+          "impact": "Incorrect validation during node startup",
+          "likelihood": "VERY_LOW (initialization should happen at startup)"
+        },
+        "mitigation_status": "ACCEPTABLE",
+        "mitigation_notes": "The code has defensive programming with genesisNetworkScheduleEntry() fallback"
+      }
+    ],
+    "validation_flow_summary": {
+      "primary_validation_path": "validateBeaconBlockPubSub -> validateBeaconBlock -> validateDenebBeaconBlock",
+      "blob_limit_check": "params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())",
+      "limit_calculation": "slot -> epoch -> network_schedule.forEpoch(epoch).MaxBlobsPerBlock",
+      "rejection_condition": "len(blob_kzg_commitments) > MaxBlobsPerBlock(slot)",
+      "error_type": "errRejectCommitmentLen",
+      "consistency_checks": [
+        "Same MaxBlobsPerBlock(slot) used in multiple locations:",
+        "- validateDenebBeaconBlock (gossip validation)",
+        "- missingBlobIndices (DA check)",
+        "- BlobIndexInBounds (sidecar verification)",
+        "- Builder API validation"
+      ]
+    },
+    "network_schedule_mechanism": {
+      "data_structure": "NetworkSchedule with sorted entries by epoch",
+      "lookup_algorithm": "Binary search backwards from latest epoch",
+      "entry_format": {
+        "Epoch": "primitives.Epoch",
+        "MaxBlobsPerBlock": "uint64",
+        "ForkVersion": "[4]byte",
+        "ForkDigest": "[4]byte",
+        "VersionEnum": "int",
+        "isFork": "bool"
+      },
+      "key_properties": [
+        "Entries sorted by epoch",
+        "Search finds latest entry with Epoch <= target_epoch",
+        "Falls back to genesis entry if no match",
+        "Supports both fork changes and BPO (Blob Parameter Override) changes",
+        "BPO changes can occur at same epoch as fork (sorted by isFork flag)"
+      ]
+    },
+    "abstract_interpretation_conclusion": {
+      "correctness": "MOSTLY_CORRECT",
+      "key_findings": [
+        "The implementation correctly uses epoch-dependent blob limits via NetworkSchedule",
+        "The slot-to-epoch-to-schedule lookup is implemented correctly but not atomic",
+        "Multiple validation points consistently use MaxBlobsPerBlock(slot)",
+        "Deprecated code paths exist but should be unreachable",
+        "Network schedule initialization is protected with defensive fallbacks"
+      ],
+      "risk_assessment": {
+        "critical_risks": 0,
+        "high_risks": 0,
+        "medium_risks": 1,
+        "low_risks": 2
+      },
+      "recommendation": "The primary concern is the non-atomic nature of the epoch boundary lookup. Consider adding explicit synchronization or snapshot semantics to ensure consistent view of network schedule during validation at epoch boundaries."
+    }
+  }
+}

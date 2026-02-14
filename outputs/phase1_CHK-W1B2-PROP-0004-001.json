@@ -1,0 +1,150 @@
+{
+  "check_id": "CHK-W1B2-PROP-0004-001",
+  "property_id": "PROP-0004",
+  "title": "Does block validation iterate ALL transactions for gas cap check?",
+  "phase": "phase1_abstract_interpretation",
+  "codebase": "Prysm (Ethereum Consensus Layer)",
+  "phase1_abstract_interpretation": {
+    "summary": "ARCHITECTURAL MISMATCH: This property tests Execution Layer (EL) transaction gas limit validation (16777216 cap per EIP-4844). Prysm is a Consensus Layer (CL) implementation that does NOT validate individual transaction gas limits. The CL treats execution payload transactions as opaque byte arrays and delegates all transaction-level validation to the EL client via the Engine API.",
+    "scope_resolution": {
+      "status": "out-of-scope",
+      "reason": "Component architecture mismatch between test property and target codebase",
+      "codebase_type": "Ethereum Consensus Layer (Prysm)",
+      "expected_type": "Ethereum Execution Layer (e.g., Geth, Nethermind, Besu)",
+      "architectural_boundary": "CL/EL separation via Engine API (EIP-3675)"
+    },
+    "code_context": {
+      "examined_files": [
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/core/blocks/payload.go",
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/consensus-types/blocks/execution.go"
+      ],
+      "key_functions": [
+        {
+          "file": "beacon-chain/core/blocks/payload.go",
+          "function": "ProcessPayload",
+          "line_range": "211-229",
+          "purpose": "Main execution payload processing function in CL"
+        },
+        {
+          "file": "beacon-chain/core/blocks/payload.go",
+          "function": "ValidatePayload",
+          "line_range": "159-176",
+          "purpose": "Validates CL-level payload fields (randao, timestamp)"
+        },
+        {
+          "file": "consensus-types/blocks/execution.go",
+          "function": "Transactions()",
+          "line_range": "177-180",
+          "purpose": "Returns raw transaction bytes without validation"
+        }
+      ],
+      "validation_scope": {
+        "cl_validates": [
+          "payload.parent_hash consistency",
+          "payload.prev_randao matches beacon state randao",
+          "payload.timestamp matches slot timestamp",
+          "blob commitment count <= max_blobs_per_block"
+        ],
+        "cl_does_not_validate": [
+          "Individual transaction gas limits",
+          "Transaction gas cap (16777216)",
+          "Transaction structure or encoding",
+          "Transaction signatures",
+          "Transaction nonces or account state"
+        ],
+        "el_responsibility": [
+          "All transaction-level validation including gas cap enforcement",
+          "Execution via Engine API execute_payload() call"
+        ]
+      }
+    },
+    "abstract_interpretation_analysis": {
+      "variable_domains": {
+        "payload.Transactions()": {
+          "type": "[][]byte (opaque byte slices)",
+          "abstract_domain": "Unconstrained byte sequences",
+          "cl_interpretation": "Prysm treats this as SSZ-serialized opaque data for merkleization only",
+          "validation_state": "No decoding or field-level validation performed",
+          "gas_limit_visibility": "Not accessible - transactions not decoded by CL"
+        },
+        "payload.GasLimit()": {
+          "type": "uint64",
+          "semantic": "BLOCK gas limit (not per-transaction limit)",
+          "abstract_domain": "[0, 2^64-1]",
+          "note": "This is the execution block gas limit, unrelated to per-transaction gas cap"
+        }
+      },
+      "control_flow_analysis": {
+        "transaction_iteration": {
+          "exists": false,
+          "reason": "CL does not iterate over transactions for validation",
+          "code_path": "ProcessPayload() -> ValidatePayload() + ValidatePayloadWhenMergeCompletes() -> st.SetLatestExecutionPayloadHeader()",
+          "transaction_access": "Only via payload.Transactions() for merkleization in SetLatestExecutionPayloadHeader()",
+          "no_decode_point": "Transactions are never RLP-decoded to access gasLimit field"
+        },
+        "delegation_boundary": {
+          "function": "Engine API execute_payload()",
+          "location": "External EL client (not in Prysm codebase)",
+          "responsibility": "EL validates all transaction fields including gas cap",
+          "spec_reference": "Beacon Chain spec: 'assert execution_engine.execute_payload(payload)' (payload.go:193 comment)"
+        }
+      },
+      "state_anomalies_found": []
+    },
+    "theoretical_vulnerability_analysis": {
+      "if_cl_were_to_validate": {
+        "potential_anomalies": [
+          {
+            "anomaly_type": "Iterator completeness",
+            "description": "IF CL validated transactions, must iterate ALL transactions [0..len(payload.Transactions())-1]",
+            "early_exit_risk": "Optimizations that skip middle/last transactions would miss oversized tx",
+            "abstract_state": "For loop index i ∈ [0, n-1] where n = len(transactions). Any i not visited creates vulnerability."
+          },
+          {
+            "anomaly_type": "Gas limit overflow",
+            "description": "Transaction gasLimit field (if decoded) must be checked against constant 16777216",
+            "abstract_domain": "tx.gasLimit ∈ [0, 2^64-1], must verify tx.gasLimit ≤ 16777216 for ALL tx",
+            "violation_state": "∃tx: tx.gasLimit > 16777216 ⇒ block MUST be rejected"
+          },
+          {
+            "anomaly_type": "Partial acceptance",
+            "description": "Block acceptance MUST be atomic - cannot accept some transactions and reject others",
+            "state_transition": "ValidateBlock(txs) → (ACCEPT all) ∨ (REJECT all), no partial state"
+          }
+        ],
+        "note": "These are theoretical. Prysm's actual architecture avoids this by delegating to EL."
+      }
+    },
+    "architectural_reasoning": {
+      "cl_el_separation": {
+        "consensus_layer_role": "Validates beacon block structure, consensus rules, and payload headers",
+        "execution_layer_role": "Validates and executes all transaction-level logic including gas limits",
+        "trust_boundary": "CL trusts EL to validate transactions via Engine API execute_payload()",
+        "spec_compliance": "Per Ethereum Beacon Chain specification, CL does not decode or validate transaction contents"
+      },
+      "why_out_of_scope": [
+        "Prysm is a CL client (beacon node), not an EL client",
+        "Transaction gas limit validation is an EL responsibility per Ethereum architecture",
+        "CL has no code path to decode RLP-encoded transactions from execution payload",
+        "Property PROP-0004 specifically tests transaction iteration for gas cap - a pure EL concern",
+        "Test procedures require creating blocks with oversized transactions at different positions - requires EL transaction pool and validation"
+      ]
+    },
+    "recommendations": {
+      "audit_action": "SKIP - Out of scope for Prysm CL codebase",
+      "target_clients": [
+        "Geth (go-ethereum)",
+        "Nethermind",
+        "Besu",
+        "Erigon",
+        "Reth"
+      ],
+      "el_validation_points": [
+        "Transaction pool admission (txpool validation)",
+        "Block validation (consensus/core block processing)",
+        "Engine API payload validation"
+      ],
+      "defense_in_depth": "Gas cap should be enforced at BOTH txpool and block validation layers in EL clients"
+    }
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "check_id": "W3B12:W3B12:CHK-0021",
+  "property_id": "PROP-W7B16-40",
+  "title": "Verify Trust Boundary Integrity: Is cumulative_gas_used monotonically non-decreasing?",
+  "severity": "Medium",
+  "bug_class": "State Consistency",
+  "phase1_abstract_interpretation": {
+    "summary": "TRUST BOUNDARY VIOLATION - Validation delegated to execution layer without verification",
+    "analysis": {
+      "architecture_finding": {
+        "description": "Prysm is a beacon chain client (consensus layer) that delegates execution payload validation to an external execution client (e.g., Geth, Nethermind, Besu) via the Engine API",
+        "trust_boundary": "Prysm trusts the execution client to validate all execution-layer invariants, including transaction receipt properties",
+        "delegation_mechanism": "Engine API methods: engine_newPayloadV1/V2/V3/V4 and engine_forkchoiceUpdatedV1/V2/V3"
+      },
+      "code_scope_analysis": {
+        "relevant_files": [
+          "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/execution/engine_client.go",
+          "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/blockchain/execution_engine.go",
+          "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/proto/engine/v1/execution_engine.proto"
+        ],
+        "key_functions": [
+          "Service.NewPayload (engine_client.go:153-213)",
+          "Service.notifyNewPayload (execution_engine.go:227-271)"
+        ],
+        "execution_payload_structure": {
+          "receipts_root": "bytes field in ExecutionPayload proto (32 bytes)",
+          "gas_used": "uint64 field representing total block gas consumption",
+          "note": "Individual transaction receipts are NOT exposed to Prysm - only the receipts_root Merkle root is visible"
+        }
+      },
+      "abstract_state_analysis": {
+        "cumulative_gas_used_domain": {
+          "type": "NOT ACCESSIBLE in Prysm codebase",
+          "reason": "cumulative_gas_used is a per-transaction-receipt field that exists only in the execution layer",
+          "prysm_visibility": {
+            "block_level_gas_used": "ExecutionPayload.gas_used (uint64): total gas consumed by all transactions",
+            "receipts_root": "ExecutionPayload.receipts_root (bytes32): Merkle root of all transaction receipts",
+            "individual_receipts": "NOT accessible - receipts are opaque to Prysm"
+          }
+        },
+        "validation_responsibility": {
+          "execution_client": [
+            "Validate each transaction receipt's cumulative_gas_used is monotonically increasing",
+            "Ensure cumulative_gas_used[i] = cumulative_gas_used[i-1] + gas_used[i]",
+            "Compute receipts_root from validated receipts",
+            "Return VALID/INVALID status via Engine API"
+          ],
+          "prysm_consensus_client": [
+            "Submit ExecutionPayload (including receipts_root) to execution client via NewPayload",
+            "Receive PayloadStatus (VALID/INVALID/SYNCING/ACCEPTED)",
+            "Trust execution client's validation result",
+            "Reject blocks if PayloadStatus is INVALID"
+          ]
+        }
+      },
+      "state_anomalies_found": [
+        {
+          "anomaly_type": "TRUST_BOUNDARY_VIOLATION",
+          "severity": "MEDIUM",
+          "description": "Prysm does NOT validate cumulative_gas_used monotonicity - this validation is fully delegated to the execution client",
+          "abstract_interpretation_details": {
+            "variable": "cumulative_gas_used (per-receipt field)",
+            "domain": "NOT_ACCESSIBLE_IN_PRYSM",
+            "expected_invariant": "∀ i ∈ [1, n]: cumulative_gas_used[i] >= cumulative_gas_used[i-1]",
+            "prysm_enforcement": "NONE - execution client is trusted to enforce this",
+            "potential_violation_scenario": [
+              "Malicious or buggy execution client returns PayloadStatus.VALID for a payload with non-monotonic cumulative_gas_used",
+              "Prysm would accept the block as valid without detecting the invariant violation",
+              "Consensus layer state would diverge from honest nodes running correct execution clients"
+            ]
+          },
+          "impact": "If execution client is compromised or buggy, Prysm cannot detect violations of execution-layer invariants",
+          "evidence": {
+            "file": "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/execution/engine_client.go",
+            "function": "NewPayload",
+            "lines": "201-212",
+            "code_excerpt": "switch result.Status {\ncase pb.PayloadStatus_INVALID_BLOCK_HASH:\n\treturn nil, ErrInvalidBlockHashPayloadStatus\ncase pb.PayloadStatus_ACCEPTED, pb.PayloadStatus_SYNCING:\n\treturn nil, ErrAcceptedSyncingPayloadStatus\ncase pb.PayloadStatus_INVALID:\n\treturn result.LatestValidHash, ErrInvalidPayloadStatus\ncase pb.PayloadStatus_VALID:\n\treturn result.LatestValidHash, nil\ndefault:\n\treturn nil, errors.Wrapf(ErrUnknownPayloadStatus, \"unknown payload status: %s\", result.Status.String())\n}",
+            "observation": "Prysm only checks the status returned by execution client - no independent validation of receipt properties"
+          }
+        },
+        {
+          "anomaly_type": "IMPLICIT_TRUST_ASSUMPTION",
+          "severity": "INFORMATIONAL",
+          "description": "Prysm's security model assumes the execution client correctly validates all EVM-level invariants",
+          "abstract_interpretation_details": {
+            "trust_assumption": "Execution client is honest and implements Ethereum execution spec correctly",
+            "risk": "Single point of trust - if execution client has a bug, Prysm cannot detect or prevent invalid state transitions",
+            "mitigation_in_ethereum_architecture": [
+              "Multiple independent execution client implementations (Geth, Nethermind, Besu, Erigon, Reth)",
+              "Consensus will fail if execution clients disagree on validity",
+              "This provides diversity-based fault tolerance"
+            ]
+          },
+          "scope_classification": "OUT_OF_SCOPE_FOR_PRYSM_BUG_BOUNTY",
+          "rationale": "This is an architectural design choice in Ethereum's consensus/execution layer separation, not a Prysm-specific vulnerability"
+        }
+      ]
+    },
+    "test_procedure_analysis": {
+      "proposed_test": "1. Construct block with receipts where cumulative_gas_used decreases. 2. Submit via P2P. 3. Verify block rejection. 4. Test consecutive receipt pairs for monotonicity validation.",
+      "feasibility_in_prysm": "NOT FEASIBLE",
+      "reasons": [
+        "Prysm does not have access to individual transaction receipts - only receipts_root",
+        "Prysm cannot construct or modify transaction receipts",
+        "Receipt validation happens in execution client, not Prysm",
+        "Test would need to be performed against execution client (e.g., Geth), not Prysm"
+      ],
+      "alternative_test_approach": {
+        "description": "Test Prysm's trust boundary enforcement",
+        "steps": [
+          "1. Set up Prysm with a mock/instrumented execution client",
+          "2. Configure mock execution client to return VALID for a payload with invalid receipts_root (simulating receipt validation bypass)",
+          "3. Submit block via P2P gossip",
+          "4. Verify Prysm accepts the block (confirming trust boundary)",
+          "5. Demonstrate that state divergence would occur if other nodes reject the block"
+        ],
+        "expected_result": "Prysm trusts execution client's VALID response and does not independently verify receipt properties",
+        "security_implication": "Validates that Prysm's security depends on execution client correctness"
+      }
+    },
+    "recommendation": {
+      "for_prysm": "DOCUMENT trust boundary - clearly state that execution-layer invariant validation is delegated to execution client and is out of scope for Prysm bug bounty",
+      "for_ethereum_ecosystem": "Encourage execution client diversity and implement cross-client testing to detect implementation bugs",
+      "for_auditors": "Focus on Prysm's consensus-layer validation logic - execution-layer invariants should be audited in execution clients (Geth, Nethermind, etc.)"
+    },
+    "conclusion": "The property 'cumulative_gas_used is monotonically non-decreasing' is NOT enforced by Prysm. This is BY DESIGN due to Ethereum's consensus/execution layer separation. Prysm trusts the execution client to validate this invariant. This is NOT a bug in Prysm but a fundamental architectural trust assumption. Bug bounty submissions claiming Prysm doesn't validate this property should be rejected as out-of-scope unless they demonstrate a failure to properly handle execution client responses."
+  }
+}

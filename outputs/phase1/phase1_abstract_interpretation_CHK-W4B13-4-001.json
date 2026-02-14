@@ -1,0 +1,247 @@
+{
+  "phase1_abstract_interpretation": {
+    "check_id": "W4B5:W4B5:CHK-0039",
+    "property_id": "PROP-W3B12-39",
+    "title": "Verify Trust Boundary Integrity: Is iteration_count >= 1 for all inputs?",
+    "scope_classification": "out-of-scope",
+    "scope_reason": "Component mismatch: Prysm is a Consensus Layer (CL) client. This check targets Execution Layer (EL) functionality (ModExp precompile gas calculation and iteration_count computation). EL-specific precompile implementations are not present in CL clients. The ModExp precompile (0x05) is part of the EVM execution environment, which is handled by execution clients (e.g., Geth, Erigon, Nethermind, Besu), not consensus clients like Prysm.",
+    "summary": "This check verifies that the iteration_count variable in the ModExp precompile gas calculation is always >= 1 for all possible inputs, preventing zero-cost execution attacks. The iteration_count is computed differently based on exponent size: for small exponents (exp_len <= 32 bytes), it uses bit_length(exponent) with special case for exp=0 returning 1; for large exponents (exp_len > 32 bytes), it uses 16*(exp_len - 32) + bit_length(top_32_bytes) with max(result, 1) clamp. Since Prysm is a consensus layer client and does not implement EVM precompiles, this check cannot be performed on this codebase.",
+    "abstract_domains_analyzed": {
+      "exponent_length": {
+        "domain": "unsigned_integer",
+        "range": "[0, 2^256)",
+        "critical_values": [0, 1, 32, 33, "2^256-1"],
+        "partitions": [
+          {
+            "name": "small_exponent",
+            "condition": "exponent_length <= 32",
+            "iteration_count_formula": "bit_length(exponent) with special case: if exponent == 0 then 1"
+          },
+          {
+            "name": "large_exponent",
+            "condition": "exponent_length > 32",
+            "iteration_count_formula": "max(16 * (exponent_length - 32) + bit_length(top_32_bytes_of_exponent), 1)"
+          }
+        ]
+      },
+      "exponent_value": {
+        "domain": "unsigned_big_integer",
+        "range": "[0, 2^(8*exponent_length))",
+        "critical_values": [0, 1, 2, 255, 256, "2^32-1"],
+        "notes": "For small exponents (length <= 32), the actual value affects bit_length calculation"
+      },
+      "iteration_count": {
+        "domain": "unsigned_integer",
+        "range": "[1, ∞)",
+        "invariant": "iteration_count >= 1 (MUST hold for all inputs)",
+        "derivation": "Computed from exponent_length and exponent_value based on partition"
+      },
+      "top_32_bytes": {
+        "domain": "unsigned_integer_256bit",
+        "range": "[0, 2^256)",
+        "critical_values": [0],
+        "notes": "Most significant 32 bytes of exponent when exponent_length > 32. If all zeros, bit_length = 0."
+      },
+      "bit_length_result": {
+        "domain": "unsigned_integer",
+        "range": "[0, 256]",
+        "notes": "Number of bits required to represent a value. bit_length(0) = 0."
+      }
+    },
+    "state_space_analysis": {
+      "input_space_partitions": [
+        {
+          "partition_id": "P1",
+          "description": "Small exponent with value = 0",
+          "conditions": ["exponent_length <= 32", "exponent == 0"],
+          "iteration_count_abstract_value": "exactly 1",
+          "safe": true,
+          "notes": "Special case: bit_length(0) = 0, but iteration_count is set to 1 explicitly"
+        },
+        {
+          "partition_id": "P2",
+          "description": "Small exponent with value > 0",
+          "conditions": ["exponent_length <= 32", "exponent > 0"],
+          "iteration_count_abstract_value": "[1, 256]",
+          "iteration_count_formula": "bit_length(exponent) - 1 OR bit_length(exponent) (implementation dependent)",
+          "safe": true,
+          "notes": "bit_length(n) for n > 0 is in [1, 256], so iteration_count >= 1"
+        },
+        {
+          "partition_id": "P3",
+          "description": "Large exponent with top_32_bytes = 0",
+          "conditions": ["exponent_length > 32", "top_32_bytes == 0"],
+          "iteration_count_abstract_value": "max(16 * (exponent_length - 32) + 0, 1) = max(16 * (exponent_length - 32), 1)",
+          "safe": true,
+          "notes": "For exponent_length = 33, this gives max(16, 1) = 16 >= 1. The max(..., 1) clamp ensures iteration_count >= 1."
+        },
+        {
+          "partition_id": "P4",
+          "description": "Large exponent with top_32_bytes > 0",
+          "conditions": ["exponent_length > 32", "top_32_bytes > 0"],
+          "iteration_count_abstract_value": "max(16 * (exponent_length - 32) + bit_length(top_32_bytes), 1) where bit_length >= 1",
+          "safe": true,
+          "notes": "Since exponent_length > 32 and top_32_bytes > 0, the result before max is already > 16, so iteration_count >> 1"
+        }
+      ],
+      "potential_zero_iteration_paths": [
+        {
+          "path": "Small exponent path without special case for exp=0",
+          "input": "exponent_length <= 32, exponent = 0",
+          "iteration_count_without_fix": "bit_length(0) - 1 = 0 - 1 = -1 OR bit_length(0) = 0",
+          "vulnerability": "If implementation does NOT have special case for exponent = 0, iteration_count could be 0 or negative",
+          "mitigation_required": "MUST have: if exponent == 0 then iteration_count = 1"
+        },
+        {
+          "path": "Large exponent path without max clamp",
+          "input": "exponent_length = 33, top_32_bytes = 0x00...00",
+          "iteration_count_without_fix": "16 * (33 - 32) + bit_length(0) = 16 + 0 = 16",
+          "vulnerability": "Actually safe even without max(..., 1) for exp_len = 33, but conceptually the clamp is needed",
+          "mitigation_required": "MUST have: max(iteration_count_raw, 1) to be defensive"
+        }
+      ]
+    },
+    "state_anomalies_found": [
+      {
+        "anomaly_type": "potential_zero_iteration_count",
+        "severity": "medium",
+        "location": "Small exponent path (exponent_length <= 32, exponent = 0)",
+        "description": "If the implementation does not explicitly handle the case where exponent = 0 (for small exponents), the bit_length(0) would return 0. Depending on the formula used (bit_length - 1 or bit_length), iteration_count could be 0 or -1, leading to zero-cost execution or undefined behavior.",
+        "abstract_state": {
+          "exponent_length": "[0, 32]",
+          "exponent": "0",
+          "bit_length": "0",
+          "iteration_count_naive": "0 or -1"
+        },
+        "required_invariant": "iteration_count MUST be exactly 1 when exponent = 0 and exponent_length <= 32",
+        "exploit_scenario": "Attacker calls ModExp with exponent = 0, exponent_length <= 32. If iteration_count = 0, gas formula becomes: gas = max(500, multiplication_complexity * 0) = 500 (saved by min floor). However, if iteration_count is used in other contexts (e.g., loop bounds in actual computation), it could cause issues or optimization exploits.",
+        "reachability": "external-reachable via Transaction entry point",
+        "attacker_controlled": true
+      },
+      {
+        "anomaly_type": "potential_unbounded_iteration_count",
+        "severity": "informational",
+        "location": "Large exponent path (exponent_length > 32)",
+        "description": "For very large exponent_length values, iteration_count can grow unboundedly: iteration_count = 16 * (exponent_length - 32) + bit_length(top_32). With exponent_length approaching 2^256, iteration_count could overflow or become extremely large.",
+        "abstract_state": {
+          "exponent_length": "[33, 2^256)",
+          "iteration_count": "[16, ∞)"
+        },
+        "required_invariant": "iteration_count computation should not overflow and should result in gas cost that prevents DoS",
+        "gas_implications": "Very large iteration_count leads to very large gas cost, which is CORRECT behavior for DoS prevention. The multiplication_complexity * iteration_count can overflow if not using arbitrary precision arithmetic.",
+        "overflow_risk": "If gas calculation uses fixed-width integers (e.g., uint64), the product multiplication_complexity * iteration_count could overflow, potentially wrapping to a small value and defeating the gas protection.",
+        "mitigation": "Implementation MUST use arbitrary precision or saturating arithmetic for gas calculation, OR reject inputs that would cause overflow."
+      },
+      {
+        "anomaly_type": "edge_case_bit_length_boundary",
+        "severity": "low",
+        "location": "Bit length calculation for powers of 2",
+        "description": "For exponent values that are powers of 2, bit_length exhibits boundary behavior: bit_length(255) = 8, bit_length(256) = 9. The iteration_count depends on whether the formula is bit_length(exp) or bit_length(exp) - 1. EIP specifications must be clear.",
+        "abstract_state": {
+          "exponent": "[2^k - 1, 2^k]",
+          "bit_length": "changes from k to k+1 at boundary"
+        },
+        "cross_client_risk": "If different clients implement different formulas (bit_length vs bit_length - 1), they will compute different gas costs for the same inputs, leading to consensus failure.",
+        "required_invariant": "All clients MUST use the exact same bit_length formula as specified in EIP-7883"
+      }
+    ],
+    "verification_obligations": [
+      {
+        "obligation_id": "VO-1",
+        "description": "Verify exponent = 0 special case",
+        "formula": "∀ inputs where exponent_length <= 32 ∧ exponent == 0 : iteration_count == 1",
+        "verification_method": "Test with exponent = 0, exponent_length in {0, 1, 16, 32}",
+        "expected_result": "iteration_count = 1 in all cases"
+      },
+      {
+        "obligation_id": "VO-2",
+        "description": "Verify small exponent non-zero case",
+        "formula": "∀ inputs where exponent_length <= 32 ∧ exponent > 0 : iteration_count >= 1",
+        "verification_method": "Test with exponent in {1, 2, 255, 256, 2^32-1}, exponent_length <= 32",
+        "expected_result": "iteration_count >= 1 in all cases"
+      },
+      {
+        "obligation_id": "VO-3",
+        "description": "Verify large exponent max clamp",
+        "formula": "∀ inputs where exponent_length > 32 : iteration_count = max(16*(exponent_length - 32) + bit_length(top_32), 1)",
+        "verification_method": "Test with exponent_length = 33, top_32_bytes = 0 (edge case)",
+        "expected_result": "iteration_count = max(16, 1) = 16"
+      },
+      {
+        "obligation_id": "VO-4",
+        "description": "Verify no overflow in gas calculation",
+        "formula": "∀ inputs : gas_cost = max(500, multiplication_complexity * iteration_count) does not overflow",
+        "verification_method": "Test with maximum reasonable values of exponent_length, base_length, modulus_length",
+        "expected_result": "Gas cost is computed correctly without overflow or wraparound"
+      },
+      {
+        "obligation_id": "VO-5",
+        "description": "Verify no zero-cost execution path",
+        "formula": "∀ inputs : final_gas_cost >= 500",
+        "verification_method": "Test all edge cases and verify minimum gas floor is enforced",
+        "expected_result": "All ModExp calls cost at least 500 gas"
+      }
+    ],
+    "recommended_test_vectors": [
+      {
+        "test_id": "TV-1",
+        "description": "Minimum iteration count via exponent = 0",
+        "inputs": {
+          "base_length": 1,
+          "exponent_length": 1,
+          "modulus_length": 1,
+          "base": "0x01",
+          "exponent": "0x00",
+          "modulus": "0x01"
+        },
+        "expected_iteration_count": 1,
+        "expected_gas": 500
+      },
+      {
+        "test_id": "TV-2",
+        "description": "Small exponent with value 1",
+        "inputs": {
+          "base_length": 1,
+          "exponent_length": 1,
+          "modulus_length": 1,
+          "base": "0x02",
+          "exponent": "0x01",
+          "modulus": "0x03"
+        },
+        "expected_iteration_count": 1,
+        "expected_gas": 500
+      },
+      {
+        "test_id": "TV-3",
+        "description": "Large exponent with top_32_bytes = 0",
+        "inputs": {
+          "base_length": 1,
+          "exponent_length": 33,
+          "modulus_length": 1,
+          "base": "0x02",
+          "exponent": "0x00...00 (33 zero bytes)",
+          "modulus": "0x03"
+        },
+        "expected_iteration_count": 16,
+        "expected_gas": "max(500, complexity * 16)"
+      },
+      {
+        "test_id": "TV-4",
+        "description": "Power of 2 boundary for bit_length",
+        "inputs": {
+          "base_length": 1,
+          "exponent_length": 2,
+          "modulus_length": 1,
+          "base": "0x02",
+          "exponent": "0x0100 (256 in decimal)",
+          "modulus": "0x03"
+        },
+        "expected_bit_length": 9,
+        "notes": "Verify bit_length(256) = 9, not 8"
+      }
+    ],
+    "code_scope_note": "N/A - ModExp precompile is not implemented in Prysm (Consensus Layer client). This functionality would be found in execution clients (Geth, Erigon, Nethermind, Besu) in their precompiled contract implementations, typically in files named modexp.go, modexp.rs, ModExp.java, etc. within the EVM or precompile package.",
+    "analysis_methodology": "Abstract interpretation was performed by partitioning the input space based on exponent_length (small vs large) and exponent_value (zero vs non-zero). For each partition, abstract domains were defined for iteration_count derivation. Transfer functions (bit_length, arithmetic operations, max clamp) were analyzed symbolically to identify states where iteration_count could be < 1. Widening was not required as the state space is finite for small exponents and monotonically increasing for large exponents.",
+    "conclusion": "The iteration_count >= 1 invariant CAN be violated if the implementation does not include: (1) special case handling for exponent = 0 returning iteration_count = 1 in the small exponent path, and (2) max(iteration_count, 1) clamp in the large exponent path. However, due to the max(500, gas_formula) minimum gas floor, zero-cost execution is prevented even if iteration_count = 0. The primary risk is cross-client consensus failure if different implementations compute different iteration_count values. Since this check targets execution layer functionality not present in Prysm, no code-level verification can be performed on this codebase."
+  }
+}

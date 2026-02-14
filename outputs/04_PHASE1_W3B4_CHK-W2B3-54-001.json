@@ -1,0 +1,297 @@
+{
+  "check_id": "W3B4:W3B4:CHK-W2B3-54-001",
+  "property_id": "PROP-W2B3-54",
+  "title": "Verify Trust Boundary Integrity for tb-003: Does block validation check ALL transaction gas limits?",
+  "severity": "Critical",
+  "bug_class": "Incomplete Validation",
+  "phase1_abstract_interpretation": {
+    "summary": "OUT OF SCOPE - Component Mismatch Analysis",
+    "context": {
+      "target_component": "Prysm (Consensus Layer Client)",
+      "required_component": "Execution Layer Client (Geth, Nethermind, Besu, etc.)",
+      "property_requirement": "Block validation MUST iterate over ALL transactions and reject the entire block if ANY single transaction has gasLimit > 16777216 (2^24)",
+      "eip_reference": "EIP-7825",
+      "trust_boundary": "tb-003 (Block Builder -> Block Validator)"
+    },
+    "scope_analysis": {
+      "is_in_scope": false,
+      "reason": "This check validates EL (Execution Layer) transaction-level gas limit enforcement during block validation. Prysm is a CL (Consensus Layer) client that does not perform individual transaction validation. The CL receives execution payloads as opaque data structures from the EL via the Engine API. Transaction-level validation, including gas limit checks, is the exclusive responsibility of the EL client.",
+      "component_boundary": "CL clients validate beacon blocks and attestations. EL clients validate execution payloads and individual transactions. This check targets EL block validation logic that iterates over transactions[] array."
+    },
+    "abstract_interpretation_analysis": {
+      "disclaimer": "The following analysis represents the EXPECTED behavior in an EL client, not actual Prysm code, since Prysm does not implement this functionality.",
+      "state_space_model": {
+        "abstract_domain": {
+          "GAS_CAP": {
+            "type": "constant",
+            "value": "2^24 = 16777216",
+            "domain": "ℕ",
+            "range": "[16777216, 16777216]",
+            "description": "Fixed gas limit cap per EIP-7825"
+          },
+          "block.transactions": {
+            "type": "array",
+            "element_type": "Transaction",
+            "length_domain": "[0, MAX_TRANSACTIONS_PER_BLOCK]",
+            "description": "Array of transactions in the execution payload"
+          },
+          "transaction.gasLimit": {
+            "type": "uint64",
+            "domain": "ℕ",
+            "theoretical_range": "[0, 2^64 - 1]",
+            "required_range": "[0, 16777216]",
+            "description": "Gas limit specified by each transaction"
+          },
+          "validation_state": {
+            "type": "enum",
+            "values": ["unvalidated", "validating", "accepted", "rejected"],
+            "initial_state": "unvalidated",
+            "description": "Block validation state machine"
+          },
+          "iteration_index": {
+            "type": "uint",
+            "domain": "ℕ",
+            "range": "[0, len(block.transactions)]",
+            "description": "Current transaction being validated"
+          },
+          "all_transactions_checked": {
+            "type": "boolean",
+            "domain": "{true, false}",
+            "invariant": "must be true before accepting block",
+            "description": "Flag indicating complete iteration over all transactions"
+          }
+        },
+        "control_flow_model": {
+          "validation_loop": {
+            "type": "for_each",
+            "iteration_variable": "tx in block.transactions",
+            "loop_invariant": "∀i ∈ [0, current_index): block.transactions[i].gasLimit ≤ GAS_CAP",
+            "termination": {
+              "normal": "i == len(block.transactions)",
+              "early_exit": "tx.gasLimit > GAS_CAP"
+            }
+          },
+          "required_behavior": {
+            "must_iterate_all": true,
+            "no_early_optimization": true,
+            "atomic_rejection": "if ANY tx.gasLimit > GAS_CAP, reject entire block"
+          }
+        }
+      },
+      "state_anomalies_found": [
+        {
+          "anomaly_id": "SA-001",
+          "type": "Incomplete Iteration",
+          "severity": "Critical",
+          "abstract_state": {
+            "condition": "∃i ∈ [0, len(block.transactions)): transaction[i] not checked",
+            "violation": "all_transactions_checked = false ∧ validation_state = accepted"
+          },
+          "description": "If block validation does not iterate over ALL transactions, there exists a state where some transactions escape gas limit validation. This creates a state-space partition where adversarial transactions with gasLimit > GAS_CAP can be included.",
+          "trace_example": {
+            "initial_state": "validation_state = unvalidated, iteration_index = 0",
+            "path": [
+              "Check first N transactions (N < total)",
+              "Early exit optimization triggers",
+              "validation_state = accepted WITHOUT checking transactions[N+1:]"
+            ],
+            "final_state": "validation_state = accepted ∧ ∃i > N: transaction[i].gasLimit > GAS_CAP",
+            "property_violation": "PROP-W2B3-54"
+          },
+          "potential_bug_patterns": [
+            "Loop optimization that exits after checking first K transactions",
+            "Conditional early-return based on heuristic (e.g., 'if likely valid, skip remaining checks')",
+            "Off-by-one error in loop bounds (e.g., for i in range(len(txs)-1) instead of range(len(txs)))",
+            "Async validation that doesn't wait for all futures to complete",
+            "Cache hit causing skip of validation for 'known' transactions"
+          ]
+        },
+        {
+          "anomaly_id": "SA-002",
+          "type": "Non-Atomic Rejection",
+          "severity": "Critical",
+          "abstract_state": {
+            "condition": "validation_state transitions from 'validating' to 'partially_rejected'",
+            "violation": "Some transactions validated/accepted before block rejected"
+          },
+          "description": "Block validation must be atomic: EITHER all transactions pass validation OR the entire block is rejected. If the validation state allows partial acceptance, the abstract domain permits inconsistent states.",
+          "trace_example": {
+            "initial_state": "block with 100 transactions, transaction[50].gasLimit = 20000000 > GAS_CAP",
+            "path": [
+              "Validate transactions[0:49] - all pass",
+              "State updates applied for transactions[0:49]",
+              "Validate transaction[50] - fails gas limit check",
+              "Attempt to rollback - but partial state already committed"
+            ],
+            "final_state": "Inconsistent state: first 49 txs accepted, block rejected",
+            "property_violation": "Atomicity requirement of block validation"
+          },
+          "potential_bug_patterns": [
+            "Eager state updates during iteration instead of batch validation",
+            "Missing transaction semantics around validation",
+            "Inability to rollback partial validation results"
+          ]
+        },
+        {
+          "anomaly_id": "SA-003",
+          "type": "Integer Overflow/Underflow",
+          "severity": "High",
+          "abstract_state": {
+            "condition": "transaction.gasLimit arithmetic overflow during comparison",
+            "domain": "uint64 gasLimit compared against uint32 GAS_CAP (type mismatch)"
+          },
+          "description": "If the gas limit comparison uses mixed integer types or performs arithmetic that can overflow, the abstract domain of the comparison result becomes unpredictable.",
+          "trace_example": {
+            "scenario_1": {
+              "gasLimit_type": "uint32",
+              "GAS_CAP_type": "uint64",
+              "transaction_gasLimit": "2^32 - 1 = 4294967295",
+              "comparison": "uint32(gasLimit) <= uint64(GAS_CAP) [type coercion]",
+              "issue": "No overflow, but if GAS_CAP stored as uint32, comparisons may be inconsistent"
+            },
+            "scenario_2": {
+              "gasLimit_value": "Large value approaching uint64 max",
+              "operation": "gasLimit + some_offset",
+              "overflow": "Wraps to small value, bypassing check"
+            }
+          },
+          "potential_bug_patterns": [
+            "Type mismatch in comparison operators",
+            "Implicit type conversions that truncate high-order bits",
+            "Arithmetic operations on gasLimit before comparison"
+          ]
+        },
+        {
+          "anomaly_id": "SA-004",
+          "type": "Inconsistent Constant Value",
+          "severity": "Critical",
+          "abstract_state": {
+            "condition": "GAS_CAP value varies across validation contexts",
+            "domain": "GAS_CAP ∈ {16777216, other_values}"
+          },
+          "description": "If the GAS_CAP constant is not consistently defined or is overridden in different code paths, the abstract domain of valid gas limits becomes context-dependent, leading to consensus divergence.",
+          "trace_example": {
+            "context_1": "txpool validation uses GAS_CAP = 2^24",
+            "context_2": "block validation uses GAS_CAP = 2^24 + epsilon (configuration drift)",
+            "result": "Transaction accepted by txpool but rejected during block validation, or vice versa"
+          },
+          "potential_bug_patterns": [
+            "Multiple constant definitions (e.g., in different packages)",
+            "Configuration file override of hardcoded constant",
+            "Fork-dependent gas cap without proper activation logic",
+            "Test code constant leaking into production"
+          ]
+        },
+        {
+          "anomaly_id": "SA-005",
+          "type": "Boundary Condition Error",
+          "severity": "Medium",
+          "abstract_state": {
+            "condition": "gasLimit == GAS_CAP (equality boundary)",
+            "domain": "Ambiguous acceptance: gasLimit ≤ GAS_CAP vs gasLimit < GAS_CAP"
+          },
+          "description": "The abstract domain boundary at GAS_CAP must be precisely defined. If the comparison operator is inconsistent (< vs ≤), transactions with gasLimit == 16777216 may be accepted or rejected non-deterministically.",
+          "trace_example": {
+            "transaction_gasLimit": "16777216 (exactly GAS_CAP)",
+            "code_path_1": "if gasLimit > GAS_CAP → false → ACCEPT",
+            "code_path_2": "if gasLimit >= GAS_CAP → true → REJECT",
+            "result": "Non-deterministic acceptance depending on which code path is taken"
+          },
+          "specification_clarification": "EIP-7825 states gasLimit > GAS_CAP is invalid, implying gasLimit == GAS_CAP is VALID. Implementation must use > (not ≥).",
+          "potential_bug_patterns": [
+            "Off-by-one error in comparison operator",
+            "Different operators in txpool vs block validation",
+            "Implicit conversion changing comparison semantics"
+          ]
+        },
+        {
+          "anomaly_id": "SA-006",
+          "type": "Concurrency / Race Condition",
+          "severity": "High",
+          "abstract_state": {
+            "condition": "Parallel validation of transactions introduces non-determinism",
+            "domain": "validation_result depends on scheduling order"
+          },
+          "description": "If transaction validation is parallelized and the block acceptance decision depends on shared mutable state, race conditions can create non-deterministic outcomes in the abstract state space.",
+          "trace_example": {
+            "initial": "Block with transactions[0] valid, transactions[50] invalid (gasLimit > GAS_CAP)",
+            "goroutine_1": "Validates transactions[0:49] → sets validation_state = accepted_partial",
+            "goroutine_2": "Validates transactions[50] → finds violation → sets validation_state = rejected",
+            "race": "If goroutine_1's write occurs after goroutine_2's write, block incorrectly accepted"
+          },
+          "potential_bug_patterns": [
+            "Parallel validation without proper synchronization",
+            "Shared validation state without mutexes",
+            "Non-atomic read-modify-write on validation result"
+          ]
+        }
+      ],
+      "reachability_analysis": {
+        "trust_boundary_entry": "tb-003: Block received from external block builder via P2P gossip or RPC",
+        "untrusted_inputs": [
+          "block.transactions[*].gasLimit (controlled by transaction sender/block builder)"
+        ],
+        "validation_checkpoints": {
+          "required": [
+            "Iterate over ALL transactions in block.transactions[]",
+            "For each tx, verify tx.gasLimit ≤ GAS_CAP (16777216)",
+            "Reject entire block atomically if ANY tx violates constraint"
+          ],
+          "current_implementation": "N/A - Prysm is CL client, does not implement transaction-level validation"
+        },
+        "attack_surface": "If validation is incomplete, adversarial block builder can include transaction with gasLimit > GAS_CAP, causing honest validators to reject while Byzantine validators accept, leading to chain split."
+      },
+      "formal_properties": {
+        "safety_property": "∀ blocks B, B is accepted ⇒ (∀ tx ∈ B.transactions: tx.gasLimit ≤ GAS_CAP)",
+        "completeness_property": "∀ transactions tx, tx.gasLimit ≤ GAS_CAP ⇒ ∃ valid_block B: tx ∈ B.transactions ∧ B is accepted",
+        "atomicity_property": "∀ blocks B, (B is accepted ⇒ ∀ tx ∈ B: tx is valid) ∧ (B is rejected ⇒ ∃ tx ∈ B: tx is invalid)",
+        "determinism_property": "∀ blocks B, validators V1, V2, V1.validate(B) = V2.validate(B) (same input → same output)"
+      }
+    },
+    "verification_strategy": {
+      "recommended_approach": "Since Prysm is a CL client, verification should focus on EL clients (Geth, Nethermind, Besu). For EL clients:",
+      "static_analysis": [
+        "Locate block validation function (e.g., apply_body, validate_block)",
+        "Identify transaction iteration loop",
+        "Verify loop bounds: for i in range(len(transactions)) with NO early exit",
+        "Check gas limit comparison: assert tx.gasLimit <= GAS_CAP for ALL tx",
+        "Confirm atomic rejection: entire block rejected if ANY tx fails"
+      ],
+      "symbolic_execution": [
+        "Input: Block with transactions[i].gasLimit = GAS_CAP + 1 for arbitrary i",
+        "Expected output: Block rejected, validation_state = rejected",
+        "Verify: No path exists where iteration_index < len(transactions) and validation_state = accepted"
+      ],
+      "fuzzing": [
+        "Generate blocks with random transaction counts and gas limits",
+        "Include edge cases: gasLimit = GAS_CAP, gasLimit = GAS_CAP + 1, gasLimit = 2^64 - 1",
+        "Insert violating transactions at random positions (first, middle, last)",
+        "Assert: All blocks with ANY gasLimit > GAS_CAP are rejected"
+      ],
+      "differential_testing": [
+        "Compare validation results across multiple EL clients (Geth, Nethermind, Besu)",
+        "Ensure consensus on edge cases (boundary values, large transaction counts)"
+      ]
+    },
+    "conclusion": {
+      "scope_determination": "OUT OF SCOPE",
+      "rationale": "Prysm (CL client) does not perform EL transaction validation. This check requires analysis of EL client codebases where block validation iterates over execution payload transactions.",
+      "abstract_interpretation_value": "The analysis identifies critical state-space anomalies that MUST be prevented in EL implementations: incomplete iteration (SA-001), non-atomic rejection (SA-002), integer overflow (SA-003), inconsistent constants (SA-004), boundary errors (SA-005), and race conditions (SA-006).",
+      "recommendation": "Mark this check as OUT_OF_SCOPE for Prysm. For comprehensive audit, apply this analysis to EL clients (Geth, Nethermind, Besu) in a separate workspace.",
+      "related_checks": [
+        "W3B4:W3B4:CHK-W2B3-53-001 (GAS_CAP enforcement at txpool and block validation)",
+        "W3B4:W3B4:CHK-W2B3-55-001 (Gas cap value consistency)",
+        "W3B4:W3B4:CHK-W2B3-56-001 (Gas cap uniformity across transaction types)",
+        "W3B4:W3B4:CHK-W3B12-5-001 (Block validation iteration over ALL transactions)"
+      ]
+    }
+  },
+  "metadata": {
+    "analysis_timestamp": 1771072900,
+    "analysis_phase": "phase1_abstract_interpretation",
+    "analyst": "Abstract Interpretation Specialist",
+    "target_workspace": "prysm",
+    "workspace_component": "consensus_layer",
+    "required_component": "execution_layer"
+  }
+}

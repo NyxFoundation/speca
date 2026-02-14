@@ -1,0 +1,68 @@
+{
+  "check_id": "CHK-W6B15-21-002",
+  "phase1_abstract_interpretation": {
+    "summary": "Abstract Interpretation Analysis: Zero Deposit Requests Handling\n\nScope Analysis:\n- File: target_workspace/proto/engine/v1/electra.go\n- Functions: EncodeExecutionRequests (lines 110-147), GetDecodedExecutionRequests (lines 32-68), unmarshalDeposits (lines 70-79)\n- Integration: target_workspace/beacon-chain/execution/engine_client.go (NewPayload method, lines 153-213)\n\nState Space Analysis:\n\n1. VARIABLE: requests.Deposits (type: []*DepositRequest)\n   - Abstract Domain: Set of deposit request lists\n   - Possible States:\n     * Empty list: len(requests.Deposits) = 0\n     * Non-empty list: len(requests.Deposits) > 0, bounded by MaxDepositRequestsPerPayload\n   - Range: [0, MaxDepositRequestsPerPayload]\n\n2. VARIABLE: requestsData (type: []hexutil.Bytes) \n   - Abstract Domain: Sequence of encoded request types\n   - Possible States:\n     * Empty sequence: len(requestsData) = 0 (when all request types are empty)\n     * Non-empty sequence: len(requestsData) in {1, 2, 3} (depending on which request types are present)\n\n3. VARIABLE: drBytes (type: []byte)\n   - Abstract Domain: Byte sequences representing SSZ-encoded deposits\n   - Possible States:\n     * Empty bytes: len(drBytes) = 0 (when len(requests.Deposits) = 0)\n     * Non-empty bytes: len(drBytes) = drSize * N, where N in [1, MaxDepositRequestsPerPayload]\n\n4. VARIABLE: requestListInSSZBytes (type: []byte) in unmarshalDeposits\n   - Abstract Domain: SSZ-encoded byte sequences\n   - Expected States:\n     * len(requestListInSSZBytes) >= drSize (checked at line 71)\n     * len(requestListInSSZBytes) <= drSize * maxDepositRequests (checked at line 75)\n\nState Transitions:\n\nEncoding Path (EncodeExecutionRequests):\n- Input State: requests.Deposits with cardinality C\n- Conditional Check: len(requests.Deposits) > 0 (line 118)\n- State Transition:\n  * If C = 0: Skip deposit encoding branch entirely → requestsData remains unchanged\n  * If C > 0: Execute marshalItems → append to requestsData\n\nDecoding Path (GetDecodedExecutionRequests):\n- Input State: ebe.ExecutionRequests with cardinality E  \n- Iteration: for i in [0, E)\n- State Transition:\n  * For each request type, check bounds and decode\n  * If no DepositRequestType present: requests.Deposits remains nil (default zero value)\n  * If DepositRequestType present: decode and populate requests.Deposits\n\nIntegration with NewPayload (engine_client.go):\n- Variable: flattenedRequests (line 183)\n- Derivation: flattenedRequests = EncodeExecutionRequests(executionRequests)\n- RPC Call: NewPayloadMethodV4 with flattenedRequests as argument\n- State dependency: EL node receives flattenedRequests and must compute hash",
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "AI-001-ZERO-DEPOSIT-EMPTY-ENCODING",
+        "severity": "Critical",
+        "title": "Empty Encoding for Zero Deposit Requests May Cause Hash Mismatch",
+        "description": "When len(requests.Deposits) = 0, the EncodeExecutionRequests function (lines 118-126 in electra.go) skips the entire deposit encoding block due to the conditional check. This results in:\n\n1. marshalItems returns empty bytes: drBytes = []byte{} (line 159-161)\n2. The if-block at line 118 is NOT entered, so no deposit request data is appended to requestsData\n3. Result: The deposit request type (0x00) is completely absent from the encoded output\n\nHowever, the Ethereum execution layer specification requires that when computing the requests_hash, ALL request types must be included in a canonical order (deposits=0, withdrawals=1, consolidations=2), even when empty. The absence of the deposit type byte may cause:\n\n- EL node expecting: hash([0x00 + <empty>]) for zero deposits\n- Prysm sends: hash([]) when no deposits exist\n- Hash mismatch leading to INVALID_BLOCK_HASH or block rejection",
+        "abstract_state": "State: len(requests.Deposits) = 0\nPrecondition: requests != nil && requests.Deposits != nil && len(requests.Deposits) == 0\nPostcondition: DepositRequestType byte (0x00) NOT present in requestsData\nExpected postcondition: DepositRequestType byte (0x00) should be present with empty payload",
+        "affected_variables": [
+          "requests.Deposits (empty slice)",
+          "requestsData (missing deposit type marker)",
+          "drBytes (empty byte array from marshalItems)"
+        ],
+        "state_bounds_violated": "Cardinality constraint: Expected requestsData to contain at least deposit type marker when deposits exist (even if empty), but actual cardinality can be 0 when len(requests.Deposits) = 0",
+        "overflow_risk": false,
+        "underflow_risk": false,
+        "null_pointer_risk": false,
+        "unbounded_growth_risk": false,
+        "boundary_condition_violated": true,
+        "code_location": "target_workspace/proto/engine/v1/electra.go:118-126",
+        "proof_trace": "1. Entry: EncodeExecutionRequests(requests) where len(requests.Deposits) = 0\n2. Line 118: Evaluate len(requests.Deposits) > 0 → FALSE\n3. Skip lines 119-126 (deposit encoding block)\n4. Line 127: Check len(requests.Withdrawals) > 0 (proceed if true, else skip)\n5. Line 136: Check len(requests.Consolidations) > 0 (proceed if true, else skip)\n6. Line 146: return requestsData (may be empty array if all request types are zero)\n7. Integration point: flattenedRequests passed to EL node via NewPayloadMethodV4 RPC\n8. EL node validation: Compute hash(flattenedRequests) and compare to expected requests_hash\n9. Divergence point: If EL expects hash([0x00]) but receives hash([]), validation fails\n10. Result: Block marked INVALID or rejected, causing DoS on valid blocks with zero deposits"
+      },
+      {
+        "anomaly_id": "AI-002-DECODE-VALIDATION-ASYMMETRY",
+        "severity": "Medium",
+        "title": "Decoding Validation is Stricter Than Encoding for Empty Cases",
+        "description": "The unmarshalDeposits function (lines 70-79) enforces a minimum size check:\n\nLine 71-73: if len(requestListInSSZBytes) < drSize { return error }\n\nThis means that during decoding, if a deposit request type marker (0x00) is present but followed by zero bytes, the decode will FAIL with 'invalid deposit requests SSZ size' error.\n\nHowever, during encoding (EncodeExecutionRequests), when len(requests.Deposits) = 0, the entire deposit block is skipped, so no type marker is added at all.\n\nThis creates an asymmetry:\n- Encode(ZeroDeposits) → [] (no type marker)\n- Decode([0x00]) → ERROR (type marker present but no data)\n- Decode([]) → OK (no type marker, deposits remains nil)\n\nPotential issue: If the EL node encodes zero deposits as [0x00] (type marker with empty payload), Prysm's decode will reject it, but Prysm's encode produces [], creating interoperability issues.",
+        "abstract_state": "State 1 (Encoding): len(requests.Deposits) = 0 → Output: []\nState 2 (Decoding): Input: [0x00] → Error (len < drSize)\nState 3 (Decoding): Input: [] → Success (skip deposit decoding)",
+        "affected_variables": [
+          "requestListInSSZBytes in unmarshalDeposits",
+          "drSize (constant, minimum expected size per deposit)",
+          "requestsData in EncodeExecutionRequests"
+        ],
+        "state_bounds_violated": "Minimum size constraint: unmarshalDeposits expects len(data) >= drSize when deposit type is present, but EncodeExecutionRequests may produce empty output for zero deposits",
+        "overflow_risk": false,
+        "underflow_risk": true,
+        "null_pointer_risk": false,
+        "unbounded_growth_risk": false,
+        "boundary_condition_violated": true,
+        "code_location": "target_workspace/proto/engine/v1/electra.go:71-73, 118-126",
+        "proof_trace": "1. Scenario A: Encoding zero deposits\n   - Input: requests with len(Deposits) = 0\n   - Line 118: len(requests.Deposits) > 0 → FALSE\n   - Skip deposit encoding\n   - Output: requestsData without deposit type marker\n\n2. Scenario B: Decoding zero deposits with type marker\n   - Input: ExecutionRequests = [[0x00]] (type marker only)\n   - Line 36: decodeExecutionRequest([0x00]) → type=0, data=[]\n   - Line 45: switch case DepositRequestType\n   - Line 46: unmarshalDeposits([], maxDepositRequests)\n   - Line 71: len([]) < drSize → TRUE\n   - Line 72: return error 'invalid deposit requests SSZ size'\n   - Result: Decoding fails\n\n3. Scenario C: Decoding zero deposits without type marker\n   - Input: ExecutionRequests = []\n   - Line 35: for loop exits immediately (len = 0)\n   - Line 67: return requests (with Deposits = nil)\n   - Result: Success, but requests.Deposits is nil/zero-value"
+      },
+      {
+        "anomaly_id": "AI-003-MARSHALING-EMPTY-SLICE-BEHAVIOR",
+        "severity": "Low",
+        "title": "marshalItems Returns Empty Bytes for Empty Input Without Type Marker",
+        "description": "The marshalItems function (lines 158-172) has special handling for empty input:\n\nLine 159-161: if len(items) == 0 { return []byte{}, nil }\n\nThis means that when called with an empty slice of deposits, it returns an empty byte array rather than returning an error or a minimal encoding. While this is correct behavior for the data portion of the encoding, it interacts with EncodeExecutionRequests in a way that may not align with EIP specifications.\n\nThe abstract state analysis shows:\n- Input: items = []\n- Output: []byte{} (length 0)\n- No type marker is added by marshalItems itself\n- Type marker addition is the responsibility of EncodeExecutionRequests\n\nIf the EIP specification requires a type marker even for empty request lists, the current implementation would miss this requirement when all items are empty.",
+        "abstract_state": "State: len(items) = 0\nPrecondition: items is empty slice (not nil)\nPostcondition: Returns []byte{} with no error\nDownstream effect: Caller must handle empty result and decide whether to include type marker",
+        "affected_variables": [
+          "items (empty slice input to marshalItems)",
+          "buf (output buffer, remains empty)",
+          "drBytes in EncodeExecutionRequests"
+        ],
+        "state_bounds_violated": "No bounds violation, but semantic expectation may differ from specification",
+        "overflow_risk": false,
+        "underflow_risk": false,
+        "null_pointer_risk": false,
+        "unbounded_growth_risk": false,
+        "boundary_condition_violated": false,
+        "code_location": "target_workspace/proto/engine/v1/electra.go:159-161, 118-126",
+        "proof_trace": "1. Call: marshalItems([]) where items is empty DepositRequest slice\n2. Line 159: len(items) == 0 → TRUE\n3. Line 160: return []byte{}, nil\n4. Caller context (EncodeExecutionRequests line 119):\n   - drBytes = []byte{}\n   - Line 123-124: requestData = [0x00] + drBytes = [0x00]\n   - HOWEVER, this code is inside if len(requests.Deposits) > 0 block\n   - So when Deposits is empty, this entire block is skipped\n5. Result: Type marker is not added when deposits are empty"
+      }
+    ]
+  }
+}

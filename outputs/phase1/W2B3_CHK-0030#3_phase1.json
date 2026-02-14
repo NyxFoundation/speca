@@ -1,0 +1,208 @@
+{
+  "phase1_abstract_interpretation": {
+    "summary": "SPECIFICATION-ONLY CHECK: EIP-2200 Gas Refund Trust Boundary Analysis - No Implementation Found",
+    "analysis_context": {
+      "check_type": "specification_only",
+      "target_system": "Prysm Ethereum Consensus Client",
+      "specification_reference": "EIP-2200",
+      "implementation_status": "NOT_APPLICABLE"
+    },
+    "abstract_domain_analysis": {
+      "required_state_variables": [
+        {
+          "name": "_snapshots",
+          "abstract_domain": "Array<StorageSnapshot>",
+          "index_domain": "ℕ (natural numbers, 0..n)",
+          "critical_index": "0 (outermost transaction snapshot)",
+          "invariant": "_snapshots[0] MUST represent pre-transaction storage state"
+        },
+        {
+          "name": "storage_original",
+          "abstract_domain": "Map<Address, Map<StorageKey, StorageValue>>",
+          "trust_boundary": "outer_transaction_boundary",
+          "source_constraint": "MUST be read from _snapshots[0], NOT from intermediate snapshots or current state"
+        },
+        {
+          "name": "storage_current",
+          "abstract_domain": "Map<Address, Map<StorageKey, StorageValue>>",
+          "trust_boundary": "current_execution_context",
+          "source_constraint": "May be modified during transaction execution"
+        },
+        {
+          "name": "snapshot_depth",
+          "abstract_domain": "ℕ (counting from 0)",
+          "range": "[0, MAX_CALL_DEPTH]",
+          "critical_value": "0"
+        }
+      ],
+      "abstract_operations": [
+        {
+          "operation": "get_storage_original(address, key)",
+          "precondition": "_snapshots is non-empty AND _snapshots[0] exists",
+          "expected_transform": "Return _snapshots[0][address][key]",
+          "error_state": "Reading from _snapshots[current_depth] OR from current state",
+          "trust_boundary_crossing": "outer_transaction → inner_execution_context"
+        },
+        {
+          "operation": "nested_call_snapshot_push()",
+          "transform": "_snapshots.append(current_state_copy)",
+          "depth_transform": "snapshot_depth := snapshot_depth + 1",
+          "invariant_preservation": "_snapshots[0] MUST remain unchanged"
+        },
+        {
+          "operation": "nested_call_snapshot_pop()",
+          "transform": "_snapshots.pop()",
+          "depth_transform": "snapshot_depth := snapshot_depth - 1",
+          "invariant_preservation": "_snapshots[0] MUST remain unchanged"
+        }
+      ]
+    },
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "SA-001",
+        "type": "INDEX_CONFUSION",
+        "severity": "HIGH",
+        "description": "Index confusion between _snapshots[0] (required) vs _snapshots[current_depth] (incorrect)",
+        "abstract_state": {
+          "correct_state": "get_storage_original reads from _snapshots[0]",
+          "anomalous_state": "get_storage_original reads from _snapshots[snapshot_depth]",
+          "condition": "snapshot_depth > 0 (nested calls)"
+        },
+        "reachability": "Reachable in deeply nested contract calls (CALL, DELEGATECALL, STATICCALL)",
+        "impact": "Gas refund calculation uses wrong storage baseline, violating EIP-2200 specification",
+        "test_trigger": "Execute storage modification in nested call depth > 1 and verify get_storage_original returns pre-transaction value"
+      },
+      {
+        "anomaly_id": "SA-002",
+        "type": "SNAPSHOT_UNINITIALIZED",
+        "severity": "HIGH",
+        "description": "Access to _snapshots[0] before transaction snapshot initialization",
+        "abstract_state": {
+          "precondition": "_snapshots.length == 0",
+          "operation": "get_storage_original(addr, key)",
+          "result": "Undefined behavior OR panic OR incorrect default value"
+        },
+        "reachability": "Reachable if get_storage_original called before transaction begins",
+        "impact": "Memory safety violation or incorrect gas calculation",
+        "test_trigger": "Call get_storage_original before proper transaction initialization"
+      },
+      {
+        "anomaly_id": "SA-003",
+        "type": "SNAPSHOT_ALIASING",
+        "severity": "MEDIUM",
+        "description": "Shallow copy of storage state causing _snapshots[0] to be mutated",
+        "abstract_state": {
+          "correct": "_snapshots[0] is immutable deep copy of pre-tx storage",
+          "anomalous": "_snapshots[0] references same memory as current_storage",
+          "mutation_path": "current_storage[addr][key] = new_value → _snapshots[0][addr][key] = new_value (unintended)"
+        },
+        "reachability": "Reachable if snapshot implementation uses reference instead of deep copy",
+        "impact": "Trust boundary violation: original values are corrupted by current modifications",
+        "test_trigger": "Modify storage and verify _snapshots[0] remains unchanged"
+      },
+      {
+        "anomaly_id": "SA-004",
+        "type": "BOUNDARY_CROSSING_VIOLATION",
+        "severity": "HIGH",
+        "description": "get_storage_original reads from intermediate snapshot or current state instead of outermost snapshot",
+        "abstract_state": {
+          "trust_domains": [
+            "OUTER_TRANSACTION (trusted baseline)",
+            "INTERMEDIATE_SNAPSHOT (untrusted - may be manipulated by nested calls)",
+            "CURRENT_STATE (untrusted - actively being modified)"
+          ],
+          "correct_source": "OUTER_TRANSACTION (_snapshots[0])",
+          "violation_sources": "INTERMEDIATE_SNAPSHOT or CURRENT_STATE"
+        },
+        "reachability": "Reachable when implementation incorrectly resolves storage read source",
+        "impact": "EIP-2200 gas mechanics broken: refunds calculated against wrong baseline",
+        "test_trigger": "Test procedure step 4: Verify _snapshots[0] is used, not current state"
+      },
+      {
+        "anomaly_id": "SA-005",
+        "type": "RANGE_VIOLATION",
+        "severity": "MEDIUM",
+        "description": "Array index out of bounds if snapshot_depth tracking is incorrect",
+        "abstract_state": {
+          "index_variable": "snapshot_depth",
+          "array_length": "_snapshots.length",
+          "violation_condition": "snapshot_depth >= _snapshots.length OR snapshot_depth < 0",
+          "safe_access": "0 <= snapshot_depth < _snapshots.length"
+        },
+        "reachability": "Reachable if snapshot push/pop operations are unbalanced",
+        "impact": "Panic/crash or undefined memory access",
+        "test_trigger": "Unbalanced snapshot operations (extra push or pop)"
+      }
+    ],
+    "implementation_search_results": {
+      "search_attempted": true,
+      "patterns_searched": [
+        "get_storage_original",
+        "GetStorageOriginal",
+        "EIP-2200",
+        "EIP2200",
+        "snapshot.*storage",
+        "storage.*snapshot",
+        "GetCommittedState"
+      ],
+      "files_found": 0,
+      "conclusion": "This is a Prysm (Ethereum Consensus Client) repository. EIP-2200 storage gas mechanics are implemented in the Ethereum Execution Layer (EL), not the Consensus Layer (CL). Prysm does not contain EVM state management code."
+    },
+    "trust_boundary_map": {
+      "TB-1": {
+        "name": "Outer Transaction Boundary",
+        "description": "Pre-transaction storage state (_snapshots[0])",
+        "trust_level": "TRUSTED_BASELINE",
+        "protection_requirement": "MUST be immutable after transaction begins"
+      },
+      "TB-2": {
+        "name": "Intermediate Call Boundary",
+        "description": "Snapshots created during nested calls (_snapshots[1..n])",
+        "trust_level": "INTERMEDIATE",
+        "protection_requirement": "MAY be modified by nested execution, MUST NOT affect _snapshots[0]"
+      },
+      "TB-3": {
+        "name": "Current Execution Context",
+        "description": "Current storage state actively being modified",
+        "trust_level": "UNTRUSTED",
+        "protection_requirement": "MUST NOT be used as source for original values"
+      }
+    },
+    "verification_strategy": {
+      "approach": "property_based_testing",
+      "key_properties": [
+        "∀ addr, key, depth: get_storage_original(addr, key) at depth d returns same value as at depth 0",
+        "∀ tx: _snapshots[0] before tx execution == _snapshots[0] after tx execution",
+        "∀ nested_call: snapshot_push() ∧ storage_modify() ∧ snapshot_pop() ⇒ _snapshots[0] unchanged"
+      ],
+      "test_cases_required": [
+        "Simple storage write at depth 0",
+        "Storage write at depth 1 (single nested call)",
+        "Storage write at depth 5 (deeply nested calls)",
+        "Multiple storage writes to same key at different depths",
+        "Snapshot pop without push (error case)",
+        "Reading original value after multiple modifications"
+      ]
+    },
+    "formal_specification": {
+      "language": "abstract_interpretation",
+      "state_space": {
+        "Storage": "Map<Address, Map<Key, Value>>",
+        "Snapshots": "Array<Storage>",
+        "Depth": "ℕ"
+      },
+      "invariants": [
+        "INV-1: ∀ tx: begin_transaction() ⇒ _snapshots[0] := current_storage",
+        "INV-2: ∀ tx: during_transaction(tx) ⇒ _snapshots[0] is immutable",
+        "INV-3: ∀ addr, key, depth: get_storage_original(addr, key) = _snapshots[0][addr][key]",
+        "INV-4: ∀ depth d: nested_call_at_depth(d) ⇒ _snapshots.length = d + 1",
+        "INV-5: ∀ depth d: get_storage_original independent of d"
+      ],
+      "violations": [
+        "VIOLATION-1: get_storage_original returns _snapshots[current_depth]",
+        "VIOLATION-2: _snapshots[0] is mutated during transaction",
+        "VIOLATION-3: get_storage_original returns current_storage instead of _snapshots[0]"
+      ]
+    }
+  }
+}

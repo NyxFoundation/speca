@@ -1,0 +1,353 @@
+{
+  "check_id": "CHK-W6B15-14-001",
+  "property_id": "PROP-W6B15-14",
+  "phase2_symbolic_execution": {
+    "summary": "Symbolic execution reveals that extract_deposit_data (implemented as UnpackDepositLogData + ProcessDepositLog) does NOT guarantee exactly 192 bytes output. A counterexample path exists where malformed Ethereum log data with incorrect field lengths can bypass size validation.",
+    "counterexample_found": true,
+    "counterexample": {
+      "description": "Malformed DepositEvent log with oversized or undersized fields",
+      "symbolic_path": {
+        "initial_state": {
+          "depositLog.Data": "SYMBOLIC_BYTES (attacker-controlled from Ethereum execution client)"
+        },
+        "path_conditions": [
+          {
+            "step": 1,
+            "location": "logs.go:18",
+            "operation": "contractAbi.Unpack('DepositEvent', data)",
+            "condition": "ABI decoder successfully parses data as DepositEvent structure",
+            "constraint": "data must have valid ABI encoding structure (offset pointers, length prefixes)",
+            "note": "ABI decoder does NOT enforce field size constraints for 'bytes' type - only structural validity"
+          },
+          {
+            "step": 2,
+            "location": "logs.go:23",
+            "operation": "Type assertion: unpackedLogs[i].([]byte)",
+            "condition": "Type assertion succeeds (each unpacked field is []byte)",
+            "constraint": "No length constraints - accepts ANY valid []byte from ABI decoder"
+          },
+          {
+            "step": 3,
+            "location": "log_processing.go:114",
+            "operation": "Return 5 byte slices to ProcessDepositLog",
+            "state": {
+              "pubkey": "[]byte with length ∈ [0, ∞) - NO VALIDATION",
+              "withdrawalCredentials": "[]byte with length ∈ [0, ∞) - NO VALIDATION",
+              "amount": "[]byte with length ∈ [0, ∞) - NO VALIDATION",
+              "signature": "[]byte with length ∈ [0, ∞) - NO VALIDATION",
+              "merkleTreeIndex": "[]byte with length ∈ [0, ∞) - NO VALIDATION"
+            }
+          },
+          {
+            "step": 4,
+            "location": "log_processing.go:122",
+            "operation": "binary.LittleEndian.Uint64(merkleTreeIndex)",
+            "condition": "len(merkleTreeIndex) >= 8 (implicit requirement)",
+            "violation_scenario": "If len(merkleTreeIndex) < 8 → PANIC (out of bounds)",
+            "note": "First potential crash point"
+          },
+          {
+            "step": 5,
+            "location": "log_processing.go:136",
+            "operation": "bytesutil.FromBytes8(amount)",
+            "condition": "len(amount) >= 8 for correct behavior",
+            "violation_scenario": "If len(amount) < 8 → returns 0 (silent data corruption), If len(amount) > 8 → uses first 8 bytes (silent truncation)",
+            "note": "Second potential crash/corruption point"
+          }
+        ],
+        "satisfying_assignment": {
+          "input": {
+            "depositLog.Data": "ABI-encoded DepositEvent with pubkey=100 bytes, withdrawalCredentials=10 bytes, amount=4 bytes, signature=50 bytes, index=4 bytes"
+          },
+          "expected_output": "192 bytes total (48+32+8+96+8)",
+          "actual_output": "172 bytes total (100+10+4+50+4) OR runtime panic/corruption",
+          "property_violated": "Output size != 192 bytes AND no error returned on size validation path"
+        }
+      },
+      "concrete_attack_scenario": {
+        "attacker": "Compromised or malicious Ethereum execution client",
+        "attack_vector": "Send malformed DepositEvent log with incorrect field lengths",
+        "attack_input": {
+          "pubkey": "100-byte value (instead of 48)",
+          "withdrawal_credentials": "10-byte value (instead of 32)",
+          "amount": "4-byte value (instead of 8)",
+          "signature": "50-byte value (instead of 96)",
+          "index": "4-byte value (instead of 8)"
+        },
+        "execution_trace": [
+          "UnpackDepositLogData extracts 5 byte slices with incorrect lengths",
+          "No size validation occurs at extraction boundary",
+          "binary.LittleEndian.Uint64(merkleTreeIndex) PANICS due to len(index) = 4 < 8",
+          "OR bytesutil.FromBytes8(amount) returns 0 due to len(amount) = 4 < 8",
+          "Deposit processed with corrupted amount=0 OR service crashes"
+        ],
+        "impact": "Service crash (DoS) OR silent data corruption (0 deposit amount accepted)"
+      }
+    }
+  },
+  "phase2_5_reachability_analysis": {
+    "summary": "The vulnerable code path is REACHABLE from external attacker-controlled entry points via the Ethereum execution client. The trust boundary is violated because untrusted log data from execution client is not validated before use.",
+    "entry_points": [
+      {
+        "entry_point": "Ethereum execution client → Service.run() → handleETH1FollowDistance()",
+        "attacker_controlled": true,
+        "description": "Ethereum execution client provides log data via FilterLogs RPC",
+        "trust_level": "UNTRUSTED - external system outside Prysm control"
+      },
+      {
+        "entry_point": "Service.requestBatchedHeadersAndLogs() → ProcessETH1Block()",
+        "attacker_controlled": true,
+        "description": "Processes blocks from execution client on periodic ticker (eth1HeadTicker)",
+        "trust_level": "UNTRUSTED - periodic processing of external data"
+      },
+      {
+        "entry_point": "Service.processPastLogs()",
+        "attacker_controlled": true,
+        "description": "Historical log sync on startup or large gaps",
+        "trust_level": "UNTRUSTED - bulk processing of historical logs"
+      }
+    ],
+    "data_flow_path": "Ethereum execution client (UNTRUSTED) → FilterLogs RPC → depositLog.Data → UnpackDepositLogData → ProcessDepositLog → bytesutil.FromBytes8 / binary.LittleEndian.Uint64 (VULNERABLE)",
+    "validation_layers": [
+      {
+        "layer": "ABI decoding",
+        "location": "logs.go:18",
+        "effectiveness": "INSUFFICIENT",
+        "details": "ABI decoder validates structural format but NOT field sizes for 'bytes' type. All 5 fields are defined as dynamic 'bytes' in ABI, allowing arbitrary lengths."
+      },
+      {
+        "layer": "Type assertion",
+        "location": "logs.go:23",
+        "effectiveness": "NONE",
+        "details": "Type assertion only checks type ([]byte), not length constraints"
+      },
+      {
+        "layer": "Merkle index validation",
+        "location": "log_processing.go:127-130",
+        "effectiveness": "PARTIAL",
+        "details": "Validates merkle index sequence/ordering but not the data field sizes"
+      },
+      {
+        "layer": "Deposit trie consistency",
+        "location": "log_processing.go:147-152",
+        "effectiveness": "PARTIAL",
+        "details": "Validates deposit index but not deposit data sizes"
+      },
+      {
+        "layer": "Implicit conversion validation",
+        "location": "log_processing.go:122, 136",
+        "effectiveness": "UNSAFE",
+        "details": "binary.LittleEndian.Uint64() panics if len < 8; bytesutil.FromBytes8() silently returns 0 if len < 8"
+      },
+      {
+        "layer": "Deferred BLS signature verification",
+        "location": "deposit.go (deferred to block processing)",
+        "effectiveness": "TOO LATE",
+        "details": "BLS signature verification happens AFTER deposit is cached and trie is updated. Malformed data may crash/corrupt state before signature check."
+      },
+      {
+        "layer": "Deferred SSZ validation",
+        "location": "proto/phase0.pb.go (SSZ size tags)",
+        "effectiveness": "TOO LATE",
+        "details": "SSZ size constraints (ssz-size:48, ssz-size:32, ssz-size:96) enforced only during serialization/deserialization, not at extraction time"
+      }
+    ],
+    "attacker_controlled": true,
+    "classification": "exploitable",
+    "exploitability_details": {
+      "threat_model": "Malicious or compromised Ethereum execution client",
+      "attack_surface": "Ethereum execution client ↔ Prysm beacon chain interface (FilterLogs RPC)",
+      "prerequisites": [
+        "Attacker controls or compromises the Ethereum execution client that Prysm connects to",
+        "OR attacker performs MITM attack on Prysm ↔ execution client communication (if not using authenticated transport)",
+        "OR execution client has a bug that returns malformed log data"
+      ],
+      "attack_steps": [
+        "1. Attacker crafts malicious DepositEvent log with incorrect field lengths",
+        "2. Malicious execution client returns this log via FilterLogs RPC to Prysm",
+        "3. Prysm's UnpackDepositLogData extracts fields without size validation",
+        "4. ProcessDepositLog attempts to process malformed data",
+        "5a. CRASH PATH: binary.LittleEndian.Uint64(merkleTreeIndex) panics if len(index) < 8",
+        "5b. CORRUPTION PATH: bytesutil.FromBytes8(amount) returns 0 if len(amount) < 8, deposit processed with 0 amount"
+      ],
+      "impact_assessment": {
+        "confidentiality": "NONE",
+        "integrity": "HIGH - Deposit data corruption (incorrect amount), merkle trie corruption, deposit cache corruption",
+        "availability": "HIGH - Service crash/panic, DoS of deposit processing",
+        "severity": "HIGH",
+        "bug_bounty_classification": "CRITICAL - Trust boundary violation with DoS and data integrity impacts"
+      }
+    },
+    "notes": "This is a clear trust boundary violation. The specification requires extract_deposit_data to return exactly 192 bytes, but the implementation delegates size validation to downstream components (SSZ, BLS verification) that execute AFTER state-mutating operations (trie insertion, cache updates). An attacker controlling the execution client can exploit this gap to crash the service or corrupt deposit data. The fix should add explicit size validation immediately after ABI unpacking, before any state mutations."
+  },
+  "reachability_graph": {
+    "nodes": [
+      {
+        "id": "ETH1_CLIENT",
+        "type": "external_untrusted",
+        "description": "Ethereum execution client (external system)"
+      },
+      {
+        "id": "FilterLogs_RPC",
+        "type": "trust_boundary",
+        "description": "RPC interface between execution client and Prysm"
+      },
+      {
+        "id": "Service.run",
+        "type": "service_entry",
+        "description": "Main service loop, runs on eth1HeadTicker"
+      },
+      {
+        "id": "Service.handleETH1FollowDistance",
+        "type": "service_handler",
+        "description": "Handles follow distance and triggers log processing"
+      },
+      {
+        "id": "Service.requestBatchedHeadersAndLogs",
+        "type": "service_handler",
+        "description": "Requests batched headers and logs for range of blocks"
+      },
+      {
+        "id": "Service.ProcessETH1Block",
+        "type": "service_handler",
+        "description": "Processes logs from a single eth1 block"
+      },
+      {
+        "id": "Service.ProcessLog",
+        "type": "service_handler",
+        "description": "Routes log to appropriate handler based on topic signature"
+      },
+      {
+        "id": "Service.ProcessDepositLog",
+        "type": "vulnerable_function",
+        "description": "Processes deposit log - VULNERABLE PATH"
+      },
+      {
+        "id": "UnpackDepositLogData",
+        "type": "vulnerable_function",
+        "description": "Unpacks deposit log data using ABI decoder - NO SIZE VALIDATION"
+      },
+      {
+        "id": "bytesutil.FromBytes8",
+        "type": "vulnerable_function",
+        "description": "Converts bytes to uint64 - UNSAFE for len < 8"
+      },
+      {
+        "id": "binary.LittleEndian.Uint64",
+        "type": "vulnerable_function",
+        "description": "Converts bytes to uint64 - PANICS if len < 8"
+      }
+    ],
+    "edges": [
+      {
+        "from": "ETH1_CLIENT",
+        "to": "FilterLogs_RPC",
+        "label": "depositLog.Data (UNTRUSTED)",
+        "trust_boundary": true
+      },
+      {
+        "from": "FilterLogs_RPC",
+        "to": "Service.ProcessETH1Block",
+        "label": "[]gethtypes.Log"
+      },
+      {
+        "from": "Service.run",
+        "to": "Service.handleETH1FollowDistance",
+        "label": "periodic ticker (eth1HeadTicker.C)"
+      },
+      {
+        "from": "Service.handleETH1FollowDistance",
+        "to": "Service.requestBatchedHeadersAndLogs",
+        "label": "if !depositRequestsStarted"
+      },
+      {
+        "from": "Service.requestBatchedHeadersAndLogs",
+        "to": "Service.ProcessETH1Block",
+        "label": "for each block in range"
+      },
+      {
+        "from": "Service.ProcessETH1Block",
+        "to": "Service.ProcessLog",
+        "label": "for each log in block"
+      },
+      {
+        "from": "Service.ProcessLog",
+        "to": "Service.ProcessDepositLog",
+        "label": "if topic == depositEventSignature"
+      },
+      {
+        "from": "Service.ProcessDepositLog",
+        "to": "UnpackDepositLogData",
+        "label": "depositLog.Data"
+      },
+      {
+        "from": "UnpackDepositLogData",
+        "to": "Service.ProcessDepositLog",
+        "label": "5 × []byte (UNBOUNDED LENGTHS)"
+      },
+      {
+        "from": "Service.ProcessDepositLog",
+        "to": "binary.LittleEndian.Uint64",
+        "label": "merkleTreeIndex (MAY PANIC)"
+      },
+      {
+        "from": "Service.ProcessDepositLog",
+        "to": "bytesutil.FromBytes8",
+        "label": "amount (MAY CORRUPT)"
+      }
+    ],
+    "critical_path": "ETH1_CLIENT → FilterLogs_RPC [TRUST BOUNDARY] → ProcessETH1Block → ProcessLog → ProcessDepositLog → UnpackDepositLogData [NO VALIDATION] → FromBytes8/Uint64 [CRASH/CORRUPT]"
+  },
+  "proof_of_exploitability": {
+    "scenario": "Malicious execution client sends DepositEvent with 4-byte amount field",
+    "precondition": "Prysm connected to compromised/malicious execution client",
+    "attack_input": "DepositEvent log: {pubkey: 48 bytes, withdrawal_credentials: 32 bytes, amount: 4 bytes (0x01020304), signature: 96 bytes, index: 8 bytes}",
+    "execution_trace": [
+      "1. Service.run() ticker fires → handleETH1FollowDistance()",
+      "2. requestBatchedHeadersAndLogs() → ProcessETH1Block(blockNum)",
+      "3. FilterLogs(blockNum) returns malicious log from execution client",
+      "4. ProcessLog() routes to ProcessDepositLog() based on topic signature",
+      "5. UnpackDepositLogData(depositLog.Data) successfully unpacks (ABI decoder accepts 4-byte amount)",
+      "6. Returns amount=[]byte{0x01, 0x02, 0x03, 0x04} (length 4)",
+      "7. bytesutil.FromBytes8(amount) called with len(amount)=4",
+      "8. FromBytes8 checks 'if len(x) < 8 { return 0 }' → RETURNS 0",
+      "9. depositData.Amount = 0 (CORRUPTED)",
+      "10. Deposit with amount=0 inserted into trie and cache",
+      "11. Property VIOLATED: Output != 192 bytes, amount field corrupted"
+    ],
+    "postcondition": "Deposit processed with amount=0 instead of actual amount, merkle trie contains incorrect data",
+    "property_violation": "extract_deposit_data did NOT return exactly 192 bytes; amount field was 4 bytes instead of 8 bytes, silently corrupted to 0"
+  },
+  "recommendations": {
+    "immediate_fix": {
+      "priority": "CRITICAL",
+      "location": "contracts/deposit/logs.go:23",
+      "description": "Add explicit size validation immediately after ABI unpacking",
+      "proposed_code": "After line 23, add:\nif len(pubkey) != 48 {\n    return nil, nil, nil, nil, nil, errors.Errorf(\"invalid pubkey length: expected 48, got %d\", len(pubkey))\n}\nif len(withdrawalCredentials) != 32 {\n    return nil, nil, nil, nil, nil, errors.Errorf(\"invalid withdrawal_credentials length: expected 32, got %d\", len(withdrawalCredentials))\n}\nif len(amount) != 8 {\n    return nil, nil, nil, nil, nil, errors.Errorf(\"invalid amount length: expected 8, got %d\", len(amount))\n}\nif len(signature) != 96 {\n    return nil, nil, nil, nil, nil, errors.Errorf(\"invalid signature length: expected 96, got %d\", len(signature))\n}\nif len(index) != 8 {\n    return nil, nil, nil, nil, nil, errors.Errorf(\"invalid index length: expected 8, got %d\", len(index))\n}",
+      "rationale": "Enforces 192-byte total guarantee (48+32+8+96+8=192) at trust boundary before any state mutations"
+    },
+    "defense_in_depth": [
+      {
+        "priority": "HIGH",
+        "location": "beacon-chain/execution/log_processing.go:122",
+        "description": "Add defensive check before binary.LittleEndian.Uint64(merkleTreeIndex)",
+        "proposed_code": "if len(merkleTreeIndex) != 8 {\n    return errors.Errorf(\"invalid merkleTreeIndex length: expected 8, got %d\", len(merkleTreeIndex))\n}\nindex := int64(binary.LittleEndian.Uint64(merkleTreeIndex))",
+        "rationale": "Prevents panic if size validation is bypassed"
+      },
+      {
+        "priority": "MEDIUM",
+        "location": "encoding/bytesutil/integers.go:87",
+        "description": "Make FromBytes8 return error instead of silently returning 0",
+        "proposed_code": "func FromBytes8(x []byte) (uint64, error) {\n    if len(x) != 8 {\n        return 0, fmt.Errorf(\"invalid byte slice length: expected 8, got %d\", len(x))\n    }\n    return binary.LittleEndian.Uint64(x), nil\n}",
+        "rationale": "Makes data corruption explicit instead of silent"
+      },
+      {
+        "priority": "LOW",
+        "location": "contracts/deposit/logs.go:23",
+        "description": "Use checked type assertions",
+        "proposed_code": "var results [5][]byte\nfor i := 0; i < 5; i++ {\n    val, ok := unpackedLogs[i].([]byte)\n    if !ok {\n        return nil, nil, nil, nil, nil, errors.Errorf(\"unexpected type at index %d: expected []byte, got %T\", i, unpackedLogs[i])\n    }\n    results[i] = val\n}\nreturn results[0], results[1], results[2], results[3], results[4], nil",
+        "rationale": "Prevents panic on unexpected ABI decoder output"
+      }
+    ]
+  }
+}

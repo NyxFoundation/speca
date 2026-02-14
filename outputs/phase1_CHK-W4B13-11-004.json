@@ -1,0 +1,308 @@
+{
+  "check_id": "CHK-W4B13-11-004",
+  "phase": "phase1_abstract_interpretation",
+  "timestamp": "2026-02-14T12:35:24Z",
+  "code_scope": {
+    "primary_files": [
+      "target_workspace/beacon-chain/core/fulu/upgrade.go",
+      "target_workspace/beacon-chain/core/helpers/beacon_committee.go",
+      "target_workspace/beacon-chain/core/helpers/validators.go"
+    ],
+    "key_functions": [
+      "UpgradeToFulu",
+      "InitializeProposerLookahead",
+      "PrecomputeProposerIndices",
+      "ComputeProposerIndex",
+      "ActiveValidatorIndices",
+      "beaconProposerIndexAtSlotFulu"
+    ],
+    "line_ranges": {
+      "upgrade.go": "20-37",
+      "beacon_committee.go": "660-704",
+      "validators.go": "103-158, 301-317, 397-440"
+    }
+  },
+  "phase1_abstract_interpretation": {
+    "summary": "Abstract interpretation analysis of validator proposer privilege assignment reveals critical state-space anomalies in the proposer lookahead initialization during fork transition. The analysis identifies potential validator set mismatches, temporal inconsistencies in RANDAO usage, and unbounded iteration risks in proposer selection.",
+    "variables_analyzed": [
+      {
+        "variable": "proposerLookahead",
+        "location": "upgrade.go:25",
+        "abstract_domain": {
+          "type": "array",
+          "element_type": "uint64",
+          "size_range": "[0, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH]",
+          "expected_size": "typically [0, 64]",
+          "constraint": "Each element must be a valid ValidatorIndex < NumValidators()"
+        },
+        "data_flow": "InitializeProposerLookahead -> UpgradeToFulu.proposerLookahead -> SetProposerLookahead -> state.ProposerLookahead",
+        "state_dependencies": [
+          "beaconState (pre-fork Electra state)",
+          "epoch (current fork epoch)",
+          "ActiveValidatorIndices (per epoch)",
+          "RANDAO seed (per epoch)"
+        ]
+      },
+      {
+        "variable": "activeIndices",
+        "location": "beacon_committee.go:664, validators.go:139",
+        "abstract_domain": {
+          "type": "array",
+          "element_type": "ValidatorIndex",
+          "size_range": "[1, MAX_VALIDATORS]",
+          "membership_constraint": "validator.activation_epoch <= epoch < validator.exit_epoch",
+          "slashing_constraint": "May include slashed validators (no explicit filter)"
+        },
+        "temporal_dependency": "Computed separately for each epoch in range [current_epoch, current_epoch + MIN_SEED_LOOKAHEAD]",
+        "anomaly_risk": "Validator set composition may change between epoch computations"
+      },
+      {
+        "variable": "seed",
+        "location": "validators.go:685",
+        "abstract_domain": {
+          "type": "byte_array",
+          "size": "32 bytes (fixed)",
+          "derivation": "Seed(state, epoch, DOMAIN_BEACON_PROPOSER)",
+          "randomness_source": "RANDAO from pre-fork state"
+        },
+        "temporal_constraint": "Must use pre-fork state's RANDAO for all epochs",
+        "consistency_requirement": "Same state.RandaoMixes must be used for all lookahead epochs"
+      },
+      {
+        "variable": "proposerIndex",
+        "location": "validators.go:696, beacon_committee.go:700",
+        "abstract_domain": {
+          "type": "ValidatorIndex",
+          "range": "[0, NumValidators - 1]",
+          "selection_probability": "Proportional to effective_balance / MAX_EFFECTIVE_BALANCE",
+          "iteration_bound": "Unbounded loop until valid proposer found"
+        },
+        "selection_criteria": [
+          "candidateIndex = activeIndices[ComputeShuffledIndex(i % length, length, seed)]",
+          "effectiveBal * MAX_RANDOM_VALUE >= MAX_EFFECTIVE_BALANCE * randomValue",
+          "No explicit slashing check (relies on activeIndices filter)"
+        ]
+      },
+      {
+        "variable": "epoch_iterator",
+        "location": "beacon_committee.go:663",
+        "abstract_domain": {
+          "type": "integer",
+          "range": "[0, MIN_SEED_LOOKAHEAD + 1)",
+          "typical_value": "[0, 2)",
+          "iteration_count": "MIN_SEED_LOOKAHEAD + 1 = 2 epochs"
+        },
+        "state_mutation_risk": "Each iteration queries activeIndices from same pre-fork state"
+      },
+      {
+        "variable": "slot_offset",
+        "location": "validators.go:313-316",
+        "abstract_domain": {
+          "type": "slot_index",
+          "range": "[0, SLOTS_PER_EPOCH - 1]",
+          "lookahead_indexing": "current_epoch: slot % SLOTS_PER_EPOCH, next_epoch: SLOTS_PER_EPOCH + (slot % SLOTS_PER_EPOCH)"
+        },
+        "boundary_condition": "At fork boundary, lookahead[0..SLOTS_PER_EPOCH-1] = current epoch, lookahead[SLOTS_PER_EPOCH..2*SLOTS_PER_EPOCH-1] = next epoch"
+      }
+    ],
+    "abstract_transformations": [
+      {
+        "operation": "InitializeProposerLookahead",
+        "input_domain": "(BeaconState[Electra], Epoch[current])",
+        "output_domain": "[]uint64[size=(MIN_SEED_LOOKAHEAD+1)*SLOTS_PER_EPOCH]",
+        "transformation": "For each epoch e in [current, current+MIN_SEED_LOOKAHEAD]: activeIndices(e) -> PrecomputeProposerIndices(e) -> append to lookAhead",
+        "precondition": "state must be pre-fork Electra state with valid validators",
+        "postcondition": "All elements are ValidatorIndex < NumValidators() AND all are from active set"
+      },
+      {
+        "operation": "ActiveValidatorIndices",
+        "input_domain": "(BeaconState, Epoch)",
+        "output_domain": "[]ValidatorIndex[size=[1, MAX_VALIDATORS]]",
+        "transformation": "Filter validators where activation_epoch <= epoch < exit_epoch",
+        "state_access": "ReadFromEveryValidator -> O(N) iteration",
+        "caching": "Results cached by seed = Seed(state, epoch, DOMAIN_BEACON_ATTESTER)"
+      },
+      {
+        "operation": "ComputeProposerIndex",
+        "input_domain": "(BeaconState, []ValidatorIndex, [32]byte)",
+        "output_domain": "ValidatorIndex",
+        "transformation": "Unbounded loop: candidateIndex = activeIndices[shuffled(i % length)] IF weighted_random_check(effectiveBal, randomValue) THEN return candidateIndex",
+        "termination_guarantee": "Probabilistic (expected iterations <= MAX_EFFECTIVE_BALANCE / MIN_EFFECTIVE_BALANCE)",
+        "anomaly": "Loop never explicitly checks validator.slashed; relies on activeIndices not containing slashed validators"
+      },
+      {
+        "operation": "beaconProposerIndexAtSlotFulu",
+        "input_domain": "(BeaconState[Fulu], Slot)",
+        "output_domain": "ValidatorIndex",
+        "transformation": "IF slot in current_epoch: lookAhead[slot % SLOTS_PER_EPOCH] ELSE lookAhead[SLOTS_PER_EPOCH + (slot % SLOTS_PER_EPOCH)]",
+        "precondition": "slot epoch must be current_epoch OR current_epoch + 1",
+        "array_access": "Direct index into proposer_lookahead without bounds check (assumes lookahead.length >= 2*SLOTS_PER_EPOCH)"
+      }
+    ],
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-001",
+        "severity": "Critical",
+        "type": "Validator Set Temporal Inconsistency",
+        "description": "The InitializeProposerLookahead function computes active validator indices separately for each epoch (current_epoch, current_epoch+1) using the same pre-fork state. However, validator set composition may have changed at the fork boundary (validators exiting, slashing events). The pre-fork state's validator set for epoch+1 may not match the actual post-fork validator set at that epoch.",
+        "location": "beacon_committee.go:664",
+        "abstract_state": "activeIndices[epoch] computed from pre-fork state for future epochs",
+        "invariant_violation": "activeIndices(epoch=current+1, state=pre-fork) != activeIndices(epoch=current+1, state=post-fork)",
+        "potential_impact": "Proposer assignments for slots in epoch+1 could include validators who have exited or been slashed during the fork epoch, or exclude validators who became active",
+        "attack_scenario": "If validator V exits at slot=fork_slot, but InitializeProposerLookahead runs at fork_slot using pre-fork state, V's exit_epoch in pre-fork state is still FAR_FUTURE. Thus V appears in activeIndices for epoch+1 lookahead. V gets proposer duties for epoch+1 despite being exited."
+      },
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-002",
+        "severity": "Critical",
+        "type": "RANDAO Seed Temporal Mismatch",
+        "description": "The seed used for proposer selection is derived from Seed(state, epoch, DOMAIN_BEACON_PROPOSER), which uses state.RandaoMixes. During fork transition, InitializeProposerLookahead uses the pre-fork state for all epochs. For future epochs (current+1), the RANDAO mix in pre-fork state may differ from the actual RANDAO that will be revealed during those epochs.",
+        "location": "validators.go:685",
+        "abstract_state": "seed = Hash(RandaoMixes[(epoch - MIN_SEED_LOOKAHEAD - 1) % EPOCHS_PER_HISTORICAL_VECTOR] || DOMAIN_BEACON_PROPOSER || epoch)",
+        "invariant_violation": "RandaoMixes[e] at pre-fork != RandaoMixes[e] at post-fork for epoch e > current",
+        "potential_impact": "Proposer assignments computed at fork time use stale RANDAO, leading to disagreement if post-fork RANDAO differs",
+        "mitigation_note": "This is likely intended behavior (use pre-fork RANDAO for determinism), but must be documented as a security assumption"
+      },
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-003",
+        "severity": "High",
+        "type": "Slashed Validator Inclusion",
+        "description": "ActiveValidatorIndices filters validators by activation/exit epochs but does NOT explicitly exclude slashed validators. The filter is: 'activation_epoch <= epoch < exit_epoch'. A slashed validator remains in activeIndices until their exit_epoch. ComputeProposerIndex does not perform an additional slashing check.",
+        "location": "validators.go:141, validators.go:412-439",
+        "abstract_state": "activeIndices may contain slashed validators if validator.slashed=true AND validator.exit_epoch > current_epoch",
+        "invariant_violation": "IsActiveValidator(validator, epoch) does NOT imply !validator.slashed",
+        "potential_impact": "Slashed validators can be assigned proposer duties via the lookahead if they are still in the active set (exit_epoch not yet reached)",
+        "code_reference": "IsActiveValidatorUsingTrie (line 50-52) only checks activation/exit, not slashed flag. ComputeProposerIndex (line 397-440) only checks effectiveBalance, not slashed.",
+        "expected_behavior": "Proposer selection should exclude slashed validators. Either activeIndices should filter them, or ComputeProposerIndex should skip them."
+      },
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-004",
+        "severity": "Medium",
+        "type": "Unbounded Iteration in Proposer Selection",
+        "description": "ComputeProposerIndex contains an unbounded for loop (for i := uint64(0); ; i++) that iterates until a validator passes the weighted random check. While probabilistically bounded, there is no explicit termination condition or maximum iteration limit.",
+        "location": "validators.go:407-439",
+        "abstract_state": "Loop continues until: effectiveBal * MAX_RANDOM_VALUE >= MAX_EFFECTIVE_BALANCE * randomValue",
+        "worst_case": "If all validators have very low effective balance, expected iterations = MAX_EFFECTIVE_BALANCE / avg(effectiveBal)",
+        "potential_impact": "In edge cases (all validators slashed to 0 effective balance, or numeric overflow in weighted check), loop could run indefinitely or exhaust resources",
+        "gas_cost": "Each iteration performs shuffling computation (O(log N)) and state access (O(1)), cumulative cost unbounded"
+      },
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-005",
+        "severity": "Medium",
+        "type": "Array Bounds Assumption in Lookahead Access",
+        "description": "beaconProposerIndexAtSlotFulu directly indexes into the proposer lookahead array without explicit bounds checking. It assumes lookahead.length >= 2*SLOTS_PER_EPOCH based on initialization, but does not verify this at runtime.",
+        "location": "validators.go:313-316",
+        "abstract_state": "Access: lookAhead[slot % SLOTS_PER_EPOCH] OR lookAhead[SLOTS_PER_EPOCH + (slot % SLOTS_PER_EPOCH)]",
+        "precondition_assumption": "len(lookAhead) >= 2 * SLOTS_PER_EPOCH",
+        "potential_impact": "If InitializeProposerLookahead returns a shorter array (due to error handling or state corruption), array access will panic",
+        "mitigation": "Add explicit length check: if len(lookAhead) < 2*SLOTS_PER_EPOCH then return error"
+      },
+      {
+        "anomaly_id": "ANOM-W4B13-11-004-006",
+        "severity": "High",
+        "type": "Fork Boundary Validator Set Change",
+        "description": "The test procedure mentions 'validator set changes occur at the fork boundary slot', but UpgradeToFulu is called with the pre-fork state at a specific slot. If validator activations/exits are processed in the same epoch transition that triggers the fork, the timing of InitializeProposerLookahead relative to epoch processing matters.",
+        "location": "upgrade.go:25",
+        "abstract_state": "epoch = slots.ToEpoch(beaconState.Slot()) computed from pre-fork state.Slot()",
+        "timing_dependency": "If fork occurs at slot S, and validator exits are processed at end of epoch(S-1), does beaconState passed to UpgradeToFulu reflect those exits?",
+        "potential_impact": "Race condition: If epoch processing (which updates validator exit_epoch, slashed flags) runs AFTER UpgradeToFulu, the lookahead is computed with stale validator set",
+        "verification_required": "Confirm UpgradeToFulu is called AFTER all epoch processing for the fork epoch completes"
+      }
+    ],
+    "data_flow_analysis": {
+      "fork_transition_sequence": [
+        "1. Fork epoch begins at slot S (S = FULU_FORK_EPOCH * SLOTS_PER_EPOCH)",
+        "2. Epoch processing runs (process_epoch) - updates validator statuses",
+        "3. UpgradeToFulu(pre_fork_state) called with state at slot S",
+        "4. InitializeProposerLookahead(pre_fork_state, epoch=FULU_FORK_EPOCH)",
+        "5. For epoch in [FULU_FORK_EPOCH, FULU_FORK_EPOCH+1]:",
+        "   a. ActiveValidatorIndices(pre_fork_state, epoch) -> filters validators",
+        "   b. PrecomputeProposerIndices(pre_fork_state, activeIndices, epoch)",
+        "   c. For slot in [0, SLOTS_PER_EPOCH): ComputeProposerIndex(pre_fork_state, activeIndices, seed[slot])",
+        "6. proposer_lookahead = [proposers_epoch_N, proposers_epoch_N+1]",
+        "7. post_fork_state.SetProposerLookahead(proposer_lookahead)",
+        "8. Return post_fork_state with initialized lookahead"
+      ],
+      "critical_dependencies": [
+        "Pre-fork state must have correct validator set (no pending exits/slashings not yet applied)",
+        "RANDAO mixes in pre-fork state must be finalized (no further updates expected)",
+        "Active validator count must be non-zero for all epochs in lookahead range",
+        "Effective balances must be stable (no pending balance updates)"
+      ]
+    },
+    "boundary_conditions": [
+      {
+        "condition": "Empty Active Validator Set",
+        "location": "validators.go:149-151",
+        "check": "if len(indices) == 0 { return error }",
+        "abstract_state": "No validators satisfy activation_epoch <= epoch < exit_epoch",
+        "impact": "InitializeProposerLookahead would fail, preventing fork transition"
+      },
+      {
+        "condition": "Validator Index Out of Range",
+        "location": "validators.go:413-415",
+        "check": "if candidateIndex >= NumValidators() { return error }",
+        "abstract_state": "activeIndices contains index >= state.NumValidators()",
+        "impact": "Proposer selection fails, preventing lookahead initialization",
+        "root_cause": "State corruption or race condition in ActiveValidatorIndices"
+      },
+      {
+        "condition": "Slot Epoch Mismatch",
+        "location": "validators.go:304-306",
+        "check": "if epoch < stateEpoch || epoch > stateEpoch+1 { return error }",
+        "abstract_state": "Requested slot's epoch is not current or next epoch",
+        "impact": "Cannot use lookahead for historical slots; must fall back to seed-based computation",
+        "correctness": "This is expected behavior, but edge case at epoch boundaries needs testing"
+      },
+      {
+        "condition": "Lookahead Size Mismatch",
+        "location": "beacon_committee.go:662",
+        "expected_size": "(MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH = 2 * 32 = 64",
+        "abstract_state": "lookAhead array must have exactly 64 elements for 2 epoch lookahead",
+        "verification": "No runtime check in beaconProposerIndexAtSlotFulu; assumes correct size"
+      }
+    ],
+    "recommendations": [
+      {
+        "priority": "Critical",
+        "recommendation": "Add explicit slashing filter to ActiveValidatorIndices or ComputeProposerIndex",
+        "rationale": "Prevent slashed validators from receiving proposer duties via lookahead",
+        "suggested_fix": "Change IsActiveValidatorUsingTrie to IsActiveNonSlashedValidatorUsingTrie (which already exists in codebase, line 54-58)",
+        "code_location": "validators.go:141"
+      },
+      {
+        "priority": "Critical",
+        "recommendation": "Document and test validator set change timing at fork boundary",
+        "rationale": "Ensure epoch processing completes BEFORE UpgradeToFulu is called",
+        "test_case": "Create test where validator exits at last slot of pre-fork epoch; verify they don't appear in epoch+1 lookahead",
+        "code_location": "upgrade.go:20-37"
+      },
+      {
+        "priority": "High",
+        "recommendation": "Add bounds check in beaconProposerIndexAtSlotFulu",
+        "rationale": "Prevent panic from array index out of bounds if lookahead is corrupted",
+        "suggested_fix": "if len(lookAhead) < 2*SLOTS_PER_EPOCH { return error }",
+        "code_location": "validators.go:301-317"
+      },
+      {
+        "priority": "High",
+        "recommendation": "Add maximum iteration limit to ComputeProposerIndex",
+        "rationale": "Prevent unbounded loop in edge cases (all validators have 0 balance)",
+        "suggested_fix": "Add: if i > MAX_ITERATIONS { return error('no eligible proposer found') }",
+        "code_location": "validators.go:407-439"
+      },
+      {
+        "priority": "Medium",
+        "recommendation": "Verify RANDAO consistency assumption in specification",
+        "rationale": "Using pre-fork RANDAO for post-fork epochs must be intentional design choice",
+        "documentation": "Add comment explaining why pre-fork state's RANDAO is used for lookahead computation"
+      }
+    ]
+  },
+  "metadata": {
+    "analyst": "Abstract Interpretation Specialist",
+    "analysis_timestamp": "2026-02-14T12:35:24Z",
+    "codebase_version": "prysm v7 (Fulu fork)",
+    "analysis_depth": "Deep (multi-function data flow tracing)",
+    "confidence": "High (direct code inspection with cross-references)"
+  }
+}

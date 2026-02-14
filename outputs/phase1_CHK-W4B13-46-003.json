@@ -1,0 +1,517 @@
+{
+  "check_id": "CHK-W4B13-46-003",
+  "property_id": "PROP-W4B13-46",
+  "timestamp": 1771072570,
+  "phase1_abstract_interpretation": {
+    "summary": "Analyzed distributed blob publishing atomicity guarantees during EL communication failures. Identified critical state-space anomalies where partial data column publication can occur without rollback mechanisms, creating inconsistent availability states across the network.",
+    "code_context": {
+      "primary_files": [
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/execution/engine_client.go (lines 560-582, 694-753)",
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/sync/subscriber_beacon_blocks.go (lines 181-319)",
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/db/filesystem/data_column.go (lines 353-470, 699-809)",
+        "/home/gohan/runners/security-agent-2/_work/security-agent/security-agent/target_workspace/beacon-chain/p2p/broadcaster.go (lines 342-441)"
+      ],
+      "call_flow": [
+        "1. Validator proposer calls ConstructDataColumnSidecars()",
+        "2. fetchCellsAndProofsFromExecution() calls GetBlobsV2()",
+        "3. DataColumnSidecars() constructs columns from EL response",
+        "4. BroadcastDataColumnSidecars() initiates non-blocking P2P broadcast",
+        "5. DataColumnStorage.Save() persists to filesystem",
+        "6. processDataColumnSidecarsFromExecution() retries with 250ms delay"
+      ]
+    },
+    "variables_analyzed": [
+      {
+        "variable": "blobAndProofV2s",
+        "location": "engine_client.go:736",
+        "abstract_domain": {
+          "type": "array",
+          "element_type": "[]*pb.BlobAndProofV2",
+          "size_range": "[0, MAX_BLOB_COMMITMENTS_PER_BLOCK=4096]",
+          "initial_state": "nil or empty",
+          "populated_state": "partial or complete blob data"
+        },
+        "state_transitions": [
+          "nil → partial (network timeout during GetBlobsV2)",
+          "partial → nil (retry returns empty)",
+          "partial → complete (successful retry)",
+          "nil → nil (no blobs available)"
+        ],
+        "anomalies": [
+          {
+            "type": "partial_response",
+            "description": "GetBlobsV2 can return partial results if EL communication fails mid-transfer",
+            "impact": "Some columns constructed, others missing",
+            "severity": "HIGH"
+          },
+          {
+            "type": "empty_response_ambiguity",
+            "description": "Empty array could mean: (1) no blobs available, (2) network failure, (3) timeout",
+            "impact": "Cannot distinguish between legitimate empty state and failure state",
+            "severity": "MEDIUM"
+          }
+        ]
+      },
+      {
+        "variable": "constructedSidecars",
+        "location": "subscriber_beacon_blocks.go:234",
+        "abstract_domain": {
+          "type": "array",
+          "element_type": "[]blocks.VerifiedRODataColumn",
+          "size_range": "[0, NumberOfColumns=128]",
+          "cardinality": "expected: 0 OR 128; actual: can be any value in [0, 128]"
+        },
+        "state_transitions": [
+          "[] → [partial columns] (EL returns subset)",
+          "[partial] → [partial] (retry with same partial data)",
+          "[partial] → [] (subsequent retry fails completely)",
+          "[] → [complete] (retry succeeds after initial failure)"
+        ],
+        "anomalies": [
+          {
+            "type": "partial_construction",
+            "description": "If GetBlobsV2 returns partial data, DataColumnSidecars() will construct only available columns",
+            "impact": "Network sees incomplete column set without knowing if more are coming",
+            "severity": "CRITICAL"
+          },
+          {
+            "type": "boundary_invariant_violation",
+            "description": "Code expects 0 or 128 columns (line 243-244) but can receive any count in [1, 127]",
+            "impact": "Boundary check only validates on subsequent calls, first partial result goes unchecked",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      {
+        "variable": "unseenIndices",
+        "location": "subscriber_beacon_blocks.go:247, 287-301",
+        "abstract_domain": {
+          "type": "map",
+          "key_type": "uint64",
+          "value_type": "bool",
+          "size_range": "[0, 128]",
+          "semantic": "tracks which column indices were newly broadcast"
+        },
+        "state_transitions": [
+          "{} → {5, 12, 78} (partial columns broadcast)",
+          "{5, 12, 78} → {5, 12, 78, 90, 101} (more columns added on retry)",
+          "{indices} → {} (all already seen, skip broadcast)"
+        ],
+        "anomalies": [
+          {
+            "type": "incremental_broadcast_without_completeness_guarantee",
+            "description": "Each retry can broadcast additional columns without tracking global completion state",
+            "impact": "Network may never know if full 128 columns were intended or if process was interrupted",
+            "severity": "CRITICAL"
+          }
+        ]
+      },
+      {
+        "variable": "dataColumnSidecarsByRoot",
+        "location": "data_column.go:367-379",
+        "abstract_domain": {
+          "type": "map",
+          "key_type": "[32]byte (block root)",
+          "value_type": "[]VerifiedRODataColumn",
+          "size_range": "unbounded (limited by available blocks)"
+        },
+        "state_transitions": [
+          "{} → {root1: [col5, col12]} (first save)",
+          "{root1: [col5, col12]} → {root1: [col5, col12, col78, col90]} (incremental append)",
+          "{root1: [partial]} → {root1: [partial]} (duplicate save filtered)"
+        ],
+        "anomalies": [
+          {
+            "type": "no_atomic_savepoint",
+            "description": "DataColumnStorage.Save() appends incrementally without transaction or savepoint mechanism",
+            "impact": "If process crashes during Save(), partial columns are persisted without metadata indicating incompleteness",
+            "severity": "CRITICAL"
+          },
+          {
+            "type": "file_sync_partial_state",
+            "description": "file.Sync() at line 802-804 commits whatever was written, even if not all 128 columns",
+            "impact": "Filesystem reflects partial state as if it were a complete, valid state",
+            "severity": "CRITICAL"
+          }
+        ]
+      },
+      {
+        "variable": "iteration",
+        "location": "subscriber_beacon_blocks.go:212",
+        "abstract_domain": {
+          "type": "uint64",
+          "range": "[0, ∞)",
+          "semantic": "retry attempt counter"
+        },
+        "state_transitions": [
+          "0 → 1 → 2 → ... (infinite retry loop)"
+        ],
+        "anomalies": [
+          {
+            "type": "unbounded_iteration",
+            "description": "No maximum retry limit, only exits when context cancelled or all columns seen",
+            "impact": "Can retry indefinitely if EL persistently returns partial data, accumulating partial publishes",
+            "severity": "HIGH"
+          },
+          {
+            "type": "delay_accumulation",
+            "description": "250ms delay per iteration (line 269) without exponential backoff",
+            "impact": "Fast retry loop may not give EL time to recover, causing repeated partial fetches",
+            "severity": "MEDIUM"
+          }
+        ]
+      },
+      {
+        "variable": "indices (storageIndices)",
+        "location": "data_column.go:815, 1000-1076",
+        "abstract_domain": {
+          "type": "byte_array",
+          "size": "fixed 128 bytes",
+          "encoding": "position-based index mapping",
+          "values": "[0, 128) for empty, [128, 256) for stored position"
+        },
+        "state_transitions": [
+          "[all zeros] → [some ≥128] (first columns stored)",
+          "[partial ≥128] → [more ≥128] (incremental storage)",
+          "[partial] → [partial] (duplicate ignored)"
+        ],
+        "anomalies": [
+          {
+            "type": "metadata_file_coherence",
+            "description": "Indices header updated separately from column data (lines 784-790, 793-799)",
+            "impact": "If crash occurs between header update and data write, file metadata claims more columns than actually stored",
+            "severity": "HIGH"
+          },
+          {
+            "type": "no_column_count_validation",
+            "description": "storageIndices tracks count but doesn't enforce 0 or 128 invariant at storage layer",
+            "impact": "Partial column sets are valid at filesystem level, contradicting protocol assumptions",
+            "severity": "HIGH"
+          }
+        ]
+      },
+      {
+        "variable": "messageBatch",
+        "location": "broadcaster.go:407",
+        "abstract_domain": {
+          "type": "pubsub.MessageBatch",
+          "size_range": "[0, available_sidecars]",
+          "semantic": "P2P message accumulator for batch publishing"
+        },
+        "state_transitions": [
+          "empty → partial (some sidecars batched)",
+          "partial → error (batch publish fails mid-operation)"
+        ],
+        "anomalies": [
+          {
+            "type": "non_atomic_batch_publish",
+            "description": "Batch publish can fail after some messages sent but before all sent",
+            "impact": "Some subnets receive columns, others don't - creates partitioned view across network",
+            "severity": "CRITICAL"
+          },
+          {
+            "type": "no_broadcast_acknowledgment",
+            "description": "BroadcastDataColumnSidecars is non-blocking (line 356: go s.broadcastDataColumnSidecars), no status returned",
+            "impact": "Caller cannot know if broadcast succeeded, failed, or partially succeeded",
+            "severity": "HIGH"
+          }
+        ]
+      }
+    ],
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "SA-001-PARTIAL-PUBLICATION",
+        "type": "PARTIAL_STATE_PUBLICATION",
+        "severity": "CRITICAL",
+        "description": "Distributed blob publishing lacks atomicity guarantee - partial data column sets can be published to the network without a mechanism to rollback or signal incompleteness",
+        "abstract_interpretation_evidence": {
+          "initial_state": "S0 = {blobs: ∅, columns: ∅, published: ∅}",
+          "intermediate_states": [
+            "S1 = GetBlobsV2() → {blobs: [b0, b1], columns: ∅, published: ∅}  [partial fetch from EL]",
+            "S2 = ConstructDataColumns() → {blobs: [b0, b1], columns: [c0..c31], published: ∅}  [only 32 of 128 columns]",
+            "S3 = BroadcastDataColumns() → {blobs: [b0, b1], columns: [c0..c31], published: [c0..c31]}  [partial publish]",
+            "S4 = DataColumnStorage.Save() → {blobs: [b0, b1], columns: [c0..c31], published: [c0..c31], stored: [c0..c31]}  [partial persist]"
+          ],
+          "failure_state": "SF = {network_timeout: true, rollback: NONE, state: S4}  [partial data permanently visible]",
+          "expected_final_state": "SE = {blobs: [all], columns: [c0..c127], published: [c0..c127], stored: [c0..c127]} OR {blobs: ∅, columns: ∅, published: ∅, stored: ∅}",
+          "actual_final_state_range": "SA ∈ [S0, SE] with no guarantee of reaching SE"
+        },
+        "code_locations": [
+          "engine_client.go:736-743 (partial GetBlobsV2 response)",
+          "subscriber_beacon_blocks.go:234-265 (no rollback on partial construction)",
+          "data_column.go:353-416 (incremental save without transaction)",
+          "broadcaster.go:346-358 (non-blocking broadcast without status)"
+        ],
+        "atomicity_violation": {
+          "operation": "DistributedBlobPublishing",
+          "expected_property": "ALL_OR_NOTHING",
+          "actual_behavior": "INCREMENTAL_WITHOUT_ROLLBACK",
+          "violation_points": [
+            "GetBlobsV2 can return partial results (no EL-level atomicity)",
+            "BroadcastDataColumnSidecars is fire-and-forget (no broadcast atomicity)",
+            "DataColumnStorage.Save writes incrementally (no storage atomicity)",
+            "Retry loop adds more columns without checking if initial set was complete"
+          ]
+        },
+        "network_impact": {
+          "da_layer": "Partial columns published create ambiguous data availability state",
+          "peer_view": "Different peers may see different column subsets depending on when they queried",
+          "reconstruction": "Nodes attempting reconstruction may fail if they cached partial state before completion",
+          "time_window": "Between first partial publish and eventual completion (or abandonment), network state is inconsistent"
+        }
+      },
+      {
+        "anomaly_id": "SA-002-TOCTOU-COLUMN-STATE",
+        "type": "TIME_OF_CHECK_TIME_OF_USE",
+        "severity": "HIGH",
+        "description": "Race condition between checking if columns are seen (line 296) and broadcasting them (line 310) - columns may arrive from peers during this window",
+        "abstract_interpretation_evidence": {
+          "check_state": "T0: hasSeenDataColumnIndex(slot, proposer, index) = false",
+          "use_state": "T1: BroadcastDataColumnSidecars(unseenSidecars)",
+          "race_window": "Δ(T0, T1) = [execution time of lines 296-310]",
+          "race_condition": "If peer broadcasts same column during Δ(T0, T1), duplicate broadcast occurs"
+        },
+        "code_locations": [
+          "subscriber_beacon_blocks.go:296 (check)",
+          "subscriber_beacon_blocks.go:310 (use)"
+        ],
+        "impact": "Duplicate columns broadcast to network, wasting bandwidth and potentially creating ambiguity about intended column set"
+      },
+      {
+        "anomaly_id": "SA-003-UNBOUNDED-RETRY-STATE",
+        "type": "UNBOUNDED_GROWTH",
+        "severity": "HIGH",
+        "description": "Infinite retry loop without maximum iteration bound can lead to unbounded state accumulation if EL persistently returns partial data",
+        "abstract_interpretation_evidence": {
+          "iteration_domain": "N = {0, 1, 2, 3, ...}",
+          "termination_conditions": [
+            "ctx.Err() != nil (external cancellation)",
+            "haveAllSidecarsBeenSeen() = true (all 128 columns seen)",
+            "constructedCount > 0 (at least one column returned)"
+          ],
+          "non_termination_scenario": "If GetBlobsV2 always returns empty array AND not all columns seen, loop never exits",
+          "state_growth": "Each iteration: 1 metric increment, 1 log entry, 250ms delay - unbounded accumulation"
+        },
+        "code_locations": [
+          "subscriber_beacon_blocks.go:212 (infinite loop header)",
+          "subscriber_beacon_blocks.go:216-221 (termination condition 1)",
+          "subscriber_beacon_blocks.go:252-265 (termination condition 2)",
+          "subscriber_beacon_blocks.go:268-269 (delay without backoff)"
+        ],
+        "impact": "Resource exhaustion through log spam, metric inflation, and goroutine retention if many blocks trigger this path simultaneously"
+      },
+      {
+        "anomaly_id": "SA-004-FILESYSTEM-METADATA-INCOHERENCE",
+        "type": "STATE_CONSISTENCY",
+        "severity": "HIGH",
+        "description": "Filesystem metadata (indices header) is written separately from column data, creating window where metadata claims more columns exist than are actually stored",
+        "abstract_interpretation_evidence": {
+          "state_before_header_write": "File = {version: 1, sszSize: S, indices: [old], data: [old_columns]}",
+          "state_after_header_write": "File = {version: 1, sszSize: S, indices: [old+new], data: [old_columns]}  [INCOHERENT]",
+          "state_after_data_write": "File = {version: 1, sszSize: S, indices: [old+new], data: [old_columns+new_columns]}  [COHERENT]",
+          "crash_window": "Between lines 784-790 (header write) and 793-799 (data write)"
+        },
+        "code_locations": [
+          "data_column.go:784-790 (write indices header)",
+          "data_column.go:793-799 (append column data)",
+          "data_column.go:802-804 (sync - commits both writes)"
+        ],
+        "impact": "If crash occurs in crash window, file metadata claims columns that don't exist, causing read failures or incorrect data availability signals"
+      },
+      {
+        "anomaly_id": "SA-005-EMPTY-RESPONSE-SEMANTIC-AMBIGUITY",
+        "type": "SEMANTIC_OVERLOADING",
+        "severity": "MEDIUM",
+        "description": "GetBlobsV2 returning empty array has three distinct semantic meanings that are indistinguishable to the caller",
+        "abstract_interpretation_evidence": {
+          "empty_response": "len(blobAndProofV2s) == 0",
+          "semantic_interpretations": [
+            "LEGITIMATE_EMPTY: No blobs exist for these versioned hashes (blocks with zero blobs)",
+            "NETWORK_FAILURE: RPC call failed mid-response, returned partial empty data",
+            "TIMEOUT: Request timed out before EL could respond, returned default empty array",
+            "NOT_READY: EL has blobs but hasn't computed cells/proofs yet (spec allows lazy computation)"
+          ],
+          "caller_action": "Lines 742-743 treat all as 'no data available', return early without distinguishing"
+        },
+        "code_locations": [
+          "engine_client.go:742-743 (early return on empty)",
+          "subscriber_beacon_blocks.go:239-240 (retry logic assumes empty = try again later)"
+        ],
+        "impact": "Legitimate zero-blob blocks are retried unnecessarily; network failures are not logged as errors; no way to detect EL cells/proofs computation delays"
+      },
+      {
+        "anomaly_id": "SA-006-BATCH-BROADCAST-PARTIAL-FAILURE",
+        "type": "PARTIAL_BATCH_FAILURE",
+        "severity": "CRITICAL",
+        "description": "P2P batch broadcast can fail after some messages are sent but before all are sent, with no rollback or retry of the failed subset",
+        "abstract_interpretation_evidence": {
+          "batch_state_evolution": [
+            "B0 = {to_send: [m0..m127], sent: [], failed: []}",
+            "B1 = {to_send: [m32..m127], sent: [m0..m31], failed: []}  [partial send]",
+            "B_error = {to_send: [], sent: [m0..m31], failed: [m32..m127]}  [batch error occurs]"
+          ],
+          "no_retry_mechanism": "broadcaster.go:416-420 only logs error, doesn't retry failed subset",
+          "caller_unaware": "broadcastAndReceiveUnseenDataColumnSidecars() called with fire-and-forget semantics (line 310)"
+        },
+        "code_locations": [
+          "broadcaster.go:407-427 (batch publish loop)",
+          "broadcaster.go:416-420 (error handling without retry)",
+          "subscriber_beacon_blocks.go:310 (fire-and-forget call)"
+        ],
+        "impact": "Network sees partial column set on some subnets but not others, creating partitioned data availability view; no mechanism to detect or correct this divergence"
+      }
+    ],
+    "critical_findings": [
+      {
+        "finding": "NO_ROLLBACK_MECHANISM",
+        "description": "No code path exists to rollback partial column publications if EL communication fails mid-process",
+        "evidence": [
+          "DataColumnStorage.Save() is append-only with no delete/rollback API",
+          "BroadcastDataColumnSidecars() is fire-and-forget with no cancellation mechanism",
+          "Retry loop only adds more columns, never removes already-published partial sets"
+        ]
+      },
+      {
+        "finding": "NO_COMPLETION_SIGNAL",
+        "description": "Network has no way to know if a column set is complete or still being published incrementally",
+        "evidence": [
+          "DataColumnStorageSummary only tracks 'which indices exist', not 'are all expected indices present'",
+          "No protocol-level signal indicating 'publication complete' vs 'publication in progress'",
+          "Peers must assume partial set is incomplete and wait, but no timeout or completion guarantee"
+        ]
+      },
+      {
+        "finding": "FIRE_AND_FORGET_BROADCAST",
+        "description": "Broadcast returns immediately without waiting for P2P confirmation, making failure detection impossible",
+        "evidence": [
+          "broadcaster.go:356 launches goroutine with 'go s.broadcastDataColumnSidecars(ctx, forkDigest, sidecars)'",
+          "broadcaster.go:358 returns nil error immediately",
+          "No channel or callback to signal broadcast completion or failure"
+        ]
+      },
+      {
+        "finding": "INCREMENTAL_PERSISTENCE_WITHOUT_TRANSACTION",
+        "description": "Filesystem storage accumulates columns incrementally without ACID transaction guarantees",
+        "evidence": [
+          "data_column.go:783-799 writes header, then data, without single atomic operation",
+          "data_column.go:802 file.Sync() commits whatever was written, even if incomplete",
+          "No rollback if process crashes between header and data writes"
+        ]
+      }
+    ],
+    "recommendations": [
+      {
+        "priority": "CRITICAL",
+        "recommendation": "Implement two-phase commit protocol for distributed blob publishing",
+        "rationale": "Atomicity requires coordination between EL fetch, local storage, and P2P broadcast",
+        "implementation_approach": [
+          "Phase 1 (Prepare): Fetch all blobs/cells from EL, validate count == 128 or 0, store in temp location",
+          "Phase 2 (Commit): Only if Phase 1 fully succeeds, atomically rename temp → final, then broadcast all",
+          "Rollback: If any step fails, delete temp storage and abort broadcast"
+        ]
+      },
+      {
+        "priority": "CRITICAL",
+        "recommendation": "Add completion metadata to DataColumnStorage",
+        "rationale": "Network needs to distinguish 'partial set still being built' from 'complete set published'",
+        "implementation_approach": [
+          "Add 'completion_status' field to file header: PARTIAL | COMPLETE",
+          "Only mark COMPLETE when count == 128 AND all indices [0..127] are present",
+          "Expose via DataColumnStorageSummary.IsComplete() API",
+          "Peers should wait for IsComplete() before trusting data availability"
+        ]
+      },
+      {
+        "priority": "HIGH",
+        "recommendation": "Make BroadcastDataColumnSidecars synchronous with error reporting",
+        "rationale": "Caller needs to know if broadcast succeeded to decide whether to retry or rollback",
+        "implementation_approach": [
+          "Change signature to return error channel: BroadcastDataColumnSidecars(...) <-chan error",
+          "Wait for all subnet publishes to complete or fail",
+          "Return aggregated error indicating which subnets failed",
+          "Caller can retry failed subnets or rollback entire publication"
+        ]
+      },
+      {
+        "priority": "HIGH",
+        "recommendation": "Add maximum retry limit to processDataColumnSidecarsFromExecution",
+        "rationale": "Unbounded retry can cause resource exhaustion if EL is persistently failing",
+        "implementation_approach": [
+          "const maxRetries = 10 (or configuration parameter)",
+          "Track iteration count and exit loop if iteration >= maxRetries",
+          "Log error and emit metric when max retries exceeded",
+          "Consider exponential backoff: delay = 250ms * (2 ** min(iteration, 5))"
+        ]
+      },
+      {
+        "priority": "MEDIUM",
+        "recommendation": "Add GetBlobsV2 response validation to distinguish empty states",
+        "rationale": "Empty response should be validated against expected blob count from block commitments",
+        "implementation_approach": [
+          "Compare len(blobAndProofV2s) with len(kzgCommitments)",
+          "If mismatch and len(blobAndProofV2s) == 0, treat as EL error, not 'no blobs'",
+          "Add RPC error code inspection to distinguish timeout vs not-found",
+          "Only retry on timeout/transient errors, fail fast on permanent errors"
+        ]
+      },
+      {
+        "priority": "MEDIUM",
+        "recommendation": "Implement atomic file write with rename for DataColumnStorage",
+        "rationale": "Prevent metadata/data incoherence if crash occurs during write",
+        "implementation_approach": [
+          "Write to temporary file (e.g., <blockroot>.tmp.sszs)",
+          "Write header and all data to temp file",
+          "Sync temp file",
+          "Atomically rename temp → final (OS guarantees atomic rename)",
+          "This ensures file is either fully written or doesn't exist"
+        ]
+      }
+    ],
+    "test_scenarios": [
+      {
+        "scenario": "EL timeout during GetBlobsV2 after partial response",
+        "setup": "Mock EL to send first 2 BlobAndProofV2 objects, then timeout",
+        "expected_behavior": "System should detect partial response, not publish any columns, retry full request",
+        "actual_behavior": "Partial columns constructed and published, retry adds more columns incrementally"
+      },
+      {
+        "scenario": "Process crash between header write and data write",
+        "setup": "Inject crash signal after data_column.go:790, before line 793",
+        "expected_behavior": "On restart, file should be detected as corrupt/incomplete and ignored or repaired",
+        "actual_behavior": "File appears valid with metadata claiming columns that don't exist, causes read errors"
+      },
+      {
+        "scenario": "P2P batch publish fails after 50% messages sent",
+        "setup": "Mock pubsub to succeed on first 64 messages, fail on remaining 64",
+        "expected_behavior": "Broadcast should rollback or retry failed subset, or fail entirely atomically",
+        "actual_behavior": "First 64 columns broadcast to network, last 64 lost, no retry or error to caller"
+      },
+      {
+        "scenario": "Concurrent GetBlobsV2 requests for same block root",
+        "setup": "Two goroutines call ConstructDataColumnSidecars for same block simultaneously",
+        "expected_behavior": "Single flight mechanism should deduplicate, only one EL request made",
+        "actual_behavior": "columnSidecarsExecSingleFlight deduplicates correctly, but both goroutines may publish, wasting resources"
+      },
+      {
+        "scenario": "Infinite retry loop with EL always returning empty",
+        "setup": "Mock EL to always return empty array for GetBlobsV2, never set all columns as 'seen'",
+        "expected_behavior": "After max retries, should fail with error, not loop forever",
+        "actual_behavior": "Loops forever until context cancelled, consuming resources"
+      }
+    ],
+    "spec_references": [
+      {
+        "spec": "EIP-7594 (PeerDAS)",
+        "section": "Data Column Publishing",
+        "requirement": "Nodes MUST publish all 128 data columns for each block with blobs",
+        "compliance": "PARTIAL - system attempts to publish all columns but lacks atomicity guarantee"
+      },
+      {
+        "spec": "engine_getBlobsV2 RPC",
+        "section": "Response Format",
+        "requirement": "Returns array of BlobAndProofV2 for requested versioned hashes",
+        "compliance": "UNCLEAR - spec doesn't address partial response semantics or atomicity guarantees"
+      }
+    ]
+  }
+}

@@ -1,0 +1,313 @@
+{
+  "check_id": "CHK-W6B15-21-001",
+  "phase1_abstract_interpretation": {
+    "summary": "Abstract interpretation analysis of compute_requests_hash for empty requests list reveals a critical cross-implementation consistency vulnerability. The analysis identifies three distinct abstract domains with state-space anomalies arising from inconsistent handling of nil vs empty slice inputs across EL client implementations.",
+    "timestamp": "2026-02-14T12:00:00Z",
+    "code_context": {
+      "primary_implementation": "go-ethereum CalcRequestsHash (core/types/block.go)",
+      "prysm_usage": "target_workspace/testing/middleware/builder/builder.go:974",
+      "specification": "EIP-7685 compute_requests_hash",
+      "test_coverage": [
+        "target_workspace/beacon-chain/core/requests/deposits_test.go:23-27 (empty requests test)",
+        "target_workspace/beacon-chain/core/transition/electra_test.go:24-43 (nil request element tests)"
+      ]
+    },
+    "abstract_domains": {
+      "input_requests_list": {
+        "type": "[][]byte",
+        "domain": "Set{nil, [], [[]], [[request_type]], [[request_type, ...data]]...}",
+        "lattice_elements": [
+          "⊥ (undefined/uninitialized)",
+          "nil (Go nil slice)",
+          "[] (empty slice, length=0)",
+          "[[]] (slice with one empty request, request length=0)",
+          "[[0x00]] (slice with request containing only type byte)",
+          "[[0x00, ...]] (slice with valid request data)",
+          "⊤ (any arbitrary byte slice structure)"
+        ]
+      },
+      "request_item_length": {
+        "type": "int (per request element)",
+        "domain": "Interval[-∞, +∞]",
+        "practical_range": "[0, MAX_REQUEST_SIZE]",
+        "critical_values": {
+          "0": "empty request item (should be skipped)",
+          "1": "only request_type byte (should be skipped per EIP-7685)",
+          "2+": "valid request with type and data (should be hashed)"
+        }
+      },
+      "hash_output": {
+        "type": "[32]byte or common.Hash",
+        "domain": "Set{EmptyRequestsHash, hash(valid_requests), nil}",
+        "canonical_empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "computation": {
+          "empty_input": "sha256(\"\") when len(requests)=0",
+          "valid_input": "sha256(concat(sha256(r1), sha256(r2), ...)) when len(ri)>1",
+          "skipped_items": "requests with len(r)<=1 excluded from hash"
+        }
+      }
+    },
+    "state_transformations": {
+      "go_ethereum_CalcRequestsHash": {
+        "source_file": "github.com/ethereum/go-ethereum/core/types/block.go",
+        "implementation": "func CalcRequestsHash(requests [][]byte) common.Hash",
+        "abstract_transfer_function": {
+          "precondition": "requests ∈ {nil, [][]byte}",
+          "loop_invariant": "∀i ∈ [0, len(requests)): if len(requests[i]) > 1 then h2 accumulates sha256(requests[i])",
+          "postcondition": "returns sha256(h2.accumulated_data)",
+          "edge_cases": {
+            "nil_input": "does NOT check for nil, will panic with nil pointer dereference if range over nil",
+            "empty_slice_input": "loop never executes, h2 contains no data, returns sha256(\"\") = EmptyRequestsHash",
+            "all_skipped": "if all requests have len<=1, h2 contains no data, returns sha256(\"\") = EmptyRequestsHash",
+            "mixed_valid_invalid": "only items with len>1 contribute to hash"
+          }
+        },
+        "code": "h1, h2 := sha256.New(), sha256.New()\nvar buf common.Hash\nfor _, item := range requests {\n    if len(item) > 1 {\n        h1.Reset()\n        h1.Write(item)\n        h2.Write(h1.Sum(buf[:0]))\n    }\n}\nh2.Sum(buf[:0])\nreturn buf"
+      },
+      "prysm_usage_pattern": {
+        "source_file": "target_workspace/testing/middleware/builder/builder.go",
+        "lines": "972-976",
+        "abstract_transfer_function": {
+          "precondition": "requests ∈ {nil, [][]byte}",
+          "conditional_check": "if requests != nil",
+          "true_branch": "requestsHash = &CalcRequestsHash(requests)",
+          "false_branch": "requestsHash = nil (remains nil pointer)",
+          "postcondition": "requestsHash ∈ {nil, *common.Hash}"
+        },
+        "code": "var requestsHash *common.Hash\nif requests != nil {\n    h := gethTypes.CalcRequestsHash(requests)\n    requestsHash = &h\n}",
+        "semantic_issue": "Distinguishes nil from empty slice [], but CalcRequestsHash treats both differently (nil panics, [] returns EmptyHash)"
+      }
+    },
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "SA-001",
+        "type": "Nil Pointer Dereference",
+        "severity": "Critical",
+        "location": "go-ethereum CalcRequestsHash function",
+        "description": "CalcRequestsHash does not validate nil input before ranging over the slice",
+        "abstract_state": {
+          "input": "requests = nil",
+          "operation": "for _, item := range requests",
+          "result": "panic: runtime error - nil pointer dereference"
+        },
+        "attack_vector": "Attacker provides nil requests parameter through P2P message",
+        "mitigation_status": "Prysm's wrapper code guards with nil check, but other implementations may not"
+      },
+      {
+        "anomaly_id": "SA-002",
+        "type": "Empty vs Nil Semantic Inconsistency",
+        "severity": "Critical",
+        "location": "Cross-implementation boundary between CL and EL",
+        "description": "Nil requests slice produces different behavior than empty requests slice []",
+        "abstract_state_comparison": {
+          "nil_input": {
+            "prysm_check": "requests == nil → true",
+            "result": "requestsHash = nil (not set)",
+            "header_field": "RequestsHash field remains nil pointer"
+          },
+          "empty_slice_input": {
+            "prysm_check": "requests == nil → false (it's [])",
+            "geth_computation": "CalcRequestsHash([]) → EmptyRequestsHash",
+            "result": "requestsHash = &EmptyRequestsHash",
+            "header_field": "RequestsHash = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        "trust_boundary_impact": "Different EL clients may represent 'no requests' differently (nil vs []), leading to hash mismatch",
+        "specification_ambiguity": "EIP-7685 specifies sha256(\"\") for empty but doesn't mandate nil vs [] handling"
+      },
+      {
+        "anomaly_id": "SA-003",
+        "type": "Loop Bound and Conditional Coverage Gap",
+        "severity": "Medium",
+        "location": "CalcRequestsHash filter condition len(item) > 1",
+        "description": "Edge case where all requests have len<=1 produces EmptyRequestsHash, semantically equivalent to no requests",
+        "abstract_state": {
+          "input": "requests = [[0x00], [0x01], [0x02]]",
+          "loop_iterations": "3 iterations, all filtered out by len(item) > 1",
+          "h2_state": "contains no data (never written to)",
+          "output": "sha256(\"\") = EmptyRequestsHash"
+        },
+        "semantic_correctness": "Correct per EIP-7685, but creates equivalence class: nil ~ [] ~ [[single_byte]...]",
+        "implementation_note": "Prysm's test at deposits_test.go:23 only tests empty slice [], not all-single-byte-requests case"
+      },
+      {
+        "anomaly_id": "SA-004",
+        "type": "Unbounded Loop with External Input",
+        "severity": "Low",
+        "location": "CalcRequestsHash iteration over requests",
+        "description": "Loop bound determined by attacker-controlled len(requests)",
+        "abstract_state": {
+          "input_domain": "len(requests) ∈ [0, MAX_UINT]",
+          "loop_complexity": "O(n) where n = len(requests)",
+          "hash_operations": "O(n) sha256 operations in worst case",
+          "resource_consumption": "CPU time proportional to request count"
+        },
+        "dos_potential": "Attacker sends block with max requests to cause computation delay",
+        "mitigation_status": "Depends on protocol-level limits (MAX_REQUESTS_PER_BLOCK)",
+        "analysis": "Not directly a vulnerability if protocol enforces bounded request count"
+      },
+      {
+        "anomaly_id": "SA-005",
+        "type": "Cross-Client Canonical Hash Divergence Risk",
+        "severity": "Critical",
+        "location": "Trust boundary tb-004 between EL implementations",
+        "description": "Different EL client implementations may have subtly different handling of edge cases",
+        "abstract_state_lattice": {
+          "go_ethereum": {
+            "nil_input": "panic (undefined behavior)",
+            "empty_input": "EmptyRequestsHash",
+            "single_byte_requests": "EmptyRequestsHash (all filtered)"
+          },
+          "hypothetical_client_A": {
+            "nil_input": "returns zero hash 0x000...000 (different from EmptyRequestsHash)",
+            "empty_input": "EmptyRequestsHash",
+            "single_byte_requests": "includes single-byte requests (violates EIP-7685)"
+          },
+          "hypothetical_client_B": {
+            "nil_input": "treats as empty, returns EmptyRequestsHash (guards nil)",
+            "empty_input": "EmptyRequestsHash",
+            "single_byte_requests": "EmptyRequestsHash (correct)"
+          }
+        },
+        "invariant_violation": "INV-013: For empty requests list, hash(CL) MUST equal hash(EL) for all EL clients",
+        "test_procedure_gap": "Test procedure must verify nil, [], [[]], [[0x00]] inputs across ALL EL client implementations"
+      }
+    ],
+    "variable_analysis": {
+      "h1_hasher": {
+        "type": "hash.Hash (sha256)",
+        "lifecycle": "created once, reset before each request",
+        "purpose": "compute sha256(request) for each valid request",
+        "state": "stateful accumulator, must be reset per iteration",
+        "invariant": "h1 is reset before processing each item"
+      },
+      "h2_hasher": {
+        "type": "hash.Hash (sha256)",
+        "lifecycle": "created once, accumulates across all requests",
+        "purpose": "compute sha256(concat(sha256(r1), sha256(r2), ...))",
+        "state": "accumulated hash state across all valid requests",
+        "critical_property": "if never written to, Sum() returns sha256(\"\") = EmptyRequestsHash"
+      },
+      "buf": {
+        "type": "common.Hash ([32]byte)",
+        "purpose": "reusable buffer for intermediate hash values",
+        "scope": "local variable",
+        "usage": "passed to Sum() to store result without allocation"
+      },
+      "item": {
+        "type": "[]byte (single request)",
+        "domain": "byte slice with len ∈ [0, MAX_REQUEST_SIZE]",
+        "critical_check": "len(item) > 1 determines inclusion in hash"
+      }
+    },
+    "dataflow_analysis": {
+      "taint_source": "requests parameter (attacker-controlled via P2P)",
+      "taint_propagation": [
+        "requests (external) → item (loop variable)",
+        "item → h1.Write(item) if len(item) > 1",
+        "h1.Sum() → h2.Write()",
+        "h2 accumulation → h2.Sum(buf) → return buf"
+      ],
+      "sanitization_points": [
+        "len(item) > 1 filter (prevents single-byte/empty inclusion)",
+        "Prysm's nil check (prevents nil panic, but creates semantic gap)"
+      ],
+      "unsanitized_paths": [
+        "nil requests → range panic (in go-ethereum without Prysm's guard)",
+        "len(requests) → loop bound (DoS if unbounded)"
+      ]
+    },
+    "symbolic_domains": {
+      "empty_hash_constant": {
+        "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "derivation": "sha256(\"\").hex()",
+        "semantic_meaning": "canonical hash for 'no valid requests'",
+        "equivalence_class": "produced by: nil (with guard), [], all-single-byte-requests",
+        "specification_source": "EIP-7685, go-ethereum EmptyRequestsHash constant"
+      },
+      "valid_request_hash_domain": {
+        "structure": "sha256(sha256(r1) || sha256(r2) || ... || sha256(rn))",
+        "constraints": "∀i: len(ri) > 1, requests ordered by type ascending",
+        "cardinality": "2^256 possible values",
+        "collision_resistance": "depends on SHA256 properties"
+      }
+    },
+    "reachability_preview": {
+      "entry_points": [
+        "P2P network message (engine.ExecutionPayloadEnvelope with requests field)",
+        "Builder API (modifyExecutionPayload function)",
+        "Engine API proxy (retrievePendingBlockElectra)"
+      ],
+      "attacker_control": "Full control over requests field content, length, and structure via P2P",
+      "trust_boundary": "tb-004: CL-EL interface where Prysm validates EL-computed requestsHash",
+      "cross_implementation_risk": "Different EL clients (geth, nethermind, besu, erigon) may implement differently"
+    },
+    "recommendations": [
+      {
+        "id": "REC-001",
+        "priority": "Critical",
+        "description": "Implement comprehensive cross-client test suite",
+        "details": "Test compute_requests_hash with: nil, [], [[]], [[0x00]], [[0x00, 0x00]], [[0x00, 0x01, 0x02]] across all EL clients",
+        "expected_behavior": "All implementations must return e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 for first 4 cases"
+      },
+      {
+        "id": "REC-002",
+        "priority": "Critical",
+        "description": "Add nil input validation to CalcRequestsHash",
+        "details": "go-ethereum should explicitly handle nil input: if requests == nil { return EmptyRequestsHash }",
+        "rationale": "Prevent panic and ensure deterministic behavior"
+      },
+      {
+        "id": "REC-003",
+        "priority": "High",
+        "description": "Clarify EIP-7685 specification",
+        "details": "Explicitly specify that nil input should be treated as empty list []",
+        "rationale": "Eliminate implementation ambiguity"
+      },
+      {
+        "id": "REC-004",
+        "priority": "Medium",
+        "description": "Add property-based tests for equivalence classes",
+        "details": "Verify that EmptyRequestsHash is produced for all semantically empty inputs: nil (guarded), [], [[]], [[x]] where len(x)<=1",
+        "implementation": "QuickCheck-style property test"
+      },
+      {
+        "id": "REC-005",
+        "priority": "Low",
+        "description": "Document request count bounds",
+        "details": "Ensure protocol-level MAX_REQUESTS_PER_BLOCK is enforced before calling CalcRequestsHash",
+        "rationale": "Prevent computational DoS"
+      }
+    ],
+    "specification_references": [
+      {
+        "name": "EIP-7685",
+        "url": "https://eips.ethereum.org/EIPS/eip-7685",
+        "relevant_section": "compute_requests_hash algorithm",
+        "quote": "the requests_hash is simply sha256(\"\") for blocks containing no requests data"
+      },
+      {
+        "name": "go-ethereum implementation",
+        "url": "https://github.com/ethereum/go-ethereum/blob/master/core/types/block.go",
+        "function": "CalcRequestsHash",
+        "relevant_section": "Loop filter: if len(item) > 1"
+      },
+      {
+        "name": "go-ethereum constants",
+        "url": "https://github.com/ethereum/go-ethereum/blob/master/core/types/hashes.go",
+        "constant": "EmptyRequestsHash",
+        "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "analysis_metadata": {
+      "methodology": "Abstract Interpretation with lattice-based domain analysis",
+      "tools_used": ["static code analysis", "specification review", "test coverage analysis"],
+      "confidence": "High - based on source code review and specification analysis",
+      "limitations": [
+        "Did not analyze all EL client implementations (only go-ethereum)",
+        "Did not perform dynamic analysis or fuzzing",
+        "Assumes current EIP-7685 specification is authoritative"
+      ]
+    }
+  }
+}

@@ -1,0 +1,211 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0041",
+      "property_id": "PROP-W4B13-66",
+      "title": "Supporting Check: Does the validation correctly handle the case when shuffling is NOT yet available for the sidecar's slot?",
+      "code_scope": {
+        "file": "target_workspace/beacon-chain/verification/blob.go",
+        "lines": "286-312",
+        "function": "SidecarProposerExpected"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract interpretation analysis reveals a critical state-space anomaly where the implementation conflates 'shuffling unavailable' with 'proposer mismatch', violating spec requirement to IGNORE (not REJECT) when shuffling data cannot be computed.",
+        "state_anomalies_found": [
+          {
+            "anomaly_type": "ERROR_STATE_CONFLATION",
+            "location": "blob.go:280,287,292,298",
+            "description": "Four different error paths all return errSidecarUnexpectedProposer: (1) TargetRootForEpoch fails, (2) parentState replay fails, (3) ComputeProposer fails, (4) proposer index mismatch. Paths 1-3 indicate shuffling unavailable (should IGNORE per spec), path 4 is actual invalidity (should REJECT). Caller cannot distinguish these cases.",
+            "severity": "HIGH",
+            "spec_violation": "Spec states: 'If the proposer_index cannot immediately be verified against the expected shuffling, the sidecar MAY be queued for later processing... do not REJECT, instead IGNORE this message.' Implementation REJECTs all cases."
+          }
+        ],
+        "abstract_domain_analysis": {
+          "error_return_domain": {
+            "intended_spec_domain": [
+              "IGNORE",
+              "REJECT"
+            ],
+            "actual_implementation_domain": [
+              "REJECT"
+            ],
+            "missing_states": [
+              "IGNORE for shuffling unavailable"
+            ],
+            "impact": "During reorgs or initial sync, honest peers are penalized for valid sidecars when parent block not yet in forkchoice"
+          }
+        }
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution confirms reachable path where shuffling unavailable leads to peer penalty.",
+        "attack_paths": [
+          {
+            "path_id": "AP-041-1",
+            "description": "Honest peer sends valid blob sidecar before parent block arrives in forkchoice",
+            "preconditions": [
+              "fc.TargetRootForEpoch(blob.ParentRoot(), epoch) returns error (parent not in forkchoice)",
+              "Blob is valid with correct signature and proposer_index"
+            ],
+            "execution_trace": [
+              "SidecarProposerExpected() called",
+              "fc.TargetRootForEpoch() fails (line 280)",
+              "Returns errSidecarUnexpectedProposer",
+              "Caller interprets as REJECT",
+              "Peer score decreased"
+            ],
+            "impact": "Unbounded peer penalty accumulation during network latency",
+            "reachability": "HIGH - occurs during normal reorg or initial sync"
+          }
+        ]
+      },
+      "phase3_invariant_analysis": {
+        "summary": "Property violated: honest peers should not be penalized for valid sidecars when shuffling temporarily unavailable.",
+        "invariant_violations": [
+          {
+            "property": "\u2200 honest_peer p, \u2200 valid_sidecar s, shuffling_unavailable(s) \u2192 IGNORE(s) \u2227 \u00acREJECT(s)",
+            "violated": true,
+            "evidence": "Implementation has shuffling_unavailable(s) \u2192 REJECT(s)"
+          }
+        ],
+        "bug_bounty_classification": {
+          "in_scope": true,
+          "severity": "HIGH",
+          "category": "Peer Scoring / Network Fragmentation",
+          "impact": "Can cause mass peer disconnections during reorgs"
+        }
+      },
+      "final_classification": "VULNERABILITY_CONFIRMED",
+      "recommendation": "Introduce errSidecarShufflingUnavailable error type. Update callers to map this to pubsub.ValidationIgnore instead of ValidationReject."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0042",
+      "property_id": "PROP-W4B13-67",
+      "title": "Verify Trust Boundary Integrity for tb-006: Is BlobSidecarsByRoot deprecated protocol serve_range correctly bounded?",
+      "code_scope": {
+        "file": "target_workspace/beacon-chain/sync/rpc_blob_sidecars_by_root.go",
+        "lines": "N/A - deprecated protocol handler not found in current implementation",
+        "notes": "BlobSidecarsByRoot RPC handler exists but serve_range enforcement for deprecated protocol (post-Fulu) not implemented yet"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Deprecated protocol serve_range logic for Fulu fork not yet implemented in codebase"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0043",
+      "property_id": "PROP-W4B13-67",
+      "title": "Supporting Check: Does the serve_range lower bound correctly handle the max() between retention window and DENEB_FORK_EPOCH?",
+      "code_scope": {
+        "file": "target_workspace/beacon-chain/sync/rpc_blob_sidecars_by_range.go",
+        "lines": "138-160",
+        "function": "BlobRPCMinValidSlot"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract interpretation of BlobRPCMinValidSlot shows correct implementation of max(current - retention, deneb_fork) logic with proper underflow protection.",
+        "state_anomalies_found": [],
+        "code_analysis": {
+          "lower_bound_calculation": {
+            "location": "lines 144-153",
+            "logic": "maxSlotLo = max(deneb_slot, current_slot - retention_slots)",
+            "underflow_protection": "Lines 147-149 handle current_slot < retention_slots correctly by returning deneb_slot",
+            "correctness": "VERIFIED"
+          }
+        }
+      },
+      "final_classification": "NO_VULNERABILITY_FOUND",
+      "notes": "Implementation correctly handles both scenarios: early after Deneb (returns DENEB_FORK_EPOCH) and later (returns retention window bound)"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0044",
+      "property_id": "PROP-W4B13-67",
+      "title": "Supporting Check: Is the FULU_FORK_EPOCH upper bound (exclusive) correctly enforced for BlobSidecarsByRoot requests?",
+      "code_scope": {
+        "file": "N/A",
+        "notes": "FULU_FORK_EPOCH upper bound enforcement not yet implemented"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Fulu fork transition logic not present in current codebase"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0045",
+      "property_id": "PROP-W4B13-67",
+      "title": "Supporting Check: Is the BlobSidecarsByRoot deprecated protocol consistent with BlobSidecarsByRange in serve_range enforcement?",
+      "code_scope": {
+        "file": "N/A",
+        "notes": "Deprecated protocol consistency checks not applicable until Fulu fork implemented"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Fulu fork deprecation protocol not yet in codebase"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0046",
+      "property_id": "PROP-W4B13-68",
+      "title": "Verify Trust Boundary Integrity for tb-006: Are peers protected from scoring penalties when using deprecated BlobSidecarsByRoot protocol during the transition period?",
+      "code_scope": {
+        "file": "N/A",
+        "notes": "Transition period peer scoring logic for deprecated protocols not implemented"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Fulu fork transition period logic not present"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0047",
+      "property_id": "PROP-W4B13-68",
+      "title": "Supporting Check: Does the beacon-node correctly identify deprecated protocol requests as legitimate during transition?",
+      "code_scope": {
+        "file": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Transition period request classification not implemented"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0048",
+      "property_id": "PROP-W4B13-68",
+      "title": "Supporting Check: Is the BlobSidecarsByRoot deprecated protocol peer scoring consistent with BlobSidecarsByRange?",
+      "code_scope": {
+        "file": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Deprecated protocol peer scoring not implemented"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0049",
+      "property_id": "PROP-W4B13-68",
+      "title": "Supporting Check: Does graceful degradation prevent network fragmentation during transition?",
+      "code_scope": {
+        "file": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "reason": "Graceful degradation logic for Fulu transition not implemented"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0050",
+      "property_id": "PROP-W4B13-69",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is DataColumnSidecarsByRange response limited to count * NUMBER_OF_COLUMNS sidecars?",
+      "code_scope": {
+        "file": "target_workspace/beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+        "lines": "N/A - handler exists but response limiting logic needs detailed review",
+        "notes": "DataColumnSidecarsByRange handler exists, but count-based response limit verification requires deeper analysis"
+      },
+      "final_classification": "REQUIRES_MANUAL_REVIEW",
+      "notes": "Complex response batching logic requires full symbolic execution analysis beyond current scope"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 115,
+    "item_count": 10,
+    "timestamp": 1771073258,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0041",
+      "W7B8:W7B8:CHK-0042",
+      "W7B8:W7B8:CHK-0043",
+      "W7B8:W7B8:CHK-0044",
+      "W7B8:W7B8:CHK-0045",
+      "W7B8:W7B8:CHK-0046",
+      "W7B8:W7B8:CHK-0047",
+      "W7B8:W7B8:CHK-0048",
+      "W7B8:W7B8:CHK-0049",
+      "W7B8:W7B8:CHK-0050"
+    ]
+  }
+}

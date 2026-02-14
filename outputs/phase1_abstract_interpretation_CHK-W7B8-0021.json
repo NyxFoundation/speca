@@ -1,0 +1,282 @@
+{
+  "check_id": "W7B8:W7B8:CHK-0021",
+  "property": "PROP-W4B13-61: DataColumnSidecarsByRoot must only serve data for blocks that have passed state transition validation",
+  "code_scope": {
+    "file": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go",
+    "function": "dataColumnSidecarByRootRPCHandler",
+    "line_range": "32-159"
+  },
+  "phase1_abstract_interpretation": {
+    "summary": "Abstract interpretation reveals a critical state-space anomaly: the handler uses AvailableBlocks() to filter block roots, but this check only verifies block existence in storage, NOT whether blocks have completed state transition validation. The dataColumnStorage.Get() operation can return data columns for blocks that exist in the database but failed state transition or are pending validation.",
+    "variables_analyzed": [
+      {
+        "variable": "requestedColumnIdents",
+        "type": "types.DataColumnsByRootIdentifiers (slice)",
+        "abstract_domain": {
+          "description": "Bounded collection of root-column pairs",
+          "range": "Length: [0, MaxRequestDataColumnSidecars]",
+          "constraints": [
+            "totalRequested = sum(len(ident.Columns)) for all ident",
+            "Validated by validateDataColumnsByRootRequest",
+            "Max bounded by params.BeaconConfig().MaxRequestDataColumnSidecars"
+          ]
+        }
+      },
+      {
+        "variable": "totalRequested",
+        "type": "int",
+        "abstract_domain": {
+          "description": "Total count of requested data columns across all roots",
+          "range": "[0, MaxRequestDataColumnSidecars]",
+          "overflow_risk": "LOW - bounded by validation",
+          "transformations": [
+            "Accumulation: totalRequested += len(ident.Columns)",
+            "Validation: totalRequested <= MaxRequestDataColumnSidecars",
+            "Rate limiting: validateRequest(totalRequested)"
+          ]
+        }
+      },
+      {
+        "variable": "roots",
+        "type": "[][32]byte (slice of block roots)",
+        "abstract_domain": {
+          "description": "Extracted block roots from request",
+          "range": "Length: len(requestedColumnIdents)",
+          "uniqueness": "May contain duplicates - same root can be requested multiple times"
+        }
+      },
+      {
+        "variable": "availableRoots",
+        "type": "map[[32]byte]bool",
+        "abstract_domain": {
+          "description": "Set of roots that exist in block storage",
+          "semantics": "CRITICAL: Maps to HasBlock(), not to 'validated blocks'",
+          "state_coverage": {
+            "included_states": [
+              "Blocks saved via SaveBlock() after state transition",
+              "Blocks saved during initial sync",
+              "Blocks in fork choice",
+              "ANOMALY: Blocks that MAY NOT have passed state transition validation"
+            ],
+            "missing_validation": "No check for state transition completion status"
+          },
+          "implementation": "beaconDB.AvailableBlocks(ctx, roots) -> checks blocksBucket for existence only"
+        }
+      },
+      {
+        "variable": "verifiedRODataColumns",
+        "type": "[]blocks.VerifiedRODataColumn",
+        "abstract_domain": {
+          "description": "Data columns retrieved from storage",
+          "semantics": "'Verified' means cryptographic verification (signatures, KZG proofs), NOT state transition validation",
+          "state_invariant_assumption": "ASSUMED but NOT ENFORCED: corresponding block has passed state transition",
+          "actual_guarantee": "Only that data columns are cryptographically valid and match the block root"
+        }
+      },
+      {
+        "variable": "minReqSlot",
+        "type": "primitives.Slot",
+        "abstract_domain": {
+          "description": "Minimum valid slot for serving data columns",
+          "range": {
+            "if_fulu_enabled": "[max(currentEpoch - MinEpochsForDataColumnSidecarsRequest, FuluForkEpoch) * SlotsPerEpoch, currentSlot]",
+            "if_fulu_disabled": "[0, MaxUint64]"
+          },
+          "purpose": "Age-based filtering, not validation-based filtering",
+          "overflow_handling": "Safe - uses primitives.Slot (uint64) with overflow checks"
+        }
+      },
+      {
+        "variable": "count",
+        "type": "int",
+        "abstract_domain": {
+          "description": "Throttling counter for batch processing",
+          "range": "[0, totalRequested]",
+          "transformations": [
+            "Incremented by len(columns) for each root",
+            "Used for modulo operation: count % batchSize",
+            "No overflow risk - bounded by totalRequested which is validated"
+          ]
+        }
+      }
+    ],
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "STATE-ANOMALY-001",
+        "severity": "CRITICAL",
+        "type": "State Invariant Violation",
+        "location": "Lines 111-113, 142-147",
+        "description": "availableRoots check does not enforce state transition validation",
+        "abstract_interpretation_analysis": {
+          "control_flow_path": "Request -> Extract roots -> AvailableBlocks() -> Skip if !available -> Get data columns -> Serve",
+          "missing_predicate": "Block has completed state transition validation",
+          "actual_predicate": "Block exists in database storage",
+          "state_space_gap": {
+            "description": "Blocks in database can be in multiple states",
+            "valid_states": [
+              "STATE_PENDING: Block received but not yet processed",
+              "STATE_PROCESSING: Block undergoing state transition",
+              "STATE_INVALID: Block failed state transition validation",
+              "STATE_VALID: Block passed state transition validation",
+              "STATE_ORPHANED: Block was valid but later orphaned by fork choice"
+            ],
+            "current_check_covers": [
+              "STATE_PENDING",
+              "STATE_PROCESSING",
+              "STATE_INVALID",
+              "STATE_VALID",
+              "STATE_ORPHANED"
+            ],
+            "required_check_should_cover": [
+              "STATE_VALID"
+            ],
+            "anomaly_impact": "Data columns can be served for blocks in any database state, including invalid or pending blocks"
+          }
+        },
+        "concrete_scenario": {
+          "attack_sequence": [
+            "1. Attacker crafts a block B with invalid state transition (e.g., invalid signature, invalid state root)",
+            "2. Block B gets saved to database during initial reception (before full validation)",
+            "3. Attacker requests DataColumnSidecarsByRoot for B's root",
+            "4. AvailableBlocks() returns true because B exists in blocksBucket",
+            "5. dataColumnStorage.Get() returns data columns for B",
+            "6. Handler serves data columns for an invalid block",
+            "7. Peer receives data columns for a block that will never be part of canonical chain"
+          ],
+          "property_violation": "Serves data for blocks that have NOT passed state transition validation"
+        },
+        "code_evidence": {
+          "availability_check": "availableRoots := s.cfg.beaconDB.AvailableBlocks(ctx, roots)",
+          "implementation": "AvailableBlocks checks: bkt.Get(root[:]) != nil (beacon-chain/db/kv/blocks.go:359)",
+          "missing_check": "No verification that savePostStateInfo() completed successfully for this root",
+          "state_transition_location": "savePostStateInfo() at blockchain/process_block.go:434 calls SaveBlock()",
+          "gap": "SaveBlock() can succeed even if state transition fails later, or block can be saved before state transition completes"
+        }
+      },
+      {
+        "anomaly_id": "STATE-ANOMALY-002",
+        "severity": "MEDIUM",
+        "type": "Temporal State Inconsistency",
+        "location": "Lines 111-147",
+        "description": "Race condition between block validation and data column serving",
+        "abstract_interpretation_analysis": {
+          "temporal_ordering": {
+            "operation_1": "Block B is saved to database (SaveBlock called)",
+            "operation_2": "State transition validation proceeds asynchronously",
+            "operation_3": "RPC request arrives for data columns of B",
+            "operation_4": "AvailableBlocks() sees B exists",
+            "operation_5": "Data columns served BEFORE operation_2 completes",
+            "race_window": "Between operation_1 and operation_2 completion"
+          },
+          "state_space_evolution": {
+            "t0": "Block B does not exist - safe",
+            "t1": "Block B saved but validation pending - UNSAFE window begins",
+            "t2": "AvailableBlocks() can return true - anomaly exploitable",
+            "t3": "State transition completes - UNSAFE window continues if validation failed",
+            "t4": "Block marked invalid (if applicable) - UNSAFE window should end but doesn't",
+            "missing_synchronization": "No barrier to prevent serving during t1-t4 for invalid blocks"
+          }
+        },
+        "concrete_scenario": {
+          "description": "Node receives block, saves it, then discovers it's invalid during state transition, but has already served its data columns to peers during the validation window"
+        }
+      },
+      {
+        "anomaly_id": "STATE-ANOMALY-003",
+        "severity": "LOW",
+        "type": "Unbounded Loop Iteration",
+        "location": "Lines 118-160",
+        "description": "Nested loop over requestedColumnIdents and columns with potential amplification",
+        "abstract_interpretation_analysis": {
+          "loop_structure": {
+            "outer_loop": "for _, ident := range requestedColumnIdents",
+            "inner_loop": "for range columns (line 124)",
+            "additional_loop": "for _, verifiedRODataColumn := range verifiedRODataColumns (line 147)"
+          },
+          "iteration_bounds": {
+            "outer": "len(requestedColumnIdents) - UNBOUNDED but rate limited",
+            "inner_count_loop": "len(columns) - UNBOUNDED but validated via totalRequested",
+            "inner_serve_loop": "len(verifiedRODataColumns) - depends on storage state",
+            "total_iterations": "sum(len(ident.Columns)) = totalRequested <= MaxRequestDataColumnSidecars"
+          },
+          "amplification_factor": {
+            "request_to_processing": "1 request -> up to MaxRequestDataColumnSidecars iterations",
+            "root_duplication": "Same root can appear multiple times in request -> redundant AvailableBlocks checks avoided by using map",
+            "column_duplication": "Same column can be requested multiple times -> redundant Get() calls possible"
+          },
+          "mitigation": "Bounded by validateDataColumnsByRootRequest and rate limiter"
+        }
+      },
+      {
+        "anomaly_id": "STATE-ANOMALY-004",
+        "severity": "LOW",
+        "type": "Integer Overflow (Mitigated)",
+        "location": "Lines 55-57",
+        "description": "Potential overflow in totalRequested accumulation - mitigated by validation",
+        "abstract_interpretation_analysis": {
+          "accumulation_pattern": "totalRequested += len(ident.Columns) in loop",
+          "variable_type": "int (architecture-dependent size, typically 64-bit)",
+          "worst_case": {
+            "max_idents": "Unbounded slice length (limited by memory and network constraints)",
+            "max_columns_per_ident": "Unbounded uint64 slice",
+            "theoretical_overflow": "If sum exceeds math.MaxInt, overflow occurs",
+            "practical_bound": "Validated against MaxRequestDataColumnSidecars immediately after accumulation"
+          },
+          "mitigation_effectiveness": "EFFECTIVE - validation at line 64 prevents serving if overflow occurred",
+          "residual_risk": "If validation limit is set close to MaxInt, potential for overflow before validation check, but highly unlikely in practice"
+        }
+      }
+    ],
+    "invariant_violations": [
+      {
+        "expected_invariant": "∀ block B served by DataColumnSidecarsByRoot: StateTransitionValid(B) = true",
+        "actual_state": "∀ block B served by DataColumnSidecarsByRoot: BlockExistsInDB(B) = true",
+        "violation": "BlockExistsInDB(B) ⇏ StateTransitionValid(B)",
+        "implication": "Blocks can exist in DB without having valid state transitions"
+      },
+      {
+        "expected_invariant": "DataColumns served only for blocks in canonical or valid fork",
+        "actual_state": "DataColumns served for any block with matching root in database",
+        "violation": "No fork choice or validation status check",
+        "implication": "Can serve data for orphaned or invalid blocks"
+      }
+    ],
+    "data_flow_analysis": {
+      "input_validation": {
+        "type_check": "Line 39-41: msg type assertion to DataColumnsByRootIdentifiers",
+        "size_validation": "Line 64: validateDataColumnsByRootRequest(totalRequested)",
+        "rate_limiting": "Line 59: rateLimiter.validateRequest",
+        "slot_age_check": "Lines 148-150: verifiedRODataColumn.SignedBlockHeader.Header.Slot >= minReqSlot",
+        "MISSING": "State transition validation status check"
+      },
+      "storage_access_pattern": {
+        "block_availability": "AvailableBlocks() - batch check for existence",
+        "data_column_retrieval": "dataColumnStorage.Get(root, columns) - per-root basis",
+        "caching": "Block cache checked in AvailableBlocks implementation",
+        "efficiency": "Bulk availability check reduces DB lookups"
+      },
+      "output_filtering": {
+        "existence_filter": "!availableRoots[root] -> skip (line 136-139)",
+        "age_filter": "slot < minReqSlot -> skip (line 148-150)",
+        "MISSING_FILTER": "State transition validation status"
+      }
+    },
+    "recommendations": [
+      {
+        "priority": "CRITICAL",
+        "recommendation": "Add state transition validation status check before serving data columns",
+        "implementation_suggestion": "Introduce IsFinalizedBlock() or IsValidatedBlock() check alongside AvailableBlocks(), or modify AvailableBlocks() to only return true for blocks that have completed state transition validation"
+      },
+      {
+        "priority": "HIGH",
+        "recommendation": "Document the semantics of 'VerifiedRODataColumn' to clarify it means cryptographic verification, not state transition validation",
+        "implementation_suggestion": "Add comments and potentially rename to CryptoVerifiedRODataColumn for clarity"
+      },
+      {
+        "priority": "MEDIUM",
+        "recommendation": "Consider adding a 'validation status' field to block storage that can be queried efficiently",
+        "implementation_suggestion": "Extend block metadata to include validation_status enum (PENDING, VALID, INVALID, ORPHANED)"
+      }
+    ]
+  }
+}

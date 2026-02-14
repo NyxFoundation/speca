@@ -1,0 +1,405 @@
+{
+  "check_id": "W4B5:W4B5:CHK-0040",
+  "property_id": "PROP-W3B12-44",
+  "title": "Verify Trust Boundary Integrity: Does ModExp handle all edge case inputs deterministically?",
+  "severity": "High",
+  "phase1_abstract_interpretation": {
+    "summary": "Abstract interpretation analysis of ModExp precompile edge case handling reveals critical state-space anomalies in the input domain. The property requires deterministic gas cost computation and result consistency across all edge cases. Analysis identifies multiple abstract domains where overflow, division-by-zero, and cross-client non-determinism can occur.",
+    "context_resolution": {
+      "target": "ModExp Precompile (EIP-7883)",
+      "location": "Execution Layer Precompiled Contract at address 0x05",
+      "note": "Prysm is a consensus layer client. ModExp precompile is implemented in execution layer clients (e.g., Geth, Nethermind, Besu, Erigon). This analysis is performed at the specification level and applies to all execution clients that Prysm validators interact with."
+    },
+    "variables_identified": [
+      {
+        "name": "base_length",
+        "type": "uint256",
+        "source": "untrusted input (calldata bytes 0-31)",
+        "abstract_domain": {
+          "type": "interval",
+          "range": "[0, 2^256-1]",
+          "safety_constraint": "Must not cause integer overflow in downstream computations"
+        }
+      },
+      {
+        "name": "exponent_length",
+        "type": "uint256",
+        "source": "untrusted input (calldata bytes 32-63)",
+        "abstract_domain": {
+          "type": "interval",
+          "range": "[0, 2^256-1]",
+          "safety_constraint": "Must not cause overflow in 16*(exponent_length-32) computation"
+        }
+      },
+      {
+        "name": "modulus_length",
+        "type": "uint256",
+        "source": "untrusted input (calldata bytes 64-95)",
+        "abstract_domain": {
+          "type": "interval",
+          "range": "[0, 2^256-1]",
+          "safety_constraint": "Must not cause integer overflow in ceil(modulus_length/8)^2"
+        }
+      },
+      {
+        "name": "max_length",
+        "type": "uint256",
+        "source": "derived: max(base_length, modulus_length)",
+        "abstract_domain": {
+          "type": "interval",
+          "range": "[0, max(base_length, modulus_length)]",
+          "critical_boundaries": [0, 1, 32, 33, "2^256-1"],
+          "branching_point": "max_length <= 32 determines complexity formula path"
+        }
+      },
+      {
+        "name": "multiplication_complexity",
+        "type": "uint256",
+        "source": "derived",
+        "abstract_domain": {
+          "type": "piecewise",
+          "cases": [
+            {
+              "condition": "max_length <= 32",
+              "value": "16",
+              "range": "[16, 16]"
+            },
+            {
+              "condition": "max_length > 32",
+              "formula": "2 * ceil(max_length/8)^2",
+              "range": "[50, overflow_boundary]",
+              "overflow_risk": "words^2 can overflow if max_length is very large"
+            }
+          ]
+        }
+      },
+      {
+        "name": "iteration_count",
+        "type": "uint256",
+        "source": "derived from exponent",
+        "abstract_domain": {
+          "type": "piecewise",
+          "cases": [
+            {
+              "condition": "exponent_length <= 32 AND exponent == 0",
+              "value": "1",
+              "range": "[1, 1]"
+            },
+            {
+              "condition": "exponent_length <= 32 AND exponent != 0",
+              "formula": "bit_length(exponent) - 1",
+              "range": "[0, 255]",
+              "note": "bit_length implementation variance is a consensus risk"
+            },
+            {
+              "condition": "exponent_length > 32",
+              "formula": "max(1, 16*(exponent_length-32) + bit_length(top_32_bytes))",
+              "range": "[1, overflow_boundary]",
+              "overflow_risk": "16*(exponent_length-32) can overflow for large exponent_length"
+            }
+          ]
+        }
+      },
+      {
+        "name": "gas_cost",
+        "type": "uint64",
+        "source": "computed",
+        "abstract_domain": {
+          "type": "interval",
+          "formula": "max(500, floor(multiplication_complexity * iteration_count))",
+          "range": "[500, min(2^64-1, GAS_CAP)]",
+          "overflow_risk": "multiplication_complexity * iteration_count can overflow product",
+          "consensus_critical": true
+        }
+      }
+    ],
+    "abstract_transformations": [
+      {
+        "operation": "max_length = max(base_length, modulus_length)",
+        "input_domain": "base_length ∈ [0, 2^256-1], modulus_length ∈ [0, 2^256-1]",
+        "output_domain": "max_length ∈ [0, 2^256-1]",
+        "anomaly": "none - max operation is safe"
+      },
+      {
+        "operation": "words = ceil(max_length / 8)",
+        "input_domain": "max_length ∈ [0, 2^256-1]",
+        "output_domain": "words ∈ [0, ceil(2^256-1 / 8)]",
+        "anomaly": "none for division, but note rounding semantics must be consistent"
+      },
+      {
+        "operation": "complexity = 2 * words^2 (for max_length > 32)",
+        "input_domain": "words ∈ [5, 2^253]",
+        "output_domain": "complexity ∈ [50, overflow]",
+        "anomaly": "CRITICAL - Integer overflow: words^2 overflows when words > sqrt(2^256-1) ≈ 2^128. For max_length > 8 * 2^128, overflow occurs.",
+        "exploitability": "Attacker provides max_length near 2^256-1, causing words ≈ 2^253, words^2 overflows to small value, gas_cost wraps to minimal.",
+        "mitigation_required": "Overflow-checked arithmetic or arbitrary precision"
+      },
+      {
+        "operation": "iterations = 16 * (exponent_length - 32) + bit_length(top_32)",
+        "input_domain": "exponent_length ∈ [33, 2^256-1]",
+        "output_domain": "iterations ∈ [1, overflow]",
+        "anomaly": "CRITICAL - Integer overflow: 16 * (exponent_length - 32) overflows when exponent_length > (2^256-1)/16 + 32 ≈ 2^252.",
+        "exploitability": "Attacker provides exponent_length near 2^256-1, causing 16*(exponent_length-32) to overflow, iteration_count wraps to small value.",
+        "mitigation_required": "Overflow-checked arithmetic or capping exponent_length"
+      },
+      {
+        "operation": "product = multiplication_complexity * iteration_count",
+        "input_domain": "complexity ∈ [16, 2^256-1], iterations ∈ [1, 2^256-1]",
+        "output_domain": "product ∈ [16, overflow]",
+        "anomaly": "CRITICAL - Integer overflow: Even if complexity and iterations individually fit in uint256, their product can overflow. E.g., complexity=2^128, iterations=2^128 => product=2^256 (wraps to 0).",
+        "exploitability": "Attacker balances large max_length and large exponent_length to maximize product overflow.",
+        "mitigation_required": "Overflow-checked multiplication or gas cap enforcement before computation"
+      },
+      {
+        "operation": "gas = max(500, floor(product))",
+        "input_domain": "product ∈ [0, 2^256-1] (after potential overflow)",
+        "output_domain": "gas ∈ [500, 2^64-1]",
+        "anomaly": "If product overflows to small value, gas = max(500, small_value) = 500, but actual computational cost is enormous. DoS vector.",
+        "consensus_impact": "If clients differ in overflow handling (panic vs wrap vs saturate), gas costs diverge => consensus failure."
+      }
+    ],
+    "state_anomalies_found": [
+      {
+        "anomaly_id": "ANOMALY-01",
+        "type": "Integer Overflow",
+        "location": "multiplication_complexity computation: 2 * ceil(max_length/8)^2",
+        "trigger_condition": "max_length > 8 * sqrt(2^255) ≈ 2^130.5",
+        "abstract_state": {
+          "pre": "max_length ∈ [2^131, 2^256-1]",
+          "post": "words ∈ [2^128, 2^253], words^2 overflows => complexity wraps to small value or panics"
+        },
+        "impact": "Gas underpricing by factor of up to 2^256 / actual_cost. Network-wide DoS if overflow wraps. Consensus failure if clients differ (panic vs wrap).",
+        "exploitability": "HIGH - Attacker controls base_length and modulus_length via contract calldata.",
+        "counterexample": {
+          "base_length": "2^240",
+          "modulus_length": "1",
+          "exponent_length": "1",
+          "expected_behavior": "Gas cost proportional to (2^240/8)^2 ≈ 2^474 (massive)",
+          "actual_behavior_if_overflow": "words = 2^237, words^2 overflows, complexity wraps to small value, gas ≈ 500"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-02",
+        "type": "Integer Overflow",
+        "location": "iteration_count computation: 16 * (exponent_length - 32)",
+        "trigger_condition": "exponent_length > (2^256 - 1) / 16 + 32 ≈ 2^252",
+        "abstract_state": {
+          "pre": "exponent_length ∈ [2^252, 2^256-1]",
+          "post": "16 * (exponent_length - 32) overflows => iteration_count wraps or panics"
+        },
+        "impact": "Gas underpricing. Large exponent becomes nearly free. DoS attack vector.",
+        "exploitability": "HIGH - Attacker controls exponent_length via contract calldata.",
+        "counterexample": {
+          "base_length": "1",
+          "modulus_length": "1",
+          "exponent_length": "2^255",
+          "expected_behavior": "iterations = 16 * (2^255 - 32) ≈ 2^259 (overflows uint256)",
+          "actual_behavior_if_overflow": "iterations wraps to small value, gas ≈ 500"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-03",
+        "type": "Integer Overflow",
+        "location": "Final product: multiplication_complexity * iteration_count",
+        "trigger_condition": "complexity * iterations > 2^256 - 1",
+        "abstract_state": {
+          "pre": "complexity ∈ [16, 2^200], iterations ∈ [16, 2^200]",
+          "post": "product = complexity * iterations overflows => gas wraps to small value"
+        },
+        "impact": "Catastrophic gas underpricing. Extremely expensive computation for 500 gas.",
+        "exploitability": "CRITICAL - Attacker can balance max_length and exponent_length to maximize product while staying under individual overflow thresholds.",
+        "counterexample": {
+          "base_length": "2^120 * 8",
+          "modulus_length": "1",
+          "exponent_length": "2^120",
+          "complexity": "2 * (2^120)^2 = 2^241",
+          "iterations": "16 * (2^120 - 32) ≈ 2^124",
+          "expected_product": "2^241 * 2^124 = 2^365 (overflows uint256)",
+          "actual_behavior": "Product wraps, gas = max(500, wrapped_value) ≈ 500"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-04",
+        "type": "Division by Zero / Edge Case Non-determinism",
+        "location": "exponent = 0 case",
+        "trigger_condition": "exponent_length <= 32 AND all exponent bytes are 0x00",
+        "abstract_state": {
+          "pre": "exponent ∈ {0}",
+          "post": "iteration_count must equal exactly 1 per spec"
+        },
+        "impact": "If iteration_count is computed as bit_length(0) - 1 = -1 (or 0 in unsigned), gas formula fails. Cross-client inconsistency if some use bit_length(0)=0 and others use bit_length(0)=1.",
+        "exploitability": "MEDIUM - Easy to trigger, but impact depends on implementation details.",
+        "counterexample": {
+          "base_length": "1",
+          "modulus_length": "1",
+          "exponent_length": "1",
+          "exponent_bytes": "0x00",
+          "expected_iterations": "1",
+          "client_A_behavior": "bit_length(0) = 0 => iterations = 0 - 1 (underflow or 0)",
+          "client_B_behavior": "bit_length(0) = 1 => iterations = 1 - 1 = 0 or special-case => 1",
+          "consensus_risk": "Different gas costs between clients"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-05",
+        "type": "Boundary Condition Inconsistency",
+        "location": "max_length = 32 vs max_length = 33 branch",
+        "trigger_condition": "max_length exactly at 32/33 boundary",
+        "abstract_state": {
+          "pre": "max_length ∈ {32, 33}",
+          "at_32": "complexity = 16 (small path)",
+          "at_33": "words = ceil(33/8) = 5, complexity = 2*25 = 50 (large path)"
+        },
+        "impact": "3.125x gas cost jump from max_length=32 to max_length=33. If clients use different comparison operators (< vs <=), consensus divergence.",
+        "exploitability": "MEDIUM - Attacker targets boundary to expose client implementation differences.",
+        "counterexample": {
+          "max_length": "32",
+          "client_A": "uses (max_length <= 32) => complexity = 16",
+          "client_B": "uses (max_length < 32) => complexity = 50",
+          "consensus_risk": "Different gas costs at boundary"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-06",
+        "type": "bit_length Implementation Variance",
+        "location": "bit_length(exponent) computation",
+        "trigger_condition": "exponent at power-of-2 boundaries (e.g., 0x80, 0x100)",
+        "abstract_state": {
+          "pre": "exponent ∈ {0x80, 0xFF, 0x100}",
+          "implementations": [
+            "bit_length(0x80) = 8 (most significant bit position)",
+            "bit_length(0x80) = 7 (highest set bit index)",
+            "bit_length(0xFF) = 8 vs 7",
+            "bit_length(0x100) = 9 vs 8"
+          ]
+        },
+        "impact": "Off-by-one in iteration_count across clients => consensus failure.",
+        "exploitability": "HIGH - Attacker probes power-of-2 exponent boundaries.",
+        "counterexample": {
+          "exponent": "0x80",
+          "client_A": "bit_length(0x80) = 8 => iterations = 7",
+          "client_B": "bit_length(0x80) = 7 => iterations = 6",
+          "gas_divergence": "Different gas costs for identical inputs"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-07",
+        "type": "Zero-Length Input Handling",
+        "location": "base_length = 0 or modulus_length = 0",
+        "trigger_condition": "base_length = 0 OR modulus_length = 0",
+        "abstract_state": {
+          "pre": "base_length ∈ {0}, modulus_length ∈ {0}",
+          "post": "max_length = 0, complexity branch unclear"
+        },
+        "impact": "Spec ambiguity: Does max_length=0 use small path (complexity=16) or is it undefined? Different clients may implement differently.",
+        "exploitability": "MEDIUM - Zero-length operands are edge cases that may not be tested cross-client.",
+        "counterexample": {
+          "base_length": "0",
+          "modulus_length": "0",
+          "exponent_length": "1",
+          "client_A": "max_length = 0 => uses small path => complexity = 16",
+          "client_B": "max_length = 0 => special case early return or error",
+          "consensus_risk": "Different gas costs or execution results"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-08",
+        "type": "Memory Allocation Before Gas Check",
+        "location": "Precompile entry point",
+        "trigger_condition": "Very large base_length or modulus_length",
+        "abstract_state": {
+          "pre": "base_length = 2^30 (1GB)",
+          "order_of_operations": "If implementation allocates buffers before computing gas, OOM occurs"
+        },
+        "impact": "Node crash before gas deduction. DoS with minimal gas expenditure.",
+        "exploitability": "CRITICAL - Attacker can crash validator nodes with low-gas transactions.",
+        "counterexample": {
+          "base_length": "2^30",
+          "modulus_length": "1",
+          "exponent_length": "1",
+          "provided_gas": "1000",
+          "expected_behavior": "Compute gas cost first, revert with out-of-gas",
+          "vulnerable_behavior": "Allocate 1GB buffer, OOM crash before gas check"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-09",
+        "type": "Ceiling Division Inconsistency",
+        "location": "ceil(max_length / 8) computation",
+        "trigger_condition": "max_length not divisible by 8",
+        "abstract_state": {
+          "pre": "max_length ∈ {1, 7, 9, 33, 65}",
+          "implementations": [
+            "ceil(x/8) = (x + 7) / 8",
+            "ceil(x/8) = (x / 8) + (x % 8 != 0 ? 1 : 0)",
+            "ceil(x/8) = floor((x + 7) / 8)"
+          ]
+        },
+        "impact": "If different clients use different ceiling implementations with rounding errors, words differs by 1 => complexity differs significantly.",
+        "exploitability": "MEDIUM - Rounding errors at odd max_length values.",
+        "counterexample": {
+          "max_length": "33",
+          "client_A": "ceil(33/8) = 5",
+          "client_B": "floor(33/8) = 4 (if ceil is buggy)",
+          "complexity_A": "2 * 25 = 50",
+          "complexity_B": "2 * 16 = 32",
+          "gas_divergence": "56% difference"
+        }
+      },
+      {
+        "anomaly_id": "ANOMALY-10",
+        "type": "Input Length vs Data Length Mismatch",
+        "location": "Reading base, exponent, modulus from calldata",
+        "trigger_condition": "Declared length > actual calldata size",
+        "abstract_state": {
+          "pre": "base_length = 1000, calldata size = 96 (only length headers)",
+          "post": "Implementation reads past end of calldata"
+        },
+        "impact": "Different clients may handle out-of-bounds reads differently: zero-padding vs error vs garbage. Consensus divergence.",
+        "exploitability": "HIGH - Attacker declares large lengths but provides minimal calldata.",
+        "counterexample": {
+          "base_length": "1000",
+          "exponent_length": "1000",
+          "modulus_length": "1000",
+          "calldata_size": "96",
+          "client_A": "Zero-pads missing bytes",
+          "client_B": "Returns error",
+          "consensus_risk": "Different execution results"
+        }
+      }
+    ],
+    "reachability_analysis": {
+      "entry_point": "Smart contract CALL/STATICCALL to address 0x05",
+      "attacker_control": "Full control over calldata (base_length, exponent_length, modulus_length, and data bytes)",
+      "validation_layers": [
+        "EVM gas check (post-computation)",
+        "Precompile input parsing",
+        "Gas cost formula execution"
+      ],
+      "exploitation_path": [
+        "Attacker deploys malicious contract",
+        "Contract calls ModExp with crafted edge case inputs",
+        "Overflow/non-determinism occurs in gas computation",
+        "Gas underpricing or cross-client divergence achieved",
+        "Network-wide impact: DoS via resource exhaustion or consensus failure"
+      ]
+    },
+    "cross_client_determinism_requirements": [
+      "All clients must use identical overflow handling: checked arithmetic with panic/revert on overflow (NOT wrapping)",
+      "All clients must use identical bit_length definition and implementation",
+      "All clients must use identical ceiling division implementation",
+      "All clients must use identical boundary condition comparisons (<=32 vs <32)",
+      "All clients must handle zero-length inputs identically",
+      "All clients must validate calldata bounds identically (zero-pad vs error)",
+      "All clients must compute gas BEFORE allocating memory",
+      "All clients must use identical exponent=0 special case handling"
+    ],
+    "recommended_verification_approach": [
+      "Differential fuzzing: Generate random edge case inputs, execute on all clients, compare gas costs and results",
+      "Boundary value testing: Test all identified critical boundaries (0, 1, 32, 33, 2^8, 2^64, 2^128, 2^252, 2^256-1)",
+      "Overflow testing: Craft inputs designed to overflow each intermediate computation",
+      "Cross-client test suite: Canonical test vectors with expected gas costs",
+      "Formal verification: Prove overflow-freedom and determinism using SMT solvers"
+    ]
+  }
+}

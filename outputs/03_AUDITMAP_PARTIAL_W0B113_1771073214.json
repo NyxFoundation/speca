@@ -1,0 +1,194 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0021",
+      "final_classification": "confirmed-finding",
+      "severity": "Low",
+      "title": "DataColumnSidecarsByRoot handler does not verify state transition validity before serving",
+      "description": "The dataColumnSidecarByRootRPCHandler uses AvailableBlocks() to check block existence but does not verify that blocks have passed state transition validation. This allows peers to probe for blocks that exist in storage but failed validation.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go:32-159",
+      "attack_scenario": "An attacker can craft requests for block roots of invalid blocks that exist in the database but failed state transition. By analyzing response timing or data presence, the attacker gains information about which blocks failed validation.",
+      "recommendation": "Add a check using forkchoice or chain service to verify the block has been validated and is part of a valid chain before serving data columns. Check `s.cfg.chain.IsCanonical(blockRoot)` or equivalent validation status.",
+      "phase1_state_anomalies": [
+        "STATE-ANOMALY-001: AvailableBlocks() checks storage existence, not validation status",
+        "STATE-ANOMALY-002: Race condition between block storage and validation completion"
+      ],
+      "phase2_symbolic_paths": [
+        "PATH-001: Block exists in DB but failed state transition -> data served (VIOLATION)",
+        "PATH-002: Block exists and passed validation -> data served (CORRECT)"
+      ],
+      "phase3_invariant_proof": "VIOLATED: \u2200 block B: StateTransitionValid(B) required before serving data columns"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0022",
+      "final_classification": "confirmed-finding",
+      "severity": "Low",
+      "title": "DataColumnSidecarsByRoot lacks explicit bypass path analysis for validity checks",
+      "description": "The RPC handler has multiple early-return paths and does not explicitly verify block validity status from forkchoice. The minReqSlot age filter is applied but there is no validation status check.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go:136-148",
+      "attack_scenario": "Attacker requests data columns for blocks within the retention window but that failed validation. The age-based filter (minReqSlot) does not prevent serving data for invalid blocks, only old blocks.",
+      "recommendation": "Add explicit forkchoice check: if !s.cfg.chain.IsCanonical(root) { continue } before serving data columns.",
+      "phase1_state_anomalies": [
+        "STATE-ANOMALY-003: Age-based filter (minReqSlot) is independent of validation status",
+        "STATE-ANOMALY-004: No explicit validation status query in the critical path"
+      ],
+      "phase2_symbolic_paths": [
+        "BYPASS-PATH-001: availableRoots check bypassed by block being in DB",
+        "BYPASS-PATH-002: minReqSlot filter is time-based, not validity-based"
+      ],
+      "phase3_invariant_proof": "VIOLATED: No validation status verification in the serving path"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0023",
+      "final_classification": "passing",
+      "severity": "Medium",
+      "title": "Gossip validation correctly returns IGNORE for unseen parent blocks",
+      "description": "The validateDataColumn function correctly checks if parent block has been seen using verifier.SidecarParentSeen() and returns pubsub.ValidationIgnore when parent is not seen, as required by the spec.",
+      "code_location": "beacon-chain/sync/validate_data_column.go:100-115",
+      "attack_scenario": "N/A - Implementation follows spec correctly",
+      "recommendation": "No changes required. Implementation correctly returns IGNORE (not REJECT) for unseen parents and triggers async parent block request.",
+      "phase1_state_anomalies": [],
+      "phase2_symbolic_paths": [
+        "PATH-001: Parent seen -> Continue validation (CORRECT)",
+        "PATH-002: Parent not seen -> Return IGNORE + async request parent (CORRECT)"
+      ],
+      "phase3_invariant_proof": "SATISFIED: Parent not seen \u2192 IGNORE (not REJECT)"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0024",
+      "final_classification": "needs-investigation",
+      "severity": "Medium",
+      "title": "IGNORE queue for unseen-parent sidecars requires investigation",
+      "description": "The code shows async parent block requests but does not explicitly show a bounded queue for IGNORE'd sidecars. Implementation may rely on libp2p message deduplication and processing, but explicit queue bounds are not evident in the code reviewed.",
+      "code_location": "beacon-chain/sync/validate_data_column.go:100-115",
+      "attack_scenario": "If the IGNORE queue is unbounded, an attacker can flood the node with data columns referencing many different unseen parents, potentially causing memory exhaustion.",
+      "recommendation": "Review the P2P layer for message queueing and ensure there are bounded limits on pending/ignored messages. Consider implementing explicit per-parent or global limits on queued data columns awaiting parent blocks.",
+      "phase1_state_anomalies": [
+        "UNKNOWN-001: IGNORE queue implementation not visible in this code layer",
+        "UNKNOWN-002: Bounding mechanism may be in libp2p layer"
+      ],
+      "phase2_symbolic_paths": [
+        "PATH-001: Multiple IGNORE'd messages -> Queue growth (REQUIRES VERIFICATION)"
+      ],
+      "phase3_invariant_proof": "UNVERIFIED: Cannot prove queue bounds from current code scope"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0025",
+      "final_classification": "needs-investigation",
+      "severity": "Medium",
+      "title": "Re-validation trigger for queued sidecars requires investigation",
+      "description": "The validation code shows async parent block requests but does not show the callback/trigger mechanism for re-validating queued sidecars when parent arrives. This may be handled at a different layer.",
+      "code_location": "beacon-chain/sync/validate_data_column.go:100-115",
+      "attack_scenario": "If re-validation is not properly triggered, valid sidecars could remain stuck in the IGNORE queue even after their parent blocks arrive.",
+      "recommendation": "Investigate block processing pipeline to confirm that sidecar re-validation is triggered when parent blocks are processed. Review event system or notification mechanism for parent block arrival.",
+      "phase1_state_anomalies": [
+        "UNKNOWN-003: Re-validation trigger mechanism not in validation handler"
+      ],
+      "phase2_symbolic_paths": [
+        "PATH-001: Parent arrives -> Re-validation (MECHANISM NOT VISIBLE)"
+      ],
+      "phase3_invariant_proof": "UNVERIFIED: Re-validation trigger not in current code scope"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0026",
+      "final_classification": "passing",
+      "severity": "Medium",
+      "title": "IGNORE queue protected from processing amplification via deduplication",
+      "description": "The validation uses hasSeenDataColumnIndex() to check if a sidecar with same (slot, proposer_index, column_index) was already processed. This prevents processing amplification from duplicate submissions.",
+      "code_location": "beacon-chain/sync/validate_data_column.go:149-151",
+      "attack_scenario": "N/A - Deduplication prevents amplification",
+      "recommendation": "No changes required. The seen cache provides effective deduplication to prevent processing amplification.",
+      "phase1_state_anomalies": [],
+      "phase2_symbolic_paths": [
+        "PATH-001: Duplicate sidecar -> IGNORE via seen cache (CORRECT)",
+        "PATH-002: New sidecar -> Full validation (CORRECT)"
+      ],
+      "phase3_invariant_proof": "SATISFIED: Duplicate detection prevents amplification"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0027",
+      "final_classification": "confirmed-finding",
+      "severity": "Low",
+      "title": "DataColumnSidecarsByRange returns data instead of ResourceUnavailable for out-of-range",
+      "description": "The dataColumnSidecarsByRangeRPCHandler validates the range and returns nil (empty response) for out-of-range requests, but the spec requires returning ResourceUnavailable(3) error code.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go:66-75",
+      "attack_scenario": "Attacker can probe the serve_range boundaries by observing response differences between empty data responses vs error codes, potentially revealing storage policies or node configuration.",
+      "recommendation": "Modify validateDataColumnsByRange to return a specific error code for out-of-range requests, and ensure the handler writes ResourceUnavailable(3) error response instead of silently closing the stream.",
+      "phase1_state_anomalies": [
+        "STATE-ANOMALY-005: Range validation returns nil instead of error for out-of-range"
+      ],
+      "phase2_symbolic_paths": [
+        "PATH-001: startSlot > currentSlot -> return nil -> silent close (INCORRECT)",
+        "PATH-002: endSlot < minStartSlot -> return nil -> silent close (INCORRECT)",
+        "PATH-003: Should return ResourceUnavailable(3) error (REQUIRED)"
+      ],
+      "phase3_invariant_proof": "VIOLATED: Out-of-range requests should return ResourceUnavailable(3)"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0028",
+      "final_classification": "passing",
+      "severity": "Low",
+      "title": "serve_range boundary calculation is deterministic and consistent",
+      "description": "The dataColumnsRPCMinValidSlot() function calculates serve_range based solely on current slot and config parameters (MinEpochsForDataColumnSidecarsRequest). This is deterministic and does not leak storage state.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go:173-189",
+      "attack_scenario": "N/A - Calculation is deterministic",
+      "recommendation": "No changes required. The serve_range is correctly calculated as a deterministic function of time, not storage state.",
+      "phase1_state_anomalies": [],
+      "phase2_symbolic_paths": [
+        "PATH-001: minReqSlot = f(currentSlot, config) -> deterministic (CORRECT)"
+      ],
+      "phase3_invariant_proof": "SATISFIED: serve_range is time-based, not storage-based"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0029",
+      "final_classification": "needs-investigation",
+      "severity": "Low",
+      "title": "Timing side channels in out-of-range request handling require verification",
+      "description": "The validateDataColumnsByRange function performs range calculations and comparisons that may have timing variations based on overflow conditions or edge cases, but explicit timing analysis was not performed.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go:155-201",
+      "attack_scenario": "If range validation has timing variations based on storage state (e.g., cache hits/misses in epoch calculations), attackers could infer storage patterns.",
+      "recommendation": "Perform explicit timing analysis or add constant-time checks for out-of-range validation. Ensure that database/cache access does not occur before range validation.",
+      "phase1_state_anomalies": [
+        "UNKNOWN-004: Timing characteristics not explicitly verified"
+      ],
+      "phase2_symbolic_paths": [
+        "PATH-001: Out-of-range check timing may vary (REQUIRES MEASUREMENT)"
+      ],
+      "phase3_invariant_proof": "UNVERIFIED: Timing consistency not proven in code review"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0030",
+      "final_classification": "passing",
+      "severity": "Low",
+      "title": "Sync state remains hidden from out-of-range probing",
+      "description": "The validateDataColumnsByRange function uses currentSlot from the clock, not from sync state. The response is determined by time-based calculations, not sync progress.",
+      "code_location": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go:155-201",
+      "attack_scenario": "N/A - Sync state not exposed",
+      "recommendation": "No changes required. The range validation is based on current slot from clock, which does not reveal sync state to peers.",
+      "phase1_state_anomalies": [],
+      "phase2_symbolic_paths": [
+        "PATH-001: Range validation uses clock.CurrentSlot(), not sync state (CORRECT)"
+      ],
+      "phase3_invariant_proof": "SATISFIED: Sync state is not used in range validation"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 0,
+    "batch_index": 113,
+    "item_count": 10,
+    "timestamp": 1771073214,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0021",
+      "W7B8:W7B8:CHK-0022",
+      "W7B8:W7B8:CHK-0023",
+      "W7B8:W7B8:CHK-0024",
+      "W7B8:W7B8:CHK-0025",
+      "W7B8:W7B8:CHK-0026",
+      "W7B8:W7B8:CHK-0027",
+      "W7B8:W7B8:CHK-0028",
+      "W7B8:W7B8:CHK-0029",
+      "W7B8:W7B8:CHK-0030"
+    ]
+  }
+}

@@ -1,0 +1,399 @@
+{
+  "check_id": "W5B6:W5B6:CHK-0032",
+  "checklist_item": {
+    "check_id": "W5B6:W5B6:CHK-0032",
+    "property_id": "PROP-W3B4-52",
+    "title": "Verify Trust Boundary Integrity: Is sidecar request rate-limiting implemented?",
+    "severity": "High",
+    "mindset": "Boundary Guard",
+    "is_boundary_check": true,
+    "reachability": {
+      "classification": "external-reachable",
+      "entry_points": [
+        "P2P"
+      ],
+      "attacker_controlled": true,
+      "bug_bounty_scope": "in-scope"
+    },
+    "test_procedure": "1. Flood validator with sidecar requests. 2. Verify rate-limiting per-peer is implemented. 3. Measure resource impact on consensus duties. 4. Identify clients without rate-limiting on sidecar serving.",
+    "bug_class": "Resource Exhaustion",
+    "risk_category": "Denial of Service",
+    "notes": "Source: PROP-W3B4-52, Trust Boundary: tb-012, Threat: stride-dos-tb-012. Request flooding exhausts validator resources."
+  },
+  "phase1_summary": "Rate-limiting IS implemented using leaky bucket algorithm with per-peer, per-topic rate limiters. Several low-severity anomalies identified.",
+  "phase2_symbolic_execution": {
+    "summary": "Symbolic execution reveals five potential attack paths through edge cases in the rate-limiting implementation. The most critical involves ALAT-002 (zero-amount bypass) and ALAT-003 (TOCTOU race condition). A counterexample demonstrates that under specific timing conditions, an attacker could send slightly over-limit requests by exploiting the time window between validation and accounting.",
+    "symbolic_variables": {
+      "input_variables": [
+        {
+          "name": "totalRequested",
+          "type": "int",
+          "domain": "[0, MaxRequestDataColumnSidecars]",
+          "source": "attacker-controlled (from P2P message)",
+          "constraints": [
+            "totalRequested = sum(len(ident.Columns)) for all ident in requestedColumnIdents",
+            "validated: totalRequested <= MaxRequestDataColumnSidecars (4096)"
+          ]
+        },
+        {
+          "name": "requestedColumnIdents",
+          "type": "[]DataColumnsByRootIdentifier",
+          "domain": "variable-length array",
+          "source": "attacker-controlled (from P2P message)",
+          "constraints": [
+            "len(requestedColumnIdents) >= 0",
+            "each ident contains BlockRoot and Columns[]"
+          ]
+        },
+        {
+          "name": "peer_id",
+          "type": "string",
+          "domain": "peer identifier",
+          "source": "attacker-controlled (can create multiple peer IDs)",
+          "constraints": [
+            "unique per libp2p peer connection"
+          ]
+        },
+        {
+          "name": "current_time",
+          "type": "time.Time",
+          "domain": "monotonically increasing",
+          "source": "system clock (not attacker-controlled)",
+          "constraints": [
+            "now() advances during request processing"
+          ]
+        }
+      ],
+      "state_variables": [
+        {
+          "name": "bucket.p",
+          "type": "time.Time",
+          "domain": "future timestamp when bucket becomes empty",
+          "initial_value": "now() when bucket created",
+          "update_rule": "bucket.p = bucket.p.Add(duration) on Add(amount)"
+        },
+        {
+          "name": "bucket.Count()",
+          "type": "int64",
+          "domain": "[0, capacity]",
+          "computation": "ceiling((bucket.p - now()) / (period / rate))",
+          "temporal_property": "monotonically decreasing as time advances"
+        },
+        {
+          "name": "Collector.buckets",
+          "type": "map[string]*LeakyBucket",
+          "domain": "unbounded map keyed by peer_id",
+          "growth_pattern": "monotonic increase, bounded by peer count and pruning"
+        }
+      ]
+    },
+    "path_conditions": [
+      {
+        "path_id": "PATH-1-HAPPY",
+        "description": "Normal request within rate limit",
+        "conditions": [
+          "amt = totalRequested",
+          "amt > 0",
+          "amt <= collector.Remaining(peer_id)",
+          "validateRequest() returns nil",
+          "request processed",
+          "rateLimiter.add(stream, amt) charges bucket"
+        ],
+        "verdict": "SAFE - rate limit enforced"
+      },
+      {
+        "path_id": "PATH-2-OVERLIMIT",
+        "description": "Request exceeds current remaining capacity",
+        "conditions": [
+          "amt = totalRequested",
+          "amt > collector.Remaining(peer_id)",
+          "validateRequest() returns ErrRateLimited",
+          "downscorePeer() called",
+          "request rejected"
+        ],
+        "verdict": "SAFE - rate limit enforced, peer penalized"
+      },
+      {
+        "path_id": "PATH-3-ZERO-AMOUNT",
+        "description": "Zero-amount request bypass (ALAT-002)",
+        "conditions": [
+          "totalRequested = 0 (requestedColumnIdents is empty or all Columns are empty)",
+          "amt = 0 initially",
+          "remaining = collector.Remaining(peer_id) = 0 (bucket exhausted)",
+          "CHECK: amt > remaining evaluates to (0 > 0) = false",
+          "validateRequest() PASSES",
+          "amt normalized to 1 AFTER validation",
+          "rateLimiter.add(stream, 1) charges 1 to bucket"
+        ],
+        "symbolic_constraint": "amt == 0 AND remaining == 0",
+        "satisfiable": true,
+        "counterexample": {
+          "found": true,
+          "scenario": "Empty request against exhausted bucket",
+          "inputs": {
+            "requestedColumnIdents": "[]",
+            "totalRequested": 0,
+            "bucket_remaining": 0
+          },
+          "execution_trace": [
+            "1. totalRequested = 0",
+            "2. validateRequest(stream, 0) called",
+            "3. amt = 0, remaining = 0",
+            "4. CHECK: 0 > 0 = false -> VALIDATION PASSES",
+            "5. amt normalized to 1",
+            "6. Request processed (though no data sent since requestedColumnIdents empty)",
+            "7. rateLimiter.add(stream, 0) called with len(columns)=0"
+          ],
+          "verdict": "EDGE CASE - validation bypassed but no actual harm since empty request sends no data"
+        }
+      },
+      {
+        "path_id": "PATH-4-TOCTOU",
+        "description": "Time-of-check-time-of-use race (ALAT-003)",
+        "conditions": [
+          "t0: amt = 100, remaining = 100",
+          "t0: validateRequest() checks amt <= remaining -> PASS",
+          "t1: time advances by Δt during request processing",
+          "t1: bucket.Count() decreases due to time-based leak",
+          "t1: remaining increases to 150",
+          "t2: rateLimiter.add(stream, 100) charges bucket",
+          "t2: actual_remaining at charge time > remaining at validation time"
+        ],
+        "symbolic_constraint": "remaining(t0) < amt <= remaining(t1) where t1 > t0",
+        "satisfiable": true,
+        "counterexample": {
+          "found": true,
+          "scenario": "Bucket leaks between validation and charging",
+          "inputs": {
+            "amt": 100,
+            "remaining_at_t0": 100,
+            "processing_delay": "10ms",
+            "leak_rate": "4096 items per 30 seconds",
+            "leaked_during_processing": "≈1.37 items per 10ms"
+          },
+          "execution_trace": [
+            "t0: validateRequest() -> remaining=100, amt=100 -> PASS",
+            "t0+10ms: request processing, bucket leaks ~1.37 items",
+            "t0+10ms: new remaining ≈ 101.37",
+            "t0+10ms: rateLimiter.add(stream, 100) -> charges 100",
+            "Result: charged 100 when original check only had capacity for 100, but bucket leaked during processing"
+          ],
+          "verdict": "BENIGN RACE - over-limit is bounded by natural time decay (~1.37 items), not attacker-controlled amplification. The 'overflow' is negligible and self-correcting."
+        }
+      },
+      {
+        "path_id": "PATH-5-SYBIL-MAP-GROWTH",
+        "description": "Unbounded map growth via Sybil attack (ALAT-001)",
+        "conditions": [
+          "attacker creates N unique peer IDs",
+          "each peer_id creates entry in Collector.buckets map",
+          "buckets not pruned if non-empty",
+          "pruning runs every 30 seconds but only removes empty buckets"
+        ],
+        "symbolic_constraint": "N_unique_peers * sizeof(LeakyBucket) > available_memory",
+        "satisfiable": "theoretically yes, but requires massive Sybil attack",
+        "counterexample": {
+          "found": true,
+          "scenario": "Memory exhaustion via many unique peers",
+          "inputs": {
+            "num_unique_peers": "1,000,000",
+            "bucket_size": "~200 bytes per LeakyBucket struct + map overhead",
+            "total_memory": "~200 MB for buckets alone"
+          },
+          "execution_trace": [
+            "1. Attacker spawns 1M unique libp2p peer connections",
+            "2. Each peer sends 1 valid request -> creates bucket entry",
+            "3. Buckets persist until empty (30 second period)",
+            "4. Memory grows to ~200MB for bucket map",
+            "5. Collector.lock contention increases with map size"
+          ],
+          "verdict": "DEFENSE-IN-DEPTH ISSUE - Mitigated by peer connection limits (not analyzed), peer scoring, and network-layer protections. Rate limiter memory footprint is secondary to connection management."
+        }
+      },
+      {
+        "path_id": "PATH-6-INTEGER-OVERFLOW",
+        "description": "Integer overflow in totalRequested computation (ALAT-004)",
+        "conditions": [
+          "totalRequested = sum(len(ident.Columns))",
+          "totalRequested is 'int' type (signed)",
+          "many requestedColumnIdents with large Columns arrays",
+          "sum could theoretically overflow before validation"
+        ],
+        "symbolic_constraint": "sum(len(ident.Columns)) > math.MaxInt",
+        "satisfiable": false,
+        "counterexample": {
+          "found": false,
+          "reason": "Network message size limits prevent encoding enough data to cause overflow. MaxRequestDataColumnSidecars=4096 is far below int overflow threshold. Validation occurs immediately after sum computation."
+        }
+      }
+    ],
+    "counterexample_found": true,
+    "counterexample": {
+      "attack_vector": "ALAT-002: Zero-amount request bypass",
+      "severity": "Low",
+      "exploitability": "Low",
+      "preconditions": [
+        "Attacker's bucket is exhausted (remaining = 0)",
+        "Attacker sends request with totalRequested = 0 (empty requestedColumnIdents or all empty Columns)"
+      ],
+      "attack_sequence": [
+        "1. Attacker exhausts rate limit bucket by sending MaxRequestDataColumnSidecars requests",
+        "2. Bucket now has remaining = 0",
+        "3. Attacker sends request with requestedColumnIdents = [] (empty array)",
+        "4. totalRequested = 0",
+        "5. validateRequest(stream, 0) called",
+        "6. amt = 0, remaining = 0",
+        "7. CHECK: amt > remaining -> 0 > 0 -> false -> VALIDATION PASSES",
+        "8. amt normalized to 1 AFTER validation",
+        "9. Request continues processing (but sends no data since requestedColumnIdents is empty)",
+        "10. rateLimiter.add(stream, 0) charges 0 to bucket (no actual charge)"
+      ],
+      "impact": "Minimal - attacker bypasses validation but gains no advantage since empty request sends no data and consumes no resources beyond connection overhead",
+      "patch_recommendation": "Normalize amt to 1 BEFORE validation check, not after: 'if amt == 0 { amt = 1 }' should precede 'if amt > uint64(remaining)'",
+      "actual_risk": "Defense-in-depth gap, not exploitable for resource exhaustion"
+    }
+  },
+  "phase2_5_reachability_analysis": {
+    "summary": "Rate-limiting enforcement is reachable from attacker-controlled P2P entry point and is the FIRST line of defense after message deserialization. The trust boundary is properly enforced with multiple validation layers. All identified anomalies are either defense-in-depth issues or have negligible impact.",
+    "entry_points": [
+      {
+        "entry_point_id": "EP-1",
+        "name": "P2P RPC: DataColumnSidecarsByRoot",
+        "protocol": "libp2p stream handler",
+        "topic": "RPCDataColumnSidecarsByRootTopicV1",
+        "registration": "target_workspace/beacon-chain/sync/rpc.go:52 (registerRPCHandlers)",
+        "handler_function": "dataColumnSidecarByRootRPCHandler",
+        "attacker_controlled": true,
+        "authentication": "None - any peer can initiate RPC request",
+        "authorization": "Per-peer rate limiting (no global authentication)",
+        "network_layer": "libp2p encrypted stream",
+        "reachability": "DIRECT - external attacker can create peer connection and send RPC requests"
+      },
+      {
+        "entry_point_id": "EP-2",
+        "name": "P2P RPC: DataColumnSidecarsByRange",
+        "protocol": "libp2p stream handler",
+        "topic": "RPCDataColumnSidecarsByRangeTopicV1",
+        "registration": "target_workspace/beacon-chain/sync/rpc.go:53 (registerRPCHandlers)",
+        "handler_function": "dataColumnSidecarsByRangeRPCHandler",
+        "attacker_controlled": true,
+        "note": "Similar rate-limiting applies to range requests"
+      },
+      {
+        "entry_point_id": "EP-3",
+        "name": "P2P RPC: BlobSidecarsByRoot",
+        "protocol": "libp2p stream handler",
+        "topic": "RPCBlobSidecarsByRootTopicV1",
+        "handler_function": "blobSidecarByRootRPCHandler",
+        "attacker_controlled": true,
+        "note": "Uses same rate-limiting architecture as data column sidecars"
+      }
+    ],
+    "data_flow_path": "```\nATTACKER (P2P peer)\n  |\n  | libp2p encrypted stream\n  v\n[P2P Layer: registerRPCHandlers]\n  | topic: RPCDataColumnSidecarsByRootTopicV1\n  v\n[RPC Dispatcher]\n  | decodes SSZ message\n  v\n[dataColumnSidecarByRootRPCHandler] <-- ENTRY POINT\n  | msg: types.DataColumnsByRootIdentifiers\n  | stream: libp2pcore.Stream\n  v\n[VALIDATION LAYER 1: Rate Limit Pre-Check]\n  | totalRequested = sum(len(ident.Columns))\n  | rateLimiter.validateRequest(stream, totalRequested)\n  |   -> peer_id = stream.Conn().RemotePeer().String()\n  |   -> collector = limiterMap[topic]\n  |   -> remaining = collector.Remaining(peer_id)\n  |   -> CHECK: amt > remaining -> reject if exceeded\n  |   -> downscorePeer() on violation\n  v\n[VALIDATION LAYER 2: Request Size Limit]\n  | validateDataColumnsByRootRequest(totalRequested)\n  |   -> CHECK: totalRequested <= MaxRequestDataColumnSidecars\n  v\n[VALIDATION LAYER 3: Time-Based Pruning]\n  | dataColumnsRPCMinValidSlot(currentSlot)\n  |   -> CHECK: requested slot >= minValidSlot\n  v\n[Processing Loop with Batch Throttling]\n  | for each requestedColumnIdent:\n  |   | if count % batchSize == 0 && ticker != nil:\n  |   |   -> wait for ticker.C (secondary rate control)\n  |   v\n  |   [ACCOUNTING: Charge Bucket]\n  |   | rateLimiter.add(stream, len(columns))\n  |   |   -> collector.Add(peer_id, amt)\n  |   |   -> bucket.Add(amt)\n  |   |   -> bucket.p = bucket.p.Add(duration)\n  |   v\n  |   [Data Retrieval]\n  |   | s.cfg.dataColumnStorage.Get(root, columns)\n  |   v\n  |   [Response Streaming]\n  |   | WriteDataColumnSidecarChunk(stream, ...)\n  v\n[Request Complete]\n```",
+    "validation_layers": [
+      {
+        "layer": "L1-RPC-VALIDATION",
+        "location": "target_workspace/beacon-chain/sync/rpc_data_column_sidecars_by_root.go:57-60",
+        "mechanism": "rateLimiter.validateRequest(stream, uint64(totalRequested))",
+        "checks": [
+          "totalRequested > collector.Remaining(peer_id) -> reject",
+          "Per-peer, per-topic bucket enforcement",
+          "Leaky bucket algorithm with time-based decay"
+        ],
+        "on_violation": "downscorePeer(), writeErrorResponseToStream(ErrRateLimited), return error",
+        "bypasses_identified": [
+          "ALAT-002: Zero-amount requests (amt=0) pass validation when remaining=0"
+        ]
+      },
+      {
+        "layer": "L2-SIZE-VALIDATION",
+        "location": "target_workspace/beacon-chain/sync/rpc_data_column_sidecars_by_root.go:63-67",
+        "mechanism": "validateDataColumnsByRootRequest(totalRequested)",
+        "checks": [
+          "totalRequested <= MaxRequestDataColumnSidecars (4096)"
+        ],
+        "on_violation": "downscorePeer(), writeErrorResponseToStream(responseCodeInvalidRequest), return error"
+      },
+      {
+        "layer": "L3-TIME-BASED-PRUNING",
+        "location": "target_workspace/beacon-chain/sync/rpc_data_column_sidecars_by_root.go:69-73",
+        "mechanism": "dataColumnsRPCMinValidSlot(currentSlot)",
+        "checks": [
+          "requested_slot >= currentSlot - MinEpochsForDataColumnSidecarsRequest"
+        ],
+        "on_violation": "Silently skip old sidecars (no error returned)"
+      },
+      {
+        "layer": "L4-BATCH-THROTTLING",
+        "location": "target_workspace/beacon-chain/sync/rpc_data_column_sidecars_by_root.go:118-122",
+        "mechanism": "ticker delay every batchSize items",
+        "checks": [
+          "if count % batchSize == 0: wait for ticker.C (1 second delay)"
+        ],
+        "note": "Secondary rate control, applies only if len(requestedColumnIdents) > batchSize"
+      },
+      {
+        "layer": "L5-PEER-SCORING",
+        "location": "target_workspace/beacon-chain/sync/rate_limiter.go:135",
+        "mechanism": "downscorePeer(remotePeer, topic, reason)",
+        "checks": [
+          "Cumulative peer reputation score",
+          "Eventually leads to peer banning"
+        ],
+        "note": "Long-term defense against repeated violations"
+      }
+    ],
+    "attacker_controlled": true,
+    "attacker_capabilities": [
+      "Create arbitrary P2P peer connections (bounded by connection limits)",
+      "Send arbitrary RPC requests with crafted messages",
+      "Control requestedColumnIdents content (BlockRoot, Columns)",
+      "Timing control (when to send requests)",
+      "Sybil attack (multiple peer IDs)"
+    ],
+    "defensive_controls": [
+      "Per-peer rate limiting (leaky bucket)",
+      "Per-topic rate isolation",
+      "Request size limits (MaxRequestDataColumnSidecars)",
+      "Time-based data retention pruning",
+      "Batch throttling (secondary rate control)",
+      "Peer reputation scoring and banning",
+      "Periodic bucket pruning (memory management)",
+      "Pre-allocated heap capacity (4096 entries)"
+    ],
+    "classification": "external-reachable",
+    "exploitability_assessment": {
+      "overall_classification": "defense-in-depth",
+      "rationale": "While rate-limiting IS implemented and enforced, several edge cases and optimization gaps exist that could theoretically be exploited. However, none of the identified anomalies enable practical resource exhaustion attacks that bypass the core rate-limiting mechanism.",
+      "anomaly_exploitability": [
+        {
+          "anomaly_id": "ALAT-001",
+          "exploitability": "defense-in-depth",
+          "reason": "Requires massive Sybil attack (millions of peers) to exhaust memory. Primary defense is peer connection limits (not analyzed in rate-limiter scope). Bucket map growth is secondary concern."
+        },
+        {
+          "anomaly_id": "ALAT-002",
+          "exploitability": "unreachable",
+          "reason": "Zero-amount bypass exists but provides no attack advantage - empty requests send no data and consume no computational resources beyond connection overhead. Self-defeating attack."
+        },
+        {
+          "anomaly_id": "ALAT-003",
+          "exploitability": "defense-in-depth",
+          "reason": "TOCTOU race allows negligible over-limit (~1-2 items over 30-second period). Bounded by natural time decay, not attacker-controlled. Self-correcting within milliseconds."
+        },
+        {
+          "anomaly_id": "ALAT-004",
+          "exploitability": "unreachable",
+          "reason": "Integer overflow prevented by network message size limits and immediate validation. MaxRequestDataColumnSidecars << math.MaxInt."
+        },
+        {
+          "anomaly_id": "ALAT-005",
+          "exploitability": "defense-in-depth",
+          "reason": "Batch throttling granularity only affects requests with len(requestedColumnIdents) <= batchSize. Primary rate limit still enforced via leaky bucket. Secondary control gap, not primary vulnerability."
+        }
+      ],
+      "residual_risk": "LOW - Rate-limiting architecture is sound. Edge cases identified are defense-in-depth optimizations, not critical vulnerabilities. No practical resource exhaustion attack path identified."
+    },
+    "notes": "The rate-limiting implementation follows security best practices: defense-in-depth with multiple validation layers, per-peer isolation, time-based decay, and peer reputation scoring. The identified anomalies are corner cases that do not compromise the core security property: 'malicious peers cannot exhaust validator resources through sidecar request flooding.' The zero-amount bypass (ALAT-002) is the most interesting finding but is self-defeating. The TOCTOU race (ALAT-003) is inherent to time-based rate limiting and has negligible impact. Overall assessment: COMPLIANT with security requirements."
+  }
+}

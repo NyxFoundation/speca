@@ -1,0 +1,361 @@
+{
+  "check_id": "CHK-W4B13-26-001",
+  "property_id": "PROP-W4B13-26",
+  "phase2_symbolic_execution": {
+    "summary": "No counterexample found. Symbolic analysis confirms that the deduplication logic correctly uses the complete composite key (slot, proposer_index, index) for all code paths. All symbolic paths leading to cache operations properly construct and utilize the 96-byte composite key, preventing equivocation attacks.",
+    "counterexample_found": false,
+    "counterexample": null,
+    "symbolic_analysis": {
+      "symbolic_variables": [
+        {
+          "name": "slot_sym",
+          "type": "primitives.Slot (uint64)",
+          "domain": "[0, 2^64-1]",
+          "constraint": "attacker-controlled via gossip message"
+        },
+        {
+          "name": "proposerIndex_sym",
+          "type": "primitives.ValidatorIndex (uint64)",
+          "domain": "[0, 2^64-1]",
+          "constraint": "attacker-controlled via gossip message"
+        },
+        {
+          "name": "index_sym",
+          "type": "uint64",
+          "domain": "[0, 2^64-1]",
+          "constraint": "attacker-controlled via gossip message"
+        },
+        {
+          "name": "key_sym",
+          "type": "string (byte array)",
+          "domain": "96-byte concatenation",
+          "constraint": "Bytes32(slot_sym) || Bytes32(proposerIndex_sym) || Bytes32(index_sym)"
+        }
+      ],
+      "path_conditions": [
+        {
+          "path_id": "PATH-1-GOSSIP",
+          "description": "Gossip validation path",
+          "entry_point": "validateDataColumn (line 30)",
+          "conditions": [
+            "pid != s.cfg.p2p.PeerID()",
+            "!s.cfg.initialSync.Syncing()",
+            "msg.Topic != nil",
+            "decodePubsubMessage succeeds",
+            "blocks.NewRODataColumn succeeds",
+            "verifier.ValidFields() succeeds",
+            "verifier.CorrectSubnet() succeeds",
+            "verifier.NotFromFutureSlot() succeeds",
+            "verifier.SlotAboveFinalized() succeeds",
+            "verifier.SidecarParentSeen() succeeds",
+            "verifier.SidecarParentValid() succeeds",
+            "verifier.ValidProposerSignature() succeeds",
+            "verifier.SidecarParentSlotLower() succeeds",
+            "verifier.SidecarDescendsFromFinalized() succeeds",
+            "verifier.SidecarInclusionProven() succeeds",
+            "verifier.SidecarKzgProofVerified() succeeds"
+          ],
+          "deduplication_check": {
+            "location": "validate_data_column.go:153",
+            "key_computation": "key_sym = computeCacheKey(slot_sym, proposerIndex_sym, index_sym)",
+            "cache_lookup": "s.seenDataColumnCache.Get(key_sym)",
+            "result": "If found in cache: return ValidationIgnore (reject duplicate). If not found: continue to line 158"
+          },
+          "cache_marking": {
+            "location": "subscriber_data_column_sidecar.go:73",
+            "operation": "s.setSeenDataColumnIndex(slot_sym, proposerIndex_sym, index_sym)",
+            "timing": "After all validation passes and before chain storage",
+            "key_used": "Same key_sym = computeCacheKey(slot_sym, proposerIndex_sym, index_sym)"
+          },
+          "equivocation_test": {
+            "scenario": "Attacker sends two messages M1, M2 with same (slot, proposerIndex, index) but different content",
+            "symbolic_execution": [
+              "M1: (slot_sym=S, proposerIndex_sym=P, index_sym=I, content=C1)",
+              "M2: (slot_sym=S, proposerIndex_sym=P, index_sym=I, content=C2) where C1 != C2",
+              "key1 = Bytes32(S) || Bytes32(P) || Bytes32(I)",
+              "key2 = Bytes32(S) || Bytes32(P) || Bytes32(I)",
+              "key1 == key2 (identical keys)",
+              "M1 passes validation -> cache.Add(key1, true)",
+              "M2 deduplication check: cache.Get(key2) -> found",
+              "M2 returns ValidationIgnore at line 154",
+              "M2 never reaches cache marking or chain storage"
+            ],
+            "verdict": "SAFE - Equivocation prevented by identical cache keys"
+          }
+        },
+        {
+          "path_id": "PATH-2-RPC-BY-ROOT",
+          "description": "RPC request/response by root",
+          "entry_point": "dataColumnSidecarByRootRPCHandler (rpc_data_column_sidecars_by_root.go:30)",
+          "conditions": [
+            "msg is types.DataColumnsByRootIdentifiers",
+            "totalRequested <= MAX_REQUEST_DATA_COLUMN_SIDECARS",
+            "rateLimiter.validateRequest succeeds",
+            "validateDataColumnsByRootRequest succeeds",
+            "requested slot >= minReqSlot",
+            "block root available in DB"
+          ],
+          "deduplication_check": {
+            "location": "None - RPC responses bypass gossip validation",
+            "note": "RPC-received data columns are returned from local storage (s.cfg.dataColumnStorage.Get) and sent to peer. No deduplication needed as this is serving stored data."
+          },
+          "cache_marking": "None - serving path, not receiving path",
+          "equivocation_test": {
+            "scenario": "Not applicable - this is a serving path for already-stored data",
+            "verdict": "N/A - no equivocation risk on serving path"
+          }
+        },
+        {
+          "path_id": "PATH-3-RPC-BY-RANGE",
+          "description": "RPC request/response by range",
+          "entry_point": "dataColumnSidecarsByRangeRPCHandler (rpc_data_column_sidecars_by_range.go)",
+          "conditions": [
+            "msg is *ethpb.DataColumnSidecarsByRangeRequest",
+            "req.Count <= MAX_REQUEST_DATA_COLUMN_SIDECARS",
+            "rateLimiter.validateRequest succeeds",
+            "validateDataColumnSidecarsByRangeRequest succeeds",
+            "start_slot and count within valid range"
+          ],
+          "deduplication_check": {
+            "location": "None - RPC responses bypass gossip validation",
+            "note": "RPC-received data columns are served from local storage. This is a serving path."
+          },
+          "cache_marking": "None - serving path, not receiving path",
+          "equivocation_test": {
+            "scenario": "Not applicable - this is a serving path for already-stored data",
+            "verdict": "N/A - no equivocation risk on serving path"
+          }
+        },
+        {
+          "path_id": "PATH-4-RPC-REQUEST-SENT",
+          "description": "Client requests data columns from peer",
+          "entry_point": "sendDataColumnSidecarsRequest (data_column_sidecars.go:763)",
+          "conditions": [
+            "Client sends DataColumnsByRoot request",
+            "Peer responds with data column sidecars",
+            "readChunkedDataColumnSidecar validates response"
+          ],
+          "received_sidecar_processing": {
+            "validation": "readChunkedDataColumnSidecar performs structural validation (rpc_send_request.go:753-820)",
+            "verification": "Full verification via verification.GossipDataColumnSidecarRequirements",
+            "deduplication_path": "Received sidecars go through receiveDataColumnSidecars -> setSeenDataColumnIndex",
+            "key_computation": "Same computeCacheKey(slot, proposerIndex, index) function"
+          },
+          "deduplication_check": {
+            "location": "subscriber_data_column_sidecar.go:73 (via receiveDataColumnSidecars)",
+            "note": "RPC-requested sidecars are marked as seen using the same composite key mechanism"
+          },
+          "cache_marking": {
+            "location": "subscriber_data_column_sidecar.go:73",
+            "operation": "s.setSeenDataColumnIndex(slot, proposerIndex, columnIndex)",
+            "key_used": "Same computeCacheKey function"
+          },
+          "equivocation_test": {
+            "scenario": "Attacker peer responds with conflicting data columns for same (slot, proposerIndex, index)",
+            "symbolic_execution": [
+              "Client requests (root=R, indices=[I])",
+              "Malicious peer sends DC1 with (slot=S, proposerIndex=P, index=I, content=C1)",
+              "DC1 passes verification -> cache.Add(key, true) where key=computeCacheKey(S,P,I)",
+              "If peer sends DC2 with same (S,P,I) but different content via gossip:",
+              "Gossip validation catches it at line 153: hasSeenDataColumnIndex returns true",
+              "DC2 returns ValidationIgnore",
+              "RPC path cannot send duplicates as it serves from storage which already has DC1"
+            ],
+            "verdict": "SAFE - Consistent deduplication across RPC and gossip paths"
+          }
+        }
+      ],
+      "key_uniqueness_proof": {
+        "theorem": "For any two distinct tuples (S1, P1, I1) != (S2, P2, I2), computeCacheKey produces distinct keys",
+        "proof": [
+          "Key construction: key = Bytes32(slot) || Bytes32(proposerIndex) || Bytes32(index)",
+          "Each component is encoded as exactly 32 bytes using bytesutil.Bytes32",
+          "Total key length: 96 bytes (3 * 32)",
+          "If (S1, P1, I1) != (S2, P2, I2), then at least one component differs",
+          "Case 1: S1 != S2 -> Bytes32(S1) != Bytes32(S2) -> first 32 bytes differ",
+          "Case 2: S1 == S2, P1 != P2 -> Bytes32(P1) != Bytes32(P2) -> bytes 33-64 differ",
+          "Case 3: S1 == S2, P1 == P2, I1 != I2 -> Bytes32(I1) != Bytes32(I2) -> bytes 65-96 differ",
+          "Therefore: key1 != key2 when tuples differ",
+          "Corollary: key1 == key2 IFF (S1, P1, I1) == (S2, P2, I2)",
+          "This ensures perfect deduplication: same tuple -> same key -> cache hit"
+        ]
+      },
+      "attempted_attack_scenarios": [
+        {
+          "attack": "Index Manipulation Attack",
+          "description": "Attacker tries to bypass deduplication by manipulating only the index field",
+          "symbolic_path": [
+            "Send M1: (slot=S, proposerIndex=P, index=I1, content=C1)",
+            "Send M2: (slot=S, proposerIndex=P, index=I2, content=C1) where I1 != I2",
+            "key1 = computeCacheKey(S, P, I1)",
+            "key2 = computeCacheKey(S, P, I2)",
+            "key1 != key2 (third component differs)",
+            "Both M1 and M2 accepted as they represent different data columns"
+          ],
+          "verdict": "EXPECTED BEHAVIOR - Different indices should be accepted",
+          "not_a_vulnerability": "This is correct per spec: each (slot, proposer, index) tuple represents a distinct data column"
+        },
+        {
+          "attack": "Slot/Proposer Manipulation Attack",
+          "description": "Attacker tries to send same content with different slot or proposer to bypass deduplication",
+          "symbolic_path": [
+            "Send M1: (slot=S1, proposerIndex=P, index=I, content=C)",
+            "Send M2: (slot=S2, proposerIndex=P, index=I, content=C) where S1 != S2",
+            "key1 = computeCacheKey(S1, P, I)",
+            "key2 = computeCacheKey(S2, P, I)",
+            "key1 != key2 (first component differs)",
+            "Both accepted but they fail other validation checks:",
+            "- ValidProposerSignature will fail for one of them (signature won't match both slots)",
+            "- SidecarProposerExpected will fail (proposer P cannot propose both slots)"
+          ],
+          "verdict": "SAFE - Other validation layers prevent this attack"
+        },
+        {
+          "attack": "Exact Equivocation Attack",
+          "description": "Attacker sends two different data columns with identical (slot, proposerIndex, index)",
+          "symbolic_path": [
+            "Send M1: (slot=S, proposerIndex=P, index=I, kzg_commitments=K1, column_data=D1)",
+            "M1 passes all validation including KZG proofs",
+            "cache.Add(computeCacheKey(S, P, I), true)",
+            "Send M2: (slot=S, proposerIndex=P, index=I, kzg_commitments=K2, column_data=D2)",
+            "M2 hits deduplication check at line 153",
+            "hasSeenDataColumnIndex(S, P, I) returns true",
+            "M2 returns ValidationIgnore, never stored or propagated"
+          ],
+          "verdict": "BLOCKED - Primary security property verified"
+        }
+      ]
+    }
+  },
+  "phase2_5_reachability_analysis": {
+    "summary": "The deduplication check is reachable from multiple attacker-controlled entry points (gossip, RPC), making it part of the critical attack surface. However, the implementation is secure across all paths with consistent use of the composite key. Classification: defense-in-depth (protects against equivocation but requires upstream cryptographic validation to fully prevent malicious sidecars).",
+    "entry_points": [
+      {
+        "name": "validateDataColumn (gossip)",
+        "location": "beacon-chain/sync/validate_data_column.go:30",
+        "protocol": "libp2p gossipsub",
+        "attacker_controlled": true,
+        "description": "Primary entry point. Any peer can publish data column sidecars to gossipsub topics. Fully attacker-controlled inputs.",
+        "input_vectors": [
+          "roDataColumn.Slot() - attacker controls via gossip message",
+          "roDataColumn.ProposerIndex() - attacker controls via gossip message",
+          "roDataColumn.DataColumnSidecar.Index - attacker controls via gossip message"
+        ],
+        "reaches_deduplication": true,
+        "path_to_deduplication": "validateDataColumn:153 -> hasSeenDataColumnIndex -> computeCacheKey"
+      },
+      {
+        "name": "dataColumnSidecarByRootRPCHandler",
+        "location": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go:30",
+        "protocol": "libp2p RPC request/response",
+        "attacker_controlled": "partial",
+        "description": "Peer can request data columns by root. Server responds with locally stored data. This is a serving path, not a receiving path, so deduplication is not directly relevant.",
+        "reaches_deduplication": false,
+        "path_to_deduplication": "N/A - serves already-stored data"
+      },
+      {
+        "name": "dataColumnSidecarsByRangeRPCHandler",
+        "location": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+        "protocol": "libp2p RPC request/response",
+        "attacker_controlled": "partial",
+        "description": "Peer can request data columns by slot range. Server responds with locally stored data. This is a serving path.",
+        "reaches_deduplication": false,
+        "path_to_deduplication": "N/A - serves already-stored data"
+      },
+      {
+        "name": "sendDataColumnSidecarsRequest (RPC client)",
+        "location": "beacon-chain/sync/data_column_sidecars.go:763",
+        "protocol": "libp2p RPC request/response (client initiates)",
+        "attacker_controlled": true,
+        "description": "Client requests data columns from peers. Malicious peers can respond with arbitrary data columns. Responses go through verification and deduplication.",
+        "input_vectors": [
+          "Peer response contains (slot, proposerIndex, index) - attacker (peer) controlled"
+        ],
+        "reaches_deduplication": true,
+        "path_to_deduplication": "readChunkedDataColumnSidecar -> verification -> receiveDataColumnSidecars:73 -> setSeenDataColumnIndex -> computeCacheKey"
+      }
+    ],
+    "data_flow_path": "Attacker (gossip/RPC peer) -> validateDataColumn OR readChunkedDataColumnSidecar -> blocks.NewRODataColumn (extract slot, proposerIndex, index) -> hasSeenDataColumnIndex (line 153) -> computeCacheKey (lines 233-238) -> seenDataColumnCache.Get -> return ValidationIgnore if duplicate",
+    "validation_layers": [
+      {
+        "layer": 1,
+        "name": "Protocol-level validation",
+        "location": "validateDataColumn:35-67",
+        "checks": [
+          "Peer ID check (own messages auto-accepted)",
+          "Initial sync status check",
+          "Topic validation",
+          "Message decoding",
+          "Type assertion to DataColumnSidecar",
+          "RODataColumn conversion"
+        ],
+        "purpose": "Filter out malformed/invalid protocol messages before expensive validation"
+      },
+      {
+        "layer": 2,
+        "name": "Structural validation",
+        "location": "validateDataColumn:76-147",
+        "checks": [
+          "ValidFields (sidecar structure)",
+          "CorrectSubnet (index matches subnet)",
+          "NotFromFutureSlot (clock skew protection)",
+          "SlotAboveFinalized (prevent old slot attacks)",
+          "SidecarParentSeen (parent block known)",
+          "SidecarParentValid (parent not bad block)",
+          "ValidProposerSignature (cryptographic signature)",
+          "SidecarParentSlotLower (monotonicity)",
+          "SidecarDescendsFromFinalized (chain ancestry)",
+          "SidecarInclusionProven (merkle proof)",
+          "SidecarKzgProofVerified (KZG commitment proof)"
+        ],
+        "purpose": "Ensure sidecar is well-formed, cryptographically valid, and consistent with chain state"
+      },
+      {
+        "layer": 3,
+        "name": "Deduplication check",
+        "location": "validateDataColumn:151-154",
+        "checks": [
+          "hasSeenDataColumnIndex(slot, proposerIndex, index)"
+        ],
+        "purpose": "Prevent acceptance of duplicate sidecars with same (slot, proposerIndex, index) tuple"
+      },
+      {
+        "layer": 4,
+        "name": "Proposer verification",
+        "location": "validateDataColumn:158-161",
+        "checks": [
+          "SidecarProposerExpected (proposer matches shuffling)"
+        ],
+        "purpose": "Ensure the claimed proposer is the expected proposer for the slot"
+      }
+    ],
+    "attacker_controlled": true,
+    "classification": "defense-in-depth",
+    "notes": "The deduplication mechanism is reachable from attacker-controlled entry points (gossip and RPC). However, it is not the sole security boundary. The implementation correctly uses a composite key to prevent equivocation, but the deduplication check sits AFTER extensive cryptographic validation (signature, KZG proofs, inclusion proofs). This means:\n\n1. An attacker cannot bypass deduplication to inject arbitrary conflicting data columns because they would fail signature verification.\n2. The deduplication check is DEFENSE-IN-DEPTH: it prevents replay/spam of valid-but-duplicate sidecars.\n3. The primary security comes from ValidProposerSignature (layer 2): an attacker cannot forge a valid signature for a different data column with the same (slot, proposerIndex, index).\n4. Classification rationale: This is defense-in-depth rather than exploitable because even if deduplication were bypassed (hypothetically), the attacker still cannot inject malicious data due to cryptographic checks. However, proper deduplication is still critical to prevent resource exhaustion and ensure spec compliance.",
+    "exploitability_analysis": {
+      "can_attacker_trigger": true,
+      "can_attacker_bypass_upstream_checks": false,
+      "can_attacker_control_key_components": true,
+      "can_attacker_cause_harm_if_deduplication_fails": "limited",
+      "detailed_assessment": "An attacker can send gossip messages or RPC responses with arbitrary (slot, proposerIndex, index) values, making them fully control the inputs to the deduplication check. However, the attacker cannot bypass upstream validation:\n\n1. ValidProposerSignature (line 128): Requires a valid BLS signature from the proposer's private key. An attacker cannot forge this for conflicting data.\n2. SidecarKzgProofVerified (line 147): Requires valid KZG proofs. An attacker cannot create valid proofs for arbitrary data.\n3. SidecarInclusionProven (line 143): Requires a valid merkle proof. An attacker cannot forge this.\n\nTherefore, while the deduplication check is reachable and inputs are attacker-controlled, the attacker cannot cause equivocation harm because:\n- To send two different data columns with the same (slot, proposerIndex, index), the attacker would need the proposer's private key.\n- Without the private key, the attacker cannot pass ValidProposerSignature for the second (conflicting) sidecar.\n- The deduplication check serves to prevent spam/replay of valid sidecars, not to prevent cryptographic attacks.\n\nPotential limited harm if deduplication fails:\n- Resource exhaustion: Attacker could spam duplicate valid sidecars, wasting processing time.\n- Spec non-compliance: Node would violate consensus spec requirement to ignore duplicates.\n- But no consensus safety violation because cryptographic validation prevents conflicting data acceptance."
+    },
+    "defense_layers_dependency": {
+      "deduplication_depends_on": [
+        "ValidProposerSignature (layer 2)",
+        "SidecarKzgProofVerified (layer 2)",
+        "SidecarInclusionProven (layer 2)"
+      ],
+      "if_deduplication_bypassed": "Without deduplication, an attacker with a valid proposer key could spam the same valid sidecar repeatedly. However, an attacker WITHOUT the proposer key cannot inject conflicting data regardless of deduplication.",
+      "primary_security_boundary": "Cryptographic validation (signatures, KZG proofs, merkle proofs) is the primary boundary. Deduplication is secondary defense."
+    },
+    "attack_surface_summary": {
+      "exposed_to_network": true,
+      "requires_authentication": false,
+      "requires_specific_privileges": "none for gossip; peer relationship for RPC",
+      "rate_limited": true,
+      "rate_limiting_details": "Gossip has peer scoring and topic limits. RPC has explicit rate limiting (rateLimiter.validateRequest).",
+      "can_trigger_without_prior_state": true,
+      "overall_risk": "LOW - Defense-in-depth mechanism with strong upstream cryptographic validation"
+    }
+  }
+}
