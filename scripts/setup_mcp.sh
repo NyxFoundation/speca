@@ -101,11 +101,11 @@ FS_ARGS=$(build_filesystem_args)
 
 COMMANDS=(
   "uvx mcp-server-tree-sitter"
-  "uvx --from git+https://github.com/oraios/serena serena start-mcp-server"
+  "uvx --from git+https://github.com/oraios/serena serena start-mcp-server --no-browser"
   "uvx semgrep-mcp"
-  "npx -y @modelcontextprotocol/server-filesystem${FS_ARGS}"
+  "npx -y @modelcontextprotocol/server-filesystem${FS_ARGS} --no-browser"
   "uvx mcp-server-fetch"
-  "npx -y @modelcontextprotocol/server-github"
+  "npx -y @modelcontextprotocol/server-github --no-browser"
 )
 
 DESCRIPTIONS=(
