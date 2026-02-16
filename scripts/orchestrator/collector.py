@@ -21,6 +21,7 @@ from .schemas import (
     Phase01dPartial,
     Phase01ePartial,
     Phase02Partial,
+    Phase02cPartial,
     Phase03Partial,
     Phase04Partial,
     PartialMetadata,
@@ -35,6 +36,7 @@ _PHASE_OUTPUT_MODELS: dict[str, type] = {
     "01d": Phase01dPartial,
     "01e": Phase01ePartial,
     "02": Phase02Partial,
+    "02c": Phase02cPartial,
     "03": Phase03Partial,
     "04": Phase04Partial,
 }
@@ -74,11 +76,8 @@ class ResultCollector:
         because partial / degraded results are still valuable for resume.
         """
         timestamp = int(time.time())
-        prefix = self.config.output_prefix
-        if prefix:
-            partial_base = f"{self.config.phase_id}_{prefix}_PARTIAL"
-        else:
-            partial_base = f"{self.config.phase_id}_PARTIAL"
+        # Always use simple {phase_id}_PARTIAL_* naming - no prefix needed
+        partial_base = f"{self.config.phase_id}_PARTIAL"
 
         output_path = (
             self.output_dir

@@ -2,7 +2,7 @@
 ---
 Description: [WORKER] Invoke the trust-model-analyst skill for a batch of items.
 Usage: `/01d_trustmodel_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
-Example: `/01d_trustmodel_worker WORKER_ID=0 QUEUE_FILE=outputs/01d_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/01d_TRUSTMODEL_PARTIAL_W0_1700000000_1.json`
+Example: `/01d_trustmodel_worker WORKER_ID=0 QUEUE_FILE=outputs/01d_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/01d_PARTIAL_W0_1700000000_1.json`
 Language: English only.
 Execution hint: This worker prompt is invoked by the phase-01 async orchestrator.
 ---

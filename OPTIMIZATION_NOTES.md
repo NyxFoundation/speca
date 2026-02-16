@@ -131,3 +131,81 @@ Consider adding:
 - Original Issue: [#40](https://github.com/NyxFoundation/security-agent/issues/40)
 - Initial Optimization PR: [#41](https://github.com/NyxFoundation/security-agent/pull/41)
 - Analysis Report: See `review_report.md` in the repository root
+
+
+## Phase 02c Bug Fix (2026-02-17)
+
+### Problem Identified
+
+Analysis of the `preresolve_prysm_fusaka-audit_238d5c07df_20260216150647` branch revealed critical issues with Phase 02c implementation:
+
+- **Resolution rate**: Only 17.3% (225/1,304 items) - extremely low
+- **Primary error**: `No such tool available: mcp__tree_sitter__find_symbol` (14 occurrences)
+- **Secondary errors**: File path issues, token limit exceeded, file operation errors
+
+### Root Causes
+
+1. **Incorrect MCP tool names**: Prompt specified `mcp__tree_sitter__*` but actual tool names likely required server prefix (e.g., `mcp__serena__tree_sitter__*`)
+2. **Over-reliance on MCP tools**: MCP tool instability caused cascading failures
+3. **Insufficient error handling**: Some errors halted processing, leaving many items unprocessed
+4. **Environment path mismatches**: GitHub Actions paths (`/home/gohan/runners/...`) hardcoded in some places
+
+### Solution: Simplified Implementation
+
+**Replaced MCP-based implementation with built-in shell tools for reliability.**
+
+#### Key Changes to `prompts/02c_worker.md`
+
+| Aspect | Before (MCP-based) | After (Shell-based) |
+|--------|-------------------|---------------------|
+| **Code search** | `mcp__tree_sitter__find_symbol` | `grep -rn` or `rg --json` |
+| **File reading** | `mcp__filesystem__read_text_file` | `file` tool (built-in) |
+| **Batch processing** | Multiple MCP calls per item | Single grep for all symbols |
+| **Error handling** | Fragile, errors propagate | Robust, per-item try-catch |
+| **Dependencies** | MCP servers (external) | Shell tools (built-in) |
+
+#### New Algorithm
+
+```
+1. Extract all symbols from batch → ["sym1", "sym2", "sym3", ...]
+2. Build regex pattern → "(sym1|sym2|sym3)"
+3. Run ONE grep command:
+   rg -n '(func|type|const|var)\s+(sym1|sym2|sym3)' target_workspace/
+4. Parse results → create symbol_map {sym1: {file, line}, ...}
+5. For each item:
+   - Lookup symbol in map (no external calls)
+   - Read code excerpt using file tool
+   - Handle errors gracefully, continue to next item
+6. Write all results to output file
+```
+
+#### Expected Improvements
+
+| Metric | Before | After (Expected) |
+|--------|--------|------------------|
+| **Resolution rate** | 17.3% | **>80%** |
+| **Error rate** | 11.7% | **<5%** |
+| **MCP calls** | 146 | **0** |
+| **Shell commands** | Unknown | **1-5 per batch** |
+| **Processing time** | Unknown | **<2 min per 100 items** |
+
+### Backward Compatibility
+
+- Output schema unchanged (`code_scope`, `code_excerpt` fields remain the same)
+- Phase 03 requires no modifications
+- Old prompt saved as `prompts/02c_worker_old.md` for reference
+- Can revert via environment variable `USE_LEGACY_PHASE02C=1` if needed
+
+### Testing Plan
+
+1. **Unit test**: Small batch (10 items) to verify basic functionality
+2. **Integration test**: 100-item batch to measure resolution rate
+3. **Production test**: Full Prysm audit (1,000+ items) to validate at scale
+
+### Next Steps
+
+1. ✅ Prompt rewritten with shell-based implementation
+2. ⏳ Push to master branch
+3. ⏳ Run GitHub Actions workflow to test
+4. ⏳ Verify resolution rate >80%
+5. ⏳ Measure Phase 03 efficiency improvement

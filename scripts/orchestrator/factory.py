@@ -8,6 +8,7 @@ from .base import (
     BaseOrchestrator,
     Phase01Orchestrator,
     Phase02Orchestrator,
+    Phase02cOrchestrator,
     Phase03Orchestrator,
     Phase04Orchestrator,
 )
@@ -38,6 +39,8 @@ def create_orchestrator(
         return Phase01Orchestrator(phase_id, num_workers, max_concurrent)
     elif phase_id == "02":
         return Phase02Orchestrator(phase_id, num_workers, max_concurrent)
+    elif phase_id == "02c":
+        return Phase02cOrchestrator(phase_id, num_workers, max_concurrent)
     elif phase_id == "03":
         return Phase03Orchestrator(num_workers, max_concurrent)
     elif phase_id == "04":

@@ -2,7 +2,7 @@
 ---
 Description: [WORKER] Invoke the audit-reviewer skill for a batch of items.
 Usage: `/04_review_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
-Example: `/04_review_worker WORKER_ID=0 QUEUE_FILE=outputs/04_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/04_REVIEW_PARTIAL_W0_1700000000_1.json`
+Example: `/04_review_worker WORKER_ID=0 QUEUE_FILE=outputs/04_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/04_PARTIAL_W0_1700000000_1.json`
 Language: English only.
 Execution hint: This worker prompt is invoked by the phase-04 async orchestrator.
 ---

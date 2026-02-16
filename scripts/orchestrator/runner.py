@@ -326,11 +326,8 @@ class ClaudeRunner:
         directory_mode = self.config.output_mode == "directory"
 
         # Create queue file
-        prefix = self.config.output_prefix
-        if prefix:
-            partial_base = f"{phase_id}_{prefix}_PARTIAL"
-        else:
-            partial_base = f"{phase_id}_PARTIAL"
+        # Always use simple {phase_id}_PARTIAL_* naming - no prefix needed
+        partial_base = f"{phase_id}_PARTIAL"
         queue_path = self.output_dir / f"{phase_id}_ASYNC_QUEUE_W{worker_id}B{batch_index}_{timestamp}.json"
         log_file = self.log_dir / f"{phase_id}_w{worker_id}b{batch_index}_{timestamp}.log.jsonl"
 

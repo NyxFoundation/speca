@@ -2,7 +2,7 @@
 ---
 Description: [WORKER] Invoke the checklist-specialist skill for a batch of items.
 Usage: `/02_checklist_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
-Example: `/02_checklist_worker WORKER_ID=0 QUEUE_FILE=outputs/02_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/02_CHECKLIST_PARTIAL_W0_1700000000_1.json`
+Example: `/02_checklist_worker WORKER_ID=0 QUEUE_FILE=outputs/02_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/02_PARTIAL_W0_1700000000_1.json`
 Language: English only.
 Execution hint: This worker prompt is invoked by the phase-02 async orchestrator.
 ---

@@ -307,8 +307,7 @@ class ResumeManager:
         count = 0
         
         # 1. Delete PARTIAL files (file mode)
-        prefix = self.config.output_prefix or ""
-        pattern = str(self.output_dir / f"{self.config.phase_id}_{prefix}PARTIAL_*.json")
+        pattern = str(self.output_dir / f"{self.config.phase_id}_PARTIAL_*.json")
         for filepath in glob.glob(pattern):
             if dry_run:
                 print(f"Would delete: {filepath}")

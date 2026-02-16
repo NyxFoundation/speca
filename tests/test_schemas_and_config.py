@@ -135,7 +135,7 @@ class TestPhaseConfig:
         assert cfg.batch_strategy == "count"
         assert cfg.max_batch_size == 15  # Optimized: increased from 10 due to unified skill
         assert cfg.result_key == "audit_items"
-        assert cfg.output_prefix == "AUDITMAP"
+        assert cfg.output_pattern == "outputs/03_PARTIAL_*.json"
 
     def test_circuit_breaker_defaults(self):
         """Default circuit breaker values should be sensible."""

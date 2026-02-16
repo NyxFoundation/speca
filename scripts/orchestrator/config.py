@@ -58,8 +58,8 @@ class PhaseConfig(BaseModel):
     # Result parsing
     result_key: str = "items"
 
-    # Output naming: semantic prefix for PARTIAL files
-    # (e.g., "TRUSTMODEL" → 01d_TRUSTMODEL_PARTIAL_W...)
+    # Output naming: always {phase_id}_PARTIAL_* (no prefix needed)
+    # Deprecated: output_prefix field kept for backwards compatibility but not used
     output_prefix: str = ""
 
     # Output mode: "file" (default) writes a single JSON; "directory" writes
@@ -127,7 +127,6 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="url",
         result_id_field="source_url",
         result_key="specs",
-        output_prefix="SUBGRAPHS",
         output_mode="directory",
     ),
 
@@ -138,13 +137,12 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/subgraph-verifier/SKILL.md"),
         prompt_path=Path("prompts/01c_verify_worker.md"),
         queue_pattern="outputs/01c_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01b_SUBGRAPHS/spec_*_verified_*.json",
+        output_pattern="outputs/01c_PARTIAL_*.json",
         depends_on=["01b"],
         input_patterns=["outputs/01b_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=10,
         item_id_field="file_path",
-        output_prefix="VERIFIED",
     ),
 
     "01d": PhaseConfig(
@@ -154,14 +152,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/trust-model-analyst/SKILL.md"),
         prompt_path=Path("prompts/01d_trustmodel_worker.md"),
         queue_pattern="outputs/01d_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01d_TRUSTMODEL_PARTIAL_*.json",
+        output_pattern="outputs/01d_PARTIAL_*.json",
         depends_on=["01b"],
         input_patterns=["outputs/01b_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=1,
         item_id_field="file_path",
         result_key="trust_model",
-        output_prefix="TRUSTMODEL",
     ),
 
     "01e": PhaseConfig(
@@ -171,14 +168,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/property-generator/SKILL.md"),
         prompt_path=Path("prompts/01e_prop_worker.md"),
         queue_pattern="outputs/01e_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01e_PROP_PARTIAL_*.json",
+        output_pattern="outputs/01e_PARTIAL_*.json",
         depends_on=["01d"],
         input_patterns=["outputs/01d_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=1,
         item_id_field="property_id",
         result_key="properties",
-        output_prefix="PROP",
     ),
 
     "02": PhaseConfig(
@@ -196,15 +192,14 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="property_id",
         result_id_field="property_id",
         result_key="checklist",
-        output_prefix="CHECKLIST",
     ),
 
     "02c": PhaseConfig(
         phase_id="02c",
         name="Code Location Pre-resolution",
-        description="Pre-resolve code locations for checklist items to optimize Phase 03",
+        description="Pre-resolve code locations for checklist items using Tree-sitter call graph analysis",
         skill_path=Path(".claude/skills/checklist-specialist/SKILL.md"),  # Dummy path, not used
-        prompt_path=Path("prompts/02c_worker.md"),
+        prompt_path=Path("prompts/02c_codelocation_worker.md"),
         queue_pattern="outputs/02c_QUEUE_{worker_id}.json",
         output_pattern="outputs/02c_PARTIAL_*.json",
         depends_on=["02"],
@@ -213,7 +208,6 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=100,  # Process 100 items per batch for efficiency
         item_id_field="check_id",
         result_key="checklist_with_code",
-        output_prefix="CODE_RESOLVED",
         model="sonnet",
         # More lenient circuit breaker for code resolution (non-critical phase)
         circuit_breaker_threshold=10,
@@ -229,14 +223,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/formal-audit-unified/SKILL.md"),
         prompt_path=Path("prompts/03_auditmap_worker_optimized.md"),
         queue_pattern="outputs/03_ASYNC_QUEUE_*.json",
-        output_pattern="outputs/03_AUDITMAP_PARTIAL_*.json",
+        output_pattern="outputs/03_PARTIAL_*.json",
         depends_on=["02c"],  # Now depends on code pre-resolution
         input_patterns=["outputs/02c_PARTIAL_*.json", "outputs/02_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=15,  # Optimized batch size with unified skill
         item_id_field="check_id",
         result_key="audit_items",
-        output_prefix="AUDITMAP",
         model="sonnet",
         # Phase 03 is the most expensive — tighter circuit breaker
         circuit_breaker_threshold=5,
@@ -253,14 +246,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/audit-reviewer/SKILL.md"),
         prompt_path=Path("prompts/04_review_worker.md"),
         queue_pattern="outputs/04_QUEUE_{worker_id}.json",
-        output_pattern="outputs/04_REVIEW_PARTIAL_*.json",
+        output_pattern="outputs/04_PARTIAL_*.json",
         depends_on=["03"],
         input_patterns=["outputs/03_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=2,
         item_id_field="check_id",
         result_key="reviewed_items",
-        output_prefix="REVIEW",
     ),
 }
 

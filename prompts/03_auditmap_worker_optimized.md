@@ -2,7 +2,7 @@
 ---
 Description: [WORKER] Invoke the unified formal-audit skill for a batch of items using MCP tools.
 Usage: `/03_auditmap_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
-Example: `/03_auditmap_worker WORKER_ID=0 QUEUE_FILE=outputs/03_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/03_AUDITMAP_PARTIAL_W0_1700000000_1.json`
+Example: `/03_auditmap_worker WORKER_ID=0 QUEUE_FILE=outputs/03_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/03_PARTIAL_W0_1700000000_1.json`
 Language: English only.
 Execution hint: This worker prompt is invoked by the phase-03 async orchestrator with MCP tools enabled.
 ---
