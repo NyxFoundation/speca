@@ -269,6 +269,15 @@ class ChecklistReachability(BaseModel):
     bug_bounty_scope: str = "conditional"
 
 
+class CodeScope(BaseModel):
+    """Code location information for a checklist item."""
+    file: str = ""
+    function: str = ""
+    line_range: str = ""
+    resolution_status: str = ""  # "resolved", "not_found", "ambiguous", "pending"
+    resolution_error: str = ""
+
+
 class ChecklistItem(BaseModel):
     """A single checklist item from Phase 02."""
     check_id: str
@@ -284,7 +293,8 @@ class ChecklistItem(BaseModel):
     notes: str = ""
     # Optional fields from graph element
     graph_element_under_test: str | None = None
-    code_scope: dict[str, Any] = Field(default_factory=dict)
+    code_scope: CodeScope = Field(default_factory=CodeScope)  # Typed code location
+    code_excerpt: str = ""  # Pre-resolved code snippet
 
 
 class Phase02Partial(BaseModel):
@@ -369,6 +379,7 @@ class AuditMapItem(BaseModel):
     check_id: str
     property_id: str | None = None
     code_scope: dict[str, Any] = Field(default_factory=dict)
+    code_snippet: str = ""
     final_classification: str = ""
     bug_bounty_eligible: bool = False
     summary: str = ""

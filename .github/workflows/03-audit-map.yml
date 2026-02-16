@@ -3,29 +3,10 @@ name: "03. Audit Map"
 on:
   workflow_dispatch:
     inputs:
-      target_repo:
-        description: 'Target repository'
+      branch:
+        description: 'Branch from 02c (required - contains target info)'
         required: true
-        type: choice
-        options:
-          - ethereum/go-ethereum
-          - paradigmxyz/reth
-          - NethermindEth/nethermind
-          - Consensys/teku
-          - hyperledger/besu
-          - erigontech/erigon
-          - status-im/nimbus-eth2
-          - sigp/lighthouse
-          - ChainSafe/lodestar
-          - grandinetech/grandine
-          - OffchainLabs/prysm
-      target_ref_type:
-        description: 'Target ref selection'
-        required: true
-        type: choice
-        options:
-          - latest_default_branch
-          - fusaka-audit
+        type: string
       workers:
         description: 'Number of parallel workers'
         required: false
@@ -36,20 +17,6 @@ on:
         required: false
         type: number
         default: 64
-      audit_scope:
-        description: 'Audit scope (cl|el|both|auto)'
-        required: false
-        type: choice
-        default: auto
-        options:
-          - auto
-          - cl
-          - el
-          - both
-      branch:
-        description: 'Existing audit branch to resume (optional)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -63,32 +30,12 @@ jobs:
       GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CLAUDE_CODE_PERMISSIONS: bypassPermissions
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
-      AUDIT_SCOPE: ${{ inputs.audit_scope }}
 
     steps:
-      - name: Resolve Inputs
-        id: resolve_inputs
-        env:
-          TARGET_REPO_INPUT: ${{ inputs.target_repo }}
-          TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
-          BRANCH_INPUT: ${{ inputs.branch }}
-        run: |
-          set -euo pipefail
-          TARGET_REPO="${TARGET_REPO_INPUT}"
-          if [ "${TARGET_REF_TYPE}" = "fusaka-audit" ]; then
-            TARGET_MODE="asof_20250915"
-          else
-            TARGET_MODE="default"
-          fi
-
-          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
-          echo "TARGET_MODE=${TARGET_MODE}" >> "$GITHUB_ENV"
-          echo "BRANCH_INPUT=${BRANCH_INPUT}" >> "$GITHUB_ENV"
-          echo "checkout_ref=" >> "$GITHUB_OUTPUT"
       - name: Checkout Branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
 
       - name: Update Scripts and Prompts from Remote
@@ -98,91 +45,48 @@ jobs:
           git fetch --prune origin
           git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
 
+      - name: Load Target Info
+        id: target_info
+        run: |
+          set -euo pipefail
+          
+          if [ ! -f "outputs/02c_TARGET_INFO.json" ]; then
+            echo "ERROR: outputs/02c_TARGET_INFO.json not found!"
+            echo "This branch must be created from Phase 02c workflow."
+            exit 1
+          fi
+          
+          TARGET_REPO="$(jq -r '.target_repo' outputs/02c_TARGET_INFO.json)"
+          TARGET_REF_TYPE="$(jq -r '.target_ref_type' outputs/02c_TARGET_INFO.json)"
+          TARGET_REF_LABEL="$(jq -r '.target_ref_label' outputs/02c_TARGET_INFO.json)"
+          TARGET_COMMIT="$(jq -r '.target_commit' outputs/02c_TARGET_INFO.json)"
+          TARGET_COMMIT_SHORT="$(jq -r '.target_commit_short' outputs/02c_TARGET_INFO.json)"
+          
+          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_TYPE=${TARGET_REF_TYPE}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_LABEL=${TARGET_REF_LABEL}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=${TARGET_COMMIT}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT_SHORT=${TARGET_COMMIT_SHORT}" >> "$GITHUB_ENV"
+          
+          echo "target_repo=${TARGET_REPO}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_type=${TARGET_REF_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_label=${TARGET_REF_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${TARGET_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${TARGET_COMMIT_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
+          
+          echo "Loaded target info:"
+          echo "  Repository: ${TARGET_REPO}"
+          echo "  Ref: ${TARGET_REF_LABEL}"
+          echo "  Commit: ${TARGET_COMMIT_SHORT}"
+
       - name: Checkout Target Repository
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TARGET_REPO }}
-          ref: ${{ steps.resolve_inputs.outputs.checkout_ref }}
+          ref: ${{ env.TARGET_COMMIT }}
           fetch-depth: 0
           path: target_workspace
-
-      - name: Resolve Target Ref
-        id: target_info
-        working-directory: ./target_workspace
-        run: |
-          set -euo pipefail
-
-          default_branch="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)"
-          if [ -z "${default_branch}" ]; then
-            default_branch="$(git remote show origin 2>/dev/null | awk -F': ' '/HEAD branch/ {print $2}' || true)"
-          fi
-          if [ -z "${default_branch}" ]; then
-            if git show-ref --verify --quiet refs/remotes/origin/main; then
-              default_branch="main"
-            elif git show-ref --verify --quiet refs/remotes/origin/master; then
-              default_branch="master"
-            else
-              echo "Unable to determine default branch."
-              exit 1
-            fi
-          fi
-          target_ref_label=""
-
-          if [ "${TARGET_MODE}" = "asof_20250915" ]; then
-            asof_commit="$(git rev-list -n1 --before="2025-09-15T23:59:59Z" "origin/${default_branch}")"
-            if [ -z "${asof_commit}" ]; then
-              echo "No commit found before 2025-09-15 on ${default_branch}."
-              exit 1
-            fi
-            git checkout "${asof_commit}"
-            target_ref_label="fusaka-audit (as of 2025-09-15, ${default_branch})"
-          elif [ "${TARGET_MODE}" = "default" ]; then
-            target_ref_label="default branch (${default_branch})"
-          else
-            target_ref_label="manual (default branch ${default_branch})"
-          fi
-
-          echo "default_branch=${default_branch}" >> "$GITHUB_OUTPUT"
-          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "target_ref_label=${target_ref_label}" >> "$GITHUB_OUTPUT"
-          echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
-
-      - name: Create Audit Branch
-        id: audit_branch
-        run: |
-          set -euo pipefail
-          repo_name="${{ steps.target_info.outputs.repo_name }}"
-          ref_type="${{ inputs.target_ref_type }}"
-          commit_version="${{ steps.target_info.outputs.short_sha }}"
-          input_branch="${{ inputs.branch }}"
-
-          BASE_BRANCH="${{ github.ref_name }}"
-          git fetch --prune origin
-
-          if [ -n "${input_branch}" ]; then
-            branch_name="${input_branch}"
-            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
-            if git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
-              echo "Resuming audit branch '${branch_name}'..."
-              git checkout -b "$branch_name" "origin/$branch_name"
-              git pull origin "$branch_name"
-            else
-              echo "Audit branch '${branch_name}' not found on origin."
-              exit 1
-            fi
-          else
-            timestamp="$(date -u +%Y%m%d%H%M%S)"
-            branch_name="audit_${repo_name}_${ref_type}_${commit_version}_${timestamp}"
-            branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
-            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
-
-            git checkout "$BASE_BRANCH"
-            git reset --hard "origin/$BASE_BRANCH"
-
-            echo "Creating new audit branch '${branch_name}' from '${BASE_BRANCH}'..."
-            git checkout -b "$branch_name" "origin/$BASE_BRANCH"
-          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -200,6 +104,7 @@ jobs:
       - name: Setup MCP Servers
         id: mcp_setup
         run: FILESYSTEM_DIRS=". target_workspace" bash scripts/setup_mcp.sh
+
       - name: Get Claude Version
         id: claude_version
         run: |
@@ -221,32 +126,14 @@ jobs:
       - name: "Step 03: Audit Map"
         run: uv run python3 scripts/run_phase.py --phase 03 --workers ${{ inputs.workers }} --max-concurrent ${{ inputs.max_concurrent }}
 
-      - name: Save Target Info
+      - name: Update Target Info (preserve from 02c)
         if: always()
         run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          import os
-
-          data = {
-              "target_repo": os.environ["TARGET_REPO"],
-              "target_ref_type": os.environ["TARGET_REF_TYPE"],
-              "target_ref_label": os.environ["TARGET_REF_LABEL"],
-              "target_commit": os.environ["TARGET_COMMIT"],
-              "target_commit_short": os.environ["TARGET_COMMIT_SHORT"],
-          }
-
-          Path("outputs").mkdir(parents=True, exist_ok=True)
-          with open("outputs/03_TARGET_INFO.json", "w", encoding="utf-8") as f:
-              json.dump(data, f, indent=2)
-          PY
-        env:
-          TARGET_REPO: ${{ env.TARGET_REPO }}
-          TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
-          TARGET_REF_LABEL: ${{ steps.target_info.outputs.target_ref_label }}
-          TARGET_COMMIT: ${{ steps.target_info.outputs.full_sha }}
-          TARGET_COMMIT_SHORT: ${{ steps.target_info.outputs.short_sha }}
+          # Target info already exists from 02c, just ensure it's still there
+          if [ -f "outputs/02c_TARGET_INFO.json" ]; then
+            cp outputs/02c_TARGET_INFO.json outputs/03_TARGET_INFO.json
+            echo "Preserved target info from Phase 02c"
+          fi
 
       - name: Push Results
         if: always()
@@ -256,16 +143,15 @@ jobs:
             git add outputs/logs/
             git commit -m "03: audit map for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push origin "${{ steps.audit_branch.outputs.branch_name }}" --force-with-lease
+            git push origin "${{ inputs.branch }}" --force-with-lease
           fi
 
       - name: Summary
         run: |
           echo "## Next: Run **04. Audit Review**" >> $GITHUB_STEP_SUMMARY
-          echo "Base branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Audit branch: \`${{ steps.audit_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Target ref: \`${{ steps.target_info.outputs.target_ref_label }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target ref: \`${{ env.TARGET_REF_LABEL }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Claude: \`${{ steps.claude_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
@@ -274,6 +160,6 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: step-7-logs-${{ github.run_id }}
+          name: audit-map-logs-${{ github.run_id }}
           path: outputs/logs/
           retention-days: 7

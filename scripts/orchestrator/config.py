@@ -10,6 +10,7 @@ PhaseConfig is a Pydantic BaseModel, providing:
   - Immutability by default (frozen model)
 """
 
+import os
 from pathlib import Path
 from typing import Callable, Any
 
@@ -198,18 +199,41 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         output_prefix="CHECKLIST",
     ),
 
+    "02c": PhaseConfig(
+        phase_id="02c",
+        name="Code Location Pre-resolution",
+        description="Pre-resolve code locations for checklist items to optimize Phase 03",
+        skill_path=Path(".claude/skills/checklist-specialist/SKILL.md"),  # Dummy path, not used
+        prompt_path=Path("prompts/02c_worker.md"),
+        queue_pattern="outputs/02c_QUEUE_{worker_id}.json",
+        output_pattern="outputs/02c_CODE_RESOLVED_PARTIAL_*.json",
+        depends_on=["02"],
+        input_patterns=["outputs/02_CHECKLIST_PARTIAL_*.json"],
+        batch_strategy="count",
+        max_batch_size=100,  # Process 100 items per batch for efficiency
+        item_id_field="check_id",
+        result_key="checklist_with_code",
+        output_prefix="CODE_RESOLVED",
+        model="sonnet",
+        # More lenient circuit breaker for code resolution (non-critical phase)
+        circuit_breaker_threshold=10,
+        max_total_retries=30,
+        max_empty_results=15,
+        max_budget_usd=10.0,  # Lower budget since this is optimization
+    ),
+
     "03": PhaseConfig(
         phase_id="03",
         name="Audit Map Generation",
         description="Perform formal audit analysis on checklist items",
-        skill_path=Path(".claude/skills/formal-audit/SKILL.md"),
-        prompt_path=Path("prompts/03_auditmap_worker.md"),
+        skill_path=Path(".claude/skills/formal-audit-unified/SKILL.md"),
+        prompt_path=Path("prompts/03_auditmap_worker_optimized.md"),
         queue_pattern="outputs/03_ASYNC_QUEUE_*.json",
         output_pattern="outputs/03_AUDITMAP_PARTIAL_*.json",
-        depends_on=["02"],
-        input_patterns=["outputs/02_PARTIAL_*.json"],
+        depends_on=["02c"],  # Now depends on code pre-resolution
+        input_patterns=["outputs/02c_CODE_RESOLVED_PARTIAL_*.json", "outputs/02_CHECKLIST_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=10,
+        max_batch_size=15,  # Optimized batch size with unified skill
         item_id_field="check_id",
         result_key="audit_items",
         output_prefix="AUDITMAP",

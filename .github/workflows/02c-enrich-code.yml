@@ -1,0 +1,283 @@
+name: "02c. Code Pre-resolution"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository'
+        required: true
+        type: choice
+        options:
+          - ethereum/go-ethereum
+          - paradigmxyz/reth
+          - NethermindEth/nethermind
+          - Consensys/teku
+          - hyperledger/besu
+          - erigontech/erigon
+          - status-im/nimbus-eth2
+          - sigp/lighthouse
+          - ChainSafe/lodestar
+          - grandinetech/grandine
+          - OffchainLabs/prysm
+      target_ref_type:
+        description: 'Target ref selection'
+        required: true
+        type: choice
+        options:
+          - latest_default_branch
+          - fusaka-audit
+      audit_scope:
+        description: 'Audit scope (cl|el|both|auto)'
+        required: false
+        type: choice
+        default: auto
+        options:
+          - auto
+          - cl
+          - el
+          - both
+      workers:
+        description: 'Number of parallel workers'
+        required: false
+        type: number
+        default: 4
+      max_concurrent:
+        description: 'Max concurrent Claude calls'
+        required: false
+        type: number
+        default: 64
+      branch:
+        description: 'Branch from 02 to resume (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  code-preresolve:
+    runs-on: self-hosted
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CLAUDE_CODE_PERMISSIONS: bypassPermissions
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
+      AUDIT_SCOPE: ${{ inputs.audit_scope }}
+
+    steps:
+      - name: Resolve Inputs
+        id: resolve_inputs
+        env:
+          TARGET_REPO_INPUT: ${{ inputs.target_repo }}
+          TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
+          BRANCH_INPUT: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          TARGET_REPO="${TARGET_REPO_INPUT}"
+          if [ "${TARGET_REF_TYPE}" = "fusaka-audit" ]; then
+            TARGET_MODE="asof_20250915"
+          else
+            TARGET_MODE="default"
+          fi
+
+          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
+          echo "TARGET_MODE=${TARGET_MODE}" >> "$GITHUB_ENV"
+          echo "BRANCH_INPUT=${BRANCH_INPUT}" >> "$GITHUB_ENV"
+          echo "checkout_ref=" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Update Scripts and Prompts from Remote
+        run: |
+          set -e
+          echo "Syncing scripts and prompts with remote branch..."
+          git fetch --prune origin
+          git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
+
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ steps.resolve_inputs.outputs.checkout_ref }}
+          fetch-depth: 0
+          path: target_workspace
+
+      - name: Resolve Target Ref
+        id: target_info
+        working-directory: ./target_workspace
+        run: |
+          set -euo pipefail
+
+          default_branch="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)"
+          if [ -z "${default_branch}" ]; then
+            default_branch="$(git remote show origin 2>/dev/null | awk -F': ' '/HEAD branch/ {print $2}' || true)"
+          fi
+          if [ -z "${default_branch}" ]; then
+            if git show-ref --verify --quiet refs/remotes/origin/main; then
+              default_branch="main"
+            elif git show-ref --verify --quiet refs/remotes/origin/master; then
+              default_branch="master"
+            else
+              echo "Unable to determine default branch."
+              exit 1
+            fi
+          fi
+          target_ref_label=""
+
+          if [ "${TARGET_MODE}" = "asof_20250915" ]; then
+            asof_commit="$(git rev-list -n1 --before="2025-09-15T23:59:59Z" "origin/${default_branch}")"
+            if [ -z "${asof_commit}" ]; then
+              echo "No commit found before 2025-09-15 on ${default_branch}."
+              exit 1
+            fi
+            git checkout "${asof_commit}"
+            target_ref_label="fusaka-audit (as of 2025-09-15, ${default_branch})"
+          elif [ "${TARGET_MODE}" = "default" ]; then
+            target_ref_label="default branch (${default_branch})"
+          else
+            target_ref_label="manual (default branch ${default_branch})"
+          fi
+
+          echo "default_branch=${default_branch}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "target_ref_label=${target_ref_label}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
+
+      - name: Create/Resume Branch
+        id: audit_branch
+        run: |
+          set -euo pipefail
+          repo_name="${{ steps.target_info.outputs.repo_name }}"
+          ref_type="${{ inputs.target_ref_type }}"
+          commit_version="${{ steps.target_info.outputs.short_sha }}"
+          input_branch="${{ inputs.branch }}"
+
+          BASE_BRANCH="${{ github.ref_name }}"
+          git fetch --prune origin
+
+          if [ -n "${input_branch}" ]; then
+            branch_name="${input_branch}"
+            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+            if git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
+              echo "Resuming branch '${branch_name}'..."
+              git checkout -b "$branch_name" "origin/$branch_name"
+              git pull origin "$branch_name"
+            else
+              echo "Branch '${branch_name}' not found on origin."
+              exit 1
+            fi
+          else
+            timestamp="$(date -u +%Y%m%d%H%M%S)"
+            branch_name="preresolve_${repo_name}_${ref_type}_${commit_version}_${timestamp}"
+            branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
+            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+
+            git checkout "$BASE_BRANCH"
+            git reset --hard "origin/$BASE_BRANCH"
+
+            echo "Creating new branch '${branch_name}' from '${BASE_BRANCH}'..."
+            git checkout -b "$branch_name" "origin/$BASE_BRANCH"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            echo "claude already installed; skipping"
+          else
+            npm install -g @anthropic-ai/claude-code
+          fi
+
+      - name: Setup MCP Servers
+        id: mcp_setup
+        run: FILESYSTEM_DIRS=". target_workspace" bash scripts/setup_mcp.sh
+
+      - name: Get Claude Version
+        id: claude_version
+        run: |
+          set -euo pipefail
+          if command -v claude >/dev/null 2>&1; then
+            echo "version=$(claude --version)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=claude-not-found" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare Git
+        run: |
+          git config --local user.name "Security Agent Bot"
+          git config --local user.email "bot@nyxfoundation.org"
+
+      - name: "Pre-flight: Schema & Config Tests"
+        run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: "Step 02c: Code Pre-resolution"
+        run: uv run python3 scripts/run_phase.py --phase 02c --workers ${{ inputs.workers }} --max-concurrent ${{ inputs.max_concurrent }}
+
+      - name: Save Target Info
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import os
+
+          data = {
+              "target_repo": os.environ["TARGET_REPO"],
+              "target_ref_type": os.environ["TARGET_REF_TYPE"],
+              "target_ref_label": os.environ["TARGET_REF_LABEL"],
+              "target_commit": os.environ["TARGET_COMMIT"],
+              "target_commit_short": os.environ["TARGET_COMMIT_SHORT"],
+          }
+
+          Path("outputs").mkdir(parents=True, exist_ok=True)
+          with open("outputs/02c_TARGET_INFO.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+          PY
+        env:
+          TARGET_REPO: ${{ env.TARGET_REPO }}
+          TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
+          TARGET_REF_LABEL: ${{ steps.target_info.outputs.target_ref_label }}
+          TARGET_COMMIT: ${{ steps.target_info.outputs.full_sha }}
+          TARGET_COMMIT_SHORT: ${{ steps.target_info.outputs.short_sha }}
+
+      - name: Push Results
+        if: always()
+        run: |
+          git add outputs/ ':!outputs/logs/'
+          if ! git diff --staged --quiet; then
+            git add outputs/logs/
+            git commit -m "02c: code pre-resolution for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git push origin "${{ steps.audit_branch.outputs.branch_name }}" --force-with-lease
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Next: Run **03. Audit Map Generation**" >> $GITHUB_STEP_SUMMARY
+          echo "Base branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ steps.audit_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target ref: \`${{ steps.target_info.outputs.target_ref_label }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Claude: \`${{ steps.claude_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Code pre-resolution completed. Phase 03 will use enriched data." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-preresolve-logs-${{ github.run_id }}
+          path: outputs/logs/
+          retention-days: 7

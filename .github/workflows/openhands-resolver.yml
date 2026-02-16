@@ -1,0 +1,407 @@
+name: Auto-Fix Tagged Issue with OpenHands (RunDir per comment)
+
+on:
+  workflow_call:
+    inputs:
+      max_iterations:
+        required: false
+        type: number
+        default: 50
+      macro:
+        required: false
+        type: string
+        default: "@openhands-agent"
+      target_branch:
+        required: false
+        type: string
+        default: "main"
+        description: "Target branch to pull and create PR against"
+      pr_type:
+        required: false
+        type: string
+        default: "draft"
+        description: "The PR type that is going to be created (draft, ready)"
+      LLM_MODEL:
+        required: false
+        type: string
+        default: "anthropic/claude-sonnet-4-20250514"
+      LLM_API_VERSION:
+        required: false
+        type: string
+        default: ""
+      base_container_image:
+        required: false
+        type: string
+        default: ""
+        description: "Custom sandbox env"
+      runner:
+        required: false
+        type: string
+        default: "ubuntu-latest"
+    secrets:
+      LLM_MODEL:
+        required: false
+      LLM_API_KEY:
+        required: true
+      LLM_BASE_URL:
+        required: false
+
+  # issues:
+  #   types: [labeled]
+  # pull_request:
+  #   types: [labeled]
+  # issue_comment:
+  #   types: [created]
+  # pull_request_review_comment:
+  #   types: [created]
+  # pull_request_review:
+  #   types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  auto-fix:
+    if: |
+      github.event_name == 'workflow_call' ||
+      github.event.label.name == 'fix-me' ||
+      github.event.label.name == 'fix-me-experimental' ||
+      (
+        ((github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
+        contains(github.event.comment.body, inputs.macro || '@openhands-agent') &&
+        (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'COLLABORATOR' || github.event.comment.author_association == 'MEMBER')
+        ) ||
+
+        (github.event_name == 'pull_request_review' &&
+        contains(github.event.review.body, inputs.macro || '@openhands-agent') &&
+        (github.event.review.author_association == 'OWNER' || github.event.review.author_association == 'COLLABORATOR' || github.event.review.author_association == 'MEMBER')
+        )
+      )
+
+    runs-on: "${{ inputs.runner || 'ubuntu-latest' }}"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify uv is available
+        run: uv --version
+
+      - name: Install Python 3.12 with uv
+        run: uv python install 3.12
+
+      - name: Check required environment variables
+        env:
+          LLM_MODEL: ${{ secrets.LLM_MODEL || inputs.LLM_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_VERSION: ${{ inputs.LLM_API_VERSION }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          required_vars=("LLM_API_KEY")
+          for var in "${required_vars[@]}"; do
+            if [ -z "${!var}" ]; then
+              echo "Error: Required environment variable $var is not set."
+              exit 1
+            fi
+          done
+
+          if [ -z "$LLM_BASE_URL" ]; then
+            echo "Warning: LLM_BASE_URL is not set, will use default API endpoint"
+          fi
+
+      - name: Set environment variables
+        env:
+          REVIEW_BODY: ${{ github.event.review.body || '' }}
+        run: |
+          # PR events
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            echo "ISSUE_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+          # PR review events
+          elif [ -n "$REVIEW_BODY" ]; then
+            echo "ISSUE_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+          # Issue comment that references a PR
+          elif [ -n "${{ github.event.issue.pull_request }}" ]; then
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+          else
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
+            echo "ISSUE_TYPE=issue" >> $GITHUB_ENV
+          fi
+
+          if [ -n "$REVIEW_BODY" ]; then
+            echo "COMMENT_ID=${{ github.event.review.id || 'None' }}" >> $GITHUB_ENV
+          else
+            echo "COMMENT_ID=${{ github.event.comment.id || 'None' }}" >> $GITHUB_ENV
+          fi
+
+          echo "MAX_ITERATIONS=${{ inputs.max_iterations || 50 }}" >> $GITHUB_ENV
+          echo "SANDBOX_ENV_GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+          echo "SANDBOX_BASE_CONTAINER_IMAGE=${{ inputs.base_container_image }}" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=${{ inputs.target_branch || 'main' }}" >> $GITHUB_ENV
+
+      - name: Compute per-run working directory (prevents already-processed skip)
+        run: |
+          # Prefer COMMENT_ID when available; otherwise fall back to run_id/run_attempt (label triggers etc.)
+          RUN_KEY="${COMMENT_ID}"
+          if [ -z "$RUN_KEY" ] || [ "$RUN_KEY" = "None" ]; then
+            RUN_KEY="${{ github.run_id }}-${{ github.run_attempt }}"
+          fi
+
+          RUN_DIR="/tmp/openhands/${{ github.repository }}/issue-${ISSUE_NUMBER}/${RUN_KEY}"
+          echo "RUN_KEY=$RUN_KEY" >> $GITHUB_ENV
+          echo "RUN_DIR=$RUN_DIR" >> $GITHUB_ENV
+          echo "OUTPUT_JSONL=$RUN_DIR/output/output.jsonl" >> $GITHUB_ENV
+          echo "PR_RESULT_TXT=$RUN_DIR/pr_result.txt" >> $GITHUB_ENV
+          echo "BRANCH_RESULT_TXT=$RUN_DIR/branch_result.txt" >> $GITHUB_ENV
+          echo "PR_NUMBER_TXT=$RUN_DIR/pr_number.txt" >> $GITHUB_ENV
+          echo "BRANCH_NAME_TXT=$RUN_DIR/branch_name.txt" >> $GITHUB_ENV
+
+          mkdir -p "$RUN_DIR"
+
+      - name: Comment on issue with start message
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issueType = process.env.ISSUE_TYPE;
+            const runDir = process.env.RUN_DIR;
+            github.rest.issues.createComment({
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `[OpenHands](https://github.com/OpenHands/OpenHands) started fixing the ${issueType}! Run key: \`${process.env.RUN_KEY}\` (workdir: \`${runDir}\`). Progress: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+
+      - name: Install OpenHands
+        id: install_openhands
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          REVIEW_BODY: ${{ github.event.review.body || '' }}
+          LABEL_NAME: ${{ github.event.label.name || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+        with:
+          script: |
+            const commentBody = process.env.COMMENT_BODY.trim();
+            const reviewBody = process.env.REVIEW_BODY.trim();
+            const labelName = process.env.LABEL_NAME.trim();
+            const eventName = process.env.EVENT_NAME.trim();
+
+            const isExperimentalLabel = labelName === "fix-me-experimental";
+            const isIssueCommentExperimental =
+              (eventName === "issue_comment" || eventName === "pull_request_review_comment") &&
+              commentBody.includes("@openhands-agent-exp");
+            const isReviewCommentExperimental =
+              eventName === "pull_request_review" && reviewBody.includes("@openhands-agent-exp");
+
+            core.setOutput('isExperimental', isExperimentalLabel || isIssueCommentExperimental || isReviewCommentExperimental);
+
+            if (isExperimentalLabel || isIssueCommentExperimental || isReviewCommentExperimental) {
+              console.log("Experimental OpenHands selected (will use git+https://github.com/openhands/openhands.git with uvx).");
+            } else {
+              console.log("Stable OpenHands selected (will use openhands-ai with uvx).");
+            }
+
+      - name: Debug Python httpx connection
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$RUN_DIR"
+          cat > test_httpx.py << 'EOFPYTHON'
+          import httpx
+          import ssl
+          import sys
+          
+          print("=== Testing httpx connection to GitHub API ===")
+          print(f"Python version: {sys.version}")
+          
+          # Test 1: Basic GET request without authentication
+          print("\n--- Test 1: GET https://api.github.com (no auth) ---")
+          try:
+              with httpx.Client(timeout=30.0) as client:
+                  response = client.get("https://api.github.com")
+                  print(f"Status: {response.status_code}")
+                  print(f"Headers: {dict(response.headers)}")
+          except Exception as e:
+              print(f"ERROR: {type(e).__name__}: {e}")
+          
+          # Test 2: With SSL context (like OpenHands)
+          print("\n--- Test 2: GET with ssl.create_default_context() ---")
+          try:
+              ssl_context = ssl.create_default_context()
+              with httpx.Client(verify=ssl_context, timeout=30.0) as client:
+                  response = client.get("https://api.github.com")
+                  print(f"Status: {response.status_code}")
+          except Exception as e:
+              print(f"ERROR: {type(e).__name__}: {e}")
+              import traceback
+              traceback.print_exc()
+          
+          # Test 3: With authentication
+          print("\n--- Test 3: GET with Bearer token ---")
+          import os
+          token = os.environ.get("GITHUB_TOKEN", "")
+          if token:
+              print(f"Token length: {len(token)}")
+              try:
+                  ssl_context = ssl.create_default_context()
+                  headers = {"Authorization": f"Bearer {token}"}
+                  with httpx.Client(verify=ssl_context, timeout=30.0) as client:
+                      response = client.get("https://api.github.com", headers=headers)
+                      print(f"Status: {response.status_code}")
+              except Exception as e:
+                  print(f"ERROR: {type(e).__name__}: {e}")
+                  import traceback
+                  traceback.print_exc()
+          else:
+              print("No GITHUB_TOKEN found")
+          
+          print("\n=== Environment variables ===")
+          for key in ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"]:
+              print(f"{key}: {os.environ.get(key, '(not set)')}")
+          EOFPYTHON
+
+          uv run --python 3.12 --with httpx python test_httpx.py
+
+      - name: Attempt to resolve issue (run in per-run dir)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USERNAME: ${{ github.actor }}
+          GIT_USERNAME: ${{ github.actor }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL || inputs.LLM_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_VERSION: ${{ inputs.LLM_API_VERSION }}
+          PYTHONPATH: ""
+          SSL_CERT_FILE: /etc/ssl/certs/ca-bundle.crt
+        run: |
+          cd "$RUN_DIR"
+          uvx --python 3.12 --from openhands-ai \
+            python -m openhands.resolver.resolve_issue \
+            --selected-repo ${{ github.repository }} \
+            --issue-number ${{ env.ISSUE_NUMBER }} \
+            --issue-type ${{ env.ISSUE_TYPE }} \
+            --max-iterations ${{ env.MAX_ITERATIONS }} \
+            --comment-id ${{ env.COMMENT_ID }} \
+            --is-experimental ${{ steps.install_openhands.outputs.isExperimental }}
+
+      - name: Check resolution result
+        id: check_result
+        run: |
+          if [ -f "$OUTPUT_JSONL" ] && grep -q '"success":true' "$OUTPUT_JSONL"; then
+            echo "RESOLUTION_SUCCESS=true" >> $GITHUB_OUTPUT
+          else
+            echo "RESOLUTION_SUCCESS=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload output.jsonl as artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: resolver-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.ISSUE_NUMBER }}-${{ env.RUN_KEY }}
+          path: ${{ env.OUTPUT_JSONL }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Create draft PR or push branch (don't fail job on "no changes")
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_USERNAME: ${{ github.actor }}
+          GIT_USERNAME: ${{ github.actor }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL || inputs.LLM_MODEL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_VERSION: ${{ inputs.LLM_API_VERSION }}
+          PYTHONPATH: ""
+          SSL_CERT_FILE: /etc/ssl/certs/ca-bundle.crt
+        run: |
+          set +e
+          cd "$RUN_DIR"
+
+          if [ "${{ steps.check_result.outputs.RESOLUTION_SUCCESS }}" = "true" ]; then
+            uvx --python 3.12 --from openhands-ai \
+              python -m openhands.resolver.send_pull_request \
+              --issue-number ${{ env.ISSUE_NUMBER }} \
+              --target-branch ${{ env.TARGET_BRANCH }} \
+              --pr-type ${{ inputs.pr_type || 'draft' }} \
+              --reviewer ${{ github.actor }} | tee "$PR_RESULT_TXT"
+            SEND_EXIT=${PIPESTATUS[0]}
+
+            # Extract PR number if created
+            if [ -f "$PR_RESULT_TXT" ]; then
+              PR_NUM=$(grep -oP 'Created pull request #\K\d+' "$PR_RESULT_TXT" || echo "")
+              if [ -n "$PR_NUM" ]; then
+                echo "$PR_NUM" > "$PR_NUMBER_TXT"
+                echo "PR_NUMBER=$PR_NUM" >> $GITHUB_ENV
+              fi
+              BRANCH=$(grep -oP 'Pushed branch: \K[^\s]+' "$PR_RESULT_TXT" || echo "")
+              if [ -n "$BRANCH" ]; then
+                echo "$BRANCH" > "$BRANCH_NAME_TXT"
+                echo "BRANCH_NAME=$BRANCH" >> $GITHUB_ENV
+              fi
+            fi
+
+            if [ $SEND_EXIT -eq 0 ]; then
+              echo "PR/branch creation succeeded"
+            else
+              echo "PR/branch creation failed or had no changes (exit=$SEND_EXIT)"
+            fi
+          else
+            echo "Resolution not successful, skipping PR creation"
+          fi
+
+      - name: Comment on issue with result
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const resolutionSuccess = process.env.RESOLUTION_SUCCESS === 'true';
+            const prNumberFile = process.env.PR_NUMBER_TXT;
+            const branchNameFile = process.env.BRANCH_NAME_TXT;
+
+            let prNumber = null;
+            let branchName = null;
+
+            if (fs.existsSync(prNumberFile)) {
+              prNumber = fs.readFileSync(prNumberFile, 'utf8').trim();
+            }
+            if (fs.existsSync(branchNameFile)) {
+              branchName = fs.readFileSync(branchNameFile, 'utf8').trim();
+            }
+
+            let body = '';
+            // PR/ブランチが実際に作成されたかを最優先で確認
+            if (prNumber) {
+              body = "✅ PR created!";
+            } else if (branchName) {
+              body = "✅ Branch pushed!";
+            } else if (resolutionSuccess) {
+              body = "✅ No changes needed";
+            } else {
+              body = "❌ Failed";
+            }
+
+            body += `\n\nRun details: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            await github.rest.issues.createComment({
+              issue_number: issueNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
