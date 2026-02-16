@@ -46,10 +46,6 @@ on:
         required: false
         type: number
         default: 64
-      branch:
-        description: 'Branch from 02 to resume (optional)'
-        required: false
-        type: string
 
 permissions:
   contents: write
@@ -66,12 +62,40 @@ jobs:
       AUDIT_SCOPE: ${{ inputs.audit_scope }}
 
     steps:
-      - name: Resolve Inputs
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Verify Phase 02 Outputs Exist
+        run: |
+          set -euo pipefail
+          echo "Verifying Phase 02 outputs in branch '${{ github.ref_name }}'..."
+
+          if ! ls outputs/02_PARTIAL_*.json 1> /dev/null 2>&1; then
+            echo "❌ No Phase 02 output files found in branch '${{ github.ref_name }}'."
+            echo "Please ensure Phase 02 has been completed on this branch before running Phase 02c."
+            echo ""
+            echo "Expected files: outputs/02_PARTIAL_*.json"
+            exit 1
+          fi
+
+          echo "✓ Phase 02 outputs found"
+          ls -lh outputs/02_PARTIAL_*.json | head -5
+
+      - name: Update Scripts and Prompts from Remote
+        run: |
+          set -e
+          echo "Syncing scripts and prompts with remote branch..."
+          git fetch --prune origin
+          git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
+
+      - name: Resolve Target Inputs
         id: resolve_inputs
         env:
           TARGET_REPO_INPUT: ${{ inputs.target_repo }}
           TARGET_REF_TYPE: ${{ inputs.target_ref_type }}
-          BRANCH_INPUT: ${{ inputs.branch }}
         run: |
           set -euo pipefail
           TARGET_REPO="${TARGET_REPO_INPUT}"
@@ -83,21 +107,7 @@ jobs:
 
           echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
           echo "TARGET_MODE=${TARGET_MODE}" >> "$GITHUB_ENV"
-          echo "BRANCH_INPUT=${BRANCH_INPUT}" >> "$GITHUB_ENV"
           echo "checkout_ref=" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout Branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-
-      - name: Update Scripts and Prompts from Remote
-        run: |
-          set -e
-          echo "Syncing scripts and prompts with remote branch..."
-          git fetch --prune origin
-          git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
 
       - name: Checkout Target Repository
         uses: actions/checkout@v4
@@ -149,41 +159,24 @@ jobs:
           echo "target_ref_label=${target_ref_label}" >> "$GITHUB_OUTPUT"
           echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
 
-      - name: Create/Resume Branch
+      - name: Create New Branch
         id: audit_branch
         run: |
           set -euo pipefail
           repo_name="${{ steps.target_info.outputs.repo_name }}"
           ref_type="${{ inputs.target_ref_type }}"
           commit_version="${{ steps.target_info.outputs.short_sha }}"
-          input_branch="${{ inputs.branch }}"
 
-          BASE_BRANCH="${{ github.ref_name }}"
           git fetch --prune origin
 
-          if [ -n "${input_branch}" ]; then
-            branch_name="${input_branch}"
-            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
-            if git show-ref --verify --quiet "refs/remotes/origin/${branch_name}"; then
-              echo "Resuming branch '${branch_name}'..."
-              git checkout -b "$branch_name" "origin/$branch_name"
-              git pull origin "$branch_name"
-            else
-              echo "Branch '${branch_name}' not found on origin."
-              exit 1
-            fi
-          else
-            timestamp="$(date -u +%Y%m%d%H%M%S)"
-            branch_name="preresolve_${repo_name}_${ref_type}_${commit_version}_${timestamp}"
-            branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
-            echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
+          timestamp="$(date -u +%Y%m%d%H%M%S)"
+          branch_name="preresolve_${repo_name}_${ref_type}_${commit_version}_${timestamp}"
+          branch_name="$(echo "${branch_name}" | tr '/ ' '__')"
+          echo "branch_name=${branch_name}" >> "$GITHUB_OUTPUT"
 
-            git checkout "$BASE_BRANCH"
-            git reset --hard "origin/$BASE_BRANCH"
-
-            echo "Creating new branch '${branch_name}' from '${BASE_BRANCH}'..."
-            git checkout -b "$branch_name" "origin/$BASE_BRANCH"
-          fi
+          echo "Creating new branch '${branch_name}' from current branch '${{ github.ref_name }}'..."
+          echo "Phase 02 outputs from '${{ github.ref_name }}' will be included..."
+          git checkout -b "$branch_name"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -256,7 +249,7 @@ jobs:
           git add outputs/ ':!outputs/logs/'
           if ! git diff --staged --quiet; then
             git add outputs/logs/
-            git commit -m "02c: code pre-resolution for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
+            git commit -m "02c: code pre-resolution for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }} (from ${{ github.ref_name }})"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
             git push origin "${{ steps.audit_branch.outputs.branch_name }}" --force-with-lease
           fi
@@ -265,14 +258,14 @@ jobs:
         run: |
           echo "## Next: Run **03. Audit Map Generation**" >> $GITHUB_STEP_SUMMARY
           echo "Base branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Branch: \`${{ steps.audit_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "New branch: \`${{ steps.audit_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target ref: \`${{ steps.target_info.outputs.target_ref_label }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Claude: \`${{ steps.claude_version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Code pre-resolution completed. Phase 03 will use enriched data." >> $GITHUB_STEP_SUMMARY
+          echo "Code pre-resolution completed. Use branch \`${{ steps.audit_branch.outputs.branch_name }}\` for Phase 03." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Logs
         uses: actions/upload-artifact@v4
