@@ -78,6 +78,9 @@ from orchestrator.schemas import (
     QueuePayload,
     PartialMetadata,
     TargetInfo,
+    CodeScope,
+    CodeLocation,
+    LineRange,
     # Validators
     validate_discovered_spec,
     validate_subgraph,
@@ -506,14 +509,27 @@ class TestPhase03:
         item = AuditMapItem(
             check_id="CHK-001",
             property_id="PROP-001",
-            code_scope={"file": "test.java", "lines": "10-20"},
+            code_scope=CodeScope(
+                locations=[
+                    CodeLocation(
+                        file="test.java",
+                        symbol="TestFunction",
+                        line_range=LineRange(start=10, end=20),
+                        role="primary"
+                    )
+                ],
+                resolution_status="resolved"
+            ),
             code_snippet="int x = 0;\nif (x > 0) {\n    return true;\n}",
             final_classification="vulnerable",
             bug_bounty_eligible=True,
             summary="Found issue"
         )
         assert item.check_id == "CHK-001"
-        assert item.code_scope["file"] == "test.java"
+        assert len(item.code_scope.locations) == 1
+        assert item.code_scope.locations[0].file == "test.java"
+        assert item.code_scope.locations[0].line_range.start == 10
+        assert item.code_scope.locations[0].line_range.end == 20
         assert item.code_snippet == "int x = 0;\nif (x > 0) {\n    return true;\n}"
         assert item.final_classification == "vulnerable"
         assert item.bug_bounty_eligible is True

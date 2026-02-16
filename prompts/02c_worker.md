@@ -23,35 +23,73 @@ Execution hint: This worker prompt is invoked by the phase-02c orchestrator with
   <instructions>
     1. **Initialize**: Read <ref id="queue"/>, select first BATCH_SIZE items. Create `results = []`.
 
-    2. **Process Each Item**:
+    2. **Batch Symbol Collection**:
+       - Extract ALL `graph_element_under_test` values from all items in batch
+       - Create a deduplicated list of symbols to search
+       - Group by expected file/component for efficient searching
+       - This reduces MCP calls from O(n*m) to O(n) where n=unique symbols, m=operations per symbol
+
+    3. **Batch Code Resolution** (prefer batch processing):
+       a. **Option A - Project-wide Analysis** (recommended, most efficient):
+          - Use `mcp__tree_sitter__analyze_project` ONCE for the entire target workspace
+          - This creates a symbol cache that can be queried in-memory
+          - Then iterate through items using cached results (no additional MCP calls)
+       
+       b. **Option B - Batch Symbol Search** (alternative):
+          - Use `mcp__tree_sitter__run_query` with a combined query for all symbols at once
+          - Example: `(function_definition name: (identifier) @name (#match? @name "^(Symbol1|Symbol2|Symbol3)$"))`
+          - This reduces multiple `find_symbol` calls to a single batch query
+
+    4. **Process Each Item** (using cached/batch results):
        a. **Extract Element Info**: Get `graph_element_under_test` from checklist item. If missing or empty, mark as `resolution_status: "no_element"`, append to results, continue.
 
-       b. **Resolve Code Location**:
-          - Use `mcp__tree_sitter__find_symbol` or `mcp__tree_sitter__run_query` to search for the graph element
-          - Search in `target_workspace/` directory (target repository)
-          - Try multiple search strategies:
-            1. Direct symbol name search
-            2. Substring matching if exact match fails
-            3. Pattern-based search using Tree-sitter queries
-          - Extract file path, function/class name, and line range
+       b. **Resolve Primary Code Location** (from cached/batch results):
+          - Look up the graph element in cached results from step 3
+          - If using Option A (analyze_project): query the cached symbol table
+          - If using Option B (batch query): extract from batch query results
+          - Extract: file path, symbol name (in name_path format), line range (start/end)
+          - This becomes the **primary** location (role: "primary")
+          - **NO additional MCP calls per item**
 
-       c. **Extract Code Excerpt**:
-          - Once location is found, use `mcp__tree_sitter__get_symbols` with `include_body=true` to get full symbol body
-          - OR use `mcp__filesystem__read_text_file` with appropriate line range
-          - Store in `code_excerpt` field (max 500 lines for performance)
+       c. **Find Related Code Locations** (batch where possible):
+          - **Callers**: Collect all primary symbols first, then batch call `find_referencing_symbols` for all at once
+          - **Callees**: Extract from primary symbol body (already cached) using regex or tree-sitter parse
+          - **Related**: Extract from checklist item description, lookup in cached results
+          - For each related location, extract: file, symbol, line_range
+          - Limit to top 10 most relevant locations to avoid excessive data
 
-       d. **Populate Result**:
+       d. **Extract Code Excerpts** (from cached results):
+          - PRIMARY location: extract from cached symbol bodies (already loaded in step 3)
+          - RELATED locations: extract from cached results where available
+          - Only use `mcp__filesystem__read_text_file` if symbol body not in cache (rare)
+          - Store combined excerpts in `code_excerpt` field with clear markers:
+            ```
+            // PRIMARY: path/to/file.go:FunctionName (lines 10-50)
+            [code here]
+            
+            // CALLER: path/to/caller.go:CallerFunc (lines 100-120)
+            [code here]
+            ```
+
+       e. **Populate Result**:
           - Create result with:
             - `check_id`: from original item
-            - `code_scope`: {file, function, line_range, resolution_status}
-            - `code_excerpt`: actual code text (if found)
+            - `code_scope`: {
+                locations: [
+                  {file, symbol, line_range: {start, end}, role: "primary"},
+                  {file, symbol, line_range: {start, end}, role: "caller"},
+                  ...
+                ],
+                resolution_status
+              }
+            - `code_excerpt`: combined code text with clear section markers (if found)
           - Set `resolution_status`:
-            - `"resolved"`: Successfully found and extracted code
+            - `"resolved"`: Successfully found primary and related code
             - `"not_found"`: Element not found in target codebase
             - `"specification_only"`: Element is specification-level, no code exists
             - `"error"`: Error during resolution
 
-       e. **Append & Continue**: Append result to `results`, continue to next item.
+       f. **Append & Continue**: Append result to `results`, continue to next item.
 
     3. **Write Output**: After ALL items processed, write `results` array to <ref id="results"/>.
 
@@ -102,10 +140,21 @@ Execution hint: This worker prompt is invoked by the phase-02c orchestrator with
   </scope_filtering>
 
   <performance_notes>
-    - Process items in batches of up to 1000 for efficiency
-    - Use Tree-sitter caching by grouping items from same files
-    - Limit code excerpts to 500 lines max to avoid token bloat
-    - Use `substring_matching=true` in find_symbol for fuzzy matches
+    **MCP Call Optimization (CRITICAL)**:
+    - **Target**: 1-10 MCP calls total for 100-item batch (not 300-400 calls per item)
+    - **Method**: Use `mcp__tree_sitter__analyze_project` ONCE, then query cached results
+    - **Fallback**: Use batch queries with combined symbol patterns
+    - **Avoid**: Individual `find_symbol` calls per item (too expensive)
+    
+    **Batching**:
+    - Process items in batches of up to 100 for efficiency (max_batch_size=100)
+    - Group items by file/component before making MCP calls
+    - Deduplicate symbol lookups across items
+    
+    **Resource Limits**:
+    - Limit total code excerpts to 500 lines max across ALL locations to avoid token bloat
+    - Limit related locations to top 10 most relevant (prioritize direct callers/callees)
+    - For large symbols (>100 lines), consider truncating excerpts with "... [truncated] ..."
   </performance_notes>
 </task>
 
@@ -115,12 +164,18 @@ Execution hint: This worker prompt is invoked by the phase-02c orchestrator with
     {
       "check_id": "string",
       "code_scope": {
-        "file": "string",
-        "function": "string",
-        "line_range": {"start": int, "end": int},
-        "resolution_status": "resolved|not_found|specification_only|out_of_scope|error"
+        "locations": [
+          {
+            "file": "string",
+            "symbol": "string (name_path format, e.g., 'ClassName/methodName')",
+            "line_range": {"start": int, "end": int},
+            "role": "primary|caller|callee|related"
+          }
+        ],
+        "resolution_status": "resolved|not_found|specification_only|out_of_scope|error",
+        "resolution_error": "string (optional)"
       },
-      "code_excerpt": "string (optional, only if resolved)"
+      "code_excerpt": "string (optional, combined excerpts with section markers)"
     }
   </schema>
   <stdout>Max 10 lines: batch size, resolution stats, status.</stdout>

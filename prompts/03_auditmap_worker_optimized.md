@@ -18,38 +18,73 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     3. File MUST be written even if some items are skipped
   </critical_requirements>
 
-  <cache_optimization>
-    To minimize token consumption, follow these caching guidelines:
-    - **Reuse context**: Keep common context (skill definitions, checklist schema) in the same conversation
-    - **Batch similar items**: Process items from the same file/component together to maximize cache hits
-    - **Minimal context**: Only include necessary information in each skill invocation
-    - **Leverage prompt caching**: Structure prompts to maximize Claude API's automatic prompt caching
-  </cache_optimization>
+  <optimization_strategy>
+    **CRITICAL PERFORMANCE REQUIREMENTS**:
+    
+    **1. Batch Skill Invocation** (minimize invocation count):
+    - **Target**: 1-5 skill calls for 15-item batch (not 15 individual calls)
+    - **Method**: Group items by file/component, invoke skill once per group
+    - **Benefit**: Reduces skill invocations from O(n) to O(k) where k=unique files (typically 3-5x reduction)
+    
+    **2. Cache Optimization** (maximize cache hits):
+    - **Group by file**: Items from same file share context (maximize cache hits)
+    - **Reuse context**: Keep common context (skill definitions, schema) in same conversation
+    - **Minimal payload**: Pass only essential context per skill call
+    - **Prompt structure**: Maintain consistent prompt structure for automatic caching
+    
+    **3. Expected Performance**:
+    - 15 items → 3-5 skill calls (if well-grouped by file)
+    - Cache hit rate: 70-90% through batching
+    - Token reduction: 40-60% vs individual processing
+  </optimization_strategy>
 
   <instructions>
     1. **Initialize**: Read <ref id="queue"/>, select first BATCH_SIZE items. Create `results = []`.
 
-    2. **Process Each Item**:
-       a. **Check Pre-resolved Code**: If `item.code_scope.resolution_status == "resolved"` and `item.code_excerpt` exists, skip code resolution and use pre-resolved data.
+    2. **Group Items by Component**:
+       - Group items by `code_scope.locations[0].file` (primary file)
+       - Items from same file can share context and be analyzed together
+       - This enables batch skill invocation (see step 4)
+
+    3. **Process Each Item** (prepare for batch):
+       a. **Check Pre-resolved Code**: If `item.code_scope.resolution_status == "resolved"` and `item.code_scope.locations` is not empty:
+          - Use pre-resolved data from Phase 02c
+          - Primary location is first item with `role == "primary"` in locations array
+          - Related locations (callers, callees) are available for context
+          - Use `item.code_excerpt` which contains all relevant code sections
        
-       b. **Resolve Code (if needed)**: Otherwise, use `mcp__tree_sitter__get_symbols` or `mcp__tree_sitter__run_query` to find file/line numbers from `item.checklist_item.graph_element_under_test`. Use `mcp__filesystem__read_text_file` with `head`/`tail` to extract relevant lines as `code_excerpt`.
+       b. **Resolve Code (if needed)**: If not pre-resolved, use `mcp__tree_sitter__get_symbols` or `mcp__tree_sitter__run_query` to find file/line numbers from `item.checklist_item.graph_element_under_test`. Use `mcp__filesystem__read_text_file` to extract relevant lines as `code_excerpt`.
 
        c. **Include Location**: Output MUST include:
-          - `code_scope`: {file, function, line_range}
-          - `code_snippet`: actual code excerpt
+          - `code_scope`: {locations: [{file, symbol, line_range, role}], resolution_status}
+          - `code_snippet`: actual code excerpt (primary location or combined from Phase 02c)
 
-       d. **Skip Check**: If `code_scope.file` is `N/A`/`SPECIFICATION-ONLY`/missing, OR code is external (`vendor/`, submodules), OR component mismatch:
+       d. **Skip Check**: If `code_scope.resolution_status` is `not_found`/`specification_only`/`out_of_scope`, OR all locations are external (`vendor/`, submodules), OR component mismatch:
           Create result with `final_classification = "out-of-scope"`, append to `results`, continue to next item.
 
-       e. **Run Audit**: If valid `code_excerpt` found, call `/formal-audit-unified` skill (single call, not phase1/2/3 separately).
-          - **Cache-friendly invocation**: Pass only essential context to the skill (code_excerpt, property, check_id)
-          - **Avoid redundancy**: Do not repeat information already in the skill's context
+       e. **Collect for Batch Processing**: Add item to appropriate group for batch skill invocation.
 
-       f. **Merge & Continue**: Merge skill output into result object, append to `results`, proceed to next item.
+    4. **Batch Skill Invocation** (preferred):
+       a. **For Each File Group** (items from same file):
+          - **Preferred**: Call `/formal-audit-unified` skill ONCE with ALL items from this file
+          - Pass combined context: all code_excerpts, all properties, all check_ids
+          - Skill processes all items in single context (maximum cache reuse)
+          - Reduces skill calls from n items to k files (typically 5-10x reduction)
+       
+       b. **Fallback** (if skill doesn't support batch):
+          - Process items individually within same conversation
+          - Still benefit from cache hits for repeated context
+          - But avoid context fork overhead between items
 
-    3. **Write Output**: After ALL items processed, write `results` array to <ref id="results"/>.
+    5. **Merge Results**: Merge skill output into result objects, append all to `results`.
 
-    4. **Confirm**: Print summary, end with: `Output File: {{OUTPUT_FILE}}`
+    6. **Write Output**: After ALL items processed, write `results` array to <ref id="results"/>.
+
+    7. **Confirm**: Print summary including:
+       - Total items processed
+       - Number of skill invocations (should be << total items)
+       - Items per skill call (average)
+       End with: `Output File: {{OUTPUT_FILE}}`
   </instructions>
 
   <data_sources>
