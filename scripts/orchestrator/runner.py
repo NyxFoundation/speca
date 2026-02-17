@@ -384,6 +384,22 @@ class ClaudeRunner:
             cwd=self.config.workdir or str(Path.cwd()),
         )
 
+        # Collect stderr concurrently so it's available for error logging.
+        # Reading stdout and stderr sequentially risks deadlock when the
+        # subprocess writes enough to fill the OS pipe buffer on one stream
+        # while we're blocked reading the other.
+        _stderr_chunks: list[bytes] = []
+
+        async def _drain_stderr() -> None:
+            if proc.stderr:
+                while True:
+                    chunk = await proc.stderr.read(65536)
+                    if not chunk:
+                        break
+                    _stderr_chunks.append(chunk)
+
+        stderr_task = asyncio.create_task(_drain_stderr())
+
         try:
             # Stream stdout to log file
             async with aiofiles.open(log_file, mode="wb") as f:
@@ -407,6 +423,18 @@ class ClaudeRunner:
                             # Treat as a failure so circuit breaker can track it
                             return None
 
+                # Wait for stderr drain to finish, then append to log so
+                # startup errors (e.g. CLAUDECODE nested-session rejection)
+                # are always visible in the captured log even when stdout is empty.
+                await stderr_task
+                stderr_bytes = b"".join(_stderr_chunks)
+                if stderr_bytes:
+                    stderr_line = json.dumps({
+                        "type": "stderr",
+                        "text": stderr_bytes.decode("utf-8", errors="replace"),
+                    }) + "\n"
+                    await f.write(stderr_line.encode())
+
             await asyncio.wait_for(proc.wait(), timeout=self.config.timeout_seconds)
         except asyncio.TimeoutError:
             proc.kill()
@@ -422,6 +450,13 @@ class ClaudeRunner:
                     await asyncio.wait_for(watcher_task, timeout=2.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     watcher_task.cancel()
+            # Ensure stderr drain task is cancelled if not yet done
+            if not stderr_task.done():
+                stderr_task.cancel()
+                try:
+                    await asyncio.wait_for(stderr_task, timeout=1.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
 
         # --- Post-hoc log anomaly detection (kept for backward compat) ---
         anomalies = LogAnomalyDetector.scan_log(log_file)
@@ -478,7 +513,8 @@ class ClaudeRunner:
                 return partial_results
 
             # Genuine failure — save error log and return None
-            stderr = await proc.stderr.read() if proc.stderr else b""
+            # Use already-collected stderr bytes (proc.stderr pipe is already drained)
+            stderr = b"".join(_stderr_chunks)
             self._save_error_log(worker_id, batch_index, timestamp, proc.returncode, stderr)
             print(
                 f"[W{worker_id}] Claude failed for batch {batch_index} (exit {proc.returncode})",
@@ -627,6 +663,15 @@ class ClaudeRunner:
     def _build_env(self, **kwargs) -> dict[str, str]:
         """Build environment variables for Claude execution."""
         env = os.environ.copy()
+
+        # Remove Claude Code session variables that would trigger the nested-session
+        # detection ("Claude Code cannot be launched inside another Claude Code
+        # session").  The CLAUDECODE env var is set by Claude Code on startup and
+        # inherited by every subprocess; child ``claude`` invocations see it and
+        # immediately exit with code 1 (writing nothing to stdout).
+        for var in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):
+            env.pop(var, None)
+
         env.update({
             "CLAUDE_CODE_PERMISSIONS": "bypassPermissions",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
