@@ -1,0 +1,2045 @@
+{
+  "checklist_with_code": [
+    {
+      "check_id": "W0B1:W0B1:CHK-0001",
+      "property_id": "PROP-W0B17-1",
+      "title": "Verify Trust Boundary Integrity: Is block RLP size validated before any processing occurs (EIP-7934)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify the entry point where blocks are received from P2P network. 2. Verify that len(rlp.encode(block)) > MAX_RLP_BLOCK_SIZE check occurs BEFORE any RLP decoding or block header parsing. 3. Craft a block payload exceeding MAX_RLP_BLOCK_SIZE and verify rejection at the network layer. 4. Confirm that oversized blocks do not trigger resource-intensive operations before rejection.",
+      "bug_class": "Input Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-1, Trust Boundary: tb-010. EIP-7934 specific defense. A P2P peer can send arbitrarily large block payloads.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "networking/p2p/src/main/java/tech/pegasys/teku/networking/p2p/libp2p/gossip/GossipHandler.java",
+            "symbol": "apply",
+            "line_range": {
+              "start": 62,
+              "end": 82
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/statetransition/src/main/java/tech/pegasys/teku/statetransition/block/BlockManager.java",
+            "symbol": "validateAndImportBlock",
+            "line_range": {
+              "start": 125,
+              "end": 169
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: networking/p2p/src/main/java/tech/pegasys/teku/networking/p2p/libp2p/gossip/GossipHandler.java:apply (lines 62-82)\n// P2P message size check BEFORE SSZ deserialization (Teku's equivalent of RLP block size guard)\npublic SafeFuture<ValidationResult> apply(final MessageApi message) {\n    messageCounter.inc();\n    final int messageSize = message.getData().readableBytes();\n    final int maxMessageSize = handler.getMaxMessageSize(); // MAX_PAYLOAD_SIZE from spec config\n    if (messageSize > maxMessageSize) {\n        LOG.trace(\"Rejecting gossip message of length {} which exceeds maximum size of {}\",\n            messageSize, maxMessageSize);\n        return VALIDATION_FAILED; // Rejects before any decoding\n    }\n    return handler.handleMessage(gossipPubsubMessage.getPreparedMessage());\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0002",
+      "property_id": "PROP-W0B17-2",
+      "title": "Verify Trust Boundary Integrity: Are blocks with non-empty ommers rejected in post-merge Ethereum?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Create a block with block.ommers set to a non-empty tuple. 2. Submit block via P2P network. 3. Verify that state_transition rejects the block with an appropriate error. 4. Verify that validate_header also enforces this constraint (defense-in-depth).",
+      "bug_class": "State Consistency",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-2, Trust Boundary: tb-005. Post-merge invariant. Non-empty ommers could trigger pre-merge code paths.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)\n// Teku validates CL-level execution payload header fields.\n// Non-empty ommers check is delegated to EL via Engine API newPayload.\npublic void validateExecutionPayloadHeader(\n    final BeaconState genericState, final ExecutionPayloadHeader header)\n    throws BlockProcessingException {\n  final BeaconStateBellatrix state = BeaconStateBellatrix.required(genericState);\n  if (miscHelpersBellatrix.isMergeTransitionComplete(state)) {\n    if (!header.getParentHash().equals(state.getLatestExecutionPayloadHeader().getBlockHash())) {\n      throw new BlockProcessingException(\"Execution payload parent hash does not match\");\n    }\n  }\n  // randao and timestamp checks follow...\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0003",
+      "property_id": "PROP-W0B17-3",
+      "title": "Verify Trust Boundary Integrity: Do all 8 computed roots/hashes match header values after block execution?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. For each of the 8 fields (gas_used, transactions_root, state_root, receipt_root, bloom, withdrawals_root, blob_gas_used, requests_hash), create a block with a mismatched computed vs header value. 2. Verify that state_transition rejects each case. 3. Check that comparison is performed with constant-time equality for cryptographic hashes. 4. Verify no early-exit on first mismatch allows partial state to be committed.",
+      "bug_class": "Cryptographic Verification",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-3, Trust Boundaries: tb-002, tb-005. Bypass allows invalid state transitions leading to consensus failure.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/block/AbstractBlockProcessor.java",
+            "symbol": "validatePostState",
+            "line_range": {
+              "start": 276,
+              "end": 290
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/block/AbstractBlockProcessor.java:validatePostState (lines 276-290)\n// Teku validates CL beacon state_root. EL validates all 8 EL roots/hashes.\nprivate BlockValidationResult validatePostState(\n    final BeaconState postState, final SignedBeaconBlock block) {\n  if (!block.getMessage().getStateRoot().equals(postState.hashTreeRoot())) {\n    return BlockValidationResult.failed(\n        \"Block state root does NOT match the calculated state root!\\n\"\n        + \"Block state root: \" + block.getMessage().getStateRoot().toHexString()\n        + \"\\n  New state root: \" + postState.hashTreeRoot().toHexString());\n  }\n  return BlockValidationResult.SUCCESSFUL;\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0004",
+      "property_id": "PROP-W0B17-5",
+      "title": "Verify Trust Boundary Integrity: Is transaction sender identity correctly derived from ECDSA signature?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction",
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify recover_sender correctly implements ECDSA recovery from (v, r, s) signature. 2. Test with malleable signatures (high-s values) and verify rejection per EIP-2. 3. Test edge cases: s=0, r=0, v outside valid range, points on curve boundaries. 4. Attempt signature forgery using known attack vectors and verify detection.",
+      "bug_class": "Cryptographic Verification",
+      "risk_category": "Spoofing",
+      "notes": "Source: PROP-W0B17-5, Trust Boundary: tb-001. Signature spoofing allows account takeover.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: ECDSA sender recovery\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0005",
+      "property_id": "PROP-W0B17-6",
+      "title": "Verify Trust Boundary Integrity: Is RLP encoding deterministic and collision-free?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Test RLP encoding with various block structures and verify determinism. 2. Verify that for B1 != B2, rlp.encode(B1) != rlp.encode(B2). 3. Test with nested structures, empty fields, and maximum-size payloads. 4. Cross-check encoding output against reference implementations.",
+      "bug_class": "Serialization",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-6, Trust Boundaries: tb-002, tb-005, tb-010. Non-deterministic encoding causes consensus splits.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: RLP deterministic encoding\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0006",
+      "property_id": "PROP-W0B17-7",
+      "title": "Verify Trust Boundary Integrity: Is keccak256 collision-resistant and correctly implemented?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify keccak256 implementation produces correct test vectors. 2. Check for any implementation-specific optimizations that might introduce bugs. 3. Verify hash comparison uses constant-time equality. 4. Test with edge cases: empty input, single byte, maximum size inputs.",
+      "bug_class": "Cryptographic Verification",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-7, Trust Boundaries: tb-002, tb-005. Implementation bug in hash computation could enable block forgery.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: keccak256 collision resistance\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0007",
+      "property_id": "PROP-W0B17-8",
+      "title": "Verify Trust Boundary Integrity: Is withdrawal amount scaled correctly by 10^9 (Gwei to Wei)?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "EngineAPI"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Trace the process_withdrawals function to verify the scaling factor of 10^9. 2. Test with withdrawal amounts at boundary values (0, max uint64 Gwei). 3. Verify no overflow occurs during multiplication. 4. Confirm balance increase exactly equals withdrawal.amount * 10^9 Wei.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-8, Trust Boundaries: tb-003, tb-007. Incorrect scaling affects total ETH supply.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/ExpectedWithdrawals.java",
+            "symbol": "processWithdrawalsUnchecked",
+            "line_range": {
+              "start": 308,
+              "end": 345
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateMutators.java",
+            "symbol": "decreaseBalance",
+            "line_range": {
+              "start": 85,
+              "end": 89
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/ExpectedWithdrawals.java:processWithdrawalsUnchecked (lines 308-345)\n// CL decreases beacon validator balance; EL increases EL account balance by withdrawal.amount (Gwei)\nfor (int i = 0; i < expectedWithdrawals.size(); i++) {\n  final Withdrawal withdrawal = expectedWithdrawals.get(i);\n  beaconStateMutators.decreaseBalance(\n      state, withdrawal.getValidatorIndex().intValue(), withdrawal.getAmount()); // Gwei units\n}\n\n// CALLEE: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateMutators.java:decreaseBalance (lines 85-89)\npublic void decreaseBalance(final MutableBeaconState state, final int index, final UInt64 delta) {\n  state.getBalances().setElement(index, state.getBalances().getElement(index).minusMinZero(delta));\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0008",
+      "property_id": "PROP-W0B17-9",
+      "title": "Verify Trust Boundary Integrity: Does withdrawal processing only increase balances, never decrease?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "EngineAPI"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Review process_withdrawals implementation for any subtraction operations. 2. Test for integer overflow that could cause wraparound to lower values. 3. Verify balance_after(a) >= balance_before(a) for all accounts a. 4. Test with maximum balance values approaching overflow boundaries.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-9, Trust Boundary: tb-007. Balance decrease during withdrawal is fund loss.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/ExpectedWithdrawals.java",
+            "symbol": "processWithdrawalsUnchecked",
+            "line_range": {
+              "start": 308,
+              "end": 345
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateMutators.java",
+            "symbol": "decreaseBalance",
+            "line_range": {
+              "start": 85,
+              "end": 89
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/ExpectedWithdrawals.java:processWithdrawalsUnchecked (lines 308-325)\n// CL decreases beacon validator balance (not increases) to record processed withdrawal.\n// The EL client increases the EL account balance (separate system).\nbeaconStateMutators.decreaseBalance(\n    state, withdrawal.getValidatorIndex().intValue(), withdrawal.getAmount());\n\n// CALLEE: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/helpers/BeaconStateMutators.java:decreaseBalance (lines 85-89)\npublic void decreaseBalance(final MutableBeaconState state, final int index, final UInt64 delta) {\n  // minusMinZero ensures underflow protection (balance >= 0)\n  state.getBalances().setElement(index, state.getBalances().getElement(index).minusMinZero(delta));\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0009",
+      "property_id": "PROP-W0B17-10",
+      "title": "Verify Trust Boundary Integrity: Do system contracts contain code before checked system transactions execute?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify process_checked_system_transaction checks len(system_contract_code) > 0. 2. Test at fork boundary to ensure system contracts are deployed. 3. Verify InvalidBlock is raised when contract has no code. 4. Note: unchecked variants (SG-010) do not have this check.",
+      "bug_class": "State Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-10, Trust Boundary: tb-004. Missing system contract code causes block processing failure.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// System contract code existence (beacon roots, withdrawal, consolidation contracts)\n// is verified by EL before checked system calls.\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:computeNewPayloadRequest (lines 131-151)\n// Teku passes parentBeaconBlockRoot and executionRequests to EL for system call validation."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0010",
+      "property_id": "PROP-W0B17-11",
+      "title": "Verify Trust Boundary Integrity: Are checked system transaction errors propagated as InvalidBlock?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify process_checked_system_transaction raises InvalidBlock if system_tx_output.error is not None. 2. Identify ways to cause system contract reversion (WITHDRAWAL_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS). 3. Verify that error check cannot be bypassed. 4. Test what happens if system contract can be made to revert on every block.",
+      "bug_class": "Error Handling",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-11, Trust Boundaries: tb-004, tb-011. If system contract reverts on every block, chain halts.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processOperationsNoValidation",
+            "line_range": {
+              "start": 154,
+              "end": 174
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processOperationsNoValidation (lines 154-174)\n// Teku processes execution requests decoded by EL after checked system calls.\n// If checked system tx fails, EL does NOT include it in executionRequests.\nsafelyProcess(() -> {\n  final ExecutionRequests executionRequests = body.getOptionalExecutionRequests()\n      .orElseThrow(() -> new BlockProcessingException(\"Execution requests expected\"));\n  processDepositRequests(state, executionRequests.getDeposits());\n  processWithdrawalRequests(state, executionRequests.getWithdrawals(), validatorExitContextSupplier);\n  processConsolidationRequests(state, executionRequests.getConsolidations());\n});"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0011",
+      "property_id": "PROP-W0B17-12",
+      "title": "Verify Trust Boundary Integrity: Are unchecked system transactions only used for beacon roots and history storage?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify that process_unchecked_system_transaction is only called for BEACON_ROOTS_ADDRESS and HISTORY_STORAGE_ADDRESS. 2. Confirm that failure of these contracts is non-critical (affects ring buffer data only). 3. Verify a compromised CL cannot corrupt critical state via unchecked system transactions.",
+      "bug_class": "Trust Boundary",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-12, Trust Boundary: tb-004. Unchecked variants allow silent failures for non-critical operations.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processDepositRequests",
+            "line_range": {
+              "start": 219,
+              "end": 243
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processDepositRequests (lines 219-243)\n// Deposit requests (EIP-6110) come from EL execution logs (unchecked tx style).\n// Withdrawal/consolidation requests come from checked system calls (EIP-7002/7251).\n@Override\npublic void processDepositRequests(\n    final MutableBeaconState state, final List<DepositRequest> depositRequests) {\n  for (DepositRequest depositRequest : depositRequests) {\n    // Sets depositRequestsStartIndex when first deposit from EIP-6110 is seen\n    if (electraState.getDepositRequestsStartIndex()\n        .equals(SpecConfigElectra.UNSET_DEPOSIT_REQUESTS_START_INDEX)) {\n      electraState.setDepositRequestsStartIndex(depositRequest.getIndex());\n    }\n    pendingDeposits.append(deposit);\n  }\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0012",
+      "property_id": "PROP-W0B17-15",
+      "title": "Verify Trust Boundary Integrity: Do all blob versioned hashes have 0x01 version prefix?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction",
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit blob transaction with versioned hashes having non-0x01 prefix (e.g., 0x00, 0x02). 2. Verify rejection at transaction validation stage. 3. Verify EL only checks version byte; KZG proof verification is by CL. 4. Test with hashes that have correct prefix but invalid KZG commitments.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-15, Trust Boundary: tb-008. Non-KZG versioned hash breaks data availability guarantees.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 93,
+              "end": 105
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 78,
+              "end": 90
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java:computeNewPayloadRequest (lines 93-105)\n// Teku derives versioned hashes from KZG commitments (0x01 prefix via kzgCommitmentToVersionedHash).\n// These are passed to EL for verification of 0x01 version prefix enforcement.\nfinal List<VersionedHash> versionedHashes =\n    blobKzgCommitments.stream()\n        .map(SszKZGCommitment::getKZGCommitment)\n        .map(miscHelpers::kzgCommitmentToVersionedHash) // SHA256(kzg_commitment)[1:] with 0x01 prefix\n        .toList();\nreturn new NewPayloadRequest(executionPayload, versionedHashes, parentBeaconBlockRoot);\n\n// CALLER: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java:validateExecutionPayload (lines 78-90)\nif (blobKzgCommitments.size() > maxBlobsPerBlock) {\n  throw new BlockProcessingException(\"Number of kzg commitments exceeds max blobs per block\");\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0013",
+      "property_id": "PROP-W0B17-16",
+      "title": "Verify Trust Boundary Integrity: Is gas refund capped at gas_used // 5 (EIP-3529)?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Craft transaction with operations generating large refund counters (e.g., SSTORE clearing). 2. Verify tx_gas_refund = min(gas_used // 5, refund_counter). 3. Test boundary cases where refund_counter exceeds gas_used // 5. 4. Verify refund never exceeds 20% of gas consumed.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-16, Trust Boundary: tb-006. Excess refunds enable spam at reduced cost.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: gas refund cap EIP-3529\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0014",
+      "property_id": "PROP-W0B17-17",
+      "title": "Verify Trust Boundary Integrity: Is EIP-7623 calldata floor gas cost enforced after refund?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Craft transaction with large calldata and refund-generating operations. 2. Verify tx_gas_used = max(gas_used - refund, calldata_floor_gas_cost). 3. Test that final gas used is at least the calldata floor. 4. Test boundary cases where refunds would push below floor.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-17, Trust Boundary: tb-006. Bypassing floor allows cheap data availability exploitation.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: EIP-7623 calldata floor gas\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0015",
+      "property_id": "PROP-W0B17-18",
+      "title": "Verify Trust Boundary Integrity: Are post-merge header fields (difficulty, nonce, ommers_hash) correctly zeroed?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Create block with non-zero difficulty, non-zero nonce, or non-EMPTY_OMMER_HASH ommers_hash. 2. Verify validate_header rejects each case. 3. Verify defense-in-depth: state_transition also enforces these constraints. 4. Check for client-specific divergence on pre-merge code paths.",
+      "bug_class": "State Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-18, Trust Boundary: tb-005. Non-zero post-merge fields could trigger pre-merge code paths.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)\n// Teku validates randao matches state, timestamp matches slot time.\n// EL validates post-merge header fields: difficulty=0, nonce=0x0000000000000000, basefeePerGas set.\nif (!beaconStateAccessors.getRandaoMix(state, beaconStateAccessors.getCurrentEpoch(state))\n    .equals(executionPayloadHeader.getPrevRandao())) {\n  throw new BlockProcessingException(\"Execution payload randao does not match state randao\");\n}\nif (!miscHelpersBellatrix.computeTimeAtSlot(state.getGenesisTime(), state.getSlot())\n    .equals(executionPayloadHeader.getTimestamp())) {\n  throw new BlockProcessingException(\"Execution payload timestamp does not match time for state slot\");\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0016",
+      "property_id": "PROP-W0B17-19",
+      "title": "Verify Trust Boundary Integrity: Are sender accounts with code validated for EIP-7702 delegation designations?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit transaction from account with code that is NOT a valid delegation designation. 2. Verify check_transaction rejects the transaction. 3. Test EIP-7702 authorization list validation for bypass vectors. 4. Verify contracts cannot initiate unauthorized transactions.",
+      "bug_class": "Authorization",
+      "risk_category": "Elevation of Privilege",
+      "notes": "Source: PROP-W0B17-19, Trust Boundary: tb-009. Bypass allows unauthorized code execution over victim accounts.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: EIP-7702 sender with code validation\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0017",
+      "property_id": "PROP-W0B17-21",
+      "title": "Verify Trust Boundary Integrity: Is transaction gas checked against remaining block gas?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit transaction with tx.gas > (block_gas_limit - block_gas_used). 2. Verify check_transaction rejects the transaction. 3. Test at boundary: tx.gas exactly equals remaining gas. 4. Test for integer overflow in gas calculation.",
+      "bug_class": "Resource Limit",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-21, Trust Boundary: tb-001. Bypass causes block gas limit overrun and consensus failure.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: transaction gas vs block gas limit\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0018",
+      "property_id": "PROP-W0B17-22",
+      "title": "Verify Trust Boundary Integrity: Is transaction blob gas checked against remaining block blob gas?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit blob transaction with calculate_total_blob_gas(tx) > blob_gas_available. 2. Verify check_transaction rejects the transaction. 3. Test for overflow in total_blob_gas calculation. 4. Test at exact boundary values.",
+      "bug_class": "Resource Limit",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-22, Trust Boundaries: tb-001, tb-008. Bypass allows excess blob data breaking data availability assumptions.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 78,
+              "end": 90
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: transaction blob gas vs remaining block blob gas\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java:validateExecutionPayload (lines 78-90)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0019",
+      "property_id": "PROP-W0B17-23",
+      "title": "Verify Trust Boundary Integrity: Is max_fee_per_gas >= max_priority_fee_per_gas enforced for EIP-1559 transactions?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit EIP-1559 transaction with max_priority_fee_per_gas > max_fee_per_gas. 2. Verify check_transaction rejects the transaction. 3. Test for arithmetic underflow in effective gas price calculation. 4. Test boundary case: priority fee exactly equals max fee.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-23, Trust Boundary: tb-001. Inconsistent fee structure could cause underflow.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: max_fee_per_gas >= max_priority_fee_per_gas\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0020",
+      "property_id": "PROP-W0B17-24",
+      "title": "Verify Trust Boundary Integrity: Is max_fee_per_gas >= base_fee_per_gas enforced?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit transaction with max_fee_per_gas < current base_fee_per_gas. 2. Verify check_transaction rejects the transaction. 3. Verify rejection occurs before execution, not after. 4. Test at exact boundary: max fee equals base fee.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-24, Trust Boundary: tb-001. Acceptance allows under-priced execution.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: max_fee_per_gas >= base_fee_per_gas\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0021",
+      "property_id": "PROP-W0B17-25",
+      "title": "Verify Trust Boundary Integrity: Do blob transactions have between 1 and BLOB_COUNT_LIMIT blobs?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit blob transaction with 0 blobs (empty blob_versioned_hashes). 2. Submit blob transaction with > MAX_BLOB_COUNT blobs. 3. Verify both cases are rejected by check_transaction. 4. Test at exact boundaries: 1 blob and MAX_BLOB_COUNT blobs.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-25, Trust Boundary: tb-008. Zero blobs wastes capacity; excess breaks data availability.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 78,
+              "end": 90
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: blob transaction count 1..MAX_BLOB_COMMITMENTS_PER_BLOCK\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/deneb/block/BlockProcessorDeneb.java:validateExecutionPayload (lines 78-90)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0022",
+      "property_id": "PROP-W0B17-26",
+      "title": "Verify Trust Boundary Integrity: Are blob and SetCode transactions prevented from creating contracts?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit blob transaction with tx.to = None (contract creation). 2. Submit SetCode transaction with tx.to = None. 3. Verify check_transaction rejects both cases. 4. Test for bypasses using special address values.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-26, Trust Boundaries: tb-001, tb-008, tb-009. Allowing contract creation violates EIP semantics.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 78,
+              "end": 90
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: blob/SetCode no contract creation (to != nil)\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:validateExecutionPayload (lines 78-90)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0023",
+      "property_id": "PROP-W0B17-27",
+      "title": "Verify Trust Boundary Integrity: Do SetCode transactions require non-empty authorization lists?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit SetCode transaction with empty authorization list. 2. Verify check_transaction rejects the transaction. 3. Test for bypasses with malformed authorization entries. 4. Verify this indicates broader EIP-7702 validation coverage.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-27, Trust Boundary: tb-009. Empty list is semantically invalid.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 78,
+              "end": 90
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: SetCode non-empty authorization list\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:validateExecutionPayload (lines 78-90)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0024",
+      "property_id": "PROP-W0B17-28",
+      "title": "Verify Trust Boundary Integrity: Does sender nonce match transaction nonce exactly?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit transaction with nonce < sender_account.nonce. 2. Submit transaction with nonce > sender_account.nonce. 3. Verify both are rejected by check_transaction. 4. Test for nonce verification bypass vectors enabling replay attacks.",
+      "bug_class": "Replay Protection",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-28, Trust Boundaries: tb-001, tb-006. Nonce bypass enables replay or ordering attacks.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: sender nonce exact match\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0025",
+      "property_id": "PROP-W0B17-29",
+      "title": "Verify Trust Boundary Integrity: Is sender balance sufficient for maximum possible transaction cost?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify balance check: sender_balance >= (tx.gas * max_fee_per_gas) + tx.value + (blob_gas * max_fee_per_blob_gas). 2. Test with extreme gas parameters near uint256 boundary to trigger overflow. 3. Test with sender balance exactly at required amount. 4. Verify no integer overflow in cost calculation.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-29, Trust Boundaries: tb-001, tb-006. Bypass creates ETH from nothing -- critical fund loss.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: sender balance >= max_cost before execution\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0026",
+      "property_id": "PROP-W0B17-30",
+      "title": "Verify Trust Boundary Integrity: Is nonce incremented before message execution?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Trace process_transaction to verify increment_nonce(state, sender) is called before process_message_call. 2. Test for reentrancy scenarios where same nonce could be reused. 3. Verify ordering is correct for cross-transaction protection within same block.",
+      "bug_class": "State Management",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-30, Trust Boundaries: tb-001, tb-006. Late nonce increment enables reentrancy attacks.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: nonce increment before message execution\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0027",
+      "property_id": "PROP-W0B17-31",
+      "title": "Verify Trust Boundary Integrity: Are gas fees deducted from sender balance before message execution?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Trace process_transaction to verify max gas fees are deducted before process_message_call. 2. Test if sender can spend the balance during execution to avoid paying gas. 3. Verify both effective_gas_fee and blob_gas_fee are deducted upfront.",
+      "bug_class": "State Management",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-31, Trust Boundary: tb-006. Late fee deduction enables fee-evasion exploit.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: gas fee deducted from sender before execution\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0028",
+      "property_id": "PROP-W0B17-32",
+      "title": "Is unused gas refunded at the correct effective_gas_price?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify refund calculation: gas_left * effective_gas_price. 2. Test for incorrect price usage (base fee vs effective price). 3. Calculate expected refund and compare to actual refund. 4. Test with various gas price configurations.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-32, Trust Boundary: tb-006. Incorrect refund affects ETH supply accuracy.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: unused gas refund at effective_gas_price\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0029",
+      "property_id": "PROP-W0B17-33",
+      "title": "Does coinbase receive only the priority fee portion (not base fee)?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify coinbase payment: tx_gas_used * (effective_gas_price - base_fee_per_gas). 2. Confirm base fee is burned, not paid to coinbase. 3. Test for incorrect full payment of effective gas price. 4. Verify EIP-1559 deflationary mechanism is correctly implemented.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-33, Trust Boundary: tb-006. Base fee to coinbase breaks EIP-1559 economics.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: coinbase receives only priority fee (not base fee)\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0030",
+      "property_id": "PROP-W0B17-34",
+      "title": "Are accounts marked for deletion destroyed after transaction execution?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Trigger SELFDESTRUCT to mark account for deletion. 2. Verify account is destroyed after transaction execution. 3. Test if accounts_to_delete set is properly processed. 4. Verify state root reflects account deletion.",
+      "bug_class": "State Management",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-34, Trust Boundary: tb-006. Failure to delete causes state trie divergence.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: SELFDESTRUCT account deletion after tx execution\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0031",
+      "property_id": "PROP-W0B17-35",
+      "title": "Does beacon roots system transaction execute before user transactions?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify apply_body calls process_unchecked_system_transaction(BEACON_ROOTS_ADDRESS) first. 2. Test if user transactions can access expected beacon root data via ring buffer. 3. Verify EIP-4788 dependent contracts work correctly.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-35, Trust Boundary: tb-004. Incorrect ordering causes beacon root unavailability.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: beacon roots system tx executes first (EIP-4788)\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:computeNewPayloadRequest (lines 131-151)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0032",
+      "property_id": "PROP-W0B17-36",
+      "title": "Does history storage system transaction execute as second operation?",
+      "severity": "Medium",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify apply_body calls process_unchecked_system_transaction(HISTORY_STORAGE_ADDRESS) second. 2. Test history data availability during transaction execution. 3. Verify contracts querying historical block hashes work correctly.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-36, Trust Boundary: tb-004. Incorrect ordering causes stale history data.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: history storage system tx as 2nd operation (EIP-2935)\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:computeNewPayloadRequest (lines 131-151)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0033",
+      "property_id": "PROP-W0B17-37",
+      "title": "Are transactions processed in sequential order within a block?",
+      "severity": "Critical",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify apply_body processes transactions in block transaction list order. 2. Test that out-of-order processing produces different state roots. 3. Verify sequential ordering is a consensus invariant. 4. Check for any parallelization that might violate ordering.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-37, Trust Boundary: tb-006. Out-of-order processing causes consensus failure.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: transactions in sequential order\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0034",
+      "property_id": "PROP-W0B17-38",
+      "title": "Are withdrawals processed after all transactions?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify apply_body calls process_withdrawals after all transactions. 2. Test that premature withdrawal processing alters state visible to transactions. 3. Verify state root divergence if ordering is violated.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-38, Trust Boundary: tb-007. Premature processing causes state root divergence.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/capella/block/BlockProcessorCapella.java",
+            "symbol": "executionProcessing",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/ExpectedWithdrawals.java",
+            "symbol": "processWithdrawals",
+            "line_range": {
+              "start": 292,
+              "end": 306
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/capella/block/BlockProcessorCapella.java:executionProcessing (lines 98-106)\n// Teku processes expected withdrawals from execution payload (CL checks match).\n// EL executes transactions first, then includes withdrawals in payload.\npublic void executionProcessing(...) throws BlockProcessingException {\n  processWithdrawals(genericState, executionPayloadHeader); // validates withdrawal list matches\n  super.executionProcessing(genericState, beaconBlockBody, payloadExecutor); // newPayload to EL\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0035",
+      "property_id": "PROP-W0B17-39",
+      "title": "Are general purpose requests processed last in block body?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify apply_body calls process_general_purpose_requests after withdrawals and transactions. 2. Test that premature processing produces incorrect request data. 3. Verify requests_hash divergence if ordering is violated.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-39, Trust Boundary: tb-011. Incorrect ordering produces different requests_hash.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processOperationsNoValidation",
+            "line_range": {
+              "start": 154,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processOperationsNoValidation (lines 154-174)\n// Execution requests (general purpose requests) are processed after standard operations.\n// super.processOperationsNoValidation() runs attestations, slashings, exits first.\n// Then safelyProcess() block handles deposit/withdrawal/consolidation requests last.\nsuper.processOperationsNoValidation(state, body, indexedAttestationCache, validatorExitContextSupplier);\nsafelyProcess(() -> {\n  processDepositRequests(state, executionRequests.getDeposits());\n  processWithdrawalRequests(state, executionRequests.getWithdrawals(), ...);\n  processConsolidationRequests(state, executionRequests.getConsolidations());\n});"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0036",
+      "property_id": "PROP-W0B17-40",
+      "title": "Are request types appended in correct order (deposits, withdrawals, consolidations)?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Craft transactions generating deposit logs, withdrawal requests, and consolidation requests. 2. Verify process_general_purpose_requests assembles in order: deposits, withdrawals, consolidations. 3. Test that incorrect ordering produces different requests_hash. 4. Verify consensus split if ordering differs between implementations.",
+      "bug_class": "Ordering",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-40, Trust Boundary: tb-011. Request ordering determines requests_hash.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processOperationsNoValidation",
+            "line_range": {
+              "start": 154,
+              "end": 174
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processOperationsNoValidation (lines 163-174)\n// Request types processed in order per EIP-7685: deposits(0x00), withdrawals(0x01), consolidations(0x02)\nprocessDepositRequests(state, executionRequests.getDeposits());      // type 0x00\nprocessWithdrawalRequests(state, executionRequests.getWithdrawals(), ...); // type 0x01\nprocessConsolidationRequests(state, executionRequests.getConsolidations()); // type 0x02\n\n// RELATED: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:computeNewPayloadRequest (lines 131-151)\n// executionRequestsDataCodec.encode() encodes requests in type-ordered format per EIP-7685."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0037",
+      "property_id": "PROP-W0B17-41",
+      "title": "Are deposit requests parsed from block output logs (not system transactions)?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify deposit requests are derived via parse_deposit_requests from log entries. 2. Test for incorrect contract address or ABI decoding. 3. Craft log entries attempting to inject fraudulent deposits. 4. Verify legitimate deposits are not missed.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-41, Trust Boundary: tb-011. Incorrect parsing could inject fraudulent validator deposits.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processDepositRequests",
+            "line_range": {
+              "start": 219,
+              "end": 243
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processDepositRequests (lines 219-243)\n// Deposit requests are sourced from EL block execution logs (EIP-6110 deposit contract).\n// The EL parses deposit contract event logs and includes them in execution_requests.deposits.\n@Override\npublic void processDepositRequests(\n    final MutableBeaconState state, final List<DepositRequest> depositRequests) {\n  // depositRequests come from EL log parsing, not system call return values\n  for (DepositRequest depositRequest : depositRequests) {\n    pendingDeposits.append(deposit);\n  }\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0038",
+      "property_id": "PROP-W0B17-42",
+      "title": "Are withdrawal and consolidation requests from checked system transactions?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P",
+          "Transaction"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify process_checked_system_transaction is called for withdrawal and consolidation request contracts. 2. Test what happens if checked is replaced with unchecked. 3. Manipulate system contract state to cause failures. 4. Verify failures are caught and not silently ignored.",
+      "bug_class": "Error Handling",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-42, Trust Boundaries: tb-004, tb-011. Silent failures corrupt request data network-wide.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processWithdrawalRequests",
+            "line_range": {
+              "start": 247,
+              "end": 310
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "processConsolidationRequests",
+            "line_range": {
+              "start": 403,
+              "end": 415
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:processWithdrawalRequests (lines 247-255)\n// Withdrawal/consolidation requests come from checked EL system contract calls.\n// EIP-7002 (withdrawal contract) and EIP-7251 (consolidation contract) are CHECKED:\n// if system call fails, no request is generated. Teku processes decoded results.\n@Override\npublic void processWithdrawalRequests(\n    final MutableBeaconState state,\n    final List<WithdrawalRequest> withdrawalRequests,\n    final Supplier<ValidatorExitContext> validatorExitContextSupplier) {\n  final UInt64 slot = state.getSlot();\n  final UInt64 currentEpoch = miscHelpers.computeEpochAtSlot(slot);\n  // processes EIP-7002 withdrawal requests from checked system calls...\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0039",
+      "property_id": "PROP-W0B17-43",
+      "title": "Are blocks with number < 1 rejected?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit block with header.number = 0 via P2P. 2. Verify validate_header rejects the block. 3. Test for chain state corruption if accepted. 4. Test for triggering genesis-specific code paths.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-43, Trust Boundary: tb-005. Block 0 could trigger unexpected code paths.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: block number >= 1\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0040",
+      "property_id": "PROP-W0B17-44",
+      "title": "Are block timestamps strictly increasing?",
+      "severity": "Medium",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit block with timestamp <= parent timestamp. 2. Verify validate_header rejects the block. 3. Test TIMESTAMP opcode behavior with non-increasing timestamps. 4. Verify time-locked contracts work correctly.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-44, Trust Boundary: tb-005. Non-increasing timestamps break time-dependent operations.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 196-201)\n// Teku enforces execution payload timestamp matches the expected slot time.\n// Since each slot has a fixed expected time, this ensures monotonically increasing timestamps.\nif (!miscHelpersBellatrix.computeTimeAtSlot(state.getGenesisTime(), state.getSlot())\n    .equals(executionPayloadHeader.getTimestamp())) {\n  throw new BlockProcessingException(\n      \"Execution payload timestamp does not match time for state slot\");\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0041",
+      "property_id": "PROP-W0B17-45",
+      "title": "Are block numbers sequential (parent.number + 1)?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit block with number != parent.number + 1 (gap or duplicate). 2. Verify validate_header rejects the block. 3. Test for chain continuity breaks. 4. Test for block number reuse attacks.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-45, Trust Boundary: tb-005. Non-sequential numbers break chain continuity.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/block/AbstractBlockProcessor.java",
+            "symbol": "processBlockHeader",
+            "line_range": {
+              "start": 354,
+              "end": 388
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/block/AbstractBlockProcessor.java:processBlockHeader (lines 354-388)\n// CL validates beacon block slot ordering (newer than latest block header).\n// EL validates execution block number sequentiality (parent.number + 1).\ncheckArgument(\n    blockHeader.getSlot().compareTo(state.getLatestBlockHeader().getSlot()) > 0,\n    \"process_block_header: Verify that the block is newer than latest block header\");\ncheckArgument(\n    blockHeader.getParentRoot().equals(state.getLatestBlockHeader().hashTreeRoot()),\n    \"process_block_header: Verify that the parent matches\");"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0042",
+      "property_id": "PROP-W0B17-47",
+      "title": "Does parent_hash cryptographically match parent header?",
+      "severity": "Critical",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Create block with parent_hash != keccak256(rlp.encode(parent_header)). 2. Verify validate_header rejects the block. 3. Test for chain reorganization attacks. 4. Verify cryptographic hash verification is correct.",
+      "bug_class": "Cryptographic Verification",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-47, Trust Boundaries: tb-002, tb-005. Mismatch enables chain reorganization attacks.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/common/block/AbstractBlockProcessor.java",
+            "symbol": "processBlockHeader",
+            "line_range": {
+              "start": 354,
+              "end": 388
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 181-188)\n// Teku validates execution payload parentHash cryptographically links to previous EL block.\nif (miscHelpersBellatrix.isMergeTransitionComplete(state)) {\n  if (!executionPayloadHeader.getParentHash()\n      .equals(state.getLatestExecutionPayloadHeader().getBlockHash())) {\n    throw new BlockProcessingException(\n        \"Execution payload parent hash does not match previous execution payload header\");\n  }\n}"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0043",
+      "property_id": "PROP-W0B17-48",
+      "title": "Does excess_blob_gas match calculation from parent?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit block with incorrect excess_blob_gas. 2. Verify validate_header rejects the block. 3. Test for arithmetic edge cases (underflow when target > used). 4. Verify client divergence on different arithmetic handling.",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-48, Trust Boundary: tb-005. Incorrect value affects blob fee calculations.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: excess_blob_gas matches parent calculation\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0044",
+      "property_id": "PROP-W0B17-49",
+      "title": "Is gas_used <= gas_limit enforced in header?",
+      "severity": "High",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Submit block with gas_used > gas_limit in header. 2. Verify validate_header rejects the block. 3. Test gas accounting consistency. 4. Verify consensus failure on gas_used root check.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-49, Trust Boundary: tb-005. Exceeding limit breaks gas accounting model.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: gas_used <= gas_limit\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0045",
+      "property_id": "PROP-W0B17-52",
+      "title": "Do system transactions originate from SYSTEM_ADDRESS (0xff...fe)?",
+      "severity": "High",
+      "mindset": "Formal Verification Engineer",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "internal-only",
+        "entry_points": [
+          "Internal"
+        ],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Verify process_system_transaction sets origin and caller to SYSTEM_ADDRESS. 2. Test for non-SYSTEM_ADDRESS caller scenarios. 3. Verify system contracts have caller-based access controls. 4. Test if incorrect caller bypasses access controls.",
+      "bug_class": "Authorization",
+      "risk_category": "Elevation of Privilege",
+      "notes": "Source: PROP-W0B17-52, Trust Boundary: tb-004. Incorrect address allows non-privileged callers.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java",
+            "symbol": "computeNewPayloadRequest",
+            "line_range": {
+              "start": 131,
+              "end": 151
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: system txs originate from SYSTEM_ADDRESS\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/electra/block/BlockProcessorElectra.java:computeNewPayloadRequest (lines 131-151)"
+    },
+    {
+      "check_id": "CHK-W0B17-13-001",
+      "property_id": "PROP-W0B17-13",
+      "title": "Verify Trust Boundary Integrity: Does base fee calculation enforce minimum increase of 1 when gas exceeds target?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Identify the calculate_base_fee_per_gas function implementation.\n2. Create test cases where parent_gas_used > parent_gas_target.\n3. Verify base_fee_per_gas_delta is always >= 1 in these scenarios.\n4. Test edge cases at exact boundary values.\n5. Confirm the asymmetry between increase and decrease is correctly implemented.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-13, Trust Boundary: tb-012",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: base fee minimum increment EIP-1559\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    },
+    {
+      "check_id": "CHK-W0B17-14-001",
+      "property_id": "PROP-W0B17-14",
+      "title": "Verify transaction validation check ordering: Are checks ordered from general to specific?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "Transaction",
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "conditional"
+      },
+      "test_procedure": "1. Review the transaction_validation_dispatch function.\n2. Verify checks are ordered: type -> fees -> gas limits -> blob-specific -> authorization.\n3. Submit transactions designed to fail at each validation stage.\n4. Measure CPU time for invalid transactions at different stages.\n5. Confirm cheap checks occur before expensive operations.",
+      "bug_class": "Resource Management",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-14, Trust Boundary: tb-001. Conditional scope - requires further investigation for high-effort DoS.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayload",
+            "line_range": {
+              "start": 153,
+              "end": 174
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: transaction validation check ordering\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayload (lines 153-174)"
+    },
+    {
+      "check_id": "CHK-W0B17-46-001",
+      "property_id": "PROP-W0B17-46",
+      "title": "Verify Trust Boundary Integrity: Is extra_data in block header limited to 32 bytes?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the validate_header function implementation.\n2. Create a block header with extra_data of exactly 32 bytes - verify acceptance.\n3. Create a block header with extra_data of 33 bytes - verify rejection.\n4. Test with extra_data of 0 bytes.\n5. Verify consistent behavior across different block types.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-46, Trust Boundary: tb-005",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/versions/deneb/ExecutionPayloadSchemaDeneb.java",
+            "symbol": "ExecutionPayloadSchemaDeneb",
+            "line_range": {
+              "start": 88,
+              "end": 96
+            },
+            "role": "primary"
+          },
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/config/SpecConfigBellatrix.java",
+            "symbol": "getMaxExtraDataBytes",
+            "line_range": {
+              "start": 48,
+              "end": 49
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/datastructures/execution/versions/deneb/ExecutionPayloadSchemaDeneb.java (line ~95)\n// extra_data size enforced by SSZ schema: SszByteListSchema.create(specConfig.getMaxExtraDataBytes())\n// SSZ deserialization rejects extra_data > MAX_EXTRA_DATA_BYTES (32 bytes per spec)\nnamedSchema(EXTRA_DATA, SszByteListSchema.create(specConfig.getMaxExtraDataBytes())),\n\n// RELATED: ethereum/spec/src/main/java/tech/pegasys/teku/spec/config/SpecConfigBellatrix.java:getMaxExtraDataBytes (line 48)\nint getMaxExtraDataBytes(); // returns 32 (0x20) per mainnet config"
+    },
+    {
+      "check_id": "CHK-W0B17-50-001",
+      "property_id": "PROP-W0B17-50",
+      "title": "Verify Trust Boundary Integrity: Is gas limit change bounded by parent_gas_limit // 1024?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the check_gas_limit function implementation.\n2. Calculate the maximum allowed gas limit change for a given parent.\n3. Test with gas_limit change at exactly the boundary - verify acceptance.\n4. Test with gas_limit change exceeding the boundary - verify rejection.\n5. Verify both increase and decrease directions are checked.",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering",
+      "notes": "Source: PROP-W0B17-50, Trust Boundary: tb-012",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: gas limit change bounded by parent/1024\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    },
+    {
+      "check_id": "CHK-W0B17-51-001",
+      "property_id": "PROP-W0B17-51",
+      "title": "Verify Trust Boundary Integrity: Is gas limit >= 5000 (GAS_LIMIT_MINIMUM) enforced?",
+      "severity": "Low",
+      "mindset": "Boundary Guard",
+      "is_boundary_check": true,
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": [
+          "P2P"
+        ],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "test_procedure": "1. Locate the check_gas_limit function implementation.\n2. Test with gas_limit = 5000 - verify acceptance.\n3. Test with gas_limit = 4999 - verify rejection.\n4. Test with gas_limit = 0 - verify rejection.\n5. Confirm the GAS_LIMIT_MINIMUM constant is correctly defined.",
+      "bug_class": "Input Validation",
+      "risk_category": "Denial of Service",
+      "notes": "Source: PROP-W0B17-51, Trust Boundary: tb-012",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java",
+            "symbol": "validateExecutionPayloadHeader",
+            "line_range": {
+              "start": 177,
+              "end": 202
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// NOTE: Teku (CL) delegates EVM execution to EL client via Engine API newPayload.\n// The EL client performs this specific validation.\n// Context: gas limit >= GAS_LIMIT_MINIMUM (5000)\n// ENTRY: ethereum/spec/src/main/java/tech/pegasys/teku/spec/logic/versions/bellatrix/block/BlockProcessorBellatrix.java:validateExecutionPayloadHeader (lines 177-202)"
+    }
+  ],
+  "metadata": {
+    "phase": "02c",
+    "worker_id": 0,
+    "batch_index": 1,
+    "item_count": 50,
+    "timestamp": 1771306976,
+    "processed_ids": [
+      "W0B1:W0B1:CHK-0001",
+      "W0B1:W0B1:CHK-0002",
+      "W0B1:W0B1:CHK-0003",
+      "W0B1:W0B1:CHK-0004",
+      "W0B1:W0B1:CHK-0005",
+      "W0B1:W0B1:CHK-0006",
+      "W0B1:W0B1:CHK-0007",
+      "W0B1:W0B1:CHK-0008",
+      "W0B1:W0B1:CHK-0009",
+      "W0B1:W0B1:CHK-0010",
+      "W0B1:W0B1:CHK-0011",
+      "W0B1:W0B1:CHK-0012",
+      "W0B1:W0B1:CHK-0013",
+      "W0B1:W0B1:CHK-0014",
+      "W0B1:W0B1:CHK-0015",
+      "W0B1:W0B1:CHK-0016",
+      "W0B1:W0B1:CHK-0017",
+      "W0B1:W0B1:CHK-0018",
+      "W0B1:W0B1:CHK-0019",
+      "W0B1:W0B1:CHK-0020",
+      "W0B1:W0B1:CHK-0021",
+      "W0B1:W0B1:CHK-0022",
+      "W0B1:W0B1:CHK-0023",
+      "W0B1:W0B1:CHK-0024",
+      "W0B1:W0B1:CHK-0025",
+      "W0B1:W0B1:CHK-0026",
+      "W0B1:W0B1:CHK-0027",
+      "W0B1:W0B1:CHK-0028",
+      "W0B1:W0B1:CHK-0029",
+      "W0B1:W0B1:CHK-0030",
+      "W0B1:W0B1:CHK-0031",
+      "W0B1:W0B1:CHK-0032",
+      "W0B1:W0B1:CHK-0033",
+      "W0B1:W0B1:CHK-0034",
+      "W0B1:W0B1:CHK-0035",
+      "W0B1:W0B1:CHK-0036",
+      "W0B1:W0B1:CHK-0037",
+      "W0B1:W0B1:CHK-0038",
+      "W0B1:W0B1:CHK-0039",
+      "W0B1:W0B1:CHK-0040",
+      "W0B1:W0B1:CHK-0041",
+      "W0B1:W0B1:CHK-0042",
+      "W0B1:W0B1:CHK-0043",
+      "W0B1:W0B1:CHK-0044",
+      "W0B1:W0B1:CHK-0045",
+      "CHK-W0B17-13-001",
+      "CHK-W0B17-14-001",
+      "CHK-W0B17-46-001",
+      "CHK-W0B17-50-001",
+      "CHK-W0B17-51-001"
+    ]
+  }
+}
