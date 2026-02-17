@@ -1,0 +1,273 @@
+{
+  "checklist_with_code": [
+    {
+      "check_id": "CHK-PROP-0046-001",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0046-001",
+        "property_id": "PROP-0046",
+        "title": "Verify Trust Boundary Integrity: Does _prepare_trie correctly identify Account values and route them through encode_node with storage roots?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create trie with Account values and non-Account values.\n2. Trace _prepare_trie to verify isinstance(value, Account) check.\n3. For Accounts: verify get_storage_root is called and result passed to encode_node.\n4. For non-Accounts: verify encode_node called without storage_root.\n5. Test with Account subclasses to verify isinstance behavior.",
+        "bug_class": "Type Confusion",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0046, Trust Boundary: tb-002, Invariant: INV-019. Misidentified Account = missing storage root."
+      },
+      "source_file": "outputs/02_PARTIAL_W7B8_1770355792.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "process_storage_root_result",
+            "line_range": {
+              "start": 411,
+              "end": 454
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/sparse/src/state.rs",
+            "symbol": "update_account",
+            "line_range": {
+              "start": 682,
+              "end": 716
+            },
+            "role": "related"
+          },
+          {
+            "file": "crates/trie/common/src/account.rs",
+            "symbol": "into_trie_account",
+            "line_range": {
+              "start": 1,
+              "end": 3
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: crates/trie/trie/src/trie.rs:process_storage_root_result (lines 411-454)\n    fn process_storage_root_result(\n        &mut self,\n        storage_result: StorageRootProgress,\n        hashed_address: B256,\n        account: Account,\n        hash_builder: &mut HashBuilder,\n        retain_updates: bool,\n    ) -> Result<Option<IntermediateStorageRootState>, StateRootError> {\n        match storage_result {\n            StorageRootProgress::Complete(storage_root, storage_slots_walked, updates) => {\n                // Storage root completed\n                self.hashed_entries_walked += storage_slots_walked;\n                if retain_updates {\n                    self.updated_storage_nodes += updates.len();\n                    self.trie_updates.insert_storage_updates(hashed_address, updates);\n                }\n\n                // Encode the account with the computed storage root\n                self.account_rlp.clear();\n                let trie_account = account.into_trie_account(storage_root);\n                trie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\n                hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n                Ok(None)\n            }\n            StorageRootProgress::Progress(state, storage_slots_walked, updates) => {\n                // Storage root hit threshold\n                self.hashed_entries_walked += storage_slots_walked;\n                if retain_updates {\n                    self.trie_updates.insert_storage_updates(hashed_address, updates);\n                }\n                Ok(Some(IntermediateStorageRootState { state: *state, account }))\n            }\n        }\n    }\n\n// RELATED: crates/trie/sparse/src/state.rs:update_account (lines 682-716)\n    pub fn update_account(\n        &mut self,\n        address: B256,\n        account: Account,\n        provider_factory: impl TrieNodeProviderFactory,\n    ) -> SparseStateTrieResult<bool> {\n        let storage_root = if let Some(storage_trie) = self.storage.tries.get_mut(&address) {\n            storage_trie.root().ok_or(SparseTrieErrorKind::Blind)?\n        } else if self.is_account_revealed(address) {\n            if let Some(value) = self.get_account_value(&address) {\n                TrieAccount::decode(&mut &value[..])?.storage_root\n            } else {\n                EMPTY_ROOT_HASH\n            }\n        } else {\n            return Err(SparseTrieErrorKind::Blind.into())\n        };\n\n        if account.is_empty() && storage_root == EMPTY_ROOT_HASH {\n            return Ok(false);\n        }\n\n        let nibbles = Nibbles::unpack(address);\n        self.account_rlp_buf.clear();\n        account.into_trie_account(storage_root).encode(&mut self.account_rlp_buf);\n        self.update_account_leaf(nibbles, self.account_rlp_buf.clone(), provider_factory)?;\n        Ok(true)\n    }"
+    },
+    {
+      "check_id": "CHK-PROP-0047-001",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0047-001",
+        "property_id": "PROP-0047",
+        "title": "Verify Trust Boundary Integrity: Does root(S) produce identical Merkle roots as other correct Ethereum MPT implementations for the same state S?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P",
+            "Engine API"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create reference test vectors from verified implementations (geth, besu).\n2. Create identical state S in this implementation.\n3. Compute root(S) and compare against reference roots.\n4. Test edge cases: empty trie, single entry, max entries, special key patterns.\n5. Run Ethereum consensus tests (Hive, reference tests) for trie correctness.",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0047, Trust Boundary: tb-006. Ultimate consensus property. Divergence = network split."
+      },
+      "source_file": "outputs/02_PARTIAL_W7B8_1770355792.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRoot::root",
+            "line_range": {
+              "start": 143,
+              "end": 148
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRoot::calculate",
+            "line_range": {
+              "start": 160,
+              "end": 330
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRoot::root_with_updates",
+            "line_range": {
+              "start": 130,
+              "end": 135
+            },
+            "role": "related"
+          },
+          {
+            "file": "crates/trie/common/src/root.rs",
+            "symbol": "state_root",
+            "line_range": {
+              "start": 1,
+              "end": 9
+            },
+            "role": "related"
+          },
+          {
+            "file": "crates/trie/db/tests/trie.rs",
+            "symbol": "test_state_root_with_state",
+            "line_range": {
+              "start": 273,
+              "end": 295
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: crates/trie/trie/src/trie.rs:StateRoot::root (lines 143-148)\n    pub fn root(self) -> Result<B256, StateRootError> {\n        match self.calculate(false)? {\n            StateRootProgress::Complete(root, _, _) => Ok(root),\n            StateRootProgress::Progress(..) => unreachable!(), // update retention is disabled\n        }\n    }\n\n// PRIMARY: crates/trie/trie/src/trie.rs:StateRoot::calculate (lines 160-330) [excerpt]\n    fn calculate(self, retain_updates: bool) -> Result<StateRootProgress, StateRootError> {\n        trace!(target: \"trie::state_root\", \"calculating state root\");\n        let mut tracker = TrieTracker::default();\n\n        let trie_cursor = self.trie_cursor_factory.account_trie_cursor()?;\n        let hashed_account_cursor = self.hashed_cursor_factory.hashed_account_cursor()?;\n\n        // create state root context once for reuse\n        let mut storage_ctx = StateRootContext::new();\n        // ...\n        while let Some(node) = account_node_iter.try_next()? {\n            match node {\n                TrieElement::Branch(node) => {\n                    hash_builder.add_branch(node.key, node.value, node.children_are_in_trie);\n                }\n                TrieElement::Leaf(hashed_address, account) => {\n                    // calculate storage root per account leaf\n                    let storage_root_calculator = StorageRoot::new_hashed(\n                        self.trie_cursor_factory.clone(),\n                        self.hashed_cursor_factory.clone(),\n                        hashed_address,\n                        ...\n                    );\n                    let storage_result = storage_root_calculator.calculate(retain_updates)?;\n                    storage_ctx.process_storage_root_result(\n                        storage_result, hashed_address, account, &mut hash_builder, retain_updates\n                    )?;\n                }\n            }\n        }\n        let root = hash_builder.root();\n        // ...\n        Ok(StateRootProgress::Complete(root, hashed_entries_walked, trie_updates))\n    }\n\n// RELATED: crates/trie/common/src/root.rs - re-exports alloy_trie::root::{state_root, storage_root, ...}"
+    },
+    {
+      "check_id": "CHK-PROP-0048-001",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0048-001",
+        "property_id": "PROP-0048",
+        "title": "Does patricialize create LeafNodes with the correct rest_of_key (key[level:]) without off-by-one errors?",
+        "severity": "High",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create tries with entries at various key lengths and nesting levels.\n2. Trace patricialize and examine LeafNode construction.\n3. Verify rest_of_key == key[level:] for each LeafNode.\n4. Test boundary: level == 0 (full key), level == len(key)-1 (single nibble).\n5. Verify proofs generated from these leaves are verifiable.",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0048. Off-by-one = broken Merkle proofs."
+      },
+      "source_file": "outputs/02_PARTIAL_W7B8_1770355792.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRootContext::process_storage_root_result",
+            "line_range": {
+              "start": 411,
+              "end": 454
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/sparse/src/trie.rs",
+            "symbol": "SerialSparseTrie::root",
+            "line_range": {
+              "start": 921,
+              "end": 930
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRoot::calculate",
+            "line_range": {
+              "start": 247,
+              "end": 309
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: crates/trie/trie/src/trie.rs (lines 428-433)\n// This is the reth equivalent of patricialize/LeafNode construction:\n// hash_builder.add_leaf encodes account as leaf in the MPT at the nibble path.\n// Nibbles::unpack(hashed_address) expands the 32-byte key to 64 nibbles.\n// The rest_of_key (key[level:]) correctness depends on the HashBuilder implementation in alloy_trie.\n\n                self.account_rlp.clear();\n                let trie_account = account.into_trie_account(storage_root);\n                trie_account.encode(&mut self.account_rlp as &mut dyn BufMut);\n                hash_builder.add_leaf(Nibbles::unpack(hashed_address), &self.account_rlp);\n\n// PRIMARY: crates/trie/sparse/src/trie.rs:SerialSparseTrie::root (lines 921-930)\n    fn root(&mut self) -> B256 {\n        // Take the current prefix set\n        let mut prefix_set = core::mem::take(&mut self.prefix_set).freeze();\n        let rlp_node = self.rlp_node_allocate(&mut prefix_set);\n        // ...\n    }\n\n// NOTE: The actual HashBuilder::add_leaf implementation is in alloy_trie crate (external dependency).\n// Key nibble slicing / off-by-one risk lives in alloy_trie::HashBuilder::add_leaf and\n// the TrieNodeIter which constructs the key path at each recursion level."
+    },
+    {
+      "check_id": "CHK-PROP-0050-001",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0050-001",
+        "property_id": "PROP-0050",
+        "title": "Verify Trust Boundary Integrity: Does _prepare_trie correctly convert preimage keys to Address type for get_storage_root calls?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create Account entries with various address formats.\n2. Trace _prepare_trie Address(preimage) conversion.\n3. Verify conversion preserves all 20 address bytes exactly.\n4. Verify no truncation, extension, or corruption occurs.\n5. Test edge cases: addresses with leading zeros, max addresses, special patterns.",
+        "bug_class": "Input Validation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0050, Trust Boundary: tb-002. Wrong address = wrong storage root = silent corruption."
+      },
+      "source_file": "outputs/02_PARTIAL_W7B8_1770355792.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "crates/trie/sparse/src/state.rs",
+            "symbol": "update_account",
+            "line_range": {
+              "start": 682,
+              "end": 716
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/trie/src/trie.rs",
+            "symbol": "StateRootContext::process_storage_root_result",
+            "line_range": {
+              "start": 411,
+              "end": 454
+            },
+            "role": "primary"
+          },
+          {
+            "file": "crates/trie/common/src/hashed_state.rs",
+            "symbol": "HashedPostState::from_bundle_state",
+            "line_range": {
+              "start": 48,
+              "end": 73
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_excerpt": "// PRIMARY: crates/trie/sparse/src/state.rs:update_account (lines 682-716)\n// In reth, the Python spec's Address(preimage) conversion is done via keccak256 hashing:\n// address -> keccak256(address) -> B256 hashed_address -> Nibbles::unpack(hashed_address)\n// The hashed_address (B256) is used as the trie key, and lookup of storage_root uses this same key.\n\n    pub fn update_account(\n        &mut self,\n        address: B256,         // This is already keccak256(address) = hashed_address\n        account: Account,\n        provider_factory: impl TrieNodeProviderFactory,\n    ) -> SparseStateTrieResult<bool> {\n        let storage_root = if let Some(storage_trie) = self.storage.tries.get_mut(&address) {\n            storage_trie.root().ok_or(SparseTrieErrorKind::Blind)?\n        } else if self.is_account_revealed(address) {\n            if let Some(value) = self.get_account_value(&address) {\n                TrieAccount::decode(&mut &value[..])?.storage_root\n            } else {\n                EMPTY_ROOT_HASH\n            }\n        } else {\n            return Err(SparseTrieErrorKind::Blind.into())\n        };\n        // ...\n        let nibbles = Nibbles::unpack(address);\n        account.into_trie_account(storage_root).encode(&mut self.account_rlp_buf);\n        self.update_account_leaf(nibbles, self.account_rlp_buf.clone(), provider_factory)?;\n        Ok(true)\n    }\n\n// CALLER: crates/trie/common/src/hashed_state.rs:from_bundle_state (lines 48-73)\n// Address hashing (the Address(preimage) conversion) happens here:\n        let hashed = state\n            .into_par_iter()\n            .map(|(address, account)| {\n                let hashed_address = KH::hash_key(address);  // keccak256(address)\n                let hashed_account = account.info.as_ref().map(Into::into);\n                let hashed_storage = HashedStorage::from_plain_storage(\n                    account.status,\n                    account.storage.iter().map(|(slot, value)| (slot, &value.present_value)),\n                );\n                (hashed_address, (hashed_account, hashed_storage))\n            })\n            .collect::<Vec<(B256, (Option<Account>, HashedStorage))>>();"
+    }
+  ],
+  "metadata": {
+    "phase": "02c",
+    "worker_id": 2,
+    "batch_index": 27,
+    "item_count": 4,
+    "timestamp": 1771307718,
+    "processed_ids": [
+      "CHK-PROP-0046-001",
+      "CHK-PROP-0047-001",
+      "CHK-PROP-0048-001",
+      "CHK-PROP-0050-001"
+    ]
+  }
+}
