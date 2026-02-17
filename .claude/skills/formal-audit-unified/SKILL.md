@@ -1,14 +1,24 @@
 ---
-name: formal-audit-unified
-description: Perform unified three-phase formal audit (Abstract Interpretation → Symbolic Execution → Invariant Proving) for a checklist item.
+name: formal-audit-adversarial
+description: Perform adversarial three-phase formal audit with attacker mindset for a checklist item.
 allowed-tools: Read, Grep, Glob, Write, mcp__filesystem__read_text_file, mcp__filesystem__search_files
 context: fork
 ---
 
-# SKILL: Unified Formal Static Audit (3 Phases)
+# SKILL: Adversarial Formal Static Audit (3 Phases)
 
 ## Goal
-Perform a complete three-phase formal audit in a single context to minimize token overhead.
+Perform a complete three-phase formal audit with an **attacker mindset** to identify exploitable vulnerabilities, not just verify correctness.
+
+## Core Mindset
+
+**Think like an attacker, not a verifier.**
+
+Your goal is NOT to prove the code is correct. Your goal is to **find ways to break it**. Ask:
+- "How can I exploit this?"
+- "What happens in unexpected combinations of states?"
+- "Can I bypass this check in a specific scenario?"
+- "What if multiple operations happen concurrently?"
 
 ## Input
 A JSON object representing a single audit item:
@@ -32,74 +42,138 @@ A JSON object representing a single audit item:
 
 ## Procedure
 
-Execute all three phases sequentially in this single context:
+Execute all three phases sequentially. **DO NOT use early exits or shortcuts.**
 
-### Phase 1: Abstract Interpretation
-1. Use `mcp__filesystem__search_files` to find related code (callers, dependencies) if needed
-2. Identify variables within code scope and their abstract domains (ranges, sets)
-3. Trace how operations transform these domains
-4. Look for state anomalies (overflow, null, unbounded growth)
-5. **Early Exit Check**: If code is trivially safe (e.g., simple getter, constant return, no external input), mark as `trivially_safe=true` and skip to Phase 3 with minimal analysis
+### Phase 1: Abstract Interpretation with Adversarial Focus
 
-### Phase 2: Symbolic Execution + Reachability
-**Skip this phase if `trivially_safe=true` from Phase 1**
+**Objective:** Identify state anomalies that could be exploited, not just documented.
+
+1. Use `mcp__filesystem__search_files` to find related code (callers, state management, caches)
+2. Identify variables and their abstract domains (ranges, sets, **state machines**)
+3. **Focus on state transitions**: How does state change over time? Can state become inconsistent?
+4. Look for:
+   - **Cache inconsistencies**: Is cached data invalidated correctly?
+   - **TOCTOU (Time-of-Check-Time-of-Use)**: Can state change between check and use?
+   - **Unordered operations**: Does order matter (e.g., Go map iteration)?
+   - **Concurrent access**: Can multiple goroutines/threads cause race conditions?
+   - **Overflow, null, unbounded growth**
+5. **Output**: List ALL potential state anomalies, even if guards exist
+
+**CRITICAL**: Do NOT skip this phase even if code looks simple. Complex bugs hide in simple-looking code.
+
+### Phase 2: Symbolic Execution with Exploit Construction
+
+**Objective:** Construct concrete exploit scenarios, not just find counterexamples.
 
 1. Treat inputs as symbolic variables
 2. Build path conditions through control flow
-3. Attempt to find assignment that violates the property (counterexample)
-4. Analyze reachability from attacker-controlled entry points
-5. Classify exploitability: exploitable, defense-in-depth, internal-only, or unreachable
-6. **Early Exit Check**: If no counterexample found and code has strong guards, mark as `verified_safe=true` and skip detailed proving in Phase 3
+3. **Actively try to construct exploits**:
+   - Can you craft inputs that bypass validation?
+   - Can you trigger the anomalies found in Phase 1?
+   - Can you exploit timing windows (TOCTOU)?
+   - Can you cause state inconsistency through specific operation sequences?
+4. **For each anomaly from Phase 1**, attempt to build a concrete attack scenario
+5. Analyze reachability from attacker-controlled entry points (P2P, RPC, user input)
+6. Classify exploitability:
+   - **exploitable**: Attacker can trigger from external interface
+   - **defense-in-depth**: Requires bypassing other layers, but theoretically possible
+   - **internal-only**: Only reachable from trusted code paths
+   - **unreachable**: No path exists
 
-### Phase 3: Invariant Proving + Scope Filtering
-**Use simplified analysis if `trivially_safe=true` or `verified_safe=true`**
+**CRITICAL**: "No counterexample found" does NOT mean safe. It may mean the exploit is complex or requires specific timing. Document this uncertainty.
 
-1. If `trivially_safe=true`: Record as safe without detailed proving
-2. If `verified_safe=true`: Record guards as sufficient proof
-3. If no counterexample: attempt to prove property holds for all paths
-4. If counterexample exists: determine bug bounty eligibility based on scope
-5. Record final eligibility decision
+### Phase 3: Invariant Analysis with Skepticism
+
+**Objective:** Determine if guards are SUFFICIENT, not just present.
+
+1. **DO NOT assume guards are sufficient just because they exist**
+2. For each guard/validation:
+   - Does it cover ALL attack scenarios from Phase 2?
+   - Can it be bypassed in specific states or timing?
+   - Does it protect against concurrent access?
+   - Does it validate ALL relevant properties (not just input values)?
+3. **Check for logic gaps**:
+   - Is validation applied consistently across all code paths?
+   - Are there edge cases where validation is skipped?
+   - Does the guard protect the ACTUAL invariant, or just a proxy?
+4. **Attempt to prove the property holds**, but:
+   - If proof fails, document why
+   - If proof succeeds, **challenge it**: What assumptions did you make? Are they valid?
+
+### Phase 3.5: Scope Filtering with Conservative Bias
+
+**Objective:** Determine bug bounty eligibility with a **bias toward reporting**.
+
+1. **Default to "eligible" unless clearly out-of-scope**
+2. Mark as `bug_bounty_eligible: true` if:
+   - Any exploit scenario exists (even if requires specific timing)
+   - State inconsistency is possible
+   - Guards are incomplete or bypassable
+   - Concurrent access can violate invariants
+3. Mark as `bug_bounty_eligible: false` ONLY if:
+   - Completely unreachable from any external interface
+   - Explicitly out-of-scope (e.g., execution layer concern in consensus client)
+   - Trivially safe with no state or external input (e.g., pure constant getter)
+4. **When in doubt, report it**
 
 ## Output Format
 
-Return a **compact** JSON object containing only essential findings:
+Return a **detailed** JSON object with concrete findings:
 
 ```json
 {
   "phase1_abstract_interpretation": {
-    "summary": "Brief 1-2 sentence summary",
-    "state_anomalies_found": ["anomaly1", "anomaly2"]
+    "summary": "Detailed 2-4 sentence summary of state analysis",
+    "state_anomalies_found": ["specific anomaly 1", "specific anomaly 2"],
+    "cache_analysis": "How is state/cache managed? Can it become inconsistent?",
+    "concurrency_analysis": "Can concurrent access cause issues?"
   },
   "phase2_symbolic_execution": {
-    "summary": "Brief 1-2 sentence summary",
-    "counterexample_found": false,
-    "counterexample": null
+    "summary": "Detailed 2-4 sentence summary of exploit construction",
+    "counterexample_found": true/false,
+    "counterexample": "Concrete exploit scenario if found",
+    "attack_scenarios": ["scenario 1", "scenario 2"],
+    "timing_dependencies": "Does exploit require specific timing or race conditions?"
   },
   "phase2_5_reachability_analysis": {
-    "summary": "Brief 1-2 sentence summary",
-    "entry_points": ["entry1"],
-    "attacker_controlled": false,
-    "classification": "unreachable"
+    "summary": "Detailed 2-4 sentence summary of reachability",
+    "entry_points": ["entry1", "entry2"],
+    "attacker_controlled": true/false,
+    "classification": "exploitable/defense-in-depth/internal-only/unreachable",
+    "attack_surface": "Describe how attacker can reach this code"
   },
   "phase3_invariant_proving": {
-    "summary": "Brief 1-2 sentence summary",
-    "proof_successful": false,
-    "guard_identified": null
+    "summary": "Detailed 2-4 sentence summary of invariant analysis",
+    "proof_successful": true/false,
+    "guard_identified": "Specific guard mechanism",
+    "guard_sufficiency": "Is the guard sufficient? What gaps exist?",
+    "edge_cases": ["edge case 1", "edge case 2"]
   },
   "phase3_5_scope_filtering": {
-    "bug_bounty_eligible": false,
-    "reason": "Brief reason",
-    "recommendation": ""
-  }
+    "bug_bounty_eligible": true/false,
+    "reason": "Detailed reason for eligibility decision",
+    "recommendation": "Concrete recommendation for fix",
+    "severity_estimate": "Critical/High/Medium/Low based on exploitability"
+  },
+  "final_classification": "vulnerability/not-a-vulnerability/informational/out-of-scope"
 }
 ```
 
-## Optimization Guidelines
+## Key Differences from Original
 
-- **Be concise**: Use 1-2 sentence summaries, not paragraphs
-- **Omit verbose explanations**: Only include when counterexample found
-- **Use minimal MCP queries**: Read only what's necessary
-- **Use `head`/`tail` parameters**: Don't read entire files if partial context suffices
-- **Early termination**: Implement early exit checks at each phase to skip unnecessary analysis
-- **Trivially safe cases**: Simple getters, constant returns, or pure functions with no external input should be marked as trivially safe
-- **Verified safe cases**: Code with strong input validation and clear guards can skip detailed invariant proving
+1. **NO Early Exits**: Every phase must be executed fully
+2. **Adversarial Mindset**: Explicitly instructed to think like an attacker
+3. **State Focus**: Emphasis on cache, TOCTOU, concurrency, ordering
+4. **Detailed Output**: Require concrete scenarios, not just summaries
+5. **Conservative Filtering**: Bias toward reporting, not dismissing
+6. **Skepticism of Guards**: Guards must be proven sufficient, not assumed
+
+## Anti-Patterns to Avoid
+
+- ❌ "Validation exists, therefore safe"
+- ❌ "No counterexample found, therefore safe"
+- ❌ "Code looks simple, skip detailed analysis"
+- ❌ "Guards exist, skip proving they're sufficient"
+- ✅ "How can I exploit this despite the guards?"
+- ✅ "What state combinations can cause issues?"
+- ✅ "Can I trigger this through timing or concurrency?"
