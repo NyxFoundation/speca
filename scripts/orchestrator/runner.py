@@ -653,10 +653,34 @@ class ClaudeRunner:
             "total_items": len(batch),
         }
 
+    @staticmethod
+    def _strip_yaml_frontmatter(content: str) -> str:
+        """
+        Strip YAML frontmatter (text between leading --- delimiters) from content.
+
+        Prompt files may contain YAML frontmatter at the top (e.g. Description,
+        Usage metadata).  When the raw content is passed to ``claude -p``, a
+        leading ``---`` is misinterpreted by the CLI's argument parser as a
+        long-option prefix, causing an "unknown option" error and exit code 1.
+
+        This method removes the frontmatter block so only the actual prompt
+        body is forwarded to the CLI.
+        """
+        stripped = content.lstrip("\n")
+        if not stripped.startswith("---"):
+            return content
+        # Find the closing --- delimiter
+        end = stripped.find("\n---", 3)
+        if end == -1:
+            return content
+        # Return everything after the closing --- line
+        return stripped[end + 4:].lstrip("\n")
+
     def _build_prompt(self, **kwargs) -> str:
         """Build the prompt content with arguments."""
         with open(self.config.prompt_path) as f:
             prompt_content = f.read()
+        prompt_content = self._strip_yaml_frontmatter(prompt_content)
         args = " ".join(f"{k.upper()}={v}" for k, v in kwargs.items())
         return f"{prompt_content}\n\n{args}"
 
