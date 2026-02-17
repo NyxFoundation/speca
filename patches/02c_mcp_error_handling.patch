@@ -1,0 +1,115 @@
+--- a/prompts/02c_codelocation_worker.md
++++ b/prompts/02c_codelocation_worker.md
+@@ -38,6 +38,41 @@
+        This registers the target codebase for analysis.
+
++    **NEW: Robust MCP Error Handling**
++
++    Wrap all MCP calls with retry logic to handle transient errors:
++
++    ```python
++    import time
++    from typing import Any, Callable
++
++    def call_mcp_with_retry(
++        mcp_func: Callable,
++        *args,
++        max_retries: int = 3,
++        backoff: float = 1.0,
++        **kwargs
++    ) -> Any:
++        """
++        Call MCP function with exponential backoff retry.
++
++        Args:
++            mcp_func: MCP tool function to call
++            max_retries: Maximum retry attempts (default: 3)
++            backoff: Initial backoff delay in seconds (default: 1.0)
++
++        Returns:
++            MCP function result
++
++        Raises:
++            Last exception if all retries fail
++        """
++        last_error = None
++        for attempt in range(max_retries):
++            try:
++                return mcp_func(*args, **kwargs)
++            except Exception as e:
++                last_error = e
++                if attempt < max_retries - 1:
++                    delay = backoff * (2 ** attempt)
++                    time.sleep(delay)
++                    continue
++        raise last_error
++
++
++    # Usage example:
++    try:
++        symbols = call_mcp_with_retry(
++            mcp__tree_sitter__get_symbols,
++            project="target-project",
++            file_path="path/to/file.go"
++        )
++    except Exception as e:
++        # Log error and continue with empty result
++        print(f"Warning: MCP call failed after retries: {e}")
++        symbols = {"functions": [], "classes": []}
++    ```
++
++    **Known Errors to Handle:**
++    - `'tree_sitter.Query' object has no attribute 'captures'`
++      → Retry with exponential backoff
++      → If still fails, skip this file and continue
++
++    **Fallback Strategy:**
++    1. Try full MCP call with retry (3 attempts)
++    2. If fails, try simpler MCP query (e.g., find_text instead of run_query)
++    3. If still fails, mark item as `resolution_status: "mcp_error"` and continue
++
+     ## Phase 1: Entry Point Identification
+
+     For each unique `reachability.entry_points` category in the batch:
+@@ -80,7 +115,7 @@
+        )
+
+     2. For each relevant file, extract symbols:
+-       mcp__tree_sitter__get_symbols(
++       symbols = call_mcp_with_retry(mcp__tree_sitter__get_symbols,
+          project="target-project",
+          file_path="path/to/file.go"
+        )
+@@ -148,7 +183,7 @@
+             try:
+                 # Query all function calls in the current file
+-                query_result = mcp__tree_sitter__run_query(
++                query_result = call_mcp_with_retry(mcp__tree_sitter__run_query,
+                     project="target-project",
+                     query="(call_expression function: [(identifier) @call (selector_expression field: (field_identifier) @call)])",
+                     file_path=file_path,
+@@ -531,7 +566,8 @@
+         "resolution_status": "resolved|not_found|no_entry_points|layer_mismatch|error",
+-        "resolution_error": "error message if status=error"
++        "resolution_status": "resolved|not_found|no_entry_points|layer_mismatch|mcp_error|error",
++        "resolution_error": "error message if status=error or mcp_error"
+       },
+       "code_excerpt": "// PRIMARY: core/types/core/types/block.go:ValidateRLPSize (lines 120-145)\n[code]\n\n// CALLER: beacon-chain/sync/validator.go:ValidateBlock (lines 45-78)\n[code]"
+     }
+@@ -542,6 +578,7 @@
+     - `layer_mismatch`: Spec layer does not match target repository layer (skipped analysis)
+     - `not_found`: Keywords didn't match any functions in call graphs
+     - `no_entry_points`: Entry points category not found in codebase
++    - `mcp_error`: MCP tool error occurred after retries (non-blocking)
+     - `error`: Exception occurred during processing
+
+     ## Phase 5: Error Handling & Output
+@@ -844,7 +881,7 @@
+                 "role": "primary" | "caller" | "callee" | "related"
+               }
+             ],
+-            "resolution_status": "resolved" | "not_found" | "no_entry_points" | "layer_mismatch" | "error",
++            "resolution_status": "resolved" | "not_found" | "no_entry_points" | "layer_mismatch" | "mcp_error" | "error",
+             "resolution_error": "string (only if status=error, otherwise empty string)"
+           },
+           "code_excerpt": "string (formatted code excerpts with markers, or empty string)"

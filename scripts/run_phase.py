@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import sys
 import os
 from pathlib import Path
@@ -91,7 +92,47 @@ def run_cleanup(phase_id: str, dry_run: bool = True) -> bool:
     return True
 
 
-async def run_phase(phase_id: str, num_workers: int, max_concurrent: int, force: bool) -> bool:
+def patch_target_info(target_layer: str | None, out_of_scope_layers: list[str] | None) -> None:
+    """Merge optional scope metadata into outputs/02c_TARGET_INFO.json (in-place).
+
+    Called before Phase 02c runs. Safe to call even if the file does not yet
+    exist (writes nothing in that case) or if both arguments are None (no-op).
+    """
+    if not target_layer and not out_of_scope_layers:
+        return
+
+    target_info_path = Path("outputs/02c_TARGET_INFO.json")
+    if not target_info_path.exists():
+        print(
+            "⚠️  outputs/02c_TARGET_INFO.json not found — skipping --target-layer / "
+            "--out-of-scope-layers injection. Run phase 02c setup first.",
+            file=sys.stderr,
+        )
+        return
+
+    with target_info_path.open() as f:
+        info = json.load(f)
+
+    if target_layer:
+        info["target_layer"] = target_layer
+    if out_of_scope_layers:
+        info["out_of_scope_spec_layers"] = out_of_scope_layers
+
+    with target_info_path.open("w") as f:
+        json.dump(info, f, indent=2)
+
+    print(f"  target_layer           = {info.get('target_layer', '(not set)')}")
+    print(f"  out_of_scope_spec_layers = {info.get('out_of_scope_spec_layers', [])}")
+
+
+async def run_phase(
+    phase_id: str,
+    num_workers: int,
+    max_concurrent: int,
+    force: bool,
+    target_layer: str | None = None,
+    out_of_scope_layers: list[str] | None = None,
+) -> bool:
     """Run a single phase with all checks and cleanup."""
     print(f"\n{'#'*60}")
     print(f"# Starting Phase {phase_id}")
@@ -118,6 +159,10 @@ async def run_phase(phase_id: str, num_workers: int, max_concurrent: int, force:
     else:
         run_cleanup(phase_id, dry_run=False)
 
+    # 2b. Inject scope metadata into TARGET_INFO for Phase 02c
+    if phase_id == "02c":
+        patch_target_info(target_layer, out_of_scope_layers)
+
     # 3. Run the orchestrator
     try:
         # Set FORCE_EXECUTE for the orchestrator if --force is used
@@ -143,11 +188,17 @@ async def run_pipeline(
     max_concurrent: int,
     force: bool,
     stop_on_failure: bool = True,
+    target_layer: str | None = None,
+    out_of_scope_layers: list[str] | None = None,
 ) -> dict[str, bool]:
     """Run a pipeline of multiple phases."""
     results = {}
     for phase_id in phases:
-        success = await run_phase(phase_id, num_workers, max_concurrent, force)
+        success = await run_phase(
+            phase_id, num_workers, max_concurrent, force,
+            target_layer=target_layer,
+            out_of_scope_layers=out_of_scope_layers,
+        )
         results[phase_id] = success
         if not success and stop_on_failure:
             print(f"\n❌ Pipeline stopped due to failure in phase {phase_id}.", file=sys.stderr)
@@ -169,7 +220,21 @@ def main():
     parser.add_argument("--cleanup-dry-run", action="store_true", help="Show what would be cleaned up without executing")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--max-concurrent", type=int, default=8, help="Max concurrent Claude executions")
-    
+
+    # Phase 02c: target metadata for scope filtering
+    parser.add_argument(
+        "--target-layer",
+        help="Functional layer of the target repo (e.g. 'consensus', 'execution', 'l2-node'). "
+             "Written into outputs/02c_TARGET_INFO.json when phase 02c is included.",
+    )
+    parser.add_argument(
+        "--out-of-scope-layers",
+        nargs="+",
+        metavar="LAYER",
+        help="Spec layers to mark as out_of_scope for this target (e.g. 'execution'). "
+             "Written into outputs/02c_TARGET_INFO.json when phase 02c is included.",
+    )
+
     args = parser.parse_args()
     
     # Determine execution order
@@ -194,7 +259,14 @@ def main():
     print(f"\nPipeline execution starting...")
     
     results = asyncio.run(
-        run_pipeline(phases, args.workers, args.max_concurrent, args.force)
+        run_pipeline(
+            phases,
+            args.workers,
+            args.max_concurrent,
+            args.force,
+            target_layer=args.target_layer,
+            out_of_scope_layers=args.out_of_scope_layers,
+        )
     )
     
     print(f"\n{'='*60}")

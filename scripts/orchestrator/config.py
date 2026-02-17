@@ -197,7 +197,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     "02c": PhaseConfig(
         phase_id="02c",
         name="Code Location Pre-resolution",
-        description="Pre-resolve code locations for checklist items using Tree-sitter call graph analysis",
+        description="Pre-resolve code locations using multi-tier fallback (MCP → Glob/Grep)",
         skill_path=Path(".claude/skills/checklist-specialist/SKILL.md"),  # Dummy path, not used
         prompt_path=Path("prompts/02c_codelocation_worker.md"),
         queue_pattern="outputs/02c_QUEUE_{worker_id}.json",
@@ -205,15 +205,15 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         depends_on=["02"],
         input_patterns=["outputs/02_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=100,  # Process 100 items per batch for efficiency
+        max_batch_size=50,  # Reduced from 100 for deeper analysis per item
         item_id_field="check_id",
         result_key="checklist_with_code",
         model="sonnet",
-        # More lenient circuit breaker for code resolution (non-critical phase)
-        circuit_breaker_threshold=10,
-        max_total_retries=30,
-        max_empty_results=15,
-        max_budget_usd=10.0,  # Lower budget since this is optimization
+        # Adjusted for multi-tier fallback strategy (Grep fallback is reliable)
+        circuit_breaker_threshold=15,  # Increased - fallback makes failures less critical
+        max_total_retries=50,  # Increased - each tier may retry
+        max_empty_results=20,  # Increased - out_of_scope items are valid results
+        max_budget_usd=20.0,  # Moderate increase - Grep fallback reduces MCP costs
     ),
 
     "03": PhaseConfig(
