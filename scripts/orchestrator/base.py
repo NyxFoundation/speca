@@ -763,9 +763,13 @@ class Phase02Orchestrator(BaseOrchestrator):
                 early_exit_results.append(self._build_skip_result(item, "missing property id"))
                 continue
             
-            # Skip out-of-scope properties
+            # Skip ONLY out-of-scope properties
+            # Keep all other items (in-scope, conditional, unknown) for Phase 03 verification
+            # This ensures we don't miss potential vulnerabilities due to overly strict filtering
             reachability = prop.get("reachability", {})
-            if reachability.get("bug_bounty_scope") == "out-of-scope":
+            bug_bounty_scope = reachability.get("bug_bounty_scope", "unknown")
+            
+            if bug_bounty_scope == "out-of-scope":
                 early_exit_results.append(self._build_skip_result(item, "out-of-scope"))
                 continue
             
