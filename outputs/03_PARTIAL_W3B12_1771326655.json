@@ -1,0 +1,808 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0066",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Block Proposer Field Element Range Validation Is Correctly Enforced via C-KZG Library",
+      "abstract_interpretation": {
+        "summary": "Abstractly model the block proposal path for blob inclusion. The proposer must ensure field element range validation occurs before including blobs in blocks. The question is whether this happens in Go code or is delegated to the C-KZG library.",
+        "findings": "The Go wrapper VerifyCellKZGProofBatch (kzg.go:98-106) delegates entirely to ckzg4844.VerifyCellKZGProofBatch from the C-KZG library. The bytes_to_bls_field range validation is implemented in the C library (github.com/ethereum/c-kzg-4844/v2/src/common/bytes.c:64-70) which calls blst_scalar_fr_check and returns C_KZG_BADARGS on violation. The proposer path calls kzg.VerifyCellKZGProofBatchFromBlobData (Fulu) or kzg.VerifyBlobKZGProofBatch (pre-Fulu), both of which invoke blob_to_polynomial via the C library, calling bytes_to_bls_field for each of the 4096 field elements. ELMemPoolRequirements is empty (blob.go:77) but this does not bypass the KZG proof validation step in validateBlobs.",
+        "verdict": "PASS - Field element range validation is enforced by the C-KZG library across all proposer paths"
+      },
+      "symbolic_execution": {
+        "summary": "Trace the block proposal path from blob receipt to block inclusion.",
+        "findings": "Path: rpc/eth/beacon/handlers.go:validateBlobs -> kzg.VerifyBlobKZGProofBatch (pre-Fulu) or kzg.VerifyCellKZGProofBatchFromBlobData (Fulu) -> C library blob_to_polynomial -> bytes_to_bls_field for each field element -> blst_scalar_fr_check -> C_KZG_BADARGS on range violation. The C error propagates back to Go as an error return, causing validateBlobs to reject the block proposal. No blob with out-of-range field elements can be included in a proposed block.",
+        "verdict": "PASS - No code path allows out-of-range field elements to be included in a proposed block"
+      },
+      "invariant_proving": {
+        "summary": "Prove the invariant: for any blob included in a proposed block, all 4096 field elements are < BLS_MODULUS.",
+        "findings": "The invariant holds because bytes_to_bls_field in the C library unconditionally calls blst_scalar_fr_check before any field operations. The C library's bytes_to_bls_field (distinct from hash_to_bls_field which applies modular reduction) returns C_KZG_BADARGS for values >= BLS_MODULUS. This error propagates through all layers without being swallowed. The Go wrapper returns (false, err) which is checked by all callers.",
+        "verdict": "PASS - Invariant holds; range validation is enforced by the C-KZG library"
+      },
+      "evidence": "beacon-chain/blockchain/kzg/kzg.go:98-106: VerifyCellKZGProofBatch is a thin wrapper delegating to ckzg4844.VerifyCellKZGProofBatch. C-KZG library src/common/bytes.c:64-70: bytes_to_bls_field calls blst_scalar_fr_check, returns C_KZG_BADARGS on range violation. beacon-chain/rpc/eth/beacon/handlers.go:validateBlobs: invokes KZG verification for all blobs before block proposal.",
+      "recommendation": "No action required. Field element range validation is correctly enforced by the C-KZG library (c-kzg-4844 v2.1.1) which is the reference implementation for EIP-7594. The Go layer correctly delegates to this library.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0067",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Validator Data Availability Verification Correctly Enforces Field Element Range Checks via C-KZG",
+      "abstract_interpretation": {
+        "summary": "Model the validator's data availability verification path. The validator must ensure field element range checks are enforced when verifying data column sidecars before attesting.",
+        "findings": "GossipDataColumnSidecarRequirements in verification/data_column.go includes RequireSidecarKzgProofVerified. This requirement calls verifyDataColumnsCommitment -> peerdas.VerifyDataColumnsSidecarKZGProofs -> kzg.VerifyCellKZGProofBatch -> C library VerifyCellKZGProofBatch. Within the C library, each cell's field elements are deserialized via bytes_to_bls_field with blst_scalar_fr_check enforcement. This path is enforced for gossip, by-range, and by-root data column reception.",
+        "verdict": "PASS - Range checks enforced through all data availability verification paths"
+      },
+      "symbolic_execution": {
+        "summary": "Trace validator data availability verification from sidecar reception to attestation.",
+        "findings": "Path: sync/validate_data_column.go:validateDataColumn -> RequireSidecarKzgProofVerified -> peerdas.VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:61) -> kzg.VerifyCellKZGProofBatch (kzg.go:98) -> ckzg4844.VerifyCellKZGProofBatch -> C library with bytes_to_bls_field range check. C_KZG_BADARGS on range violation propagates back as an error, causing ValidationReject. Validators cannot attest to blocks whose data columns contain out-of-range field elements.",
+        "verdict": "PASS - Field element range validation enforced before data availability confirmation"
+      },
+      "invariant_proving": {
+        "summary": "Prove: no data column with out-of-range field elements can pass validator verification.",
+        "findings": "The invariant holds because: (1) bytes_to_bls_field in C-KZG unconditionally calls blst_scalar_fr_check; (2) C_KZG_BADARGS propagates through all layers; (3) validateUnbatchedColumnsKzg (batch_verifier.go:183) provides a fallback path that also enforces range checks; (4) only VerifiedRODataColumn objects are stored, blocking unverified data from entering the consensus process.",
+        "verdict": "PASS - Invariant holds across all validator verification paths"
+      },
+      "evidence": "beacon-chain/sync/validate_data_column.go: GossipDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified. beacon-chain/core/peerdas/p2p_interface.go:61-93: VerifyDataColumnsSidecarKZGProofs chains through to C-KZG range validation. beacon-chain/blockchain/kzg/kzg.go:98-106: thin wrapper to C library.",
+      "recommendation": "No action required. Validator data availability verification correctly enforces field element range checks through the C-KZG library at all reception points (gossip, by-range, by-root).",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0068",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Out-of-Range Blob Bytes Cannot Produce Cells Passing verify_cell_kzg_proof_batch \u2014 C-KZG Rejects With Error",
+      "abstract_interpretation": {
+        "summary": "Test the falsification hypothesis: can out-of-range blob bytes (>= BLS_MODULUS) be deserialized silently via modular reduction and produce cells that pass batch KZG proof verification?",
+        "findings": "The C-KZG library makes a critical distinction between two field element construction functions: (1) bytes_to_bls_field (for untrusted input): calls blst_scalar_fr_check and returns C_KZG_BADARGS if value >= BLS_MODULUS \u2014 no modular reduction applied; (2) hash_to_bls_field (for hash outputs only): applies modular reduction without range checking \u2014 this is only used for challenge generation where inputs are hash outputs. Out-of-range blob bytes trigger bytes_to_bls_field (not hash_to_bls_field), resulting in C_KZG_BADARGS rather than silent corruption.",
+        "verdict": "PASS - The falsification hypothesis is refuted; out-of-range bytes are rejected with C_KZG_BADARGS, not silently accepted"
+      },
+      "symbolic_execution": {
+        "summary": "Simulate the attack: submit a blob with one field element = BLS_MODULUS and trace the outcome.",
+        "findings": "Path for blob with out-of-range field element: C library blob_to_polynomial (eip4844/blob.c:35-40) -> bytes_to_bls_field for each 32-byte chunk -> blst_scalar_fr_check on BLS_MODULUS value -> returns false -> C_KZG_BADARGS returned from blob_to_polynomial -> C_KZG_BADARGS propagates to verify_cell_kzg_proof_batch -> Go binding returns (false, ErrBadArgs) -> VerifyDataColumnsSidecarKZGProofs returns error -> ValidationReject. No cells are produced from an invalid blob.",
+        "verdict": "PASS - Out-of-range bytes cause immediate rejection; no cells are produced or evaluated"
+      },
+      "invariant_proving": {
+        "summary": "Prove: for any blob byte sequence with any value >= BLS_MODULUS, verify_cell_kzg_proof_batch returns an error.",
+        "findings": "The invariant holds because bytes_to_bls_field is the only deserialization path for blob field elements, and it unconditionally applies blst_scalar_fr_check. The function is designed specifically to reject rather than reduce. The goto out pattern in the C code aborts all downstream computation immediately on any C_KZG_BADARGS return. There is no code path from bytes_to_bls_field that continues processing after a range check failure.",
+        "verdict": "PASS - Invariant holds unconditionally; out-of-range values always cause early abort"
+      },
+      "evidence": "C-KZG src/common/bytes.c:64-70: bytes_to_bls_field calls blst_scalar_fr_check, returns C_KZG_BADARGS on value >= BLS_MODULUS. Distinct from hash_to_bls_field which applies modular reduction (only for hash outputs). C-KZG src/eip4844/blob.c:35-40: blob_to_polynomial calls bytes_to_bls_field for each of 4096 field elements. C_KZG_BADARGS propagates through all layers to Go's error return.",
+      "recommendation": "No action required. The hypothesis that out-of-range bytes could silently produce valid cells is falsified. The C-KZG library correctly rejects out-of-range field elements with an error, not silent modular reduction.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0069",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "All bytes_to_bls_field Implementations Use Consistent Range Checking \u2014 Both C-KZG and go-kzg-4844 Reject Out-of-Range Values",
+      "abstract_interpretation": {
+        "summary": "Verify that all implementations of field element deserialization in the Prysm codebase use consistent range checking behavior.",
+        "findings": "Prysm uses two KZG libraries: (1) c-kzg-4844/v2 (for EIP-7594/Fulu operations): bytes_to_bls_field with blst_scalar_fr_check, returns C_KZG_BADARGS on violation; (2) go-ethereum/crypto/kzg4844 wrapping crate-crypto/go-kzg-4844 (for EIP-4844/Deneb operations): DeserializeBlob/DeserializeScalar with SetBytesCanonical / ReduceCanonicalBigEndian, returns ErrNonCanonicalScalar on violation. Both libraries reject values >= BLS_MODULUS with an error (not boolean false or silent reduction). The BLS_MODULUS constant is the same across both libraries (BLS12-381 scalar field modulus). Byte ordering (big-endian) is consistent across both libraries.",
+        "verdict": "PASS - All field element deserialization implementations use consistent range checking behavior"
+      },
+      "symbolic_execution": {
+        "summary": "Test the same out-of-range input (BLS_MODULUS) across both library paths.",
+        "findings": "c-kzg-4844 path: bytes_to_bls_field(BLS_MODULUS_bytes) -> blst_scalar_fr_check -> false -> C_KZG_BADARGS -> Go error. go-kzg-4844 path: DeserializeScalar(BLS_MODULUS_bytes) -> ReduceCanonicalBigEndian -> range check -> ErrNonCanonicalScalar. Both paths return non-nil errors. Neither path applies silent modular reduction for untrusted input deserialization. The behavior is consistent: both reject with error.",
+        "verdict": "PASS - Both libraries produce consistent rejection behavior for identical out-of-range inputs"
+      },
+      "invariant_proving": {
+        "summary": "Prove the cross-library consistency invariant.",
+        "findings": "The invariant holds: for any 32-byte input with scalar value >= BLS_MODULUS, both c-kzg-4844 and go-kzg-4844 return a non-nil error from their field element deserialization functions. The same BLS12-381 modulus constant is used (hardcoded in both libraries). Big-endian interpretation is consistent. No alternative deserialization path exists in Prysm that bypasses these range checks for untrusted input.",
+        "verdict": "PASS - Cross-library consistency invariant holds"
+      },
+      "evidence": "c-kzg-4844 src/common/bytes.c:64-70: bytes_to_bls_field with blst_scalar_fr_check returning C_KZG_BADARGS. go-kzg-4844: DeserializeBlob/DeserializeScalar with ReduceCanonicalBigEndian returning ErrNonCanonicalScalar. Both use the same BLS12-381 scalar field modulus. Both use big-endian byte interpretation.",
+      "recommendation": "No action required. Implementation consistency is maintained across all field element deserialization paths in Prysm. Both KZG libraries correctly reject out-of-range values with errors.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0070",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Range Check Failure Correctly Aborts All Downstream Operations \u2014 Full Error Propagation Chain Verified",
+      "abstract_interpretation": {
+        "summary": "Verify that if bytes_to_bls_field range check fails, all downstream polynomial arithmetic and KZG operations are aborted and no partial state is produced.",
+        "findings": "The C-KZG library uses a consistent goto out pattern for error handling. When bytes_to_bls_field returns C_KZG_BADARGS from blob_to_polynomial, the goto out pattern immediately jumps to the cleanup label, bypassing all subsequent polynomial operations. No partial field element arrays are written; the output polynomial is left uninitialized. This failure propagates up through compute_cells_and_kzg_proofs and verify_cell_kzg_proof_batch, returning C_KZG_BADARGS at each level. The Go binding returns (false, ErrBadArgs). peerdas.VerifyDataColumnsSidecarKZGProofs wraps and returns the error. validateUnbatchedColumnsKzg returns pubsub.ValidationReject.",
+        "verdict": "PASS - Range check failure triggers complete abort; no downstream operations execute on invalid input"
+      },
+      "symbolic_execution": {
+        "summary": "Trace the full error propagation chain from bytes_to_bls_field failure to P2P rejection.",
+        "findings": "bytes_to_bls_field returns C_KZG_BADARGS -> blob_to_polynomial goto out -> compute_cells_and_kzg_proofs returns C_KZG_BADARGS -> verify_cell_kzg_proof_batch returns C_KZG_BADARGS -> Go binding (false, ErrBadArgs) -> VerifyCellKZGProofBatch returns (false, err) -> VerifyDataColumnsSidecarKZGProofs returns errors.Wrap(err) -> validateUnbatchedColumnsKzg returns (ValidationReject, err) OR verifyKzgBatch broadcasts verificationErr to all requestors -> validateWithKzgBatchVerifier calls validateUnbatchedColumnsKzg fallback -> ValidationReject. No error is swallowed at any point in this chain.",
+        "verdict": "PASS - Complete error propagation verified; no partial state corruption possible"
+      },
+      "invariant_proving": {
+        "summary": "Prove: error from bytes_to_bls_field propagates to ValidationReject without being swallowed.",
+        "findings": "The invariant holds at each layer: (1) C goto out pattern ensures no partial writes after error; (2) Go binding checks C return code and returns error; (3) VerifyDataColumnsSidecarKZGProofs checks (verified, err) \u2014 error is returned immediately; (4) batch_verifier.go broadcasts error to all requestors; (5) validateWithKzgBatchVerifier falls back to unbatched verification on error, which also returns the error; (6) validateDataColumn propagates ValidationReject to P2P layer. There are no silent error discards in this chain.",
+        "verdict": "PASS - Error propagation invariant holds across all 6 layers"
+      },
+      "evidence": "C-KZG: goto out pattern in blob_to_polynomial aborts on C_KZG_BADARGS. beacon-chain/blockchain/kzg/kzg.go:98-106: returns error from C library. beacon-chain/core/peerdas/p2p_interface.go:82-84: checks err and returns errors.Wrap(err). beacon-chain/sync/batch_verifier.go:208-213: broadcasts verificationErr to all requestors. Lines 172-178: fallback to unbatched verification which also returns error.",
+      "recommendation": "No action required. Error propagation from bytes_to_bls_field range check failure is correctly implemented across all 6 layers from C library to P2P rejection. No partial state corruption is possible.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0071",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "compute_r_powers_for_verify_cell_kzg_proof_batch Includes All Required EIP-7594 Fiat-Shamir Inputs",
+      "abstract_interpretation": {
+        "summary": "Abstractly model the Fiat-Shamir hash input space. The hash must bind: domain separator, batch size parameters, all commitments, per-cell commitment mapping, cell indices, cell data, and proofs.",
+        "findings": "The function compute_r_powers_for_verify_cell_kzg_proof_batch in eip7594.c (lines 389-478) builds its SHA-256 preimage as: DOMAIN_STR(16B) || FIELD_ELEMENTS_PER_CELL(8B) || num_commitments(8B) || num_cells(8B) || commitments_bytes[0..num_commitments-1](48B*n) || per_cell[commitment_indices[i](8B) || cell_indices[i](8B) || cells[i](2048B) || proofs_bytes[i](48B)]. This covers all elements required by EIP-7594. The domain separator is 'RCKZGCBATCH__V1_'. The Go wrapper in kzg.go:98-106 is a thin delegator passing all four required parameter arrays untouched to the C library. The C assert at line 473 verifies the entire buffer is consumed.",
+        "verdict": "PASS - All required elements are present in the hash preimage"
+      },
+      "symbolic_execution": {
+        "summary": "Trace concrete execution from Go call to C hash construction, verifying no inputs are dropped.",
+        "findings": "Path: kzg.VerifyCellKZGProofBatch (kzg.go:105) -> ckzg4844.VerifyCellKZGProofBatch (main.go:504-526) -> C.verify_cell_kzg_proof_batch (eip7594.c:821) -> deduplicate_commitments (eip7594.c:877) -> compute_r_powers_for_verify_cell_kzg_proof_batch (eip7594.c:896-905). The Go binding passes commitmentsBytes, cellIndices, cells, proofsBytes to C via unsafe.Pointer casts. In C, the function first deduplicates commitments to get unique_commitments and commitment_indices, then calls compute_r_powers with all seven required elements. The buffer is fully consumed as verified by the assert.",
+        "verdict": "PASS - No inputs are dropped along the call chain"
+      },
+      "invariant_proving": {
+        "summary": "Prove the invariant: hash preimage includes all prover-controlled inputs.",
+        "findings": "The input_size computation at eip7594.c:405-413 accounts for every prover-controlled element. The assert at line 473 enforces this invariant at runtime. The domain separator 'RCKZGCBATCH__V1_' differs from the blob batch domain 'RCKZGBATCH___V1_' (eip4844.c:48), preventing cross-protocol confusion. The implementation matches the EIP-7594 spec function compute_verify_cell_kzg_proof_batch_challenge exactly.",
+        "verdict": "PASS - Invariant holds; all elements bound"
+      },
+      "evidence": "C-KZG eip7594.c lines 389-478: compute_r_powers_for_verify_cell_kzg_proof_batch hashes domain separator 'RCKZGCBATCH__V1_', FIELD_ELEMENTS_PER_CELL, num_commitments, num_cells, deduplicated commitments, commitment_indices, cell_indices, cells, and proofs. Go wrapper at beacon-chain/blockchain/kzg/kzg.go:98-106 delegates all parameters to C library without omission. C binding at github.com/ethereum/c-kzg-4844/v2/bindings/go/main.go:504-526 passes all arrays via direct pointer casts.",
+      "recommendation": "No action required. The Fiat-Shamir challenge implementation in c-kzg-4844 v2.1.1 correctly includes all EIP-7594 required inputs. Continue tracking c-kzg-4844 releases for any upstream changes.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0072",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Domain Separator RCKZGCBATCH__V1_ Is Present and Correct \u2014 Domain Separator Omission Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if the domain separator were omitted, hashes could collide with other protocols enabling proof forgery.",
+        "findings": "The domain separator RANDOM_CHALLENGE_DOMAIN_VERIFY_CELL_KZG_PROOF_BATCH = 'RCKZGCBATCH__V1_' (16 bytes) is declared at eip7594.c:42 and unconditionally memcpy'd as the first hash buffer write (lines 423-427). An assert at line 423 enforces the string is exactly DOMAIN_STR_LENGTH (16) bytes. The domain is distinct from the EIP-4844 blob batch domain 'RCKZGBATCH___V1_' (eip4844.c:48), preventing cross-protocol confusion attacks.",
+        "verdict": "PASS - Domain separator is present, correct length, and distinct from other protocol domains"
+      },
+      "symbolic_execution": {
+        "summary": "Simulate omission of domain separator to test falsifiability.",
+        "findings": "The domain separator is a compile-time constant in the C library. There is no conditional code path that skips it. The memcpy at line 426 is the first write to the hash buffer after allocation. A buffer allocation failure exits before any hash computation, so partial-domain attacks are impossible. The 'RCKZGCBATCH__V1_' domain differs from 'RCKZGBATCH___V1_' in positions 7, 8, and 9, making cross-protocol hash collisions negligible.",
+        "verdict": "PASS - Domain separator cannot be omitted; no forgery path exists"
+      },
+      "invariant_proving": {
+        "summary": "Prove domain separator inclusion invariant.",
+        "findings": "The invariant holds unconditionally: for any call to verify_cell_kzg_proof_batch with num_cells > 0, the first DOMAIN_STR_LENGTH bytes of the SHA-256 input equal 'RCKZGCBATCH__V1_'. No conditional branching exists around lines 423-427. The cross-protocol distinctness invariant holds by domain string character differences.",
+        "verdict": "PASS - Domain separator invariant holds unconditionally"
+      },
+      "evidence": "eip7594.c line 42: static const char *RANDOM_CHALLENGE_DOMAIN_VERIFY_CELL_KZG_PROOF_BATCH = \"RCKZGCBATCH__V1_\". Lines 423-427: assert length == 16, unconditional memcpy as first buffer write. eip4844.c line 48: distinct domain 'RCKZGBATCH___V1_' for blob proofs confirming cross-protocol separation.",
+      "recommendation": "No action required. The domain separator 'RCKZGCBATCH__V1_' is correctly implemented as the first hash input and is distinct from other Ethereum KZG protocol domains.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0073",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "num_commitments and num_cells Are Bound in Fiat-Shamir Hash \u2014 Batch Size Manipulation Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if batch size fields were omitted, an attacker could potentially manipulate batch membership by padding or truncating the batch.",
+        "findings": "Both num_commitments and num_cells are explicitly encoded as 8-byte little-endian integers in the hash preimage at eip7594.c lines 432-438. num_cells is the actual number of cells from the Go layer. num_commitments is the count of unique commitments after deduplication. The hash input includes sizeof(uint64_t) bytes for each at lines 406-408.",
+        "verdict": "PASS - Both length fields are bound in the hash"
+      },
+      "symbolic_execution": {
+        "summary": "Simulate batch size manipulation attacks.",
+        "findings": "Without num_cells binding: an adversary with valid challenge r for k cells would need SHA-256 second-preimage resistance to be broken to compute r for k+1 cells. Without num_commitments binding: commitment bytes themselves are included in the hash, providing implicit length binding. The explicit length fields provide defense-in-depth beyond fixed-size element concatenation.",
+        "verdict": "PASS - Length fields provide defense-in-depth; batch manipulation attacks are infeasible"
+      },
+      "invariant_proving": {
+        "summary": "Prove the invariant: hash preimage length varies predictably with num_commitments and num_cells.",
+        "findings": "The input_size formula at eip7594.c:405-413 encodes both lengths. The assert at line 473 verifies the entire computed size is consumed. Both length scalars are explicitly hashed (lines 432-438) before commitment/cell data. The challenge r is uniquely determined by the exact batch sizes.",
+        "verdict": "PASS - Invariant holds; both length fields properly bound"
+      },
+      "evidence": "eip7594.c lines 406-408: + sizeof(uint64_t) for both num_commitments and num_cells. Lines 432-438: bytes_from_uint64(offset, num_commitments) and bytes_from_uint64(offset, num_cells) written before commitment/cell data.",
+      "recommendation": "No action required. Both num_commitments and num_cells are explicitly bound in the Fiat-Shamir hash, preventing batch size manipulation attacks.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0074",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "commitment_indices Are Bound in Fiat-Shamir Hash \u2014 Commitment Reordering Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if commitment_indices were omitted, an adversary could swap which commitment is associated with which cell.",
+        "findings": "The per-cell loop at eip7594.c lines 447-462 writes commitment_indices[i] as the first per-cell field (line 449: bytes_from_uint64(offset, commitment_indices[i])). commitment_indices is internally derived by deduplicate_commitments (lines 875-877) from the per-cell commitment array passed by Go. The Go API accepts one commitment per cell (commitmentsBytes slice), and the C library deduplicates internally. The hash binds which unique commitment index maps to each cell.",
+        "verdict": "PASS - commitment_indices are bound in hash; reordering attack is infeasible"
+      },
+      "symbolic_execution": {
+        "summary": "Trace commitment_indices derivation and hash inclusion.",
+        "findings": "In Go, VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:75) appends one commitment per cell. The C library receives these as commitmentsBytes. deduplicate_commitments maps each position to a unique commitment index. These indices are written per-cell in the hash at line 449. If an attacker swapped commitment[0] and commitment[1] for a valid batch, deduplication would produce a different commitment_indices mapping, changing SHA-256 challenge r and invalidating the pairing check.",
+        "verdict": "PASS - Commitment-to-cell binding enforced through commitment_indices in hash"
+      },
+      "invariant_proving": {
+        "summary": "Prove commitment_indices binding invariant.",
+        "findings": "For any two distinct commitment-to-cell mappings that produce different pairings, the Fiat-Shamir challenges will be distinct by SHA-256 collision resistance. commitment_indices[i] is written to the hash for each cell i, so any reordering changes r, invalidating the pairing check.",
+        "verdict": "PASS - Invariant holds by SHA-256 collision resistance"
+      },
+      "evidence": "eip7594.c lines 447-452: per-cell loop writes bytes_from_uint64(offset, commitment_indices[i]) as first per-cell field. Lines 875-877: commitment_indices derived by deduplicate_commitments. p2p_interface.go:75: commitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i])) \u2014 one commitment per cell.",
+      "recommendation": "No action required. commitment_indices are correctly bound as the first per-cell hash element. The Go API design of one commitment per cell correctly maps to the C library's expected input format.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0075",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "cell_indices Are Bound in Fiat-Shamir Hash and Pairing Equation \u2014 Cell Index Substitution Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if cell_indices were omitted, an attacker could substitute a proof for column j in place of column i.",
+        "findings": "cell_indices[i] (column index 0-127 for EIP-7594) is written per-cell at eip7594.c line 451: bytes_from_uint64(offset, cell_indices[i]). The Go caller passes sidecar.Index as the cell index at p2p_interface.go:76. The C sanity check at line 858 validates cell_indices[i] < CELLS_PER_EXT_BLOB. cell_indices also feed into compute_commitment_to_aggregated_interpolation_poly (line 935) and computed_weighted_sum_of_proofs (line 948), creating double-binding: both in the challenge hash and in the pairing computation.",
+        "verdict": "PASS - cell_indices are doubly bound in hash and pairing computation; substitution attack is infeasible"
+      },
+      "symbolic_execution": {
+        "summary": "Trace cell index binding through the full call chain.",
+        "findings": "sidecar.Index flows to indices[] at p2p_interface.go:76, then to C cell_indices array. In compute_r_powers: written to hash at line 451. In verify_cell_kzg_proof_batch: also used for interpolation polynomial coset selection (line 935) and coset factor computation (line 948). A proof for column j cannot verify as column i because (1) hash r changes when cell index changes, and (2) interpolation polynomial coset selection depends on cell_indices. Both defenses must be overcome simultaneously.",
+        "verdict": "PASS - Cell index doubly bound in hash and verification equation"
+      },
+      "invariant_proving": {
+        "summary": "Prove cell_indices binding invariant.",
+        "findings": "The invariant holds: a proof for column j cannot verify as column i (i != j) because changing any cell index changes r (hash binding under SHA-256 collision resistance) AND the interpolation polynomial coset selection depends on cell_indices (pairing equation binding under DL assumption on BLS12-381). Both must be simultaneously satisfied for a forged proof to pass.",
+        "verdict": "PASS - Invariant holds; cell_indices doubly bound"
+      },
+      "evidence": "eip7594.c lines 451-452: bytes_from_uint64(offset, cell_indices[i]). Line 858: sanity check cell_indices[i] >= CELLS_PER_EXT_BLOB. Lines 935, 948: cell_indices used in weighted sum of proofs computation. p2p_interface.go:76: indices = append(indices, sidecar.Index).",
+      "recommendation": "No action required. cell_indices are correctly bound in both the Fiat-Shamir hash and the pairing verification equation, providing defense-in-depth against index substitution attacks.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0076",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Cell Data (coset_eval bytes) Is Fully Bound in Fiat-Shamir Hash \u2014 Data Substitution Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if cell evaluation bytes were not bound in the hash, an attacker could modify cell content while reusing a valid proof for different data.",
+        "findings": "The entire cell content (cells[i], BYTES_PER_CELL = 2048 bytes per cell) is written to the hash preimage at eip7594.c line 457: memcpy(offset, &cells[i], BYTES_PER_CELL). This accounts for num_cells * BYTES_PER_CELL bytes in hash input (line 412). Cell data flows from Go as kzg.Cell(sidecar.Column[i]) (p2p_interface.go:77), a 2048-byte array. Total cell data per batch can be up to 128 cells * 2048 bytes = 256KB.",
+        "verdict": "PASS - Full cell data is bound in hash; data substitution attack is infeasible"
+      },
+      "symbolic_execution": {
+        "summary": "Trace cell data binding from sidecar to hash computation.",
+        "findings": "sidecar.Column[i] (2048 bytes) -> kzg.Cell cast at p2p_interface.go:77 -> passed to VerifyCellKZGProofBatch -> C cells array -> memcpy(offset, &cells[i], BYTES_PER_CELL) at eip7594.c:457. Any single-bit modification to any cell byte changes SHA-256(preimage), changing r, invalidating the aggregated pairing check. Probability of accidental collision: 2^-256.",
+        "verdict": "PASS - Cell data binding is comprehensive and correct"
+      },
+      "invariant_proving": {
+        "summary": "Prove cell data binding invariant.",
+        "findings": "Invariant: the Fiat-Shamir challenge r is a deterministic function of all cell bytes across all cells in the batch. SHA-256 collision resistance ensures any byte modification changes r with overwhelming probability. The verification equation uses cells to reconstruct interpolation polynomials \u2014 changing cell data without changing the proof would cause both the hash challenge and the polynomial commitment check to fail independently.",
+        "verdict": "PASS - Invariant holds; cell data comprehensively bound"
+      },
+      "evidence": "eip7594.c line 412: + (num_cells * BYTES_PER_CELL) /* cells */. Lines 456-459: memcpy(offset, &cells[i], BYTES_PER_CELL); offset += BYTES_PER_CELL. p2p_interface.go:77: cells = append(cells, kzg.Cell(sidecar.Column[i])) \u2014 full 2048-byte cell passed.",
+      "recommendation": "No action required. Cell evaluation bytes are correctly and completely bound in the Fiat-Shamir hash, preventing any data substitution attack.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0077",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "KZG Proofs Are Bound in Fiat-Shamir Hash \u2014 Cross-Cell Proof Substitution Attack Is Infeasible",
+      "abstract_interpretation": {
+        "summary": "Model the attack: if proofs were not bound in the hash, an attacker could substitute a valid proof for one cell in place of another.",
+        "findings": "The proof bytes for each cell (BYTES_PER_PROOF = 48 bytes) are written to the hash preimage at eip7594.c line 461: memcpy(offset, &proofs_bytes[i], BYTES_PER_PROOF). The hash includes num_cells * BYTES_PER_PROOF bytes of proof data (line 413). Proof bytes flow from Go as kzg.Bytes48(sidecar.KzgProofs[i]) at p2p_interface.go:78.",
+        "verdict": "PASS - Proofs are bound in hash; cross-cell proof substitution is infeasible"
+      },
+      "symbolic_execution": {
+        "summary": "Trace proof binding through computation.",
+        "findings": "If an attacker substituted proof pi_k at position j in a batch (replacing pi_j), the hash preimage at position j contains pi_k, changing r. The linear combination sum(r^i * pi_i) uses a different r, making the pairing check fail. Even without the hash change, substituting pi_k for pi_j would fail the pairing equation because pi_k attests to column k's coset, not column j's coset.",
+        "verdict": "PASS - Proof binding prevents cross-cell proof substitution"
+      },
+      "invariant_proving": {
+        "summary": "Prove proof binding invariant.",
+        "findings": "The invariant: the Fiat-Shamir challenge r is a function of all proof bytes. Each proof is a 48-byte BLS G1 point; binding them means r depends on the specific proof set. The linear combination sum(r^i * pi_i) is valid if and only if each pi_i was computed for the corresponding cell data and column index under the correct commitment. Hash binding ensures r is derived from the specific proofs, preventing equivocation attacks.",
+        "verdict": "PASS - Invariant holds; proofs properly bound in hash"
+      },
+      "evidence": "eip7594.c line 413: + (num_cells * BYTES_PER_PROOF) /* proofs_bytes */. Lines 460-462: memcpy(offset, &proofs_bytes[i], BYTES_PER_PROOF); offset += BYTES_PER_PROOF. p2p_interface.go:78: proofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i])) \u2014 full 48-byte proof passed as final per-cell hash element.",
+      "recommendation": "No action required. KZG proofs are correctly bound in the Fiat-Shamir hash as the last per-cell element, preventing any cross-cell proof substitution attack.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0078",
+      "final_classification": "INFORMATIONAL",
+      "severity": "Low",
+      "title": "P2P Gossip KZG Verification Has Correct Parameter Passing; Cross-Requestor Batch Contamination Causes Fallback Overhead",
+      "abstract_interpretation": {
+        "summary": "Model the P2P gossip path: validateDataColumn -> validateWithKzgBatchVerifier -> kzgVerifierRoutine/verifyKzgBatch -> VerifyDataColumnsSidecarKZGProofs. Verify parameter correctness and error handling.",
+        "findings": "Parameter passing is correct: all four required arrays (commitments, indices, cells, proofs) are populated with matched per-cell indices in VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:73-80). The gossip path in validate_data_column.go marks RequireSidecarKzgProofVerified on success. A design concern exists in verifyKzgBatch (batch_verifier.go:194-214): when sidecars from multiple requestors are batched together, the SAME verificationErr is broadcast to ALL requestors. If one sidecar is invalid, all requestors in the batch receive a failure even if their own sidecar was valid. The fallback to validateUnbatchedColumnsKzg (batch_verifier.go:177) re-verifies each requestor's original columns independently, ensuring correctness.",
+        "verdict": "INFORMATIONAL - Parameters are correctly passed; cross-batch contamination is a design trade-off that triggers fallback overhead but does not compromise security"
+      },
+      "symbolic_execution": {
+        "summary": "Trace a mixed-validity batch scenario.",
+        "findings": "Scenario: Requestor A submits valid sidecar SA, Requestor B submits invalid sidecar SB. kzgVerifierRoutine non-deterministically batches both. verifyKzgBatch concatenates allDataColumns and broadcasts verificationErr to both A and B (batch_verifier.go:211-213). Both fall back to validateUnbatchedColumnsKzg with their ORIGINAL dataColumns slice (batch_verifier.go:177). A's sidecar passes (ValidationAccept), B's sidecar fails (ValidationReject). No valid sidecar is permanently rejected, but A incurs extra latency due to B's invalid sidecar.",
+        "verdict": "INFORMATIONAL - Correctness maintained through fallback; adversarial invalid sidecar injection can trigger sustained fallback overhead"
+      },
+      "invariant_proving": {
+        "summary": "Prove the invariant: no valid sidecar is permanently rejected due to batch contamination.",
+        "findings": "The invariant holds because: (1) validateUnbatchedColumnsKzg is always called with the ORIGINAL dataColumns slice, not the aggregated allDataColumns; (2) this ensures only the requesting validator's own sidecars are re-verified independently; (3) ValidationReject is returned only if unbatched verification also fails. The security invariant is maintained but the DOS resilience is slightly reduced under adversarial spam.",
+        "verdict": "INFORMATIONAL - Security invariant holds; performance invariant has minor adversarial DOS concern"
+      },
+      "evidence": "beacon-chain/sync/batch_verifier.go:194-214: verifyKzgBatch concatenates all data columns and broadcasts same error to all requestors. Line 177: fallback to validateUnbatchedColumnsKzg with original dataColumns on error. beacon-chain/sync/validate_data_column.go:148-153: gossip path invokes validateWithKzgBatchVerifier. beacon-chain/core/peerdas/p2p_interface.go:73-80: correct per-cell parameter construction.",
+      "recommendation": "Consider adding a metric counter for KZG batch fallback events to detect adversarial sidecar spam causing sustained fallback overhead. The cross-requestor batching design is a performance optimization with acceptable security properties. Document the cross-requestor batch contamination behavior explicitly in code comments.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0079",
+      "final_classification": "INFORMATIONAL",
+      "severity": "Low",
+      "title": "Validator Attestation Does Not Directly Gate on Data Column KZG Verification \u2014 Verification Occurs at Sidecar Reception per EIP-7594 Design",
+      "abstract_interpretation": {
+        "summary": "Model the validator attestation path to determine whether KZG verification of data column sidecars gates attestation.",
+        "findings": "The attestation data generation path (GetAttestationData in rpc/core/validator.go:480-557) does not invoke any KZG verification function. It produces attestation data from the current head state root. The connection is indirect: data column sidecars are KZG-verified when received via gossip (validate_data_column.go), P2P requests (data_column_sidecars.go:996), or backfill. Only VerifiedRODataColumn objects are forwarded to the blockchain service. Per EIP-7594/Fulu design, attestation does not require global data availability verification; validators only verify columns within their assigned custody group.",
+        "verdict": "INFORMATIONAL - Architecture is per EIP-7594 spec; KZG verification at attestation time is not required; indirect coupling should be documented"
+      },
+      "symbolic_execution": {
+        "summary": "Trace attestation data generation to check KZG dependency.",
+        "findings": "GetAttestationData -> HeadFetcher.HeadRoot() -> constructs AttestationData with BeaconBlockRoot. No KZG calls in this path. The head block was accepted by the blockchain service, which only stores VerifiedRODataColumn objects (enforcing prior KZG verification). The blockchain service's DataColumnReceiver interface accepts only VerifiedRODataColumn, ensuring stored data columns have passed KZG verification. Per EIP-7594, validators attest to blocks based on the block's KZG commitments (verified at block processing time), not on all data column sidecars globally.",
+        "verdict": "INFORMATIONAL - Indirect coupling is by-design per EIP-7594; document for clarity"
+      },
+      "invariant_proving": {
+        "summary": "Prove the invariant: blocks with invalid data column KZG proofs cannot gain validator attestations.",
+        "findings": "The invariant holds with qualification: validators attest to blocks based on the block's KZG commitments (verified via blob validation at block processing time, not data column verification). Data columns are derived from blobs \u2014 if the blob KZG commitment is valid, the data column KZG proofs must also be valid for correctly generated columns. The blob commitment verification at block processing time is the primary attestation gate; data column verification provides a secondary consistency check. Per EIP-7594, this is the correct design.",
+        "verdict": "INFORMATIONAL - Security invariant holds through blob-level KZG verification at block processing time"
+      },
+      "evidence": "beacon-chain/rpc/core/validator.go:480-557: GetAttestationData contains no KZG calls. beacon-chain/sync/validate_data_column.go:148-153: KZG verification at gossip reception. beacon-chain/verification/data_column.go:389-405: SidecarKzgProofVerified for P2P requests. The DataColumnReceiver interface accepts only VerifiedRODataColumn, enforcing prior KZG verification.",
+      "recommendation": "Document the indirect coupling between data column KZG verification and attestation in code comments. The architecture is consistent with EIP-7594 design: validators verify custody group columns, not all data columns globally, before attesting. No security fix required.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0080",
+      "final_classification": "FALSE_POSITIVE",
+      "severity": "Informational",
+      "title": "Fiat-Shamir Hash Input Order Is Deterministic and Consistent with EIP-7594 Specification",
+      "abstract_interpretation": {
+        "summary": "Model ordering requirements: hash input order must be canonical and match EIP-7594 spec compute_verify_cell_kzg_proof_batch_challenge for cross-implementation consistency.",
+        "findings": "The hash input order in compute_r_powers_for_verify_cell_kzg_proof_batch (eip7594.c:420-463) is: domain(16B) -> FIELD_ELEMENTS_PER_CELL(8B LE) -> num_commitments(8B LE) -> num_cells(8B LE) -> per-unique-commitment: commitment_bytes(48B) -> per-cell: commitment_indices[i](8B LE) || cell_indices[i](8B LE) || cells[i](2048B) || proofs_bytes[i](48B). The EIP-7594 spec compute_verify_cell_kzg_proof_batch_challenge specifies: RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN || field_elements_per_cell || len(commitments) || len(cells) || commitments || commitment_indices || cell_indices || cells || proofs. The implementation matches this order exactly. c-kzg-4844 is the reference implementation ensuring cross-client consistency.",
+        "verdict": "PASS - Hash input order is deterministic, canonical, and matches EIP-7594 specification"
+      },
+      "symbolic_execution": {
+        "summary": "Verify determinism by examining all ordering decisions in the call chain.",
+        "findings": "Ordering is fully deterministic: (1) commitments written in deduplicated first-seen order (deterministic from input array order); (2) per-cell data follows cell order as provided by the Go caller; (3) within each cell, fixed order: commitment_index, cell_index, cell_data, proof. bytes_from_uint64 consistently uses little-endian encoding. The Go caller's array construction at p2p_interface.go:73-80 iterates sidecars then cells in deterministic order. kzgVerifierRoutine channel draining introduces non-determinism in batch membership but not in ordering within a single VerifyCellKZGProofBatch call.",
+        "verdict": "PASS - Ordering is deterministic within any given verification call"
+      },
+      "invariant_proving": {
+        "summary": "Prove the ordering invariant: same inputs always produce the same hash.",
+        "findings": "The invariant holds because: (1) bytes_from_uint64 always produces little-endian encoding; (2) deduplicate_commitments is a pure deterministic function; (3) per-cell loop iterates from i=0 to num_cells-1 in strict ascending order; (4) memcpy for cell/commitment/proof data is byte-exact. Cross-client consistency is guaranteed because all major Ethereum consensus clients (Prysm, Lighthouse, Nimbus, Lodestar) use c-kzg-4844 as the cryptographic backend for EIP-7594 functions.",
+        "verdict": "PASS - Ordering invariant holds unconditionally"
+      },
+      "evidence": "eip7594.c lines 404-413: input_size layout definition specifying canonical order. Lines 420-463: deterministic serial buffer writes following the defined order. Line 35: #define DOMAIN_STR_LENGTH 16. Line 42: 'RCKZGCBATCH__V1_' (16 chars verified by assert at 423). Order matches EIP-7594 consensus spec exactly. c-kzg-4844 v2.1.1 is the EIP-7594 reference implementation.",
+      "recommendation": "No action required. Hash input ordering is deterministic, canonical, and matches the EIP-7594 specification. Cross-client consistency is ensured by shared use of the c-kzg-4844 reference library. Continue tracking EIP-7594 specification evolution for any future ordering changes.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 12,
+    "item_count": 15,
+    "timestamp": 1771326655,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0066",
+      "W7B8:W7B8:CHK-0067",
+      "W7B8:W7B8:CHK-0068",
+      "W7B8:W7B8:CHK-0069",
+      "W7B8:W7B8:CHK-0070",
+      "W7B8:W7B8:CHK-0071",
+      "W7B8:W7B8:CHK-0072",
+      "W7B8:W7B8:CHK-0073",
+      "W7B8:W7B8:CHK-0074",
+      "W7B8:W7B8:CHK-0075",
+      "W7B8:W7B8:CHK-0076",
+      "W7B8:W7B8:CHK-0077",
+      "W7B8:W7B8:CHK-0078",
+      "W7B8:W7B8:CHK-0079",
+      "W7B8:W7B8:CHK-0080"
+    ]
+  }
+}
