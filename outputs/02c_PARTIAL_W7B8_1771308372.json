@@ -1,0 +1,2198 @@
+{
+  "checklist_with_code": [
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#5",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#5",
+        "property_id": "PROP-W1B10-50",
+        "title": "Verify Fork Digest Computation: Is compute_fork_digest correctly implemented to derive the expected digest for each epoch?",
+        "severity": "Medium",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Fork digest matching"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A P2P peer can send blocks with arbitrary fork digests. If fork digest validation is missing, blocks from different fork versions could be processed as if they belong to the current fork."
+        },
+        "test_procedure": "1. Locate the compute_fork_digest function implementation. 2. Verify it takes the block epoch as input and derives the correct fork version for that epoch. 3. Confirm the genesis validators root is correctly incorporated into the digest computation. 4. Test with known test vectors: compute digest for pre-fork epoch, at-fork epoch, and post-fork epoch. 5. Verify the function handles epoch boundary conditions correctly (e.g., exact fork epoch transition).",
+        "bug_class": "Cryptographic Implementation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-50, Element: SG-003. Internal verification that the fork digest computation is correct, as incorrect computation would allow fork confusion attacks."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "compute_fork_digest",
+            "line_range": {
+              "start": 1753,
+              "end": 1762
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "compute_fork_digest_fulu",
+            "line_range": {
+              "start": 1764,
+              "end": 1790
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon_chain/spec/network.nim",
+            "symbol": "getForkDigest",
+            "line_range": {
+              "start": 138,
+              "end": 145
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/forks.nim:compute_fork_digest (lines 1753-1762)\n// https://github.com/ethereum/consensus-specs/blob/v1.5.0-beta.4/specs/phase0/beacon-chain.md#compute_fork_digest\nfunc compute_fork_digest*(current_version: Version,\n                          genesis_validators_root: Eth2Digest): ForkDigest =\n  ## Return the 4-byte fork digest for the ``current_version`` and\n  ## ``genesis_validators_root``.\n  array[4, byte](result)[0..3] =\n    compute_fork_data_root(\n      current_version, genesis_validators_root).data.toOpenArray(0, 3)\n\n// RELATED: beacon_chain/spec/forks.nim:compute_fork_digest_fulu (lines 1764-1790)\n// https://github.com/ethereum/consensus-specs/blob/v1.6.0-alpha.2/specs/fulu/beacon-chain.md#modified-compute_fork_digest\nfunc compute_fork_digest_fulu*(\n    cfg: RuntimeConfig, genesis_validators_root: Eth2Digest, epoch: Epoch):\n    ForkDigest =\n  let\n    fork_version = forkVersionAtEpoch(cfg, epoch)\n    base_digest = compute_fork_data_root(fork_version, genesis_validators_root)\n    blob_parameters = get_blob_parameters(cfg, epoch)\n  var bpo_buf: array[16, byte]\n  bpo_buf[0 .. 7] = toBytesLE(distinctBase(blob_parameters.EPOCH))\n  bpo_buf[8 .. 15] = toBytesLE(blob_parameters.MAX_BLOBS_PER_BLOCK)\n  let bpo_digest = eth2digest(bpo_buf)\n  var res: array[4, byte]\n  staticFor i, 0 ..< len(res):\n    res[i] = base_digest.data[i] xor bpo_digest.data[i]\n  ForkDigest(res)\n\n// CALLER: beacon_chain/spec/network.nim:getForkDigest (lines 138-145)\nfunc getForkDigest(\n    cfg: RuntimeConfig, genesis_validators_root: Eth2Digest,\n    current_fork_version: Version, epoch: Epoch): ForkDigest =\n  if epoch >= cfg.FULU_FORK_EPOCH:\n    compute_fork_digest_fulu(cfg, genesis_validators_root, epoch)\n  else:\n    compute_fork_digest(current_fork_version, genesis_validators_root)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#9",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify Trust Boundary Integrity: Does the CL implement timeout handling for Engine API calls when EL returns SYNCING status?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented. Not directly attacker-controlled but could be triggered by triggering EL sync issues via P2P."
+        },
+        "test_procedure": "1. Identify all Engine API call sites in the CL codebase that interact with the EL. 2. Review timeout configuration for each Engine API method (engine_newPayloadV*, engine_forkchoiceUpdatedV*, etc.). 3. Verify that explicit timeout values are set and are reasonable (not indefinite). 4. Test behavior when EL returns SYNCING status repeatedly - confirm CL does not block indefinitely. 5. Verify that other consensus duties (attestations, block proposals) continue to be processed even when Engine API calls are timing out. 6. Check for proper error handling and retry logic when timeouts occur.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Trust Boundaries: tb-006, tb-007, Threat: stride-014"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/el/el_manager.nim",
+            "symbol": "sendNewPayload",
+            "line_range": {
+              "start": 827,
+              "end": 920
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/el/el_manager.nim",
+            "symbol": "forkchoiceUpdated",
+            "line_range": {
+              "start": 936,
+              "end": 1097
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/el/el_manager.nim (timeout constants, lines 54-64)\nconst\n  noTimeout = WithoutTimeout(0)\n  engineApiConnectionTimeout = 5.seconds\n  web3RequestsTimeout = 8.seconds\n  GETPAYLOAD_TIMEOUT = 1.seconds\n  GETBLOBS_TIMEOUT = 250.milliseconds\n\n// PRIMARY: beacon_chain/el/el_manager.nim:sendNewPayload (lines 827-885)\n// Timeout is passed as 'deadline: DeadlineFuture' parameter\nproc sendNewPayload*(\n    m: ELManager,\n    blck: SomeForkyBeaconBlock,\n    deadline: DeadlineFuture,\n    retry: bool,\n): Future[Opt[PayloadExecutionStatus]] {.async: (raises: [CancelledError]).} =\n  ...\n  let timeoutExceeded =\n    try:\n      discard await race(pendingRequests).wait(deadline)\n      false\n    except AsyncTimeoutError:\n      true\n\n// RELATED: beacon_chain/el/el_manager.nim (lines 127-128)\ndeclareCounter engine_api_timeouts,\n  \"Number of timeout errors...\""
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#8",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#8",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify CL resilience: Can the CL continue processing attestations and block proposals while Engine API calls are pending or timing out?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented."
+        },
+        "test_procedure": "1. Review the CL's task/thread architecture to understand how Engine API calls are dispatched. 2. Verify that Engine API communication is performed asynchronously or in a dedicated thread/task. 3. Check that the main consensus loop is not blocked by Engine API calls. 4. Test by simulating a slow/unresponsive EL and verify attestation duties continue. 5. Verify block production responsibilities are not indefinitely delayed by EL sync issues. 6. Review logging and alerting mechanisms for prolonged SYNCING states.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Covered Actors: actor-consensus-layer, actor-execution-engine"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/el/el_manager.nim",
+            "symbol": "sendNewPayload",
+            "line_range": {
+              "start": 827,
+              "end": 920
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/el/el_manager.nim",
+            "symbol": "forkchoiceUpdated",
+            "line_range": {
+              "start": 936,
+              "end": 1097
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/el/el_manager.nim:sendNewPayload (lines 827-885)\n// deadline param controls timeout; async design prevents blocking main loop\nproc sendNewPayload*(\n    m: ELManager,\n    blck: SomeForkyBeaconBlock,\n    deadline: DeadlineFuture,\n    retry: bool,\n): Future[Opt[PayloadExecutionStatus]] {.async: (raises: [CancelledError]).} =\n  ...\n  while true:\n    block mainLoop:\n      let requests = m.elConnections.mapIt: engineApiRequest(it, req, \"newPayload\", startTime, noTimeout)\n      var pendingRequests = requests\n      while true:\n        let timeoutExceeded =\n          try:\n            discard await race(pendingRequests).wait(deadline)\n            false\n          except AsyncTimeoutError:\n            true\n        if timeoutExceeded:\n          break mainLoop"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#6",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#6",
+        "property_id": "PROP-W1B10-51",
+        "title": "Verify invariant: Extended SYNCING status from EL does not cause CL to miss attestation or proposal duties",
+        "severity": "Medium",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "EngineAPI"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "JWT authentication",
+            "Engine API protocol"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A buggy EL that returns SYNCING indefinitely would stall the CL if no timeout is implemented."
+        },
+        "test_procedure": "1. Design a test scenario where EL returns SYNCING status for an extended period. 2. Attempt to falsify the invariant by observing whether CL misses any scheduled attestation duties during this period. 3. Attempt to falsify by checking if block proposal opportunities are lost. 4. Verify state transitions: CL should transition to a degraded operational mode rather than complete stall. 5. Check for any race conditions between Engine API timeout handling and consensus duty scheduling. 6. Verify that once EL returns to VALID/INVALID status, normal operations resume.",
+        "bug_class": "State Consistency",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-51, Primary Element: SG-002, Type: invariant"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/el/el_manager.nim",
+            "symbol": "sendNewPayload",
+            "line_range": {
+              "start": 827,
+              "end": 920
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/el/el_manager.nim:sendNewPayload (lines 827-885)\n// deadline-based timeout + async design prevents indefinite blocking\nconst GETPAYLOAD_TIMEOUT = 1.seconds\n// Engine API calls use deadline futures; on timeout, returns Opt.none\n// allowing consensus duties to proceed independently\nproc sendNewPayload*(\n    m: ELManager,\n    blck: SomeForkyBeaconBlock,\n    deadline: DeadlineFuture,\n    retry: bool\n): Future[Opt[PayloadExecutionStatus]] {.async.} =\n  ...\n  except AsyncTimeoutError:\n    true  # timeoutExceeded = true, breaks main loop gracefully"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#10",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Trust Boundary Integrity for tb-005/tb-009: Is the proposer deterministically identifiable and cryptographically bound to each slot?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Verify that state.proposer_lookahead is computed deterministically from beacon state. 2. Confirm that the proposer lookahead computation is identical across all conforming implementations. 3. Validate that the block proposer signature cryptographically binds the proposer identity to the block. 4. Attempt to craft a block where the proposer signature does not match the expected proposer from the lookahead and verify rejection. 5. Check that lookahead values cannot be manipulated after computation.",
+        "bug_class": "Non-Repudiation",
+        "risk_category": "Repudiation",
+        "notes": "Source: PROP-W1B10-52, Trust Boundaries: tb-005, tb-009, Threat: stride-013"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "get_beacon_proposer_index",
+            "line_range": {
+              "start": 538,
+              "end": 590
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "initialize_proposer_lookahead",
+            "line_range": {
+              "start": 617,
+              "end": 633
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/validator.nim:get_beacon_proposer_index (lines 538-590)\nfunc get_beacon_proposer_index*(state: ForkyBeaconState, cache: var StateCache, slot: Slot): Opt[ValidatorIndex] =\n  let epoch = get_current_epoch(state)\n  ...\n  when typeof(state).kind >= ConsensusFork.Fulu:\n    let pi = Opt.some(ValidatorIndex item(state.proposer_lookahead, slot mod SLOTS_PER_EPOCH))\n    cache.beacon_proposer_indices[slot] = pi\n    return pi\n  else:\n    # uses compute_proposer_index with deterministic seed from get_seed(state, epoch, DOMAIN_BEACON_PROPOSER)\n    ...\n\n// RELATED: beacon_chain/spec/validator.nim:initialize_proposer_lookahead (lines 617-633)\nfunc initialize_proposer_lookahead*(state: electra.BeaconState, cache: var StateCache):\n    HashArray[Limit ((MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH), uint64] =\n  let current_epoch = state.slot.epoch()\n  var lookahead: HashArray[Limit ((MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH), uint64]\n  for i in 0 ..< (MIN_SEED_LOOKAHEAD + 1):\n    let epoch_i = current_epoch + i\n    let proposers = get_beacon_proposer_indices(state, epoch_i)\n    for j in 0 ..< SLOTS_PER_EPOCH:\n      if proposers[j].isSome():\n        mitem(lookahead, i * SLOTS_PER_EPOCH + j) = proposers[j].get.uint64\n  lookahead"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#9",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Proposer-Consensus Layer Interaction: Does the consensus layer correctly enforce proposer assignment from the lookahead?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Trace the data flow from proposer lookahead computation to block proposal acceptance. 2. Verify that the consensus layer rejects blocks from validators not matching the lookahead for a given slot. 3. Check for race conditions or timing issues where lookahead updates could create ambiguity. 4. Confirm that slashing decisions correctly reference the proposer lookahead at the time of the alleged violation.",
+        "bug_class": "Access Control",
+        "risk_category": "Elevation of Privilege",
+        "notes": "Source: PROP-W1B10-52, Node: actor-consensus-layer"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "get_beacon_proposer_index",
+            "line_range": {
+              "start": 538,
+              "end": 590
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/state_transition_epoch.nim",
+            "symbol": "process_randao_mixes_reset",
+            "line_range": {
+              "start": 1348,
+              "end": 1364
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/validator.nim:get_beacon_proposer_index (lines 538-590)\n// For Fulu+: reads from state.proposer_lookahead (precomputed)\nwhen typeof(state).kind >= ConsensusFork.Fulu:\n  let pi = Opt.some(ValidatorIndex item(state.proposer_lookahead, slot mod SLOTS_PER_EPOCH))\n  cache.beacon_proposer_indices[slot] = pi\n  return pi\n\n// RELATED: beacon_chain/spec/state_transition_epoch.nim (lines 1348-1364)\n// Proposer lookahead update during epoch transition\nlet next_epoch = get_current_epoch(state) + MIN_SEED_LOOKAHEAD + 1\nlet new_proposers = get_beacon_proposer_indices(state, next_epoch)\nfor i in 0 ..< SLOTS_PER_EPOCH:\n  if new_proposers[i].isSome():\n    mitem(state.proposer_lookahead, last_epoch_start + i) = new_proposers[i].get.uint64"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#7",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#7",
+        "property_id": "PROP-W1B10-52",
+        "title": "Verify Validator Assignment Integrity: Can a validator deny or falsely claim proposer duty assignment?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal",
+            "Consensus"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [
+            "Proposer lookahead computation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If the lookahead is incorrect, the wrong validator could be blamed or slashed for actions they did not take."
+        },
+        "test_procedure": "1. Verify that proposer lookahead is publicly auditable and deterministically reproducible. 2. Check that validators cannot influence their own selection in the lookahead. 3. Confirm that signature requirements prevent a validator from claiming another validator proposed a block. 4. Test that historical proposer assignments are immutable once computed. 5. Verify that any dispute resolution mechanism correctly identifies the assigned proposer.",
+        "bug_class": "Non-Repudiation",
+        "risk_category": "Repudiation",
+        "notes": "Source: PROP-W1B10-52, Nodes: actor-proposer, actor-validator"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "compute_proposer_indices",
+            "line_range": {
+              "start": 444,
+              "end": 462
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/validator.nim:compute_proposer_indices (lines 444-462)\n// Fulu spec: deterministic slot-by-slot proposer index computation\nfunc compute_proposer_indices*(\n    state: ForkyBeaconState,\n    epoch: Epoch, seed: Eth2Digest,\n    indices: seq[ValidatorIndex]\n): seq[Opt[ValidatorIndex]] =\n  var proposerIndices: seq[Opt[ValidatorIndex]]\n  for epochSlot in epoch.slots():\n    var buffer: array[32 + 8, byte]\n    buffer[0..31] = seed.data\n    buffer[32..39] = uint_to_bytes(epochSlot.asUInt64)\n    let slotSeed = eth2digest(buffer)\n    let proposerIndex = compute_proposer_index(state, indices, slotSeed)\n    proposerIndices.add(proposerIndex)\n  proposerIndices"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#11",
+        "property_id": "PROP-W1B10-53",
+        "title": "Verify Trust Boundary Integrity for tb-009: Is the MIN_SEED_LOOKAHEAD delay sufficient to prevent same-epoch randao manipulation of proposer assignments?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Consensus protocol",
+            "Randao contribution",
+            "MIN_SEED_LOOKAHEAD delay"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A validator controlling multiple slots could attempt to bias the randao mix to manipulate future proposer assignments."
+        },
+        "test_procedure": "1. Review the implementation of MIN_SEED_LOOKAHEAD delay in proposer selection. 2. Identify all randao mix contribution points at epoch boundaries. 3. Analyze the proposer lookahead calculation to verify it correctly incorporates the seed lookahead delay. 4. Model the attack surface: calculate the validator stake percentage required to bias randao outcomes. 5. Verify that the delay between randao contribution and proposer assignment prevents same-epoch manipulation. 6. Test edge cases at epoch boundaries where timing assumptions may be violated. 7. Check for any code paths that could allow early revelation or late contribution of randao values.",
+        "bug_class": "Randomness Manipulation",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-W1B10-53, Trust Boundary: tb-009, Primary Element: SG-006."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/state_transition_epoch.nim",
+            "symbol": "process_randao_mixes_reset",
+            "line_range": {
+              "start": 1348,
+              "end": 1364
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/presets/mainnet/phase0_preset.nim",
+            "symbol": "MIN_SEED_LOOKAHEAD",
+            "line_range": {
+              "start": 48,
+              "end": 48
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon_chain/spec/state_transition_block.nim",
+            "symbol": "process_randao",
+            "line_range": {
+              "start": 90,
+              "end": 120
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/state_transition_epoch.nim (lines 1348-1364)\n// MIN_SEED_LOOKAHEAD used to compute next epoch proposers\nlet next_epoch = get_current_epoch(state) + MIN_SEED_LOOKAHEAD + 1\nlet new_proposers = get_beacon_proposer_indices(state, next_epoch)\nfor i in 0 ..< SLOTS_PER_EPOCH:\n  if new_proposers[i].isSome():\n    mitem(state.proposer_lookahead, last_epoch_start + i) = new_proposers[i].get.uint64\n\n// RELATED: beacon_chain/spec/state_transition_block.nim:process_randao (lines 90-120)\n// RANDAO reveal verification and mixing\nproc process_randao(\n    state: var ForkyBeaconState,\n    body: SomeForkyBeaconBlockBody | SomeForkyBlindedBeaconBlockBody,\n    flags: UpdateFlags, cache: var StateCache): Result[void, cstring] =\n  let proposer_index = get_beacon_proposer_index(state, cache).valueOr: ...\n  if skipBlsValidation notin flags and body.randao_reveal isnot TrustedSig:\n    if not verify_epoch_signature(state.fork, state.genesis_validators_root, epoch, proposer_pubkey, body.randao_reveal):\n      return err(\"process_randao: invalid epoch signature\")\n  let mix = get_randao_mix(state, epoch)\n  let rr = eth2digest(body.randao_reveal.toRaw()).data"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#10",
+        "property_id": "PROP-W1B10-53",
+        "title": "Supporting Node Check: Verify validator randao contributions cannot be withheld or replayed to influence proposer selection",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Consensus protocol",
+            "Randao contribution",
+            "MIN_SEED_LOOKAHEAD delay"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Supporting check for boundary integrity - focuses on validator node behavior."
+        },
+        "test_procedure": "1. Review how validator randao contributions are collected and validated. 2. Verify that missing randao contributions are handled correctly. 3. Check for replay protection on randao contributions. 4. Verify that the consensus layer properly rejects late or out-of-order randao values. 5. Test scenarios where a validator deliberately withholds their randao contribution to influence the mix.",
+        "bug_class": "Randomness Manipulation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-53, Supporting check for nodes: actor-validator, actor-consensus-layer"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/state_transition_block.nim",
+            "symbol": "process_randao",
+            "line_range": {
+              "start": 90,
+              "end": 120
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/state_transition_epoch.nim",
+            "symbol": "process_randao_mixes_reset",
+            "line_range": {
+              "start": 1048,
+              "end": 1058
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/state_transition_block.nim:process_randao (lines 90-120)\nproc process_randao(\n    state: var ForkyBeaconState,\n    body: SomeForkyBeaconBlockBody | SomeForkyBlindedBeaconBlockBody,\n    flags: UpdateFlags, cache: var StateCache): Result[void, cstring] =\n  let proposer_index = get_beacon_proposer_index(state, cache).valueOr: ...\n  let epoch = state.get_current_epoch()\n  if skipBlsValidation notin flags and body.randao_reveal isnot TrustedSig:\n    let proposer_pubkey = state.validators.item(proposer_index).pubkey\n    if not verify_epoch_signature(state.fork, state.genesis_validators_root, epoch, proposer_pubkey, body.randao_reveal):\n      return err(\"process_randao: invalid epoch signature\")\n  let mix = get_randao_mix(state, epoch)\n  let rr = eth2digest(body.randao_reveal.toRaw()).data\n\n// RELATED: beacon_chain/spec/state_transition_epoch.nim:process_randao_mixes_reset (lines 1048-1058)\nfunc process_randao_mixes_reset*(state: var ForkyBeaconState) =\n  let current_epoch = get_current_epoch(state)\n  let next_epoch = current_epoch + 1\n  state.randao_mixes[next_epoch mod EPOCHS_PER_HISTORICAL_VECTOR] =\n    get_randao_mix(state, current_epoch)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#12",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Trust Boundary Integrity for tb-009: Are all proposer indices from compute_proposer_indices validated against the active validator set?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot."
+        },
+        "test_procedure": "1. Identify the compute_proposer_indices function and trace all validator index selection paths. 2. Verify that the function explicitly checks each selected index against the active validator set for the target epoch. 3. Test with edge cases. 4. Verify that the epoch parameter used for active set lookup matches the epoch for which proposers are being computed. 5. Check for race conditions where validator status could change during computation. 6. Attempt to construct a scenario where an inactive validator index is returned.",
+        "bug_class": "State Consistency",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-35, Trust Boundary: tb-009, Source Invariant: FULU-SG004-INV-003, Threat: stride-010"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "compute_proposer_indices",
+            "line_range": {
+              "start": 444,
+              "end": 462
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "get_active_validator_indices",
+            "line_range": {
+              "start": 80,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "is_active_validator",
+            "line_range": {
+              "start": 68,
+              "end": 70
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/validator.nim:compute_proposer_indices (lines 444-462)\nfunc compute_proposer_indices*(\n    state: ForkyBeaconState,\n    epoch: Epoch, seed: Eth2Digest,\n    indices: seq[ValidatorIndex]\n): seq[Opt[ValidatorIndex]] =\n  # indices is already filtered to active validators from caller\n  var proposerIndices: seq[Opt[ValidatorIndex]]\n  for epochSlot in epoch.slots():\n    ...\n    let proposerIndex = compute_proposer_index(state, indices, slotSeed)\n    proposerIndices.add(proposerIndex)\n  proposerIndices\n\n// CALLEE: beacon_chain/spec/helpers.nim:get_active_validator_indices (lines 80-93)\niterator get_active_validator_indices*(state: ForkyBeaconState, epoch: Epoch):\n    ValidatorIndex =\n  for vidx in state.validators.vindices:\n    if is_active_validator(state.validators[vidx], epoch):\n      yield vidx\n\n// CALLEE: beacon_chain/spec/helpers.nim:is_active_validator (lines 68-70)\nfunc is_active_validator*(validator: Validator, epoch: Epoch): bool =\n  ## Check if ``validator`` is active.\n  validator.activation_epoch <= epoch and epoch < validator.exit_epoch"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#11",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Consensus Layer Correctly Filters Exited Validators from Proposer Selection",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot."
+        },
+        "test_procedure": "1. Review the consensus layer's get_active_validator_indices function to verify it correctly excludes exited validators. 2. Trace how validator exit_epoch is checked against the current/target epoch. 3. Verify that validators with exit_epoch <= current_epoch are excluded. 4. Test boundary conditions: validator exits exactly at the epoch boundary. 5. Confirm that the active set used for proposer selection is computed atomically.",
+        "bug_class": "Logic Error",
+        "risk_category": "Denial of Service",
+        "notes": "Supporting check for actor-consensus-layer. Source: PROP-W1B10-35"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "is_active_validator",
+            "line_range": {
+              "start": 68,
+              "end": 70
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "get_active_validator_indices",
+            "line_range": {
+              "start": 80,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/helpers.nim:is_active_validator (lines 68-70)\nfunc is_active_validator*(validator: Validator, epoch: Epoch): bool =\n  ## Check if ``validator`` is active.\n  validator.activation_epoch <= epoch and epoch < validator.exit_epoch\n  # NOTE: exit_epoch is strictly less than (not <=), so exited validators excluded\n\n// CALLER: beacon_chain/spec/helpers.nim:get_active_validator_indices (lines 80-93)\niterator get_active_validator_indices*(state: ForkyBeaconState, epoch: Epoch):\n    ValidatorIndex =\n  for vidx in state.validators.vindices:\n    if is_active_validator(state.validators[vidx], epoch):\n      yield vidx\n\nfunc get_active_validator_indices*(state: ForkyBeaconState, epoch: Epoch): seq[ValidatorIndex] =\n  var res = newSeqOfCap[ValidatorIndex](state.validators.len)\n  for vidx in get_active_validator_indices(state, epoch):\n    res.add vidx\n  res"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#8",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#8",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Slashed Validators Cannot Be Selected as Block Proposers",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot."
+        },
+        "test_procedure": "1. Identify how the slashed flag is checked during proposer selection. 2. Verify that compute_proposer_indices excludes validators where slashed == true. 3. Test scenario: validator gets slashed between lookahead computation and actual slot. 4. Verify that if a slashed validator somehow produces a block, it is rejected by honest nodes. 5. Check if there are any code paths that could allow a slashed validator to bypass this filter. 6. Review historical slashing events to ensure the exclusion logic is consistent with specification.",
+        "bug_class": "Logic Error",
+        "risk_category": "Tampering",
+        "notes": "Supporting check for actor-validator. A slashed validator producing blocks could create conflicting blocks. Source: PROP-W1B10-35"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "is_active_validator",
+            "line_range": {
+              "start": 68,
+              "end": 70
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/validator.nim",
+            "symbol": "compute_proposer_indices",
+            "line_range": {
+              "start": 444,
+              "end": 462
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/helpers.nim:is_active_validator (lines 68-70)\nfunc is_active_validator*(validator: Validator, epoch: Epoch): bool =\n  validator.activation_epoch <= epoch and epoch < validator.exit_epoch\n  # NOTE: slashed validators retain their activation/exit epochs;\n  // they are filtered by exit_epoch (slashing advances exit_epoch)\n  // Slashed validators undergo exit processing which sets exit_epoch\n\n// RELATED: beacon_chain/spec/validator.nim:compute_proposer_indices (lines 444-462)\n// Takes 'indices: seq[ValidatorIndex]' - filtered to active validators by caller\nfunc compute_proposer_indices*(\n    state: ForkyBeaconState, epoch: Epoch, seed: Eth2Digest,\n    indices: seq[ValidatorIndex]): seq[Opt[ValidatorIndex]] ="
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0004",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0004",
+        "property_id": "PROP-W1B10-35",
+        "title": "Verify Not-Yet-Activated Validators Are Excluded from Proposer Selection",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "If an inactive validator is selected as proposer, they cannot produce a block, causing a missed slot."
+        },
+        "test_procedure": "1. Review how activation_epoch is checked in the proposer selection logic. 2. Verify that validators with activation_epoch > current_epoch are excluded from the active set. 3. Test edge case: validator activates exactly at the epoch for which proposers are being computed. 4. Check that the lookahead computation correctly uses the future epoch's active set, not the current one. 5. Verify no off-by-one errors in epoch comparisons. 6. Test with validators in the activation queue to ensure they cannot be selected prematurely.",
+        "bug_class": "Logic Error",
+        "risk_category": "Denial of Service",
+        "notes": "Supporting check for actor-validator. Source: PROP-W1B10-35"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "is_active_validator",
+            "line_range": {
+              "start": 68,
+              "end": 70
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/helpers.nim",
+            "symbol": "get_active_validator_indices",
+            "line_range": {
+              "start": 80,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/helpers.nim:is_active_validator (lines 68-70)\nfunc is_active_validator*(validator: Validator, epoch: Epoch): bool =\n  ## Check if ``validator`` is active.\n  validator.activation_epoch <= epoch and epoch < validator.exit_epoch\n  # activation_epoch <= epoch required: future validators (activation_epoch > epoch) excluded\n  # This is the direct guard against not-yet-activated validators\n\n// CALLER: beacon_chain/spec/helpers.nim:get_active_validator_indices (lines 80-93)\niterator get_active_validator_indices*(state: ForkyBeaconState, epoch: Epoch):\n    ValidatorIndex =\n  for vidx in state.validators.vindices:\n    if is_active_validator(state.validators[vidx], epoch):\n      yield vidx"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#13",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#13",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify Trust Boundary Integrity for tb-004: Are P2P block submissions with maximum blob commitments properly rate-limited to prevent resource exhaustion?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count."
+        },
+        "test_procedure": "1. Identify the P2P block gossip handler and locate the rate-limiting logic for block proposals. 2. Verify that the rate limit enforces at most one block per slot per proposer. 3. Simulate a malicious peer sending multiple blocks with maximum blob commitments in the same slot from the same proposer identity. 4. Confirm that excess blocks are rejected and the peer is penalized or disconnected. 5. Measure memory and CPU usage when receiving blocks at the dynamically configured maximum blob limit (EIP-7892). 6. Verify that resource consumption remains bounded even under sustained attack.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-54, Trust Boundary: tb-004, Threat: stride-015. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBeaconBlockDeneb",
+            "line_range": {
+              "start": 378,
+              "end": 396
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "getMaxBlobsPerBlock",
+            "line_range": {
+              "start": 294,
+              "end": 302
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/gossip_processing/gossip_validation.nim:validateBeaconBlockDeneb (lines 378-396)\ntemplate validateBeaconBlockDeneb(\n    dag: ChainDAGRef,\n    signed_beacon_block: deneb.SignedBeaconBlock | electra.SignedBeaconBlock | fulu.SignedBeaconBlock,\n    wallTime: BeaconTime): untyped =\n  # [REJECT] The length of KZG commitments is less than or equal to the\n  // limitation defined in Consensus Layer\n  let blob_params = dag.cfg.get_blob_parameters(signed_beacon_block.message.slot.epoch())\n  if not (lenu64(signed_beacon_block.message.body.blob_kzg_commitments) <=\n      blob_params.MAX_BLOBS_PER_BLOCK):\n    return dag.checkedReject(\"validateBeaconBlockDeneb: too many blob commitments\")\n\n// RELATED: beacon_chain/gossip_processing/gossip_validation.nim:getMaxBlobsPerBlock (lines 294-302)\nfunc getMaxBlobsPerBlock(cfg: RuntimeConfig, slot: Slot): uint64 =\n  let epoch = slot.epoch\n  if epoch >= cfg.FULU_FORK_EPOCH:\n    get_blob_parameters(cfg, epoch).MAX_BLOBS_PER_BLOCK\n  elif epoch >= cfg.ELECTRA_FORK_EPOCH:\n    cfg.MAX_BLOBS_PER_BLOCK_ELECTRA\n  else:\n    cfg.MAX_BLOBS_PER_BLOCK"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#12",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify P2P Peer Validation: Does the P2P layer properly authenticate and track proposer identity for rate-limiting purposes?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count."
+        },
+        "test_procedure": "1. Review how proposer identity is extracted and validated from incoming P2P block messages. 2. Check if proposer identity can be spoofed or if rate-limiting can be bypassed by forging proposer IDs. 3. Verify that rate-limiting is applied per authenticated proposer, not per connection or IP. 4. Test whether a single malicious peer can masquerade as multiple proposers to circumvent rate limits. 5. Confirm cryptographic validation of proposer signatures before processing resource-intensive blob data.",
+        "bug_class": "Authentication Bypass",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-W1B10-54, Supporting check for node: actor-p2p-peer. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBeaconBlockDeneb",
+            "line_range": {
+              "start": 378,
+              "end": 396
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/gossip_processing/eth2_processor.nim",
+            "symbol": "eth2_processor",
+            "line_range": {
+              "start": 1,
+              "end": 50
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/gossip_processing/gossip_validation.nim:validateBeaconBlockDeneb (lines 378-396)\n// Blob count check in P2P gossip validation pipeline\nlet blob_params = dag.cfg.get_blob_parameters(signed_beacon_block.message.slot.epoch())\nif not (lenu64(signed_beacon_block.message.body.blob_kzg_commitments) <=\n    blob_params.MAX_BLOBS_PER_BLOCK):\n  return dag.checkedReject(\"validateBeaconBlockDeneb: too many blob commitments\")\n\n// NOTE: Gossip validation pipeline processes blocks received from P2P peers\n// Rate-limiting and proposer identity checks are enforced via gossip scoring\n// in eth2_processor.nim and block_processor.nim"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#9",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#9",
+        "property_id": "PROP-W1B10-54",
+        "title": "Verify Consensus Layer Resource Management: Does the consensus layer properly bound resource allocation for blob commitment validation?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Rate limiting"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "A P2P peer can send blocks with maximum blob count."
+        },
+        "test_procedure": "1. Identify the consensus layer components that process incoming blocks with blob commitments. 2. Review memory allocation patterns when processing blocks at the dynamic blob limit. 3. Verify that blob KZG commitment validation is properly bounded in time and memory. 4. Check for any amplification attacks where a small attacker input causes disproportionate computation. 5. Test behavior when the dynamic blob limit (EIP-7892) is at its maximum configuration. 6. Verify graceful degradation under load rather than crash or hang conditions.",
+        "bug_class": "Resource Exhaustion",
+        "risk_category": "Availability",
+        "notes": "Source: PROP-W1B10-54, Supporting check for node: actor-consensus-layer. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBeaconBlockDeneb",
+            "line_range": {
+              "start": 378,
+              "end": 396
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBlobSidecar",
+            "line_range": {
+              "start": 398,
+              "end": 440
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/gossip_processing/gossip_validation.nim:validateBeaconBlockDeneb (lines 378-396)\n// Early rejection bounds resource use - blob count checked before expensive ops\nlet blob_params = dag.cfg.get_blob_parameters(signed_beacon_block.message.slot.epoch())\nif not (lenu64(signed_beacon_block.message.body.blob_kzg_commitments) <=\n    blob_params.MAX_BLOBS_PER_BLOCK):\n  return dag.checkedReject(\"validateBeaconBlockDeneb: too many blob commitments\")\n\n// RELATED: beacon_chain/gossip_processing/gossip_validation.nim:validateBlobSidecar (lines 398-440)\n// [REJECT] The sidecar's index is consistent with MAX_BLOBS_PER_BLOCK\nif not (blob_sidecar.index < dag.cfg.getMaxBlobsPerBlock(block_header.slot)):\n  return dag.checkedReject(\"BlobSidecar: index inconsistent\")"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#14",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#14",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Trust Boundary Integrity for tb-005: Are execution payloads with invalid blob commitment counts rejected before forwarding to EL?",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation, wasting CL processing time."
+        },
+        "test_procedure": "1. Identify the CL code path that validates incoming execution payloads from P2P/Consensus. 2. Locate the blob commitment count validation assertion. 3. Verify the assertion order: confirm blob count check occurs BEFORE any Engine API calls to EL. 4. Craft test payloads that pass parent_hash, prev_randao, and timestamp checks but have invalid blob commitment counts. 5. Submit these payloads and verify they are rejected at the blob count assertion. 6. Monitor Engine API logs to confirm NO calls are made to EL for rejected payloads.",
+        "bug_class": "Denial of Service",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Trust Boundary: tb-005. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/state_transition_block.nim",
+            "symbol": "process_execution_payload",
+            "line_range": {
+              "start": 1075,
+              "end": 1098
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBeaconBlockDeneb",
+            "line_range": {
+              "start": 378,
+              "end": 396
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/state_transition_block.nim:process_execution_payload (lines 1075-1098)\n// Blob count validation sequence: prev_randao -> timestamp -> blob count -> EL call\nif not (payload.prev_randao == get_randao_mix(state, get_current_epoch(state))):\n  return err(\"process_execution_payload: payload and state randomness mismatch\")\nif not (payload.timestamp == compute_timestamp_at_slot(state, state.slot)):\n  return err(\"process_execution_payload: invalid timestamp\")\n// Verify commitments are under limit - BEFORE EL call\nlet blob_params = cfg.get_blob_parameters(get_current_epoch(state))\nif not (lenu64(body.blob_kzg_commitments) <= blob_params.MAX_BLOBS_PER_BLOCK):\n  return err(\"process_execution_payload: too many KZG commitments\")\n// EL call happens AFTER blob count check:\n// if not notify_new_payload(payload):\n//   return err(\"process_execution_payload: execution payload invalid\")"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#13",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#13",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Consensus Layer (actor-consensus-layer) enforces blob count validation before EL interaction",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation."
+        },
+        "test_procedure": "1. Review CL implementation for execution payload handling. 2. Trace the validation sequence from payload receipt to EL forwarding. 3. Verify blob commitment count is validated in the assertion chain. 4. Check for any code paths that could bypass blob count validation. 5. Confirm the CL does not make Engine API newPayload calls for payloads failing blob count checks. 6. Test edge cases: zero blobs, maximum blobs, blob count at boundary values.",
+        "bug_class": "Resource Exhaustion",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Supporting node: actor-consensus-layer. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/state_transition_block.nim",
+            "symbol": "process_execution_payload",
+            "line_range": {
+              "start": 1075,
+              "end": 1098
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/state_transition_block.nim:process_execution_payload (lines 1075-1098)\n// Order: randao check -> timestamp check -> blob count check -> EL notify\nlet blob_params = cfg.get_blob_parameters(get_current_epoch(state))\nif not (lenu64(body.blob_kzg_commitments) <= blob_params.MAX_BLOBS_PER_BLOCK):\n  return err(\"process_execution_payload: too many KZG commitments\")\n// Only then:\nwhen payload is ForkyExecutionPayloadHeader:\n  state.latest_execution_payload_header = payload  // blinded path\nelse:\n  if not notify_new_payload(payload):  // EL call happens after blob count validation\n    return err(\"process_execution_payload: execution payload invalid\")"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#10",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#10",
+        "property_id": "PROP-W1B10-55",
+        "title": "Verify Proposer (actor-proposer) cannot cause CL to forward invalid blob count payloads",
+        "severity": "Low",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Consensus"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "P2P gossip validation",
+            "Block signature verification"
+          ],
+          "bug_bounty_scope": "conditional",
+          "notes": "An attacker could submit blocks that pass early checks but fail blob count validation."
+        },
+        "test_procedure": "1. Identify how proposer-originated blocks enter the validation pipeline. 2. Verify that proposer blocks undergo the same blob count validation as P2P-received blocks. 3. Test if a malicious proposer can craft blocks that bypass blob count checks. 4. Verify that even locally-built blocks are validated before EL submission. 5. Check rate limiting and anti-spam measures for proposer-submitted blocks.",
+        "bug_class": "Input Validation",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-55, Supporting node: actor-proposer. CONDITIONAL SCOPE."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/state_transition_block.nim",
+            "symbol": "process_execution_payload",
+            "line_range": {
+              "start": 1075,
+              "end": 1098
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateBeaconBlockDeneb",
+            "line_range": {
+              "start": 378,
+              "end": 396
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/state_transition_block.nim:process_execution_payload (lines 1075-1098)\n// Both P2P-received and locally-proposed blocks go through state_transition_block\n// which enforces blob count validation before any EL interaction\nlet blob_params = cfg.get_blob_parameters(get_current_epoch(state))\nif not (lenu64(body.blob_kzg_commitments) <= blob_params.MAX_BLOBS_PER_BLOCK):\n  return err(\"process_execution_payload: too many KZG commitments\")"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#15",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#15",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify Trust Boundary Integrity for tb-002: Does the precompile correctly trigger out-of-gas revert when available_gas < 6900?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert."
+        },
+        "test_procedure": "1. Identify the precompile gas check implementation at the EVM-precompile boundary (tb-002). 2. Call the precompile with exactly 6899 gas and verify it reverts with out-of-gas. 3. Verify that all remaining gas is consumed upon revert. 4. Call with exactly 6900 gas and verify no revert occurs due to gas. 5. Test edge cases: 0 gas, 1 gas, 6898 gas, 6900 gas, 6901 gas. 6. Verify this is the ONLY condition under which the precompile reverts. 7. Compare behavior across different client implementations for consistency.",
+        "bug_class": "Gas Accounting",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-W1B10-58, Trust Boundary: tb-002, Source Invariant: EIP7951-SG006-INV-002, Source Assumption: asm-002"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: This check targets an EVM precompile (gas cost 6900) which lives in the\n// Execution Layer codebase, not the Consensus Layer (nimbus-eth2).\n// nimbus-eth2 is a CL client and does not implement EVM precompile logic.\n// The relevant implementation would be in an EL client (e.g., nimbus-eth1, go-ethereum)."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#14",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#14",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify EVM-to-Precompile Gas Consumption: Is remaining gas fully consumed on out-of-gas revert?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert."
+        },
+        "test_procedure": "1. Construct a transaction calling the precompile with gas < 6900. 2. After the revert, verify that gasUsed equals the gas provided. 3. Check that no gas is refunded to the caller. 4. Verify consistency with other EVM out-of-gas behaviors. 5. Test from nested call contexts to ensure gas consumption propagates correctly.",
+        "bug_class": "Gas Accounting",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-58, Supporting check for actor-evm node"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: EVM gas accounting for precompiles is an Execution Layer concern.\n// nimbus-eth2 is a Consensus Layer client; EVM precompile implementation is out of scope."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#11",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#11",
+        "property_id": "PROP-W1B10-58",
+        "title": "Verify Precompile Revert Exclusivity: Does the precompile revert ONLY for gas < 6900?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "validation_layers": [
+            "Transaction validation",
+            "Gas availability"
+          ],
+          "bug_bounty_scope": "in-scope",
+          "notes": "A caller can deliberately provide exactly 6899 gas to trigger the out-of-gas revert."
+        },
+        "test_procedure": "1. Review precompile implementation for all potential revert/error paths. 2. Verify that when gas >= 6900, no revert can occur regardless of input. 3. Test with malformed inputs, edge-case values, and boundary conditions with sufficient gas. 4. Confirm that input validation errors do NOT cause reverts but are handled per EIP specification. 5. Fuzz the precompile with various inputs while providing >= 6900 gas and verify no reverts.",
+        "bug_class": "Control Flow Integrity",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-58, Supporting check for actor-precompile node"
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: EVM precompile revert logic is an Execution Layer concern.\n// nimbus-eth2 is a Consensus Layer client; EVM precompile implementation is out of scope."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#16",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#16",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Trust Boundary Integrity for tb-008: Is BLOB_SCHEDULE sorted in descending epoch order to ensure correct parameter lookup?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup. Descending sort finds the most recent applicable entry."
+        },
+        "test_procedure": "1. Locate the get_blob_parameters function and identify the BLOB_SCHEDULE data structure. 2. Verify that the schedule is sorted in DESCENDING order by epoch. 3. Create test cases with multiple epoch entries and confirm the function returns the first entry where epoch >= entry.EPOCH. 4. Attempt to falsify by temporarily changing sort order to ascending and verify that incorrect parameters are returned. 5. Compare sort direction implementation across different client implementations. 6. Check for any edge cases: empty schedule, single entry, epoch boundary conditions.",
+        "bug_class": "Consensus Logic",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Trust Boundary: tb-008, Primary Element: SG-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/presets.nim",
+            "symbol": "cmpBlobParameters",
+            "line_range": {
+              "start": 773,
+              "end": 776
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "get_blob_parameters",
+            "line_range": {
+              "start": 1102,
+              "end": 1112
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon_chain/spec/datatypes/base.nim",
+            "symbol": "doAssert_isSorted_BLOB_SCHEDULE",
+            "line_range": {
+              "start": 975,
+              "end": 975
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/presets.nim:cmpBlobParameters (lines 773-776)\nfunc cmpBlobParameters*(x, y: BlobParameters): int =\n  # Don't care about ties and want reverse order.\n  cmp(y.EPOCH.distinctBase, x.EPOCH.distinctBase)\n  # NOTE: y before x = descending sort (highest epoch first)\n\n// CALLEE: beacon_chain/spec/forks.nim:get_blob_parameters (lines 1102-1112)\n// https://github.com/ethereum/consensus-specs/blob/v1.6.0-alpha.2/specs/fulu/beacon-chain.md#new-get_blob_parameters\nfunc get_blob_parameters*(cfg: RuntimeConfig, epoch: Epoch): BlobParameters =\n  ## Return the blob parameters at a given epoch.\n  for entry in cfg.BLOB_SCHEDULE:\n    if epoch >= entry.EPOCH:\n      return entry  // First match in descending-sorted schedule = most recent applicable\n  BlobParameters(\n    EPOCH: cfg.ELECTRA_FORK_EPOCH,\n    MAX_BLOBS_PER_BLOCK: cfg.MAX_BLOBS_PER_BLOCK_ELECTRA)\n\n// RELATED: beacon_chain/spec/datatypes/base.nim (line 975)\ndoAssert isSorted(cfg.BLOB_SCHEDULE, cmp = cmpBlobParameters)  // runtime validation"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#15",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#15",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Blob Schedule Consensus: Do all client implementations use identical sorting direction for BLOB_SCHEDULE lookup?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup."
+        },
+        "test_procedure": "1. Identify all client implementations that process blob parameters. 2. For each implementation, locate the BLOB_SCHEDULE sorting logic. 3. Verify that ALL implementations use descending (reverse) order by epoch. 4. Create cross-client test vectors. 5. Document any discrepancies between clients that could lead to consensus failures.",
+        "bug_class": "Consensus Logic",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Supporting node check for actor-blob-schedule and actor-consensus-layer."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/presets.nim",
+            "symbol": "cmpBlobParameters",
+            "line_range": {
+              "start": 773,
+              "end": 776
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "get_blob_parameters",
+            "line_range": {
+              "start": 1102,
+              "end": 1112
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/presets.nim:cmpBlobParameters (lines 773-776)\nfunc cmpBlobParameters*(x, y: BlobParameters): int =\n  # Don't care about ties and want reverse order.\n  cmp(y.EPOCH.distinctBase, x.EPOCH.distinctBase)  // descending by epoch\n\n// CALLEE: beacon_chain/spec/forks.nim:get_blob_parameters (lines 1102-1112)\nfunc get_blob_parameters*(cfg: RuntimeConfig, epoch: Epoch): BlobParameters =\n  for entry in cfg.BLOB_SCHEDULE:\n    if epoch >= entry.EPOCH:\n      return entry\n  BlobParameters(EPOCH: cfg.ELECTRA_FORK_EPOCH, MAX_BLOBS_PER_BLOCK: cfg.MAX_BLOBS_PER_BLOCK_ELECTRA)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#12",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#12",
+        "property_id": "PROP-W1B10-59",
+        "title": "Verify Blob Parameter Lookup Logic: Does get_blob_parameters correctly return the first matching entry from descending-sorted schedule?",
+        "severity": "High",
+        "mindset": "Formal Verification Engineer",
+        "is_boundary_check": false,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Sorting direction is critical for correct schedule lookup."
+        },
+        "test_procedure": "1. Construct a BLOB_SCHEDULE with multiple entries at different epochs. 2. Query get_blob_parameters at epoch 250 - verify it returns parameters from epoch 200 entry. 3. Query at epoch 350 - verify it returns parameters from epoch 300. 4. Query at epoch 99 - verify behavior when no matching entry exists. 5. Verify the invariant: for any query epoch E, the returned entry's EPOCH is the largest value <= E. 6. Test epoch boundary: query at exactly the epoch value of an entry.",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-W1B10-59, Invariant verification for SG-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "get_blob_parameters",
+            "line_range": {
+              "start": 1102,
+              "end": 1112
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/presets.nim",
+            "symbol": "cmpBlobParameters",
+            "line_range": {
+              "start": 773,
+              "end": 776
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/forks.nim:get_blob_parameters (lines 1102-1112)\nfunc get_blob_parameters*(cfg: RuntimeConfig, epoch: Epoch): BlobParameters =\n  ## Return the blob parameters at a given epoch.\n  // BLOB_SCHEDULE is sorted descending (highest epoch first)\n  // First match where epoch >= entry.EPOCH is the most recent applicable entry\n  for entry in cfg.BLOB_SCHEDULE:\n    if epoch >= entry.EPOCH:\n      return entry  // largest EPOCH <= query epoch\n  // Fallback if query epoch is before all scheduled entries\n  BlobParameters(\n    EPOCH: cfg.ELECTRA_FORK_EPOCH,\n    MAX_BLOBS_PER_BLOCK: cfg.MAX_BLOBS_PER_BLOCK_ELECTRA)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#17",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#17",
+        "property_id": "PROP-W1B10-60",
+        "title": "Verify Trust Boundary Integrity for tb-010: Is the compute_fork_digest hashing scheme for blob parameters implemented identically across all client implementations?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Any deviation in byte encoding or concatenation order would produce different hashes, causing network partitions."
+        },
+        "test_procedure": "1. Identify all client implementations of compute_fork_digest for blob parameters. 2. Verify the uint_to_bytes encoding specification: byte width, endianness, padding. 3. Verify concatenation order: confirm all clients compute hash(uint_to_bytes(epoch) + uint_to_bytes(max_blobs_per_block)). 4. Verify the hash function used is identical across all implementations. 5. Create test vectors with known values. 6. Execute compute_fork_digest on each client implementation with identical inputs. 7. Compare hash outputs across all clients.",
+        "bug_class": "Cross-Client Consensus Divergence",
+        "risk_category": "Denial of Service / Network Partition",
+        "notes": "Source: PROP-W1B10-60, Trust Boundary: tb-010, Assumption: asm-010, Threat: stride-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "compute_fork_digest_fulu",
+            "line_range": {
+              "start": 1764,
+              "end": 1790
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/forks.nim:compute_fork_digest_fulu (lines 1764-1790)\n// https://github.com/ethereum/consensus-specs/blob/v1.6.0-alpha.2/specs/fulu/beacon-chain.md#modified-compute_fork_digest\nfunc compute_fork_digest_fulu*(\n    cfg: RuntimeConfig, genesis_validators_root: Eth2Digest, epoch: Epoch):\n    ForkDigest =\n  let\n    fork_version = forkVersionAtEpoch(cfg, epoch)\n    base_digest = compute_fork_data_root(fork_version, genesis_validators_root)\n    blob_parameters = get_blob_parameters(cfg, epoch)\n  var bpo_buf: array[16, byte]\n  bpo_buf[0 .. 7] = toBytesLE(distinctBase(blob_parameters.EPOCH))    // uint64 LE encoding of epoch\n  bpo_buf[8 .. 15] = toBytesLE(blob_parameters.MAX_BLOBS_PER_BLOCK)   // uint64 LE encoding of max_blobs\n  let bpo_digest = eth2digest(bpo_buf)  // SHA256 hash of [epoch_bytes || max_blobs_bytes]\n  var res: array[4, byte]\n  staticFor i, 0 ..< len(res):\n    res[i] = base_digest.data[i] xor bpo_digest.data[i]  // XOR base fork digest with BPO digest\n  ForkDigest(res)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#16",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#16",
+        "property_id": "PROP-W1B10-60",
+        "title": "Verify Consensus Layer Implementation: Does actor-consensus-layer correctly implement the canonical blob parameter hashing invariant?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "validation_layers": [],
+          "bug_bounty_scope": "in-scope",
+          "notes": "Any deviation in byte encoding would produce different hashes, causing network partitions."
+        },
+        "test_procedure": "1. Locate the consensus layer code responsible for fork digest computation. 2. Review the implementation of uint_to_bytes encoding. 3. Check for any platform-specific behaviors. 4. Verify that the hash function used matches the canonical specification. 5. Check for any edge cases: zero values, maximum values. 6. Review any serialization libraries used. 7. Verify that no implicit type conversions could alter the byte representation.",
+        "bug_class": "Cryptographic Implementation Error",
+        "risk_category": "Tampering / Denial of Service",
+        "notes": "Source: PROP-W1B10-60, Supporting node check for actor-consensus-layer."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "compute_fork_digest_fulu",
+            "line_range": {
+              "start": 1764,
+              "end": 1790
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon_chain/spec/forks.nim",
+            "symbol": "compute_fork_digest",
+            "line_range": {
+              "start": 1753,
+              "end": 1762
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "grep_fallback"
+      },
+      "code_excerpt": "// PRIMARY: beacon_chain/spec/forks.nim:compute_fork_digest_fulu (lines 1764-1790)\n// toBytesLE uses little-endian encoding for both epoch and max_blobs_per_block\n// bpo_buf[0..7] = epoch as uint64 LE, bpo_buf[8..15] = max_blobs as uint64 LE\n// eth2digest uses SHA-256 (ethereum2 digest)\nvar bpo_buf: array[16, byte]\nbpo_buf[0 .. 7] = toBytesLE(distinctBase(blob_parameters.EPOCH))\nbpo_buf[8 .. 15] = toBytesLE(blob_parameters.MAX_BLOBS_PER_BLOCK)\nlet bpo_digest = eth2digest(bpo_buf)\n// XOR first 4 bytes of base digest with first 4 bytes of bpo_digest\nvar res: array[4, byte]\nstaticFor i, 0 ..< len(res):\n  res[i] = base_digest.data[i] xor bpo_digest.data[i]\nForkDigest(res)"
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0001#18",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0001#18",
+        "property_id": "PROP-0001",
+        "title": "Verify Trust Boundary Integrity: Is keccak256 hash of RLP-encoded trie deterministic regardless of insertion order?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Identify all entry points for transaction submission that affect trie state. 2. Craft two valid transaction sequences that produce identical final state but differ in ordering. 3. Execute both sequences and compare resulting state roots. 4. Verify that root(T1) == root(T2) for identical key-value mappings. 5. Test with block producers controlling transaction ordering.",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0001, Trust Boundaries: tb-001, tb-007. Violation would cause consensus splits."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: Merkle Patricia Trie (MPT) implementation is an Execution Layer concern.\n// nimbus-eth2 is a Consensus Layer client and does not implement RLP-encoded MPT state trie logic.\n// The relevant implementation would be in an EL client (e.g., ethereum/execution-specs, nimbus-eth1)."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0002#17",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0002#17",
+        "property_id": "PROP-0003",
+        "title": "Verify Trust Boundary Integrity: Is the 32-byte RLP encoding threshold consistently enforced in encode_internal_node?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Craft state entries that produce trie nodes with RLP encodings at exactly 32 bytes. 2. Test boundary condition: verify len(rlp.encode(...)) < 32 returns unencoded form. 3. Verify len(rlp.encode(...)) >= 32 returns keccak256 hash. 4. Compare handling across different client implementations. 5. Check for off-by-one errors in comparison.",
+        "bug_class": "Boundary Condition",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0003, Trust Boundaries: tb-002, tb-004, tb-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: encode_internal_node / RLP encoding threshold is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no MPT encode_internal_node found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0003#13",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0003#13",
+        "property_id": "PROP-0004",
+        "title": "Verify Trust Boundary Integrity: Is storage_root validated as non-None for all Account nodes in encode_node?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create contract creation transaction with both code and initial storage. 2. Test race conditions between storage root computation and account encoding. 3. Verify assertion fires if storage_root is None. 4. Check what happens if None storage_root is silently used. 5. Test Fusaka-specific storage layout changes.",
+        "bug_class": "Input Validation",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0004, Trust Boundary: tb-006."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: encode_node / storage_root validation is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no MPT encode_node found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0004#2",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0004#2",
+        "property_id": "PROP-0005",
+        "title": "Verify Trust Boundary Integrity: Are all Fusaka/Osaka-specific types explicitly handled in encode_node before fallback?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "internal-only",
+          "entry_points": [
+            "Internal"
+          ],
+          "attacker_controlled": false,
+          "bug_bounty_scope": "conditional"
+        },
+        "test_procedure": "1. Review encode_node isinstance checks for exhaustiveness. 2. Identify all new Fusaka transaction and receipt types. 3. Verify each Fusaka type is handled before previous_trie.encode_node fallback. 4. Test with new EIP-7702 set-code transactions if applicable. 5. Compare encoding outputs between Fusaka and previous fork encoders.",
+        "bug_class": "Type Confusion",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0005, Trust Boundary: tb-005."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: encode_node type dispatch is an Execution Layer (Python EVM spec) concern.\n// nimbus-eth2 is a CL client; no encode_node Fusaka type handling found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0005",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0005",
+        "property_id": "PROP-0006",
+        "title": "Verify Trust Boundary Integrity: Does copy_trie produce true isolation between original and copy?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create trie copy and verify _data modifications to copy do not affect original. 2. Test with block producers controlling transaction ordering during re-org. 3. Check if shallow copy shares mutable state with original. 4. Verify secured and default fields are preserved. 5. Test concurrent access to original and copy during speculative execution.",
+        "bug_class": "Aliasing",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0006, Trust Boundary: tb-007."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: copy_trie isolation is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no copy_trie found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0006",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0006",
+        "property_id": "PROP-0007",
+        "title": "Verify Trust Boundary Integrity: Does trie_set properly delete keys when value equals default?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Submit transaction that sets storage value to default (e.g., zero). 2. Verify key is removed from trie._data after operation. 3. Check for phantom entries remaining in trie. 4. Compare state root before and after default-value set. 5. Test with various EVM operations (SSTORE with zero, SELFDESTRUCT).",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0007, Trust Boundary: tb-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: trie_set default value deletion is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no trie_set found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0007",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0007",
+        "property_id": "PROP-0008",
+        "title": "Verify Trust Boundary Integrity: Is trie_set/trie_get roundtrip guaranteed for non-default values?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Craft values that might compare equal to trie.default through type confusion. 2. Test trie_set with various value types. 3. Verify trie_get returns exact value set. 4. Check for unintended deletion of non-default values. 5. Test edge cases: empty bytes vs None, zero U256 vs default.",
+        "bug_class": "Type Confusion",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0008, Trust Boundary: tb-001. Unauthorized fund loss if balances silently deleted."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: trie_set/trie_get roundtrip is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no trie_set/trie_get found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0008",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0008",
+        "property_id": "PROP-0012",
+        "title": "Verify Trust Boundary Integrity: Is nibble_list_to_compact encoding is_leaf flag and parity correct?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Generate nibble lists of various lengths. 2. Verify first_byte_high_nibble == (2 * is_leaf) + (len(x) % 2). 3. Craft Merkle proofs with nodes at compact encoding boundary. 4. Test proof verification to ensure leaf/extension nodes distinguished. 5. Attempt to forge proofs by confusing leaf/extension via compact encoding.",
+        "bug_class": "Encoding Error",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0012, Trust Boundary: tb-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: nibble_list_to_compact is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no compact encoding for MPT found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0009",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0009",
+        "property_id": "PROP-0015",
+        "title": "Verify Trust Boundary Integrity: Are bytes_to_nibble_list and nibble_list_to_compact mutual inverses?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Test roundtrip: decode(compact(nibbles(bytes))) == bytes. 2. Craft proof paths with various byte sequences. 3. Check compact header stripping produces original data. 4. Test edge cases: empty paths, single-byte, 32-byte keys. 5. Attempt proof path manipulation exploiting encode/decode asymmetry.",
+        "bug_class": "Encoding Error",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0015, Trust Boundaries: tb-004, tb-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: bytes_to_nibble_list / nibble_list_to_compact are Execution Layer (MPT) concerns.\n// nimbus-eth2 is a CL client; no MPT nibble encoding found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0010",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0010",
+        "property_id": "PROP-0016",
+        "title": "Verify Trust Boundary Integrity: Does encode_node produce non-empty output for all valid values?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Identify all Fusaka-specific types in encode_node. 2. Test each type to ensure non-empty encoding. 3. Craft transactions triggering each encoding path. 4. Verify assertion in _prepare_trie catches empty encodings. 5. Test boundary conditions between valid and invalid state values.",
+        "bug_class": "Assertion Failure",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0016, Trust Boundary: tb-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: encode_node non-empty output assertion is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no _prepare_trie or MPT encode_node found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0011",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0011",
+        "property_id": "PROP-0017",
+        "title": "Verify Trust Boundary Integrity: Is keccak256 key hashing enforced for secured tries?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Verify trie.secured == True for state trie. 2. Confirm _prepare_trie hashes all keys with keccak256. 3. Check for scenarios where secured flag could be False. 4. Test if attacker can control trie structure via crafted addresses. 5. Attempt DoS through pathological trie shapes with unhashed keys.",
+        "bug_class": "Access Control",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0017, Trust Boundary: tb-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: secured trie keccak256 key hashing is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no secured trie implementation found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0012",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0012",
+        "property_id": "PROP-0018",
+        "title": "Verify Trust Boundary Integrity: Is get_storage_root callback correctly invoked with proper Address?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Verify get_storage_root callback is non-None for Account values. 2. Confirm correct Address derived from preimage. 3. Test with Fusaka-specific storage layout changes. 4. Verify storage root computation for all account types. 5. Check callback behavior during concurrent account modifications.",
+        "bug_class": "Callback Integrity",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0018, Trust Boundary: tb-006."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: get_storage_root callback is an Execution Layer (MPT/account trie) concern.\n// nimbus-eth2 is a CL client; no MPT account encoding found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0013",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0013",
+        "property_id": "PROP-0019",
+        "title": "Verify Trust Boundary Integrity: Does empty trie produce correct EMPTY_TRIE_ROOT?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "EngineAPI"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create empty trie and verify root() == EMPTY_TRIE_ROOT. 2. Confirm EMPTY_TRIE_ROOT == keccak256(rlp.encode(b'')). 3. Test scenario where all state entries are deleted. 4. Verify consistency with expected constant value. 5. Check edge case: trie becoming empty through SELFDESTRUCT.",
+        "bug_class": "Edge Case Handling",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0019, Trust Boundary: tb-003."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: EMPTY_TRIE_ROOT is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no MPT root computation found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0014",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0014",
+        "property_id": "PROP-0020",
+        "title": "Verify Trust Boundary Integrity: Is root() output always exactly 32 bytes?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Transaction",
+            "EngineAPI"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Test tries with very few entries producing small root nodes. 2. Verify root() always returns 32-byte output. 3. Check that small roots are keccak256 hashed. 4. Craft blocks leaving exact number of entries to trigger edge case. 5. Compare root size handling across client implementations.",
+        "bug_class": "Output Validation",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0020, Trust Boundaries: tb-002, tb-003."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: MPT root() 32-byte output is an Execution Layer concern.\n// nimbus-eth2 is a CL client; no MPT root() function found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0015",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0015",
+        "property_id": "PROP-0023",
+        "title": "Verify Trust Boundary Integrity: Does patricialize correctly handle common prefix extension nodes?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create transactions producing keys with specific common prefixes. 2. Verify ExtensionNode returned for shared prefix > 0. 3. Test recursive patricialize at level + prefix_length. 4. Check cross-client consistency in prefix computation. 5. Test edge cases: very long prefixes, single-nibble prefixes.",
+        "bug_class": "Algorithm Error",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0023, Trust Boundary: tb-002."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: patricialize function is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no patricialize found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0016",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0016",
+        "property_id": "PROP-0025",
+        "title": "Verify Trust Boundary Integrity: Are Account/Receipt/Uint rejected at internal branch value positions?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Craft transactions mapping Account/Receipt/Uint to keys matching branch level. 2. Verify AssertionError raised for these types at branch positions. 3. Test with len(key) == level condition. 4. Check all Fusaka-specific types for this constraint. 5. Attempt to bypass through key collision at branch levels.",
+        "bug_class": "Assertion Failure",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0025, Trust Boundaries: tb-001, tb-002."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: MPT branch value type rejection is an Execution Layer concern.\n// nimbus-eth2 is a CL client; no MPT patricialize branch value check found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0017",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0017",
+        "property_id": "PROP-0026",
+        "title": "Verify Trust Boundary Integrity: Does patricialize guarantee termination through increasing level?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction",
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Analyze patricialize recursion invariant: level' > level for all recursive calls. 2. Craft input attempting to cause non-increasing level. 3. Test with pathological key distributions. 4. Verify no infinite recursion possible. 5. Check stack overflow behavior with deep recursion.",
+        "bug_class": "Infinite Loop",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0026, Trust Boundaries: tb-001, tb-002."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: patricialize termination guarantee is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no patricialize found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0018",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0018",
+        "property_id": "PROP-0027",
+        "title": "Verify Trust Boundary Integrity: Is keccak256 collision resistance assumed correctly?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Verify keccak256 implementation correctness against test vectors. 2. Confirm no known collision vulnerabilities. 3. Check for weak hash usage in any code paths. 4. Verify collision probability < 2^-128. 5. Document cryptographic assumption for audit trail.",
+        "bug_class": "Cryptographic Assumption",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0027, Trust Boundaries: tb-001, tb-002, tb-004, tb-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: keccak256 collision resistance for MPT is an Execution Layer concern.\n// nimbus-eth2 is a CL client; it does not implement the MPT state trie."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0019",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0019",
+        "property_id": "PROP-0028",
+        "title": "Verify Trust Boundary Integrity: Is RLP encoding canonical and deterministic?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P",
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Test rlp.encode produces identical output for identical inputs. 2. Verify no two distinct inputs produce same RLP encoding. 3. Check for non-canonical encoding edge cases. 4. Compare RLP output across client implementations. 5. Test with complex nested structures in trie nodes.",
+        "bug_class": "Encoding Error",
+        "risk_category": "Tampering",
+        "notes": "Source: PROP-0028, Trust Boundaries: tb-002, tb-004."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: RLP encoding canonicality for MPT is an Execution Layer concern.\n// nimbus-eth2 is a CL client; no rlp.encode for trie node encoding found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0020",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0020",
+        "property_id": "PROP-0029",
+        "title": "Verify Trust Boundary Integrity: Are nibble values validated in range [0, 15]?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Craft compact encodings that decode to out-of-range nibbles. 2. Verify nibble_list_to_compact rejects or handles values > 15. 3. Test Merkle proof verification with invalid nibbles. 4. Check for overlapping paths caused by out-of-range nibbles. 5. Attempt proof forgery through nibble overflow.",
+        "bug_class": "Input Validation",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0029, Trust Boundaries: tb-002, tb-004, tb-008."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: nibble range validation is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no nibble range validation found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0021",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0021",
+        "property_id": "PROP-0030",
+        "title": "Verify Trust Boundary Integrity: Is P2P block state root verification enforced?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Receive block from malicious peer with crafted transactions. 2. Execute transactions and compute state root. 3. Verify block header state root matches computed root. 4. Test block rejection when state root mismatches. 5. Check for bypass through edge cases in trie construction.",
+        "bug_class": "State Verification",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0030, Trust Boundary: tb-002."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: P2P block state root verification is an Execution Layer (MPT/EVM) concern.\n// nimbus-eth2 is a CL client; state root computation via MPT is out of scope for this target."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0022",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0022",
+        "property_id": "PROP-0031",
+        "title": "Verify Trust Boundary Integrity: Is patricialize complexity bounded by O(N * K)?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "Transaction"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Create transactions with many accounts having long common prefixes. 2. Measure patricialize computation time. 3. Compare computation cost to EVM gas paid. 4. Test for worse-than-polynomial complexity. 5. Verify per-block gas limits provide adequate protection.",
+        "bug_class": "Algorithmic Complexity",
+        "risk_category": "Denial of Service",
+        "notes": "Source: PROP-0031, Trust Boundary: tb-001."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: patricialize complexity analysis is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no patricialize found in target workspace."
+    },
+    {
+      "check_id": "W2B3:W2B3:CHK-0023",
+      "checklist_item": {
+        "check_id": "W2B3:W2B3:CHK-0023",
+        "property_id": "PROP-0032",
+        "title": "Verify Trust Boundary Integrity: Are state sync trie nodes verified against known root?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "reachability": {
+          "classification": "external-reachable",
+          "entry_points": [
+            "P2P"
+          ],
+          "attacker_controlled": true,
+          "bug_bounty_scope": "in-scope"
+        },
+        "test_procedure": "1. Receive trie nodes from sync provider. 2. Verify keccak256(rlp.encode(node)) matches parent reference. 3. Test 32-byte inline/hash boundary handling. 4. Craft nodes exploiting boundary inconsistencies across clients. 5. Verify rejection of nodes failing verification.",
+        "bug_class": "Chain of Trust",
+        "risk_category": "Spoofing",
+        "notes": "Source: PROP-0032, Trust Boundary: tb-004."
+      },
+      "source_file": "outputs/02_PARTIAL_W2B3_1770349505.json",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_error": "",
+        "resolution_method": null
+      },
+      "code_excerpt": "// NOT FOUND: State sync trie node verification is an Execution Layer (MPT) concern.\n// nimbus-eth2 is a CL client; no MPT state sync found in target workspace."
+    }
+  ],
+  "metadata": {
+    "phase": "02c",
+    "worker_id": 7,
+    "batch_index": 8,
+    "item_count": 50,
+    "timestamp": 1771308372,
+    "processed_ids": [
+      "W2B3:W2B3:CHK-0003#5",
+      "W2B3:W2B3:CHK-0001#9",
+      "W2B3:W2B3:CHK-0002#8",
+      "W2B3:W2B3:CHK-0003#6",
+      "W2B3:W2B3:CHK-0001#10",
+      "W2B3:W2B3:CHK-0002#9",
+      "W2B3:W2B3:CHK-0003#7",
+      "W2B3:W2B3:CHK-0001#11",
+      "W2B3:W2B3:CHK-0002#10",
+      "W2B3:W2B3:CHK-0001#12",
+      "W2B3:W2B3:CHK-0002#11",
+      "W2B3:W2B3:CHK-0003#8",
+      "W2B3:W2B3:CHK-0004",
+      "W2B3:W2B3:CHK-0001#13",
+      "W2B3:W2B3:CHK-0002#12",
+      "W2B3:W2B3:CHK-0003#9",
+      "W2B3:W2B3:CHK-0001#14",
+      "W2B3:W2B3:CHK-0002#13",
+      "W2B3:W2B3:CHK-0003#10",
+      "W2B3:W2B3:CHK-0001#15",
+      "W2B3:W2B3:CHK-0002#14",
+      "W2B3:W2B3:CHK-0003#11",
+      "W2B3:W2B3:CHK-0001#16",
+      "W2B3:W2B3:CHK-0002#15",
+      "W2B3:W2B3:CHK-0003#12",
+      "W2B3:W2B3:CHK-0001#17",
+      "W2B3:W2B3:CHK-0002#16",
+      "W2B3:W2B3:CHK-0001#18",
+      "W2B3:W2B3:CHK-0002#17",
+      "W2B3:W2B3:CHK-0003#13",
+      "W2B3:W2B3:CHK-0004#2",
+      "W2B3:W2B3:CHK-0005",
+      "W2B3:W2B3:CHK-0006",
+      "W2B3:W2B3:CHK-0007",
+      "W2B3:W2B3:CHK-0008",
+      "W2B3:W2B3:CHK-0009",
+      "W2B3:W2B3:CHK-0010",
+      "W2B3:W2B3:CHK-0011",
+      "W2B3:W2B3:CHK-0012",
+      "W2B3:W2B3:CHK-0013",
+      "W2B3:W2B3:CHK-0014",
+      "W2B3:W2B3:CHK-0015",
+      "W2B3:W2B3:CHK-0016",
+      "W2B3:W2B3:CHK-0017",
+      "W2B3:W2B3:CHK-0018",
+      "W2B3:W2B3:CHK-0019",
+      "W2B3:W2B3:CHK-0020",
+      "W2B3:W2B3:CHK-0021",
+      "W2B3:W2B3:CHK-0022",
+      "W2B3:W2B3:CHK-0023"
+    ]
+  }
+}
