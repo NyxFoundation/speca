@@ -1,0 +1,903 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-25-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-25-003",
+        "title": "Does the beacon node correctly maintain data availability consistency when receiving duplicate sidecar tuples?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-25"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/subscriber_data_column_sidecar.go",
+            "symbol": "receiveDataColumnSidecar",
+            "line_range": {
+              "start": 37,
+              "end": 60
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "hasSeenDataColumnIndex",
+            "line_range": {
+              "start": 230,
+              "end": 236
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) receiveDataColumnSidecar(ctx context.Context, sidecar blocks.VerifiedRODataColumn) error {\n\tslot := sidecar.SignedBlockHeader.Header.Slot\n\tproposerIndex := sidecar.SignedBlockHeader.Header.ProposerIndex\n\tcolumnIndex := sidecar.Index\n\ts.setSeenDataColumnIndex(slot, proposerIndex, columnIndex)\n\tif err := s.cfg.chain.ReceiveDataColumn(sidecar); err != nil {\n\t\treturn errors.Wrap(err, \"receive data column\")\n\t}\n\t// ... operation feed notification\n\treturn nil\n}",
+      "phase1": {
+        "summary": "Two TOCTOU and ordering issues identified. (1) hasSeenDataColumnIndex (gossip validation goroutine) and setSeenDataColumnIndex (subscriber goroutine) have no composite atomic guarantee. Two peers sending the same sidecar tuple simultaneously can both pass the seen-check before either sets it. (2) setSeenDataColumnIndex is called before chain.ReceiveDataColumn. If storage fails, the cache permanently marks the tuple seen, blocking future redelivery.",
+        "state_anomalies": [
+          "TOCTOU: seen-check in validateDataColumn goroutine is not atomic with set in receiveDataColumnSidecar goroutine",
+          "Set-before-store: seenDataColumnCache marks tuple seen before successful storage, preventing re-delivery on storage failure",
+          "Cache pruning divergence: slotAwareCache.pruneOldestSlots deletes entries from slotToKeys map but does not call cache.Remove on underlying LRU, causing divergence"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete exploit: Two P2P peers A and B simultaneously send the same (slot=S, proposer=P, column=C) sidecar. Gossip validation goroutine 1 calls hasSeenDataColumnIndex(S,P,C) -> false (not set yet). Gossip validation goroutine 2 calls hasSeenDataColumnIndex(S,P,C) -> false (not set yet, race). Both proceed. Both call dataColumnSubscriber -> receiveDataColumnSidecar. Both call chain.ReceiveDataColumn(sidecar) concurrently. This is a double-store that may corrupt storage state or trigger unexpected behavior in chain processing.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Concurrent duplicate delivery: two peers simultaneously send same sidecar tuple, both bypass seen check due to TOCTOU",
+          "Storage failure DoS: if chain.ReceiveDataColumn fails transiently, the sidecar is permanently excluded from re-delivery due to set-before-store ordering"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P gossip data column sidecar subscription - validateDataColumn + dataColumnSubscriber"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The guard 'hasSeenDataColumnIndex' in validateDataColumn provides an IGNORE signal but is not atomic with setSeenDataColumnIndex in receiveDataColumnSidecar. The libp2p pubsub layer may deliver messages from multiple peers concurrently to different validation goroutines. The validateBlockLock mutex in validateBeaconBlockPubSub is not present in validateDataColumn, confirming no exclusion. The set-before-store pattern means transient storage failures permanently poison the deduplication cache for that tuple.",
+        "proof_successful": false,
+        "guard_sufficiency": "Insufficient. The check-then-act pattern spans two goroutines with no mutual exclusion. Fix: move setSeenDataColumnIndex to AFTER chain.ReceiveDataColumn succeeds, and add synchronization between the seen-check and seen-set operations."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "High",
+        "recommendation": "Move setSeenDataColumnIndex call to after chain.ReceiveDataColumn succeeds. Consider adding a mutex or using a compare-and-set primitive for the seen-check+set operation. Fix the slotAwareCache pruneOldestSlots to also call cache.Remove for evicted keys."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Two bugs confirmed: (1) TOCTOU race in deduplication allows duplicate sidecar processing under concurrent gossip delivery. (2) Set-before-store ordering means transient ReceiveDataColumn failures permanently suppress re-delivery of that sidecar, creating a DoS vector against data availability. The cache pruning divergence is an informational finding."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-001",
+        "title": "Verify Trust Boundary Integrity for tb-002: Is max_blobs_per_block correctly derived from the epoch-dependent get_blob_parameters at block validation?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/blob.go",
+            "symbol": "MaxBlobsPerBlock",
+            "line_range": {
+              "start": 127,
+              "end": 135
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func validateDenebBeaconBlock(blk interfaces.ReadOnlyBeaconBlock) error {\n\tif blk.Version() < version.Deneb {\n\t\treturn nil\n\t}\n\tcommits, err := blk.Body().BlobKzgCommitments()\n\tif err != nil {\n\t\treturn errors.New(\"unable to read commitments from deneb block\")\n\t}\n\tmaxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())\n\tif len(commits) > maxBlobsPerBlock {\n\t\treturn errors.Wrapf(errRejectCommitmentLen, \"%d > %d\", len(commits), maxBlobsPerBlock)\n\t}\n\treturn nil\n}",
+      "phase1": {
+        "summary": "validateDenebBeaconBlock calls params.BeaconConfig().MaxBlobsPerBlock(blk.Slot()) which derives max blobs from the epoch-dependent BlobSchedule. The BeaconChainConfig is a global singleton. The MaxBlobsPerBlock function reads BlobSchedule (a slice) and may call slices.SortFunc on it if unsorted - IN-PLACE mutation of global state. Multiple gossip validation goroutines call this concurrently.",
+        "state_anomalies": [
+          "Data race: concurrent calls to MaxBlobsPerBlock() from gossip validation goroutines concurrently mutate global BlobSchedule via slices.SortFunc if unsorted",
+          "Integer overflow in comparator: int(a.Epoch - b.Epoch) can overflow for large epoch values"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete exploit: At startup or after config reload, BlobSchedule may be unsorted. Two gossip validation goroutines running concurrently both observe IsSortedFunc==false and both enter the SortFunc branch, concurrently mutating the same global BlobSchedule slice. This is a detected Go data race (violates Go memory model). The result can be a corrupted BlobSchedule causing MaxBlobsPerBlock to return incorrect values.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Concurrent gossip block validation triggers concurrent BlobSchedule sort, corrupting the global config slice",
+          "Corrupted BlobSchedule causes over-limit blob blocks to pass validation or valid blocks to be rejected"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P gossip block subscription - validateBeaconBlockPubSub -> validateDenebBeaconBlock"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The MaxBlobsPerBlock function contains a conditional sort of a global mutable slice without synchronization. In Go, concurrent reads and writes to a shared slice are a data race. The sort is triggered by IsSortedFunc returning false, which is possible at startup or after config changes. Once the race corrupts the slice, subsequent reads will return incorrect epoch-to-max-blobs mappings.",
+        "proof_successful": false,
+        "guard_sufficiency": "Insufficient. No mutex or sync.Once protects the sort operation. Fix: sort BlobSchedule once at config initialization time, or protect the sort with a sync.Once / mutex."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "High",
+        "recommendation": "Sort BlobSchedule once at initialization time in BeaconChainConfig.InitializeForkSchedule() or equivalent, under a mutex. Remove the defensive sort from MaxBlobsPerBlock. This eliminates the data race."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Data race in MaxBlobsPerBlock() on the global BeaconChainConfig.BlobSchedule slice. Concurrent gossip validation goroutines can simultaneously trigger and execute slices.SortFunc on the shared slice, corrupting the epoch-to-blob-limit mapping. This is a confirmed Go data race that affects block validation correctness under concurrent load."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-002",
+        "title": "Verify Block Proposer Cannot Exploit Epoch-Dependent Blob Limits",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "missingBlobIndices",
+            "line_range": {
+              "start": 612,
+              "end": 635
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "maxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())\nif len(commits) > maxBlobsPerBlock {\n\treturn errors.Wrapf(errRejectCommitmentLen, \"%d > %d\", len(commits), maxBlobsPerBlock)\n}",
+      "phase1": {
+        "summary": "Both validateDenebBeaconBlock and missingBlobIndices derive maxBlobsPerBlock from blk.Slot() which is immutable in the signed block header. The epoch-dependent derivation is deterministic given a fixed slot. No cross-epoch inconsistency is possible for the same block slot.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No independent counterexample found. The adversarial scenario (proposer crafting block at epoch boundary to get different limits at gossip vs process_block time) is not viable. Both call sites use blk.Slot() producing identical MaxBlobsPerBlock results for the same block. The only inconsistency vector is the data race in MaxBlobsPerBlock already identified in CHK-W2B3-26-001.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "The invariant 'maxBlobsPerBlock check is consistent between gossip validation and process_block' holds. Both use blk.Slot() producing deterministic epoch derivation. No independent vulnerability beyond the data race from CHK-W2B3-26-001.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient for this specific check."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "The epoch-dependent blob limit is derived identically at both call sites using the block's immutable slot field. No epoch-boundary exploitation is possible for this specific check item."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-003",
+        "title": "Verify Beacon Node Epoch Derivation from Current State",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/p2p/fork_watcher.go",
+            "symbol": "forkWatcher",
+            "line_range": {
+              "start": 11,
+              "end": 40
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) forkWatcher() {\n\t// ...\n\tfor {\n\t\tselect {\n\t\tcase currSlot := <-slotTicker.C():\n\t\t\tcurrentEpoch := slots.ToEpoch(currSlot)\n\t\t\tnewEntry := params.GetNetworkScheduleEntry(currentEpoch)\n\t\t\t// Updates ENR for peer discovery only\n\t\t}\n\t}\n}",
+      "phase1": {
+        "summary": "forkWatcher manages ENR updates for discv5 peer discovery. It reads params.GetNetworkScheduleEntry (read-only config access) and writes to dv5Listener.LocalNode() ENR metadata only. Zero coupling to MaxBlobsPerBlock or blob limit validation.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No counterexample found. ENR staleness can affect peer discovery but does not affect consensus validation for already-connected peers. Blob limit derivation in validateDenebBeaconBlock reads BeaconChainConfig.BlobSchedule directly, not through forkWatcher.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "forkWatcher and MaxBlobsPerBlock have zero coupling. The ENR update failure handling (continue on error without updating scheduleEntry) is correct retry behavior. No security issue.",
+        "proof_successful": true,
+        "guard_sufficiency": "N/A - no security property at risk."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "forkWatcher is exclusively responsible for peer discovery ENR updates. It has no influence on block validation, blob limits, or data availability checks."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-001",
+        "title": "Verify Trust Boundary Integrity for tb-002: Are blocks with zero blob KZG commitments correctly accepted as valid?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areBlobsAvailable",
+            "line_range": {
+              "start": 855,
+              "end": 930
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Zero blobs: len(commits) = 0, check 0 > maxBlobsPerBlock -> false -> nil (valid)\n// areBlobsAvailable: if expected == 0 { return nil }\n// areDataColumnsAvailable: if len(kzgCommitments) == 0 { return nil }",
+      "phase1": {
+        "summary": "The upper-bound check len(commits) > maxBlobsPerBlock handles zero correctly (0 > any_positive == false). All downstream DA checks short-circuit on zero commitments. Correct per EIP-4844 and PeerDAS specs which mandate upper bound only.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No counterexample found. Zero-commitment blocks pass all validation stages correctly without triggering any DA checks. No attack path via zero-blob blocks.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "All guards correctly handle the zero-commitment case. EIP-4844 mandates no minimum. The implementation is spec-compliant.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "Correct and spec-compliant. Zero blob KZG commitments are valid per EIP-4844 and correctly handled throughout the validation and DA check pipeline."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-002",
+        "title": "Verify Block Proposer Handling: Does the block proposer correctly create blocks with zero blob commitments?",
+        "severity": "Medium",
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areBlobsAvailable",
+            "line_range": {
+              "start": 855,
+              "end": 930
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "expected := len(kzgCommitments)\nif expected == 0 {\n\treturn nil  // zero blobs always passes DA check\n}",
+      "phase1": {
+        "summary": "areBlobsAvailable early-returns nil for zero commitments before any storage access, notifier creation, or blocking wait. No resources allocated for zero-commitment blocks in the DA check path.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No counterexample found. Zero-commitment blocks safely bypass the entire blob DA wait mechanism. This is the correct behavior per spec.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "The early return guard is necessary and sufficient. missingBlobIndices also returns nil,nil for empty expected slices as defense-in-depth.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "Correct implementation. Zero-commitment blocks are handled correctly in areBlobsAvailable."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-003",
+        "title": "Verify Beacon Node Validation: Does the beacon node permit zero blob KZG commitments without enforcing a minimum?",
+        "severity": "Medium",
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areDataColumnsAvailable",
+            "line_range": {
+              "start": 689,
+              "end": 730
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "if len(kzgCommitments) == 0 {\n\treturn nil  // Zero kzg commitments = no data availability check needed\n}",
+      "phase1": {
+        "summary": "areDataColumnsAvailable correctly short-circuits before all PeerDAS custody sampling infrastructure for zero-commitment blocks. The subscription defer is after the early return, so no subscription resource is allocated.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No counterexample found. PeerDAS spec (Fulu das-core.md) mandates custody sampling only for non-empty kzg_commitments. The implementation is spec-compliant.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "The early return guard is necessary and sufficient. Defense-in-depth: missingDataColumnIndices also returns nil,nil for empty expected maps.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "Correct and spec-compliant. Zero KZG commitments correctly bypass PeerDAS custody sampling in areDataColumnsAvailable."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Are DataColumnSidecarsByRange response sizes properly bounded?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 26,
+              "end": 127
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "validateDataColumnsByRange",
+            "line_range": {
+              "start": 173,
+              "end": 218
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// rateLimitingAmount = 1 for validateRequest gate regardless of sidecar count\nif err := s.rateLimiter.validateRequest(stream, rateLimitingAmount); err != nil {\n\treturn errors.Wrap(err, \"rate limiter validate request\")\n}\n// quota tracked per sidecar in streamDataColumnBatch\nquota -= 1\nif quota == 0 {\n\treturn 0, nil\n}",
+      "phase1": {
+        "summary": "The rate limiter gate charges only 1 unit for any request regardless of the number of columns or slots. The per-sidecar charges in streamDataColumnBatch fill the bucket over time but the initial gate is trivially passed. Duplicate column indices in Columns field are not rejected, allowing amplified I/O.",
+        "state_anomalies": [
+          "Rate limiter gate charges 1 unit for potentially 16384-sidecar requests - asymmetric cost between requestor and responder",
+          "Duplicate Columns indices amplify I/O: Columns=[0,0,0,...] causes same sidecar retrieved and sent multiple times"
+        ]
+      },
+      "phase2": {
+        "summary": "Exploit: A peer with a rate limiter bucket at capacity can trigger 16384 sidecars per request for just 1 rate-limit unit consumed at the gate. With bucket capacity ~8192-16384 units, a peer can sustain very high bandwidth consumption. Additionally, Columns=[0]*128 causes the server to store.Get() with 128 duplicate index=0 entries, returning the same sidecar 128 times per block.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Rate exhaustion: 1 gate unit consumes 16384 sidecar responses worth of bandwidth",
+          "I/O amplification: duplicate column indices in Columns field cause repeated storage reads for same sidecar"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The size bound (MaxRequestDataColumnSidecars quota) is correctly enforced for total sidecar count. However the rate limiter gate is asymmetric. The quota mechanism does bound the absolute response size but the cost of triggering it is too low.",
+        "proof_successful": false,
+        "guard_sufficiency": "Partially sufficient. Quota enforces upper bound on response size but the rate limiting gate is too cheap relative to cost."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "Medium",
+        "recommendation": "Validate and deduplicate Columns field in request validation. Charge rate limiter proportionally to request size at the gate."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "The rate limiter gate charges only 1 unit for any request size, allowing a peer to trigger maximum-size responses (16384 sidecars) for minimal rate-limit cost. Duplicate column indices compound this by amplifying I/O per block. These are weak server-side input validation failures enabling resource exhaustion."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-002",
+        "title": "Verify RPC Requester Input Validation for DataColumnSidecarsByRange",
+        "severity": "High",
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "validateDataColumnsByRange",
+            "line_range": {
+              "start": 173,
+              "end": 218
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func validateDataColumnsByRange(request *pb.DataColumnSidecarsByRangeRequest, currentSlot primitives.Slot) (*rangeParams, error) {\n\tstartSlot, count := request.StartSlot, request.Count\n\tif count == 0 {\n\t\treturn nil, errors.Wrap(p2ptypes.ErrInvalidRequest, \"invalid request count parameter\")\n\t}\n\t// Columns field NOT validated here\n\t// ...\n}",
+      "phase1": {
+        "summary": "validateDataColumnsByRange validates StartSlot and Count with overflow protection. However the Columns field is not validated for: (1) out-of-range column indices (>= NumberOfColumns), (2) duplicate entries. SSZ limits cap Columns to 128 entries but values can be 0-MaxUint64.",
+        "state_anomalies": [
+          "Out-of-range column index: request with Columns=[200] causes storageIndices.get(200) to return errDataColumnIndexTooLarge, propagated as responseCodeServerError (not responseCodeInvalidRequest), so peer is NOT downscored",
+          "Duplicate column indices allowed: Columns=[0,0,...,0] causes amplified I/O"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete exploit: Send Columns=[200] (out of range). Server responds with responseCodeServerError. Peer is not penalized. Attacker can send repeated out-of-range requests without peer scoring consequence. Also Columns=[0]*128 triggers 128 I/O reads per block for the same column.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Out-of-range column index causes server error response without peer penalty",
+          "Duplicate column indices amplify I/O per block"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The Columns field requires validation: (1) all indices must be < NumberOfColumns, (2) indices must be unique. Both validations are missing. The missing validations allow low-cost resource consumption attacks.",
+        "proof_successful": false,
+        "guard_sufficiency": "Insufficient. Slot range is validated but Columns field has no index range or uniqueness checks."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "Medium",
+        "recommendation": "Add validation: reject if any column index >= NumberOfColumns with responseCodeInvalidRequest + peer penalty. Deduplicate Columns before processing or reject duplicate entries."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Missing input validation for Columns field in DataColumnSidecarsByRange request. Out-of-range indices trigger server errors without peer penalty. Duplicate indices amplify storage I/O. Both are exploitable resource consumption issues."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-003",
+        "title": "Verify Beacon Node Response Construction Enforces Dual Limit",
+        "severity": "High",
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "streamDataColumnBatch",
+            "line_range": {
+              "start": 128,
+              "end": 172
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "s.rateLimiter.add(stream, rateLimitingAmount)\nquota -= 1\nif quota == 0 {\n\treturn 0, nil\n}",
+      "phase1": {
+        "summary": "streamDataColumnBatch correctly decrements quota per sidecar and stops when quota reaches 0. The rate limiter is charged per sidecar after successful write. A failed write does not charge the rate limiter despite server resources being consumed for storage retrieval and partial encoding.",
+        "state_anomalies": [
+          "Rate limiter not charged for failed writes: if WriteDataColumnSidecarChunk fails, rateLimiter.add is skipped but storage was already read and encoding was partial"
+        ]
+      },
+      "phase2": {
+        "summary": "Exploit: Attacker opens stream, receives N-1 sidecars, resets stream. The N-th write fails. rateLimiter.add not called for that sidecar. Repeated stream resets allow sustained slightly-above-limit request rates. Combined with the already-weak gate (CHK-W2B3-28-001), compounds the rate exhaustion.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Stream reset before quota: receive N-1 sidecars then reset stream, avoiding rate limiter charge for last attempted write"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC - stream manipulation"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The quota mechanism correctly limits total response size. The issue is that rate limiter charging is post-write rather than pre-write, creating a small leakage window for stream-reset attacks.",
+        "proof_successful": false,
+        "guard_sufficiency": "Mostly sufficient. The quota bounds are absolute. The rate limiter post-write issue is a minor compounding factor for the resource exhaustion in CHK-W2B3-28-001."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "Medium",
+        "recommendation": "Charge rate limiter before writing each sidecar. Alternatively, pre-charge for the full batch at the start of streamDataColumnBatch."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Rate limiter is charged after successful write. Stream resets allow escaping rate limiter charges for the last sidecar in a batch, enabling slightly-above-rate sustained attacks. This is a compounding issue with CHK-W2B3-28-001's weak gate design."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-29-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-29-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Is DataColumnSidecarsByRange response ordering deterministic?",
+        "severity": "Medium",
+        "property_id": "PROP-W2B3-29"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 87,
+              "end": 100
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Sort the wanted columns.\nslices.Sort(wantedColumns)\n// batcher iterates blocks in canonical order via IsCanonical\nbatcher, err := newBlockRangeBatcher(*rangeParameters, s.cfg.beaconDB, s.rateLimiter, s.cfg.chain.IsCanonical, ticker)",
+      "phase1": {
+        "summary": "Block ordering: sortedUniqueBlocks() sorts ROBlocks ascending by slot. Column ordering: slices.Sort(wantedColumns) sorts column indices ascending. DataColumnStorage.Get() iterates the input indices slice in order. Both guarantees are maintained.",
+        "state_anomalies": []
+      },
+      "phase2": {
+        "summary": "No counterexample found. The sort guarantee chain is complete: wantedColumns pre-sorted at line 94, passed unchanged to Get(), which produces results in the same order as the input indices.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "Both invariants (ascending slot order for blocks, ascending column_index order within each block) are proven. The implementation is spec-compliant for ordering.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "The response ordering is deterministic and spec-compliant. Blocks are served in ascending slot order via ROBlockSlice sort. Columns within each block are served in ascending column_index order via pre-sorted wantedColumns and Get() iteration order."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-30-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-30-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Does DataColumnSidecarsByRange include ALL sidecars from a block when any is included?",
+        "severity": "Medium",
+        "property_id": "PROP-W2B3-30"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "streamDataColumnBatch",
+            "line_range": {
+              "start": 128,
+              "end": 172
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "for _, verifiedRODataColumn := range verifiedRODataColumns {\n\t// ...\n\tquota -= 1\n\tif quota == 0 {\n\t\treturn 0, nil  // MID-BLOCK early exit possible\n\t}\n}",
+      "phase1": {
+        "summary": "The quota mechanism can reach zero mid-iteration over verifiedRODataColumns for a single block. When quota hits 0, the function returns immediately with return 0, nil - silently stopping mid-block without error. Additionally, validateDataColumnsByRange does NOT validate that count * len(columns) <= MaxRequestDataColumnSidecars, allowing over-large requests that guarantee mid-block truncation.",
+        "state_anomalies": [
+          "Mid-block quota truncation: quota can expire while streaming columns for a single block",
+          "Missing server-side validation: count * len(columns) vs MaxRequestDataColumnSidecars not checked before serving",
+          "Silent truncation: no error is returned to the requesting peer when truncation occurs"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete exploit: Attacker sends StartSlot=S, Count=10000, Columns=[0..127]. Server clamps end to currentSlot but does not reject oversized request. Server serves blocks until quota=MaxRequestDataColumnSidecars=16384 is exhausted. If the last block has 128 stored columns and only k<128 quota units remain, only k columns for that block are streamed. Peer receives partial column set for last block with no error.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Over-request forces mid-block truncation at predictable quota boundary",
+          "Spec-compliant request with count*len(cols)==MaxRequestDataColumnSidecars and all columns stored: last block may still be partially served if blocks before it consumed all quota"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The all-or-nothing per block invariant is NOT proven. The early return in streamDataColumnBatch at line 165 (return 0, nil when quota==0) can fire mid-block. The rpc_blob_sidecars_by_range.go has identical pattern - confirming systemic design issue.",
+        "proof_successful": false,
+        "guard_sufficiency": "Insufficient. Missing guard: server-side validation of count*len(columns) <= MaxRequestDataColumnSidecars to reject over-large requests upfront, and block-level atomicity to stop at block boundaries."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "Medium",
+        "recommendation": "Add server-side validation: reject requests where count * len(columns) > MaxRequestDataColumnSidecars with responseCodeInvalidRequest. Add block-level atomicity: check if remaining quota >= len(columns_for_this_block) before serving; if not, stop at prior block boundary."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Two confirmed issues: (1) Missing server-side validation of count*len(columns) vs MaxRequestDataColumnSidecars. (2) Quota mechanism can truncate mid-block, serving a partial column set for the final block with no error indication. The requesting peer may make incorrect DA assessments based on incomplete data."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-31-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-31-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Are DataColumnSidecarsByRange responses from the canonical fork choice chain?",
+        "severity": "High",
+        "property_id": "PROP-W2B3-31"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 82,
+              "end": 92
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Uses s.cfg.chain.IsCanonical to filter canonical blocks\nbatcher, err := newBlockRangeBatcher(*rangeParameters, s.cfg.beaconDB, s.rateLimiter, s.cfg.chain.IsCanonical, ticker)",
+      "phase1": {
+        "summary": "IsCanonical checks the ForkChoiceStore under RLock per block during filter() evaluation. The fork choice store state can change between batch iterations (up to 1-second ticker gap). A reorg during request serving causes the batcher to serve blocks that were canonical at check time but are now non-canonical when delivered.",
+        "state_anomalies": [
+          "TOCTOU between batch iterations: reorg can invalidate already-streamed blocks without the server or client knowing",
+          "ForkChoiceStore RLock is released between batch calls, creating a 1-second window for concurrent reorg writes",
+          "canonicalFilter.prevRoot only detects chain discontinuity going forward, cannot retract already-sent data"
+        ]
+      },
+      "phase2": {
+        "summary": "Scenario: Peer requests slots 100-200. Batch 1 (slots 100-108) served, all canonical. Between batch 1 and batch 2, reorg at slot 105 occurs - old slots 105-108 become non-canonical. Peer has already received non-canonical blocks for 105-108. The non-linear detection in batch 2 will detect a chain break and stop serving, but the already-sent stale data cannot be retracted.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Natural reorg during long-running range request serves stale non-canonical column data",
+          "Timing attack: malicious block producer times a reorg to coincide with batch boundary to serve victim stale data"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC (victim is requesting peer)",
+          "Natural reorg events or attacker-triggered via block withholding"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The invariant 'all served blocks remain canonical for the duration of the response' is NOT maintained. IsCanonical is checked per-block at evaluation time, but the 1-second ticker between batches creates a well-defined TOCTOU window. The non-linear guard in canonicalFilter stops serving further blocks after a chain break but cannot retract already-streamed data.",
+        "proof_successful": false,
+        "guard_sufficiency": "Partially sufficient. Stops future serving after reorg detection. Cannot protect against already-streamed data from previous batches becoming non-canonical."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "Medium",
+        "recommendation": "Consider taking a snapshot of canonical head root at request start and serving only blocks that are ancestors of that head root. Document that responses near the chain head are best-effort and may be affected by reorgs. Ensure client-side initial sync revalidates received blocks against local fork choice."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "TOCTOU confirmed: reorg during multi-batch range request causes already-streamed blocks to become non-canonical. The 1-second ticker between batches creates a well-defined exploitation window. PeerDAS nodes using this data for DA assessments may receive stale non-canonical column data without detection."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-32-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-32-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Is data_column_serve_range correctly enforced?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-32"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnsRPCMinValidSlot",
+            "line_range": {
+              "start": 193,
+              "end": 218
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func dataColumnsRPCMinValidSlot(currentSlot primitives.Slot) (primitives.Slot, error) {\n\tif !params.FuluEnabled() {\n\t\treturn primitives.Slot(math.MaxUint64), nil\n\t}\n\tbeaconConfig := params.BeaconConfig()\n\tminReqEpochs := beaconConfig.MinEpochsForDataColumnSidecarsRequest\n\tminStartEpoch := beaconConfig.FuluForkEpoch\n\tcurrEpoch := slots.ToEpoch(currentSlot)\n\tif currEpoch > minReqEpochs && currEpoch-minReqEpochs > minStartEpoch {\n\t\tminStartEpoch = currEpoch - minReqEpochs\n\t}\n\tepochStart, err := slots.EpochStart(minStartEpoch)\n\tif err != nil {\n\t\treturn 0, errors.Wrapf(err, \"epoch start for epoch %d\", minStartEpoch)\n\t}\n\treturn epochStart, nil\n}",
+      "phase1": {
+        "summary": "The serve range function is a pure, stateless computation. All arithmetic uses safe operations. The uint64 underflow in currEpoch-minReqEpochs is correctly guarded by currEpoch > minReqEpochs. The clamp operations (max startSlot, min endSlot) in validateDataColumnsByRange correctly enforce the serve window.",
+        "state_anomalies": [
+          "Pre-Fulu requests silently return empty response (nil,nil) rather than error response + peer penalty - minor behavioral gap"
+        ]
+      },
+      "phase2": {
+        "summary": "No counterexample found for incorrect serve range enforcement. The arithmetic is correct. The only behavioral gap is silent empty responses for pre-Fulu requests, which is intentional design (peers may overshoot during sync) but allows probing without penalty.",
+        "counterexample_found": false,
+        "attack_scenarios": []
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": false
+      },
+      "phase3": {
+        "summary": "The invariant 'serve range correctly bounded to [max(FuluForkEpochStart, currentEpoch-MinEpochsForRequest), currentSlot]' is proven. All guards are sufficient. EpochStart overflow is prevented by SafeMul inside slots.EpochStart. The underflow guard is present.",
+        "proof_successful": true,
+        "guard_sufficiency": "Sufficient."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "reasoning": "The data_column_serve_range is correctly enforced. Arithmetic is safe with proper underflow and overflow guards. The silent empty response for out-of-range requests is an intentional design choice to avoid penalizing peers during sync."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-33-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-33-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Does DataColumnSidecarsByRoot reject requests exceeding MAX_REQUEST_DATA_COLUMN_SIDECARS?",
+        "severity": "Critical",
+        "property_id": "PROP-W2B3-33"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go",
+            "symbol": "validateDataColumnsByRootRequest",
+            "line_range": {
+              "start": 148,
+              "end": 161
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_root.go",
+            "symbol": "dataColumnSidecarByRootRPCHandler",
+            "line_range": {
+              "start": 31,
+              "end": 147
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func validateDataColumnsByRootRequest(colIdents types.DataColumnsByRootIdentifiers) error {\n\ttotal := uint64(0)\n\tfor _, id := range colIdents {\n\t\ttotal += uint64(len(id.Columns))\n\t}\n\tif total > params.BeaconConfig().MaxRequestDataColumnSidecars {\n\t\treturn types.ErrMaxDataColumnReqExceeded\n\t}\n\treturn nil\n}",
+      "phase1": {
+        "summary": "Critical finding: requestedColumnsByRoot (the deduplicated map) is built for LOGGING ONLY (lines 59-79). The serving loop at line 102 iterates over the ORIGINAL requestedColumnIdents list, not the deduplicated map. This means duplicate blockRoot entries cause repeated dataColumnStorage.Get() calls for the same root. Also: no upfront rateLimiter.validateRequest() call unlike the by-range handler. Additionally, total > check (not >=) means exactly MaxRequestDataColumnSidecars is allowed through but triggers response of exactly that many sidecars.",
+        "state_anomalies": [
+          "Deduplication map built but not used for serving - only used for logging",
+          "Missing upfront rate limiter gate - only per-identifier charges occur",
+          "Duplicate blockRoot in request causes 128x I/O amplification for same root"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete exploit: Attacker sends 128 DataColumnsByRootIdentifier entries all with same BlockRoot and Columns=[0..127]. total = 128 * 128 = 16384. Validation check: 16384 > 16384? No (not >=). Passes. Server iterates 128 identifiers, each calling dataColumnStorage.Get(sameRoot, [0..127]). This is 128 disk reads for the same block root, returning 128 identical sets of 128 columns = 16384 identical sidecar objects written to stream. 128x I/O amplification for storage, 128x network amplification.",
+        "counterexample_found": true,
+        "attack_scenarios": [
+          "Duplicate blockRoot 128x I/O amplification: same root read 128 times from disk",
+          "No upfront rate gate: only per-identifier charges, no reject-before-work protection",
+          "16384 identical sidecars streamed due to deduplication map not used for serving"
+        ]
+      },
+      "phase2_5": {
+        "classification": "exploitable",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRoot RPC"
+        ],
+        "attacker_controlled": true
+      },
+      "phase3": {
+        "summary": "The total count guard is present but uses > instead of >= and does not prevent duplicate-root amplification. The deduplication map (requestedColumnsByRoot) was correctly designed to deduplicate but was wired only to the logging code path - a likely bug where the serving loop was not updated to use the deduplicated map.",
+        "proof_successful": false,
+        "guard_sufficiency": "Partially sufficient. Total column count is bounded by MaxRequestDataColumnSidecars but duplicate blockRoot entries enable I/O amplification beyond that bound. The correct fix is to use requestedColumnsByRoot for the serving loop."
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "severity_estimate": "High",
+        "recommendation": "Use requestedColumnsByRoot map for the serving loop instead of requestedColumnIdents. Add s.rateLimiter.validateRequest(stream, rateLimitingAmount) before processing. Change > to >= in the total check to be consistent with the by-range handler's quota semantics."
+      },
+      "final_classification": "vulnerability",
+      "reasoning": "Critical finding: the deduplication map requestedColumnsByRoot is built (lines 59-64) but wired only to the logging path (lines 72-79). The serving loop iterates the original list (line 102), causing duplicate blockRoot entries to trigger repeated storage reads for the same root. With 128 duplicate entries each requesting 128 columns, this enables 128x disk I/O amplification and 16384 identical sidecar writes in a single request. The missing upfront rate limiter gate compounds this vulnerability."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 7,
+    "batch_index": 8,
+    "item_count": 15,
+    "timestamp": 1771331678,
+    "processed_ids": [
+      "W3B4:W3B4:CHK-W2B3-25-003",
+      "W3B4:W3B4:CHK-W2B3-26-001",
+      "W3B4:W3B4:CHK-W2B3-26-002",
+      "W3B4:W3B4:CHK-W2B3-26-003",
+      "W3B4:W3B4:CHK-W2B3-27-001",
+      "W3B4:W3B4:CHK-W2B3-27-002",
+      "W3B4:W3B4:CHK-W2B3-27-003",
+      "W3B4:W3B4:CHK-W2B3-28-001",
+      "W3B4:W3B4:CHK-W2B3-28-002",
+      "W3B4:W3B4:CHK-W2B3-28-003",
+      "W3B4:W3B4:CHK-W2B3-29-001",
+      "W3B4:W3B4:CHK-W2B3-30-001",
+      "W3B4:W3B4:CHK-W2B3-31-001",
+      "W3B4:W3B4:CHK-W2B3-32-001",
+      "W3B4:W3B4:CHK-W2B3-33-001"
+    ]
+  }
+}

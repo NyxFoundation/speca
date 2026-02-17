@@ -1,0 +1,290 @@
+{
+  "worker_id": "W2B3",
+  "phase": "03",
+  "timestamp": 1771330069,
+  "results": [
+    {
+      "check_id": "CHK-W2B3-44-001",
+      "checklist_item": {
+        "description": "ENR epoch manipulation to reflect sync state vs wall-clock time",
+        "graph_element_under_test": "p2p/fork_watcher.go forkWatcher()"
+      },
+      "audit_result": {
+        "phase1_abstract_interpretation": {
+          "summary": "The p2p forkWatcher uses a wall-clock SlotTicker (genesisTime + SecondsPerSlot) to determine currentEpoch and update the ENR's ForkDigest. This runs independently of the node's sync state: the forkWatcher starts immediately when the p2p service starts (service.go:301 `go s.forkWatcher()`), with no dependency on initialSyncComplete or any sync-state signal. The sync-layer forkWatcher (beacon-chain/sync/fork_watcher.go:15) DOES wait for `<-s.initialSyncComplete` before proceeding, but the p2p-layer forkWatcher does NOT. This creates a state divergence window where the p2p ENR advertises a fork epoch that the node has not yet synced to, while the actual chain processing is still lagging behind.",
+          "state_anomalies_found": [
+            "ENR updated at wall-clock epoch boundary regardless of whether node has synced to that epoch",
+            "p2p forkWatcher started unconditionally at service start (service.go:301) with no wait for sync completion",
+            "sync-layer forkWatcher waits for initialSyncComplete, creating asymmetry between p2p ENR advertisement and actual synced state",
+            "scheduleEntry initialized as zero-value NetworkScheduleEntry; first slot tick always triggers an ENR update regardless of sync state",
+            "Node can advertise Fulu ForkDigest in ENR while still syncing pre-Fulu blocks, causing peer-selection divergence"
+          ],
+          "cache_analysis": "scheduleEntry is a local variable in forkWatcher goroutine, updated only when updateENR succeeds. No global state caching involved. The ENR update itself is atomic (node.Set). However, the triggering condition—wall-clock epoch—is fully decoupled from forkchoice or sync chain head.",
+          "concurrency_analysis": "forkWatcher runs as a goroutine. The ENR update (node.Set) is called on a DiscV5 LocalNode, which may have internal locking. No race between multiple forkWatcher instances since only one is started. The core issue is not concurrency but temporal divergence: wall-clock epoch vs synced epoch."
+        },
+        "phase2_symbolic_execution": {
+          "summary": "Consider a node restarting behind the chain head, 100 epochs behind the current fork. Immediately on start, forkWatcher sees wall-clock epoch E (post-fork) and calls updateENR with the new ForkDigest. Peers performing compareForkENR check currentForkDigest and now see this node as a valid peer for the post-fork network. But the node is actually processing blocks at epoch E-100 and the sync-layer forkWatcher has not yet triggered topic registration. The node's gossip subscriptions are still on the old fork topics, creating a window where peer discovery succeeds but gossip communication fails.",
+          "counterexample_found": true,
+          "counterexample": "1. Node starts with genesis_time T. Current wall-clock epoch is E (post-fork FULU). 2. p2p service starts, forkWatcher immediately fires on first slot tick. 3. GetNetworkScheduleEntry(E) returns FULU ForkDigest. 4. updateENR sets ENR CurrentForkDigest = FULU digest. 5. Node is selected by peers as a valid FULU peer via discovery. 6. Peers send FULU-topic messages but node rejects them (not subscribed, or subscribed to old topics). 7. Alternatively: node advertises FULU in ENR but has not completed initial sync, causing wasted connections and potential network partition effects. The sync forkWatcher (sync/fork_watcher.go:15) waits for initialSyncComplete before registering topics—meaning ENR and topic subscriptions are out of sync during initial sync.",
+          "attack_scenarios": [
+            "Attacker exploits ENR/subscription mismatch: craft conditions that make a lagging validator advertise wrong fork in ENR, causing peer-churn and isolation",
+            "An attacker operating a network sybil could force target node to restart repeatedly, keeping it in the ENR-sync desync window and effectively isolating it from correct peers",
+            "In a client diversity scenario, FULU-fork epoch at E: honest node reboots, advertises FULU ENR immediately, peers connect, but node rejects their FULU messages—causing the peers to penalize the node's gossip score and potentially blacklist it"
+          ],
+          "timing_dependencies": "The vulnerability window exists from node start until initialSyncComplete fires. For a node that is many epochs behind, this window could be hours. An attacker cannot directly control this window but can influence it by delaying block propagation to the target node."
+        },
+        "phase2_5_reachability_analysis": {
+          "summary": "This is exploitable through normal network operations. Any peer observing the node's ENR will see a post-fork ForkDigest. The compareForkENR function in fork.go checks currentForkDigest and will accept the connection, but the actual gossip topic subscription state does not match. This is reachable from any peer doing peer discovery.",
+          "entry_points": ["DiscV5 peer discovery", "ENR advertisement via DHT", "Direct peer connection with ENR comparison"],
+          "attacker_controlled": false,
+          "classification": "defense-in-depth",
+          "attack_surface": "The desync between ENR fork advertisement and actual topic subscription state is a design-level issue. It does not give an attacker direct control over consensus but can degrade P2P connectivity and cause isolation of syncing nodes. The practical impact is availability degradation rather than direct consensus subversion."
+        },
+        "phase3_invariant_proving": {
+          "summary": "The intended invariant is: 'ENR ForkDigest reflects the fork the node is actually participating in.' The actual code breaks this invariant during initial sync because the p2p forkWatcher does not check sync state before updating the ENR. The sync-layer forkWatcher correctly guards on initialSyncComplete, but the p2p-layer counterpart has no such guard. The guards present (dv5Listener nil check) are insufficient: they only prevent crashes when discovery is disabled, not when the node is syncing.",
+          "proof_successful": false,
+          "guard_identified": "dv5Listener nil check at line 13 of fork_watcher.go; `continue` on updateENR error to avoid stale scheduleEntry",
+          "guard_sufficiency": "Insufficient. The nil check prevents crash when discovery is disabled but does not prevent premature ENR updates during initial sync. The sync-layer forkWatcher uses `<-s.initialSyncComplete` as a synchronization barrier, but the p2p-layer forkWatcher has no equivalent. This asymmetry is the root of the bug.",
+          "edge_cases": [
+            "Node restart during fork epoch: ENR immediately updated to post-fork digest before syncing completes",
+            "Multi-fork scenario: if node is multiple forks behind, ENR could jump several fork digests ahead of actual sync position",
+            "If updateENR fails on first tick, scheduleEntry stays zero-value and retry happens next slot—this is correct behavior but does not address the sync-state issue"
+          ]
+        },
+        "phase3_5_scope_filtering": {
+          "bug_bounty_eligible": true,
+          "reason": "The ENR advertisement decoupled from sync state is a real design bug. During initial sync (which can last hours for a node catching up), the node advertises a post-fork ForkDigest while its gossip subscriptions are on old topics. This causes miscommunication with peers, gossip score degradation, and potential temporary isolation. While it does not directly allow consensus subversion, it impacts availability and P2P network health. The asymmetry with sync/fork_watcher.go which does gate on initialSyncComplete confirms this is an inconsistency in the codebase.",
+          "recommendation": "The p2p forkWatcher should either (a) gate on a sync-complete signal similar to how sync/fork_watcher.go uses `<-s.initialSyncComplete`, or (b) check the current synced epoch from the forkchoice chain head rather than purely using wall-clock time. The ENR should reflect what the node is actually processing, not what the wall clock says.",
+          "severity_estimate": "Low"
+        },
+        "final_classification": "informational"
+      }
+    },
+    {
+      "check_id": "CHK-W2B3-45-001",
+      "checklist_item": {
+        "description": "Malicious peer forging data column sidecar with valid BLS proposer signature",
+        "graph_element_under_test": "beacon-chain/verification/data_column.go ValidProposerSignature()"
+      },
+      "audit_result": {
+        "phase1_abstract_interpretation": {
+          "summary": "ValidProposerSignature verifies that the SignedBlockHeader's BLS signature matches the proposer's public key from the beacon state. The signature cache (sigCache) uses a signatureData struct {Root, Parent, Signature, Proposer, Slot} as the cache key. The verification computes the signing root using the current fork's domain (DomainBeaconProposer) and validates against the validator's public key at sig.Proposer index. The cache stores the result (true/false) keyed on all five fields together.",
+          "state_anomalies_found": [
+            "Cache key includes all five fields (Root, Parent, Signature, Proposer, Slot)—an attacker cannot produce a cache hit for a forged signature without matching all fields",
+            "If cache lookup returns (true, nil), the full BLS verification is skipped—valid only if the cached signature exactly matches the incoming signatureData",
+            "parentState is retrieved lazily and cached within the verifier's stateByRoot map; if parentState is stale or incorrect, the validator's public key could be wrong",
+            "signatureData uses the proposer_index field from the sidecar itself to look up the validator—if ProposerIndex is wrong, wrong public key is used"
+          ],
+          "cache_analysis": "sigCache is an LRU cache (size 256). Cache hits require exact signatureData match (all five fields). The cache result is boolean (verified=true/false). On a cache hit with verified=false, ErrSigFailedToVerify is returned immediately without re-verification. This could theoretically cause a denial of service if an attacker causes a valid signature to be cached as invalid, but this requires the attacker to present the same exact signatureData (same Root+Parent+Sig+Proposer+Slot) that was previously invalid—practically impossible for a legitimately signed message.",
+          "concurrency_analysis": "sigCache wraps github.com/hashicorp/golang-lru which is thread-safe. The parentState cache (stateByRoot map) is accessed without locking within a single verifier instance. Since a new verifier is created per gossip message, there is no concurrent access to stateByRoot across goroutines."
+        },
+        "phase2_symbolic_execution": {
+          "summary": "For a forged sidecar to pass ValidProposerSignature, an attacker needs either: (1) a valid BLS private key for the claimed proposer, or (2) a collision in signatureData that produces a cache hit. Option (1) requires breaking BLS-12-381 discrete log. Option (2) requires matching {Root, Parent, Signature, Proposer, Slot}—effectively a preimage attack on the full 5-field key. Neither is computationally feasible. The signature scheme correctly uses DomainBeaconProposer to prevent cross-domain replay.",
+          "counterexample_found": false,
+          "counterexample": "No feasible counterexample found. BLS signature forgery without the private key is computationally infeasible under the BLS-12-381 hardness assumption. Cache poisoning would require an attacker to submit the exact same signatureData (Root+Parent+Signature+Proposer+Slot tuple) previously seen as invalid, which contradicts the goal of presenting a different block.",
+          "attack_scenarios": [
+            "Cache poisoning scenario: attacker sends a sidecar with identical (Root, Parent, Proposer, Slot) but different Signature, causing the tuple to be cached as 'invalid'. This could block a legitimately signed sidecar from being accepted—but only if the Signature field is part of the key (it is), so the legitimate sidecar has a different key and is verified independently.",
+            "Proposer index spoofing: attacker sets ProposerIndex to a validator with a known weak key. However, the actual signature would still need to verify against that validator's actual public key from the beacon state.",
+            "State staleness: if parentState is from a different fork or has been modified, ValidatorAtIndex could return the wrong public key. This is a theoretical TOCTOU on parentState retrieval but requires compromising the state database."
+          ],
+          "timing_dependencies": "No timing-dependent exploits identified. The BLS verification is deterministic."
+        },
+        "phase2_5_reachability_analysis": {
+          "summary": "ValidProposerSignature is called on all gossip-received data column sidecars. It is reachable from any P2P peer. However, exploiting it to accept a forged signature is computationally infeasible. The practical risk is limited to denial-of-service via CPU exhaustion (forcing expensive BLS verifications on invalid data), but this is mitigated by the signature cache.",
+          "entry_points": ["P2P gossip: /data_column_sidecar_<subnet>/ topic"],
+          "attacker_controlled": true,
+          "classification": "unreachable",
+          "attack_surface": "Any P2P peer can send data column sidecars. However, forging a valid BLS signature is computationally infeasible, making the 'forgery' attack path unreachable in practice."
+        },
+        "phase3_invariant_proving": {
+          "summary": "The invariant 'only the legitimate proposer can produce a valid sidecar signature' holds. The BLS signature verification correctly uses DomainBeaconProposer with the per-epoch fork data, binds to the block root (not just the header fields), and validates against the validator's actual public key from the beacon state. The signature cache is correctly keyed on all five distinguishing fields.",
+          "proof_successful": true,
+          "guard_identified": "BLS signature verification in sigCache.VerifySignature() using DomainBeaconProposer domain and validator public key from beacon state",
+          "guard_sufficiency": "Sufficient for the stated property. The five-field cache key prevents cache poisoning across different messages. The domain separation prevents cross-domain replays.",
+          "edge_cases": [
+            "Edge case: attacker uses same Root+Parent+Proposer+Slot but different Signature byte sequence—this produces a cache miss, triggers full verification, correctly fails",
+            "Edge case: if two proposers share the same public key (impossible in practice under key uniqueness requirements), verification would accept either's signature",
+            "Edge case: parentState retrieval failure returns error, causing ErrInvalidProposerSignature—this is correct failure-safe behavior"
+          ]
+        },
+        "phase3_5_scope_filtering": {
+          "bug_bounty_eligible": false,
+          "reason": "The property holds. BLS signature forgery is computationally infeasible under standard cryptographic assumptions. No implementation flaw was found that would allow forging a signature or bypassing the verification. This is a correctly implemented security control.",
+          "recommendation": "No change required. The implementation correctly follows the Ethereum consensus spec for proposer signature verification.",
+          "severity_estimate": "Low"
+        },
+        "final_classification": "not-a-vulnerability"
+      }
+    },
+    {
+      "check_id": "CHK-W2B3-46-001",
+      "checklist_item": {
+        "description": "Three-layer integrity verification for all sidecars",
+        "graph_element_under_test": "beacon-chain/verification/data_column.go - three-layer verification: ValidProposerSignature + SidecarInclusionProven + SidecarKzgProofVerified"
+      },
+      "audit_result": {
+        "phase1_abstract_interpretation": {
+          "summary": "The three-layer verification consists of: (1) ValidProposerSignature—BLS signature over the SignedBlockHeader binding proposer identity; (2) SidecarInclusionProven—Merkle proof that kzg_commitments are included in the block body (4-node proof using KzgCommitmentsInclusionProof field); (3) SidecarKzgProofVerified—KZG proof that the column data matches the commitments. Together these bind: proposer identity → block header → commitments → column data. Gaps to examine: whether the three layers bind to the same block, whether the inclusion proof covers all commitments, and whether any layer can be satisfied with cached results that were computed for a different block.",
+          "state_anomalies_found": [
+            "Inclusion proof cache (ic) uses a 160-byte key: 4×32 bytes from KzgCommitmentsInclusionProof[0..3] + 32 bytes from SignedBlockHeader.HashTreeRoot(). If two different columns from the same block are submitted, they share the same inclusion proof key and the second gets a cache hit—this is intentional and correct.",
+            "KZG verification (SidecarKzgProofVerified) is performed via batch verifier (validateWithKzgBatchVerifier) and then SatisfyRequirement is called directly. If the batch verifier incorrectly processes the batch, the requirement is marked satisfied without direct verification per column.",
+            "The three layers are independent: an attacker could craft a sidecar where layers 1 and 2 pass but layer 3 fails—this is correctly handled since all three must pass for VerifiedRODataColumns to succeed.",
+            "SidecarInclusionProven uses a fixed proof length of 4 (inclusionProofKey returns error if len != 4). If this length is incorrect for a given fork, the proof check would fail safely."
+          ],
+          "cache_analysis": "The inclusion proof cache (ic, size 2) caches successful inclusion proof verifications by a 160-byte key. The small cache size (2 entries) means it evicts quickly in high-throughput scenarios, forcing re-verification. This is safe but potentially a CPU performance concern. The signature cache and the KZG batch verifier have their own caching mechanisms.",
+          "concurrency_analysis": "Each call to validateDataColumn creates a new RODataColumnsVerifier with a fresh stateByRoot map. The shared caches (sc for signatures, ic for inclusion proofs) are accessed by multiple goroutines processing simultaneous gossip messages. The LRU caches use internal locking. The batch KZG verifier (validateWithKzgBatchVerifier) may aggregate proofs across multiple concurrent calls—correctness depends on the batch verifier implementation."
+        },
+        "phase2_symbolic_execution": {
+          "summary": "The three-layer chain provides strong binding. To bypass all three: an attacker needs (1) a valid proposer BLS signature over a block header H, (2) a valid Merkle proof that some commitments C are in H's body, and (3) valid KZG proofs that column data D matches commitments C. Steps 1 and 3 require knowledge of the proposer's private key and valid KZG witness data respectively—both computationally infeasible without the actual data. The weakest link is the inclusion proof's reliance on the 4-element KzgCommitmentsInclusionProof field.",
+          "counterexample_found": false,
+          "counterexample": "No feasible counterexample found for the full three-layer chain. An attacker cannot forge BLS signatures or KZG proofs without the corresponding private keys/witnesses.",
+          "attack_scenarios": [
+            "Partial attack—layer 2 only: craft a sidecar with valid inclusion proof (matching a legitimately included commitment) but invalid KZG column data. This would fail at layer 3 (SidecarKzgProofVerified). The result is correct rejection.",
+            "Cache confusion attack: submit a sidecar with the same block header (same SignedBlockHeader) but different column data. Layer 1 (sig) would get a cache hit (valid), layer 2 (inclusion) would get a cache hit (same proof key), but layer 3 (KZG) would fail on the different data. Result: correct rejection.",
+            "Batch KZG verifier manipulation: if an attacker can influence which proofs are batched together and cause incorrect batch aggregation, a bogus proof might slip through. This requires the batch verifier to have a bug, not a flaw in the three-layer design itself."
+          ],
+          "timing_dependencies": "No inherent timing dependency for the three-layer integrity check itself."
+        },
+        "phase2_5_reachability_analysis": {
+          "summary": "All three layers are evaluated for every gossip-received data column sidecar. They are reachable from P2P. The layers are enforced in sequence within validateDataColumn: ValidProposerSignature at step 7, SidecarInclusionProven at step 10, KZG at step 11. All three must pass for the message to be accepted.",
+          "entry_points": ["P2P gossip data_column_sidecar_<subnet> topic"],
+          "attacker_controlled": true,
+          "classification": "defense-in-depth",
+          "attack_surface": "The three-layer chain is correctly applied to all gossip-received sidecars. The only potential weakness is in the KZG batch verifier implementation, which is external to this codebase (crypto library)."
+        },
+        "phase3_invariant_proving": {
+          "summary": "The invariant 'a VerifiedRODataColumn binds proposer identity, block header, commitments, and column data through cryptographic proofs' holds for all three layers individually. The chain of binding is: Sig(proposer_key) → block_header_root → kzg_commitments (Merkle proof) → column_data (KZG). The results system in result.go requires all three requirements to be satisfied before VerifiedRODataColumns returns success.",
+          "proof_successful": true,
+          "guard_identified": "Three independent cryptographic verification layers: BLS (ValidProposerSignature), Merkle (SidecarInclusionProven), KZG (SidecarKzgProofVerified); allSatisfied() check in VerifiedRODataColumns()",
+          "guard_sufficiency": "Sufficient. The allSatisfied() check requires all registered requirements to have nil error results. SatisfyRequirement is used for KZG (after batch verification), but this is only called after the batch verifier confirms acceptance. The three layers together form a cryptographically sound binding.",
+          "edge_cases": [
+            "KZG proof length check: if len(KzgCommitmentsInclusionProof) != 4, inclusionProofKey returns error causing a cache miss and the actual inclusion proof is verified—this is safe",
+            "Empty data columns: ValidFields() is called first and checks sidecar structure via peerdas.VerifyDataColumnSidecar—empty/malformed sidecars are rejected before reaching the three-layer verification",
+            "allSatisfied() checks against the registered requirements list (GossipDataColumnSidecarRequirements). Since all 12 requirements must pass, missing any one is caught."
+          ]
+        },
+        "phase3_5_scope_filtering": {
+          "bug_bounty_eligible": false,
+          "reason": "The three-layer integrity verification is correctly implemented. All three layers bind cryptographically to prevent accepting forged sidecars. The allSatisfied() requirement system ensures no layer can be skipped. No exploitable gap was found in the design or implementation.",
+          "recommendation": "The batch KZG verifier should be audited separately as a dependency. Consider increasing the inclusion proof cache size from 2 to match the signature cache size (256) for performance.",
+          "severity_estimate": "Low"
+        },
+        "final_classification": "not-a-vulnerability"
+      }
+    },
+    {
+      "check_id": "CHK-W2B3-47-001",
+      "checklist_item": {
+        "description": "Gossip validation ordered cheapest to most expensive",
+        "graph_element_under_test": "beacon-chain/sync/validate_data_column.go validateDataColumn() - validation ordering"
+      },
+      "audit_result": {
+        "phase1_abstract_interpretation": {
+          "summary": "The validation ordering in validateDataColumn is: (1) ValidFields, (2) CorrectSubnet, (3) NotFromFutureSlot [IGNORE], (4) SlotAboveFinalized [IGNORE], (5) SidecarParentSeen [IGNORE+async fetch], (6) SidecarParentValid [REJECT], (7) ValidProposerSignature [REJECT], (8) SidecarParentSlotLower [REJECT], (9) SidecarDescendsFromFinalized [REJECT], (10) SidecarInclusionProven [REJECT], (11) KZG via batch verifier [REJECT], (12) SidecarProposerExpected [REJECT]. The GossipDataColumnSidecarRequirements array lists ValidProposerSignature BEFORE SidecarParentSeen, but the actual execution in validateDataColumn.go places SidecarParentSeen BEFORE ValidProposerSignature. This is a critical discrepancy between the declared requirements array ordering and the actual execution ordering.",
+          "state_anomalies_found": [
+            "CRITICAL: GossipDataColumnSidecarRequirements declares RequireValidProposerSignature before RequireSidecarParentSeen (lines 31-32 of data_column.go), but actual validateDataColumn execution calls SidecarParentSeen BEFORE ValidProposerSignature (lines 104-127 of validate_data_column.go)",
+            "The requirements array ordering does NOT enforce execution ordering—it only affects allSatisfied() tracking. So the array can diverge from runtime ordering without causing failures.",
+            "ValidProposerSignature is placed AFTER SidecarParentSeen in execution—this is intentional per comment at line 124: 'We do not strictly respect the spec ordering here. This is necessary because signature verification depends on the parent root, which is only available if the parent block is known.'",
+            "The spec ordering (eth2.0-specs) places ValidProposerSignature before SidecarParentSeen. The comment acknowledges the deviation and gives a reason.",
+            "Cost ordering concern: KZG batch verification (most expensive) runs before SidecarProposerExpected (expensive shuffling). hasSeenDataColumnIndex deduplication check runs between KZG and ProposerExpected—this is after an expensive operation."
+          ],
+          "cache_analysis": "The results bitmap (result.go) caches per-requirement pass/fail state within a single verifier instance. Each gossip message creates a new verifier, so there is no cross-message cache state contamination. The signature cache (LRU-256) and inclusion proof cache (LRU-2) are shared across verifier instances.",
+          "concurrency_analysis": "Gossip message validation in libp2p-pubsub runs validators concurrently. Each call to validateDataColumn creates an independent verifier. Shared mutable state: signature cache, inclusion proof cache, seenDataColumnCache (for hasSeenDataColumnIndex). These use LRU with internal locking or sync.Map semantics."
+        },
+        "phase2_symbolic_execution": {
+          "summary": "The ordering discrepancy between GossipDataColumnSidecarRequirements and actual execution is significant but explained in the comment. The key security question is whether the deviation allows an attack: could an attacker submit a sidecar that passes SidecarParentSeen but would have been rejected by an ordering-compliant implementation? No, because both checks are performed—just in a different order. The question is whether delaying ValidProposerSignature until after SidecarParentSeen creates a DoS vector.",
+          "counterexample_found": true,
+          "counterexample": "DoS via expensive BLS before cheap checks scenario (spec-ordering): If the implementation followed the GossipDataColumnSidecarRequirements array order (ValidProposerSignature BEFORE SidecarParentSeen), an attacker could submit sidecars with valid BLS signatures (forged via stolen key or replayed from legitimate messages) but unknown parent roots. The expensive BLS verification would run before the cheap 'has parent been seen' check—potentially wasting CPU. The ACTUAL implementation (SidecarParentSeen first) is MORE secure in this regard, not less. However: the discrepancy between array and execution means a reader of GossipDataColumnSidecarRequirements would have a false understanding of execution order. Additionally, if any future code uses the requirements array to ENFORCE ordering (e.g., a batch processor), it would execute in the wrong order.",
+          "attack_scenarios": [
+            "Array vs execution ordering confusion: any batch processing code that iterates GossipDataColumnSidecarRequirements and calls corresponding methods in array order would execute ValidProposerSignature before SidecarParentSeen—opposite of the gossiping ordering intention",
+            "Cost exhaustion: current order (SidecarParentSeen first) means attacker needs a known parent to trigger BLS verification. This is actually more expensive to mount (attacker needs valid parent knowledge). However, if hasSeenDataColumnIndex check passed first, duplicate detection would block the expensive KZG computation.",
+            "Duplicate sidecar spam: hasSeenDataColumnIndex check occurs AFTER KZG batch verification (the most expensive check). This means the same sidecar could trigger expensive KZG re-verification before being detected as a duplicate. Checking hasSeenDataColumnIndex earlier would be cheaper."
+          ],
+          "timing_dependencies": "No TOCTOU identified within the ordering itself. The hasSeenDataColumnIndex race (two simultaneous sidecars with same key both pass the seen-check before either sets it) is a separate deduplication issue."
+        },
+        "phase2_5_reachability_analysis": {
+          "summary": "Any P2P peer can send gossip data column sidecars. The validation ordering is exercised for every incoming sidecar. The ordering deviation from spec is documented in a comment and represents an intentional implementation choice, not an oversight. The cost ordering issue (hasSeenDataColumnIndex after KZG) is reachable by any peer sending duplicate columns.",
+          "entry_points": ["P2P gossip data_column_sidecar topic from any peer"],
+          "attacker_controlled": true,
+          "classification": "defense-in-depth",
+          "attack_surface": "An attacker can send sidecars with known parent roots to trigger BLS verification, then duplicate sidecars to trigger repeated KZG verification before deduplication. However, libp2p-pubsub's message deduplication at the pubsub layer may limit this."
+        },
+        "phase3_invariant_proving": {
+          "summary": "The invariant 'cheap checks run before expensive checks' is PARTIALLY violated: (1) The spec mandates ValidProposerSignature before SidecarParentSeen, but the implementation correctly inverts this for DoS-resistance reasons (BLS is expensive; parent check is cheap). (2) The hasSeenDataColumnIndex deduplication check runs after the expensive KZG batch verification, meaning duplicate sidecars pay the KZG cost. This is a genuine ordering inefficiency that could be exploited for CPU exhaustion.",
+          "proof_successful": false,
+          "guard_identified": "Comment at line 124 of validate_data_column.go documenting intentional spec deviation; libp2p-pubsub message ID deduplication as an outer layer",
+          "guard_sufficiency": "Partially sufficient. The intentional inversion of BLS/ParentSeen is justified. But placing hasSeenDataColumnIndex after KZG is suboptimal: an attacker who knows a valid (slot, proposerIndex, columnIndex) tuple that has already been seen can force expensive KZG re-verification before the duplicate is detected. The outer pubsub deduplication may help but operates on message ID (hash of the serialized message), not on the semantic key (slot, proposer, index).",
+          "edge_cases": [
+            "Two simultaneous valid sidecars for the same (slot, proposer, index): both pass hasSeenDataColumnIndex check before either sets it—both pay full KZG cost, both are accepted, the second acceptance is a no-op but wastes resources",
+            "Sidecar with valid BLS+Merkle but invalid KZG: runs through 10 steps before failing at step 11—the ordering does not short-circuit on cheap failures early enough",
+            "Requirements array order vs execution order mismatch: any future automated analysis or batch processor iterating the requirements array will have incorrect assumptions about execution ordering"
+          ]
+        },
+        "phase3_5_scope_filtering": {
+          "bug_bounty_eligible": true,
+          "reason": "Two issues found: (1) The hasSeenDataColumnIndex deduplication check runs after KZG batch verification (most expensive check), allowing a known-duplicate sidecar to trigger expensive KZG computation. This is an exploitable CPU exhaustion vector for any peer that knows a valid (slot, proposer, index) tuple that has already been processed. (2) The GossipDataColumnSidecarRequirements array ordering diverges from the actual validateDataColumn execution ordering without clear documentation that they are intentionally different. This creates a maintenance hazard where future developers may trust the array as authoritative for execution order.",
+          "recommendation": "Move hasSeenDataColumnIndex check to before KZG batch verification. Consider adding a comment to GossipDataColumnSidecarRequirements clarifying that the array order does not reflect execution order in validateDataColumn. The intentional spec deviation (ParentSeen before BLS) should be documented in both the array and the function.",
+          "severity_estimate": "Low"
+        },
+        "final_classification": "informational"
+      }
+    },
+    {
+      "check_id": "CHK-W2B3-48-001",
+      "checklist_item": {
+        "description": "Non-proposer claiming proposer identity",
+        "graph_element_under_test": "beacon-chain/verification/data_column.go SidecarProposerExpected()"
+      },
+      "audit_result": {
+        "phase1_abstract_interpretation": {
+          "summary": "SidecarProposerExpected verifies that the sidecar's ProposerIndex matches the beacon chain's computed expected proposer for (slot, parentRoot). It uses propCache.Proposer() (which calls helpers.ProposerIndexAtSlotFromCheckpoint) for cached lookups, and propCache.ComputeProposer() (which processes slots and calls helpers.BeaconProposerIndex) for cache misses. The checkpoint is computed as (epoch-1, targetRoot) where targetRoot comes from forkchoice. The ProposerIndex from the sidecar is compared against the computed index at line 484.",
+          "state_anomalies_found": [
+            "dataColumn.ProposerIndex() is attacker-controlled—it comes directly from the received sidecar's SignedBlockHeader.ProposerIndex field",
+            "ValidProposerSignature runs BEFORE SidecarProposerExpected in execution. The BLS signature verification uses sig.Proposer (= dataColumn.ProposerIndex()) as the key to look up the validator's public key. So ValidProposerSignature already binds the signature to the claimed proposer.",
+            "If ValidProposerSignature passes, the attacker HAS proven they control the private key of the claimed proposer. SidecarProposerExpected then checks if that proposer was actually selected for the slot.",
+            "The targetRoot computation uses epoch-1 logic: if dataColumnEpoch > 0, use epoch-1. This means for epoch-0 columns, the checkpoint epoch stays at 0. For epoch-1+, the shuffling is looked up from the previous epoch's checkpoint—correct per beacon chain spec.",
+            "targetRootFromCache uses a local map (targetRootBySlotParentRoot) within the single verifier call, not a persistent cross-call cache. This map is keyed on (slot, parentRoot) pairs within the current batch of dataColumns being verified."
+          ],
+          "cache_analysis": "propCache.Proposer() uses helpers.ProposerIndexAtSlotFromCheckpoint, which likely reads from a global proposer index cache updated by block processing. The stateByRoot map within the verifier is per-call and not shared. targetRootFromCache is a local per-call map. The absence of a persistent cross-call proposer cache for gossip means each gossip message with an uncached proposer may trigger ProcessSlotsUsingNextSlotCache—a potentially expensive operation.",
+          "concurrency_analysis": "ProposerIndexAtSlotFromCheckpoint likely uses a global next-slot-cache that is read/written by multiple goroutines. However, helpers.BeaconProposerIndex is deterministic given the same state, so concurrent calls with the same input are idempotent. Race conditions would result in duplicate computation, not incorrect results."
+        },
+        "phase2_symbolic_execution": {
+          "summary": "For a non-proposer (validator V) to claim proposer identity (validator P) for a slot S: V must forge P's BLS signature (impossible), OR V must be the actual expected proposer (ValidProposerSignature then correctly succeeds with V's key, but SidecarProposerExpected would fail unless V=expected_proposer). If V submits a sidecar claiming ProposerIndex=P but signed with V's own key, ValidProposerSignature looks up P's public key from the state and verifies the signature—this fails because V signed it, not P. Therefore the two checks together (ValidProposerSignature + SidecarProposerExpected) create a sound binding.",
+          "counterexample_found": false,
+          "counterexample": "No feasible counterexample. ValidProposerSignature and SidecarProposerExpected together prevent non-proposer identity claims: ValidProposerSignature prevents signing with a different key, while SidecarProposerExpected prevents using a legitimately controlled key for a slot where that validator is not the expected proposer.",
+          "attack_scenarios": [
+            "Griefer attack: a non-proposer submits a sidecar with their own valid signature (so ValidProposerSignature passes for their own index) but a claimed slot where they are not the expected proposer. SidecarProposerExpected catches this and returns REJECT.",
+            "Epoch boundary race: at an epoch boundary, the proposer shuffling changes. If a validator submits a sidecar claiming to be the proposer for the new epoch but the forkchoice targetRoot has not been updated yet, ComputeProposer might use a stale epoch's shuffling. This is a TOCTOU concern: the computed proposer index depends on when the proposer cache is updated relative to the epoch transition.",
+            "Checkpoint epoch-1 subtraction: for slot 0 (epoch 0), dataColumnEpoch stays at 0 and is NOT decremented. For slot 32 (epoch 1), dataColumnEpoch = 0 (decremented from 1). This means epoch-0 and epoch-1 slots use the same epoch-0 checkpoint for proposer lookup. If an attacker crafts a sidecar for a slot in epoch 1 that is computed using epoch-0's shuffling, and the actual expected proposer for that slot under epoch-1 shuffling is different, there could be a mismatch. However, the Ethereum spec uses the previous epoch's shuffling for the first slot of a new epoch, so this may be correct by design."
+          ],
+          "timing_dependencies": "TOCTOU at epoch boundary: the expected proposer for slot S depends on the forkchoice's view of targetRoot at the time SidecarProposerExpected is called. If forkchoice has not yet been updated to include the relevant block, TargetRootForEpoch may return an incorrect or previous-epoch root, potentially producing a wrong proposer index. This could cause valid sidecars to be rejected (false negative) but not invalid sidecars to be accepted (no false positive in terms of security)."
+        },
+        "phase2_5_reachability_analysis": {
+          "summary": "SidecarProposerExpected is the last step in validateDataColumn validation, reached only after all other checks pass. It is reachable from P2P for any sidecar that passes the preceding 11 checks. The proposer index comparison is the final guard against identity impersonation.",
+          "entry_points": ["P2P gossip after passing 11 prior validation steps"],
+          "attacker_controlled": true,
+          "classification": "internal-only",
+          "attack_surface": "The ProposerIndex field is attacker-controlled from the network, but the combined ValidProposerSignature + SidecarProposerExpected checks form a sound barrier. To bypass SidecarProposerExpected, an attacker would need to either forge the BLS signature (infeasible) or actually be the expected proposer."
+        },
+        "phase3_invariant_proving": {
+          "summary": "The invariant 'only the expected proposer for a slot can submit a valid data column sidecar' holds. The combination of ValidProposerSignature (binds signature to ProposerIndex) and SidecarProposerExpected (verifies ProposerIndex against beacon shuffling) prevents non-proposers from claiming proposer identity. The ordering (ValidProposerSignature before SidecarProposerExpected in execution) is correct: BLS binds identity to slot/block, then shuffling confirms the identity is correct for the slot.",
+          "proof_successful": true,
+          "guard_identified": "Two-step guard: (1) ValidProposerSignature—BLS signature must match the claimed ProposerIndex's public key; (2) SidecarProposerExpected—the ProposerIndex must match the beacon chain's computed expected proposer for the slot",
+          "guard_sufficiency": "Sufficient. The two checks together are necessary and sufficient to prevent non-proposer identity claims. The epoch-1 subtraction in proposer epoch computation follows the beacon spec. A minor concern is the TOCTOU at epoch boundaries causing false-negative rejections but no false-positive acceptances.",
+          "edge_cases": [
+            "Epoch 0, slot 0: dataColumnEpoch stays at 0, checkpoint epoch = 0. Proposer lookup uses genesis validators root. This is correct for genesis.",
+            "Slashed proposer: a slashed validator may still have their public key valid in the beacon state, but their ProposerIndex should not appear as expected_proposer since slashed validators are excluded from the proposer set. SidecarProposerExpected handles this via shuffling.",
+            "Multiple columns same slot: SidecarProposerExpected iterates all dataColumns in the verifier—for gossip this is always exactly one column (roDataColumns = []blocks.RODataColumn{roDataColumn}), so no batch confusion."
+          ]
+        },
+        "phase3_5_scope_filtering": {
+          "bug_bounty_eligible": false,
+          "reason": "The combined ValidProposerSignature + SidecarProposerExpected guard correctly prevents non-proposers from claiming proposer identity. No implementation flaw was found that would allow bypassing this check. The property holds under standard BLS hardness assumptions.",
+          "recommendation": "Consider documenting the dependency between ValidProposerSignature and SidecarProposerExpected: they together form a two-factor proposer identity proof, and their ordering dependency (ValidProposerSignature must precede SidecarProposerExpected because BLS binds the identity) should be explicit.",
+          "severity_estimate": "Low"
+        },
+        "final_classification": "not-a-vulnerability"
+      }
+    }
+  ]
+}

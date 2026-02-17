@@ -1,0 +1,452 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-0051",
+      "property_id": "PROP-W4B13-69",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Client enforces count * columnsCount (not count * NUMBER_OF_COLUMNS) \u2014 equivalent when requesting all columns",
+      "description": "The client in SendDataColumnSidecarsByRangeRequest computes totalCount = request.Count * len(request.Columns), i.e., count * columnsCount. The loop reads exactly totalCount sidecars, then issues a final read and asserts EOF. If the server sends more than totalCount, the client returns errMaxResponseDataColumnSidecarsExceeded and downscorescores the peer. The spec says the limit is count * NUMBER_OF_COLUMNS. The client's limit equals the spec limit precisely when the client requests all NUMBER_OF_COLUMNS columns. When the client requests a subset of columns (columnsCount < NUMBER_OF_COLUMNS), the client's limit is tighter than the spec's: count * columnsCount < count * NUMBER_OF_COLUMNS. This means the client is actually more restrictive than required, which is acceptable. There is no case where the client accepts more than count * NUMBER_OF_COLUMNS sidecars: (a) if all columns requested, client limit = count * NUMBER_OF_COLUMNS; (b) if subset requested, client limit = count * columnsCount < count * NUMBER_OF_COLUMNS. The invariant 'client never accepts > count * NUMBER_OF_COLUMNS sidecars' holds under all circumstances. The pre-validation check 'totalCount > maxRequestDataColumnSidecars' uses MaxRequestDataColumnSidecars (16384) as the absolute ceiling, which is a valid pre-flight rejection. The implementation is compliant with the spec from the client perspective.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_send_request.go",
+            "symbol": "SendDataColumnSidecarsByRangeRequest",
+            "line_range": {
+              "start": 457,
+              "end": 568
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "phase1": "Abstract domain analysis: count \u2208 [1, MAX_REQUEST_DATA_COLUMN_SIDECARS], columnsCount \u2208 [1, NUMBER_OF_COLUMNS=128]. totalCount = count * columnsCount \u2208 [1, MAX_REQUEST_DATA_COLUMN_SIDECARS=16384]. The pre-validation guard totalCount > 16384 \u2192 error ensures totalCount \u2264 16384 before any stream read. The loop bound is totalCount. For any valid (count, columnsCount) pair, totalCount \u2264 count * NUMBER_OF_COLUMNS because columnsCount \u2264 NUMBER_OF_COLUMNS. Therefore the client's acceptance window is always within the spec-permitted window.",
+      "phase2": "Symbolic execution: Case A \u2014 count=128, columns=all 128: totalCount=16384, loop reads up to 16384, EOF check. Limit = spec limit. Case B \u2014 count=1, columns=all 128: totalCount=128, loop reads up to 128, EOF enforced. Limit = 128 \u2264 1*128. Case C \u2014 count=1, columns={0}: totalCount=1, loop reads up to 1, EOF enforced. Limit = 1 < 1*128 (tighter than spec). Case D \u2014 count=256, columns=all 128: totalCount=32768 > 16384 \u2192 pre-validation error before any read. No path exists in which the client successfully reads more than count * NUMBER_OF_COLUMNS sidecars.",
+      "phase2_5": "Cross-domain: The client uses columnsCount from the request object (immutable after construction). There is no TOCTOU: the Columns slice is read once to compute columnsCount and again to build the requestedIndices map for isSidecarIndexRequested validation. Both reads are from the same *ethpb.DataColumnSidecarsByRangeRequest, which is not modified during the function. The server quota is 16384, larger than the client's loop bound for small count. The adversarial server could send up to 16384 sidecars; the client's loop+EOF check would reject any count beyond totalCount.",
+      "phase3": "Invariant: 'len(roDataColumns) \u2264 count * NUMBER_OF_COLUMNS at return'. Proof: (1) totalCount = count * columnsCount \u2264 count * NUMBER_OF_COLUMNS since columnsCount \u2264 NUMBER_OF_COLUMNS. (2) loop runs at most totalCount iterations. (3) each iteration either appends one element or returns (EOF \u2192 partial return, error \u2192 nil). (4) after the loop, the final readChunkedDataColumnSidecar either returns io.EOF (\u2192 return roDataColumns with len \u2264 totalCount) or non-EOF (\u2192 return error, nil slice). (5) therefore len(roDataColumns) \u2264 totalCount \u2264 count * NUMBER_OF_COLUMNS at every return point. Invariant holds.",
+      "phase3_5": "Conservative assessment: The only conceivable concern is whether a malicious server can cause the client to accept an oversized response. It cannot: the loop is statically bounded by totalCount, which is computed before opening the stream and is immutable. The isSidecarIndexRequested validator additionally rejects sidecars with unrequested indices, providing defense-in-depth. The EOF check adds a third enforcement layer. No violation scenario identified.",
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "The implementation is correct. Consider adding an explicit comment noting that the client bound count * columnsCount is always \u2264 count * NUMBER_OF_COLUMNS (since columnsCount \u2264 NUMBER_OF_COLUMNS), to clarify the relationship to the spec limit for future readers."
+    },
+    {
+      "check_id": "CHK-0052",
+      "property_id": "PROP-W4B13-69",
+      "final_classification": "potential-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Low",
+      "title": "Server quota initialized to MaxRequestDataColumnSidecars (16384) instead of tighter per-request limit count * len(columns)",
+      "description": "The server handler dataColumnSidecarsByRangeRPCHandler initializes its quota to beaconConfig.MaxRequestDataColumnSidecars (16384) unconditionally, without computing the tighter per-request limit count * len(request.Columns). For a request with count=1 and all 128 columns, the spec-required limit is 128, but the server quota is 16384. The server serves data bounded only by actual available blocks in the requested slot range (via the batcher iterating canonical blocks in [startSlot, startSlot+count)) and by the absolute quota. In practice, the actual data constraint (count slots * len(wantedColumns) sidecars) is always \u2264 the spec limit. However, the absence of an explicit per-request limit on the server side means: (1) if there is a storage bug that returns duplicate sidecars for the same (blockRoot, columnIndex), the server would stream duplicates up to 16384 instead of stopping at count * len(columns); (2) if batcher logic has a bug that causes it to iterate more blocks than count, the server would stream the excess up to 16384. The client does enforce the tighter limit and would reject responses exceeding count * columnsCount, so the end-to-end impact is a peer downscoring event rather than data corruption. The server non-conformance to the tighter limit represents a deviation from the spec's intent but requires a secondary bug to manifest as a practical issue.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 26,
+              "end": 126
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "streamDataColumnBatch",
+            "line_range": {
+              "start": 128,
+              "end": 171
+            },
+            "role": "secondary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "phase1": "Abstract domain analysis: The server quota q\u2080 = MaxRequestDataColumnSidecars = 16384. After serving the response, quota decrements by 1 per sidecar streamed. The spec requires q\u2080 \u2264 count * NUMBER_OF_COLUMNS. For count \u2208 [1, 127] with all 128 columns, count * 128 < 16384, meaning the server's initial quota exceeds the spec limit. The batcher provides an implicit data constraint: it iterates blocks in [startSlot, startSlot + rangeParameters.size), where rangeParameters.size \u2264 count. For each block, at most len(wantedColumns) sidecars are returned. So the maximum sidecars streamed = rangeParameters.size * len(wantedColumns) \u2264 count * len(columns) \u2264 count * NUMBER_OF_COLUMNS. Under the assumption that storage returns no duplicates and the batcher is correct, the server never exceeds the spec limit despite the loose quota.",
+      "phase2": "Symbolic execution: count=1, columns=all 128. Server quota=16384. batcher iterates 1 slot. storage.Get returns \u2264 128 sidecars. Quota after serving \u2265 16384-128=16256. Server streams \u2264 128 sidecars. Spec limit = 1*128 = 128. Served \u2264 128. OK. Now consider hypothetical storage bug: storage.Get for block root B with 128 requested indices returns 256 sidecars (duplicates). Server streams 256, quota=16384-256=16128 > 0. Client receives 256 with totalCount=128. Client loop reads 128, then final read gets sidecar 129, not EOF \u2192 client returns errMaxResponseDataColumnSidecarsExceeded and downscorescores. The server has violated the spec but the client protects local state. Without a storage bug, the symbolic path never reaches quota from below the per-request limit.",
+      "phase2_5": "Cross-domain: The server lacks the defensive per-request quota tightening that the analogous blob handler conceptually implements. The blob handler in SendBlobsByRangeRequest explicitly computes max = min(MaxRequestBlobSidecars, count * maxBlobsPerBlock), demonstrating the pattern. The data column server handler does not apply the analogous min(MaxRequestDataColumnSidecars, count * len(columns)) tightening. This is an asymmetry in defensive posture. The client's EOF enforcement compensates, but two layers of defence (server quota tightening + client EOF check) are preferable to one.",
+      "phase3": "Invariant: 'server never streams > count * NUMBER_OF_COLUMNS sidecars'. This invariant is NOT explicitly enforced by the server quota. It holds only inductively through: (1) batcher correctness; (2) storage correctness \u2014 returns at most len(wantedColumns) sidecars per block root; (3) no duplicate block roots in batcher output. If all three sub-invariants hold, the server invariant holds. But the server does not assert or enforce these sub-invariants via the quota mechanism. The invariant is conditionally proven under storage and batcher correctness assumptions, not unconditionally enforced.",
+      "phase3_5": "Conservative assessment: The server's failure to tighten the quota to count * len(columns) is a spec conformance gap. It does not directly enable an attack against a correct client, because the client enforces the tighter limit. However: (a) it could enable bandwidth abuse if storage returns duplicate entries, (b) it represents a protocol violation that could confuse alternative implementations that trust the server to self-limit, (c) the pattern established in blob handling (explicit per-request limit) is not followed here.",
+      "attack_scenario": "An adversarial or buggy storage layer that returns duplicate data column entries for a requested block root could cause the server to stream more than count * NUMBER_OF_COLUMNS sidecars for a small-count request. The receiving client would detect the excess and downscore the server peer, but the attack consumes server bandwidth and causes unnecessary network traffic. Under normal operation (no storage bugs), this scenario does not arise.",
+      "exploit_conditions": "Requires: (1) a storage bug or adversarial modification that causes dataColumnStorage.Get() to return duplicate entries; (2) a small count value such that count * len(columns) < MaxRequestDataColumnSidecars (i.e., count < 128 when requesting all columns). Not exploitable by network-facing attackers in the current implementation.",
+      "recommendation": "Tighten the server quota before the batcher loop: compute requestQuota = min(MaxRequestDataColumnSidecars, request.Count * uint64(len(request.Columns))) and initialize maxRequestDataColumnSidecars to requestQuota. This brings the server in line with the spec's count * NUMBER_OF_COLUMNS limit and follows the same defensive pattern as the blob handler's per-request limit computation. Additionally, validateDataColumnsByRange should validate that request.Count * len(request.Columns) \u2264 MaxRequestDataColumnSidecars to reject oversized requests early."
+    },
+    {
+      "check_id": "CHK-0053",
+      "property_id": "PROP-W4B13-69",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Response cannot exceed count * columnsCount sidecars end-to-end due to client loop bound and EOF enforcement",
+      "description": "The question is whether a response can exceed count * NUMBER_OF_COLUMNS sidecars for a small count value. Examining the full request-response path: the client computes totalCount = count * len(request.Columns), reads exactly totalCount sidecars in a bounded loop, then performs a mandatory EOF check. If the server sends sidecar number totalCount+1 instead of EOF, the client returns an error (errMaxResponseDataColumnSidecarsExceeded) and downscorescores the peer. Since len(request.Columns) \u2264 NUMBER_OF_COLUMNS, totalCount \u2264 count * NUMBER_OF_COLUMNS. Therefore the client's acceptance window is at most count * NUMBER_OF_COLUMNS, regardless of what the server sends. The server cannot cause the client to accept more sidecars than totalCount. Additionally, the isSidecarIndexRequested validator rejects any sidecar whose column index was not explicitly requested, providing a second defense layer. No code path exists in which the caller of SendDataColumnSidecarsByRangeRequest receives a slice with more than count * NUMBER_OF_COLUMNS entries. The client's protection is end-to-end effective.",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_send_request.go",
+            "symbol": "SendDataColumnSidecarsByRangeRequest",
+            "line_range": {
+              "start": 457,
+              "end": 568
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 26,
+              "end": 126
+            },
+            "role": "secondary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "phase1": "Abstract domain analysis over the full request-response protocol. Let R = count * columnsCount (client's loop bound). Let S = actual sidecars sent by server. The client returns: (a) an error if S > R (EOF check fails); (b) a slice of length min(S, R) if S \u2264 R (loop exits when i reaches R or EOF). Since R \u2264 count * NUMBER_OF_COLUMNS (because columnsCount \u2264 NUMBER_OF_COLUMNS), the returned slice always has length \u2264 count * NUMBER_OF_COLUMNS. The property 'response to caller \u2264 count * NUMBER_OF_COLUMNS' holds universally.",
+      "phase2": "Symbolic execution of the adversarial case: count=1, columns=all 128, totalCount=128. Adversarial server sends 200 sidecars. Client loop iteration 0..127: appends 128 sidecars. Loop completes. Final readChunkedDataColumnSidecar: reads sidecar #129, NOT EOF. Client enters the error branch: returns nil, errMaxResponseDataColumnSidecarsExceeded. Caller receives nil slice. The 200-sidecar response does not result in the caller having more than 128 sidecars.",
+      "phase2_5": "Cross-domain: Could an integer overflow in totalCount = request.Count * columnsCount cause the loop bound to wrap? The pre-check 'totalCount > maxRequestDataColumnSidecars' (16384) rejects any totalCount > 16384, which requires Count * columnsCount > 16384. For count=2^63 and columnsCount=2^63, the multiplication wraps to 0 in Go (no overflow panic for unsigned integers), totalCount=0, and the pre-check 0 > 16384 is false \u2014 allowing the function to proceed with an apparently small totalCount despite the enormous count. However, the loop 'for range 0' executes 0 iterations. The client returns an empty slice after the EOF check (which would get sidecar 1 from server, not EOF \u2192 error). So the overflow case returns an error or an empty slice \u2014 not an oversized response. The overflow is not exploitable for response inflation.",
+      "phase3": "Invariant proving: Let roDataColumns be the returned slice. Claim: len(roDataColumns) \u2264 count * NUMBER_OF_COLUMNS. The function has multiple return points: (1) pre-validation error path \u2014 returns nil (len=0); (2) mid-loop EOF path \u2014 returns roDataColumns with len \u2264 totalCount \u2264 count * NUMBER_OF_COLUMNS; (3) post-loop EOF check success path \u2014 returns roDataColumns with len = totalCount \u2264 count * NUMBER_OF_COLUMNS; (4) post-loop EOF check failure path \u2014 returns nil (len=0); (5) context/validation error paths \u2014 return nil. All return points satisfy len(roDataColumns) \u2264 count * NUMBER_OF_COLUMNS. The invariant is proven by case exhaustion.",
+      "phase3_5": "Conservative assessment: The invariant holds unconditionally for the client. The server does not enforce the tighter per-request limit (as noted in CHK-0052), but this cannot cause a correct client to accept an oversized response. Classification as not-a-vulnerability is warranted.",
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "No client-side fix required. The enforcement is correct and thorough. For defense-in-depth and spec conformance, the server should be fixed (see CHK-0052) to tighten its quota to count * len(columns), ensuring that conforming server behavior matches the spec's intent independently of client enforcement."
+    },
+    {
+      "check_id": "CHK-0054",
+      "property_id": "PROP-INCL-PROOF-VERIFY",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "VerifyDataColumnSidecarInclusionProof correctly implemented but does not bind column index \u2014 by design",
+      "description": "The function VerifyDataColumnSidecarInclusionProof at beacon-chain/core/peerdas/p2p_interface.go correctly verifies that the KZG commitments list is included at position kzgPosition=11 in the beacon block body Merkle tree. The function is cryptographically sound for its stated purpose. However, it does not and cannot verify that the column INDEX contained in the sidecar matches the column data \u2014 this is architectural: the inclusion proof only attests that a commitments list is included in a block body, not which column a sidecar represents. Column-index binding is performed by the KZG proof (VerifyDataColumnsSidecarKZGProofs), which uses sidecar.Index as the cell index in VerifyCellKZGProofBatch. The two checks together provide complete security.",
+      "phase1": "Verification invariants: (1) body_root must be exactly 32 bytes; (2) SignedBlockHeader and Header must be non-nil; (3) KzgCommitmentsInclusionProof must be exactly 4 elements of 32 bytes; (4) the proof asserts hash_tree_root(kzg_commitments_list) occupies position 11 in the body Merkle tree. A nil return guarantees the commitments are anchored in a signed block body. The function does NOT verify column index or column cell data.",
+      "phase2": "Attack paths: (A) Nil header: returns ErrNilBlockHeader before any crypto \u2014 no bypass. (B) Short body_root: returns ErrBadRootLength \u2014 no bypass. (C) Wrong proof bytes: trie.VerifyMerkleProof returns false, returns ErrInvalidInclusionProof. (D) Tampered commitments: LeavesFromCommitments computes wrong leaves, hash_tree_root diverges, proof fails. (E) Wrong block header: attacker cannot forge a Merkle proof for a different body_root without SHA-256 collision resistance being broken. (F) Empty commitments: blocked upstream by RequireValidFields before inclusion proof is reached. No bypass paths found.",
+      "phase2_5": "Cache key (inclusionProofKey) uses KzgCommitmentsInclusionProof[0..3] (128 bytes) + SignedBlockHeader.HashTreeRoot() (32 bytes) = 160 bytes. Key does NOT include sidecar.Index or KzgCommitments. All columns of the same block share the same signed block header and the same inclusion proof (block-level, not column-level), so they produce the same cache key. A cache hit for column 0 correctly skips re-verification for column N of the same block \u2014 semantically sound.",
+      "phase3": "Invariant proof: RequireValidFields ensures structural validity; RequireSidecarInclusionProven anchors commitments to a signed block; RequireSidecarKzgProofVerified (VerifyCellKZGProofBatch with sidecar.Index) binds each column cell to a specific commitment at a specific column index. Neither check subsumes the other. Together they are complete.",
+      "phase3_5": "The implementation is correct. kzgPosition=11 is consistent between p2p_interface.go and kzg.go, matching the Electra beacon block body structure. No bypass scenarios identified.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/core/peerdas/p2p_interface.go:97-125",
+          "beacon-chain/verification/data_column.go:356-387",
+          "beacon-chain/verification/data_column.go:527-547",
+          "consensus-types/blocks/kzg.go:14-20"
+        ]
+      },
+      "attack_scenario": "An attacker crafts a sidecar where the inclusion proof is invalid or refers to a different block, expecting the node to accept it. VerifyDataColumnSidecarInclusionProof rejects it at the Merkle proof check step.",
+      "exploit_conditions": "None. The function is cryptographically correct. Column-index binding is intentionally delegated to the KZG proof layer.",
+      "recommendation": "Add inline documentation clarifying that column-index binding is NOT provided by VerifyDataColumnSidecarInclusionProof and is instead provided by RequireSidecarKzgProofVerified. This prevents future developers from incorrectly relaxing the KZG requirement under the assumption that the inclusion proof is sufficient for complete verification."
+    },
+    {
+      "check_id": "CHK-0055",
+      "property_id": "PROP-P2P-RELAY-VALID-PROOF",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Gossip relay correctly enforces inclusion proof; ByRangeRequestDataColumnSidecarRequirements is dead code never referenced outside its definition",
+      "description": "The gossip validation pipeline in validateDataColumn (validate_data_column.go:143) enforces SidecarInclusionProven() with pubsub.ValidationReject on failure, ensuring only sidecars with valid inclusion proofs are propagated. However, ByRangeRequestDataColumnSidecarRequirements is declared in verification/data_column.go:44-48 but is never referenced anywhere in the codebase outside its declaration. The by-range RPC receive path uses verifyByRootDataColumnSidecars which applies ByRootRequestDataColumnSidecarRequirements. Since both requirement sets are currently identical, there is no functional gap, but the dead code creates a maintenance hazard.",
+      "phase1": "Gossip relay invariant: for a sidecar to be forwarded (msg.ValidatorData set at line 183), all requirements in GossipDataColumnSidecarRequirements must be satisfied. RequireSidecarInclusionProven is at index 9 of the 12-element requirement list. The verifier's allSatisfied() check (called by VerifiedRODataColumns) enforces this. The relay invariant holds: no sidecar with invalid inclusion proof proceeds to ValidatorData assignment.",
+      "phase2": "Attack path analysis: (A) Send invalid inclusion proof via gossip \u2192 SidecarInclusionProven() returns error \u2192 (ValidationReject, err) \u2014 no relay. (B) Send during initial sync \u2192 (ValidationIgnore, nil) at line 43-44 \u2014 ignored, not accepted into storage. (C) Own messages (self-generated) bypass all validation (line 37-39) \u2014 expected and necessary behavior. (D) Peer sends by-range request response with invalid inclusion proof \u2192 verifyByRootDataColumnSidecars calls SidecarInclusionProven() \u2192 returns error \u2192 peer is downscored \u2014 correctly rejected.",
+      "phase2_5": "Dead code impact: ByRangeRequestDataColumnSidecarRequirements is defined but the actual by-range receive path calls verifyByRootDataColumnSidecars which hardcodes ByRootRequestDataColumnSidecarRequirements. Current functional equivalence masks the dead code. If ByRange requirements were to diverge from ByRoot in a future commit, the by-range receive path would silently use the wrong requirement set.",
+      "phase3": "Relay security invariant holds across all paths. Gossip: enforced at validate_data_column.go:143. ByRoot receive: enforced at data_column_sidecars.go:992. ByRange receive: enforced via same verifyByRootDataColumnSidecars function. ByRange serve: serves pre-verified VerifiedRODataColumn from storage. No gap identified.",
+      "phase3_5": "Conservative: the dead code is not exploitable in the current state (both requirement sets are identical). The risk is forward-looking: if requirements diverge, the wrong set would be silently used for by-range received data. Severity is informational. Relay enforcement is correct.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:75-153",
+          "beacon-chain/verification/data_column.go:26-57",
+          "beacon-chain/sync/data_column_sidecars.go:939-1006"
+        ]
+      },
+      "attack_scenario": "An attacker peer sends a gossip sidecar with an invalid inclusion proof. The node returns ValidationReject and penalizes the peer. No relay occurs.",
+      "exploit_conditions": "None for the relay path. ByRangeRequestDataColumnSidecarRequirements dead code is not exploitable in the current codebase but creates a maintenance risk.",
+      "recommendation": "Either remove ByRangeRequestDataColumnSidecarRequirements (since it is never used) or wire it explicitly into the by-range receive path in data_column_sidecars.go to replace the ByRootRequestDataColumnSidecarRequirements usage, ensuring each RPC path uses its semantically appropriate requirement set and preventing silent divergence in future refactors."
+    },
+    {
+      "check_id": "CHK-0056",
+      "property_id": "PROP-BEACON-NODE-REJECT-INVALID-PROOF",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Beacon node rejects invalid inclusion proofs from all sources; inclusion proof cache key excludes column index but is semantically correct",
+      "description": "All three ingestion paths enforce RequireSidecarInclusionProven before producing VerifiedRODataColumn. The inclusion proof cache key (inclusionProofKey) is composed of KzgCommitmentsInclusionProof bytes (128 bytes) + SignedBlockHeader.HashTreeRoot() (32 bytes) = 160 bytes total, and does NOT include sidecar.Index. Since all columns of the same block carry the same block-level inclusion proof (the proof is over the block body's commitments list, not per-column), two sidecars for the same block with different column indices will produce the same cache key and share a cache entry. This is semantically correct \u2014 a cache hit correctly skips redundant re-verification of an identical proof.",
+      "phase1": "Rejection invariants: (1) Gossip: ValidationReject at validate_data_column.go:143-145. (2) ByRoot receive: error return at data_column_sidecars.go:992-994. (3) ByRange receive: same verifyByRootDataColumnSidecars path. (4) Storage layer: dataColumnStorage only stores VerifiedRODataColumn, which requires allSatisfied() including RequireSidecarInclusionProven. The node cannot store or forward a sidecar with an invalid inclusion proof.",
+      "phase2": "Cache attack surface: inclusionProofKey fails (returns error) if: (a) len(KzgCommitmentsInclusionProof) != 4, or (b) SignedBlockHeader.HashTreeRoot() returns error. On keyErr != nil: no cache lookup, no cache store, but VerifyDataColumnSidecarInclusionProof is still called. On keyErr == nil and cache miss: VerifyDataColumnSidecarInclusionProof is called; on success, result is cached. On keyErr == nil and cache hit: verification is skipped. Cache poisoning would require: first passing VerifyDataColumnSidecarInclusionProof (legitimate crypto check), then sending a different sidecar with the same proof bytes + block header hash.",
+      "phase2_5": "Cross-column cache sharing: sidecar for column 0 of block B passes verification and is cached with key K. Sidecar for column 5 of block B arrives with the same proof bytes and same block header, producing the same key K. Cache hit fires, VerifyDataColumnSidecarInclusionProof is skipped for column 5. This is correct: the inclusion proof is block-level, not column-level, so verifying it once for any column of a block is sufficient to establish that the commitments list is in that block's body. Per-column authenticity is provided by the KZG proof, which is not cached and is always computed.",
+      "phase3": "Invariant holds. The cache is conservative (only stores successful verifications, only accessible after passing the crypto check). The lack of column index in the cache key is intentional. The per-column security gap is correctly closed by RequireSidecarKzgProofVerified, which is also mandatory in all requirement sets and uses sidecar.Index in VerifyCellKZGProofBatch.",
+      "phase3_5": "Conservative: no bypass scenario exists. All paths correctly reject invalid inclusion proofs.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/verification/data_column.go:527-547",
+          "beacon-chain/verification/data_column.go:356-387",
+          "beacon-chain/sync/validate_data_column.go:143-145",
+          "beacon-chain/sync/data_column_sidecars.go:985-1006"
+        ]
+      },
+      "attack_scenario": "An attacker sends sidecars with invalid inclusion proofs across gossip and RPC paths. All paths call SidecarInclusionProven() which runs (or cache-hits) VerifyDataColumnSidecarInclusionProof. Invalid proofs are rejected. Cache poisoning requires first passing the crypto check, making it a non-attack.",
+      "exploit_conditions": "None. Cache design is correct for the block-level semantics of inclusion proofs. Per-column binding is enforced by the KZG layer, which is always verified independently.",
+      "recommendation": "Add a comment in inclusionProofKey explaining why sidecar.Index is intentionally excluded from the key (all columns of the same block carry the same block-level inclusion proof). Add a unit test asserting that two sidecars for the same block with different column indices produce the same cache key and that this triggers the intended cache-hit optimization."
+    },
+    {
+      "check_id": "CHK-0057",
+      "property_id": "PROP-GOSSIP-REJECT-INVALID-PROOF",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Gossip validation cannot accept sidecars with invalid inclusion proofs; both checks are mandatory and complementary \u2014 removal of either creates a security gap",
+      "description": "A sidecar with an invalid inclusion proof cannot be accepted by gossip validation in the current implementation. The validateDataColumn function enforces SidecarInclusionProven() at line 143 with ValidationReject. The inclusion proof and KZG proof are complementary: the inclusion proof anchors the commitments list to a signed block body (prevents commitment injection); the KZG proof binds column cells to specific commitments at a specific column index (prevents cell substitution and index mismatch). Neither check subsumes the other. Together they are sufficient for complete data column sidecar authenticity.",
+      "phase1": "Gossip acceptance invariant: msg.ValidatorData is set only after verifier.VerifiedRODataColumns() succeeds (line 168-183). VerifiedRODataColumns() calls allSatisfied(), which requires all 12 requirements in GossipDataColumnSidecarRequirements (including RequireSidecarInclusionProven at index 9) to be satisfied without error. The control flow from decode to ValidatorData assignment has exactly one path, and it passes through SidecarInclusionProven(). There is no conditional branch that skips this check for gossip messages.",
+      "phase2": "Bypass attempt analysis: (A) Omit inclusion proof check from requirements \u2014 blocked by GossipDataColumnSidecarRequirements being a package-level constant. (B) Use SatisfyRequirement to skip it \u2014 only RequireSidecarKzgProofVerified is satisfied externally (line 153); RequireSidecarInclusionProven is never externally satisfied in the gossip path. (C) Exploit results.cached() to get early return \u2014 each gossip message creates a new verifier instance, so no cross-message result sharing occurs. (D) Send during initial sync \u2014 returns ValidationIgnore, not ValidationAccept. (E) Own message bypass \u2014 only applies to self-generated messages. No bypass exists.",
+      "phase2_5": "Security composition analysis: Inclusion proof alone (without KZG): attacker could provide valid commitments C from a real block B, but substitute column cells inconsistent with the commitments. The KZG check catches this. KZG proof alone (without inclusion proof): attacker provides fake commitments C_fake not from any block, generates valid cells for column N consistent with C_fake, and provides a fake inclusion proof. The KZG check passes (cells are consistent with C_fake), but the inclusion proof fails (C_fake is not in any real block body). Conclusion: both checks are required and neither can be omitted.",
+      "phase3": "Completeness proof: GossipDataColumnSidecarRequirements enforces: (1) ValidProposerSignature \u2014 authenticates the block header; (2) SidecarInclusionProven \u2014 anchors commitments to an authenticated block body; (3) SidecarKzgProofVerified \u2014 binds column cells to authenticated commitments at the claimed column index. This three-check composition prevents: forged blocks (signature), commitment substitution (inclusion proof), and cell substitution or index fraud (KZG proof). The system is complete under standard cryptographic assumptions.",
+      "phase3_5": "Conservative: no bypass scenario was identified. Forward-looking risk: if a future developer removes RequireSidecarInclusionProven from GossipDataColumnSidecarRequirements (incorrectly believing KZG proofs are sufficient), attackers could inject arbitrary commitments not tied to any real block into the data availability sampling system. This is not a current vulnerability but is a critical design invariant that must be preserved.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:143-153",
+          "beacon-chain/verification/data_column.go:26-39",
+          "beacon-chain/core/peerdas/p2p_interface.go:97-125",
+          "beacon-chain/core/peerdas/p2p_interface.go:61-93"
+        ]
+      },
+      "attack_scenario": "An attacker sends a gossip sidecar with an invalid inclusion proof. validateDataColumn calls verifier.SidecarInclusionProven() \u2192 VerifyDataColumnSidecarInclusionProof returns ErrInvalidInclusionProof \u2192 SidecarInclusionProven returns wrapped error \u2192 validateDataColumn returns (ValidationReject, err). The peer's gossip score is penalized. The sidecar is not relayed or stored.",
+      "exploit_conditions": "None. A sidecar with an invalid inclusion proof cannot be accepted by gossip validation in the current implementation.",
+      "recommendation": "Add regression tests for: (a) sidecar with tampered KzgCommitmentsInclusionProof bytes returns ValidationReject; (b) sidecar with valid inclusion proof but invalid KZG proof returns ValidationReject; (c) sidecar with valid KZG proof but invalid inclusion proof returns ValidationReject. Add a prominent code comment on GossipDataColumnSidecarRequirements explaining that RequireSidecarInclusionProven and RequireSidecarKzgProofVerified are both mandatory and complementary \u2014 removing either creates a distinct security gap in the data availability sampling system."
+    },
+    {
+      "check_id": "CHK-0058",
+      "property_id": "PROP-KZG-GOSSIP-COVERAGE",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "verify_data_column_sidecar_kzg_proofs called for every gossip sidecar via batch or fallback path",
+      "description": "The gossip validation pipeline in validate_data_column.go calls validateWithKzgBatchVerifier for every sidecar processed via gossip. This either succeeds via the batch path (verifyKzgBatch -> peerdas.VerifyDataColumnsSidecarKZGProofs) or falls back to validateUnbatchedColumnsKzg -> peerdas.VerifyDataColumnsSidecarKZGProofs. No code path through validateDataColumn reaches ValidationAccept without a successful KZG proof verification. The verifier.SatisfyRequirement(verification.RequireSidecarKzgProofVerified) call at line 153 of validate_data_column.go is only reached after validateWithKzgBatchVerifier returns ValidationAccept. The check is always performed.",
+      "phase1": "Abstract interpretation confirms: control flow in validateDataColumn always reaches the KZG verification block (lines 147-153) before the ValidationAccept return at line 226. There is no early-return path between SidecarInclusionProven (step 10) and validateWithKzgBatchVerifier (step 11) that would skip KZG. The only exits before KZG are REJECT or IGNORE outcomes, which do not accept invalid sidecars.",
+      "phase2": "Symbolic execution: For any input sidecar, after passing structural/subnet/slot/parent/signature/inclusion checks, execution must reach s.validateWithKzgBatchVerifier(ctx, roDataColumns). The function returns ValidationAccept iff (a) batch verifier succeeds with nil error, or (b) batch verifier returns error AND validateUnbatchedColumnsKzg succeeds. In case (b), VerifyDataColumnsSidecarKZGProofs is called directly. In neither case is a sidecar accepted without KZG proof verification completing successfully.",
+      "phase2_5": "Cross-path analysis: The gossip subscription topic data_column_sidecar_{subnet} is the only gossip ingress path for data column sidecars. The subscriber in subscriber_data_column_sidecar.go consumes only sidecars that passed validateDataColumn. No bypass path for gossip ingress exists that skips validateDataColumn entirely.",
+      "phase3": "Invariant: For all gossip-sourced data column sidecars that receive ValidationAccept, RequireSidecarKzgProofVerified is satisfied in the verifier results set. The verifier.VerifiedRODataColumns() call enforces allSatisfied() which checks all requirements in GossipDataColumnSidecarRequirements including RequireSidecarKzgProofVerified. The SatisfyRequirement call happens only after successful batch KZG or unbatched KZG verification. Invariant holds.",
+      "phase3_5": "Confirmed secure. The KZG call chain for gossip is complete and mandatory.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:147-153",
+          "beacon-chain/sync/batch_verifier.go:157-191",
+          "beacon-chain/sync/batch_verifier.go:183-192",
+          "beacon-chain/sync/batch_verifier.go:194-214"
+        ]
+      },
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "No change required for correctness. Consider adding a unit test that explicitly verifies no gossip acceptance path can skip the KZG check."
+    },
+    {
+      "check_id": "CHK-0059",
+      "property_id": "PROP-KZG-RELAY-ENFORCEMENT",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "P2P peer layer enforces KZG proof verification before relay via validateDataColumn",
+      "description": "The gossip validation handler validateDataColumn is registered as the pubsub message validator for all data_column_sidecar_{subnet_id} topics. libp2p-pubsub enforces that only messages returning ValidationAccept are relayed to other peers. Since ValidationAccept requires passing KZG verification (via validateWithKzgBatchVerifier and RequireSidecarKzgProofVerified), no peer can relay a data column sidecar with an invalid KZG proof. ValidationIgnore prevents relay and drops the message locally; ValidationReject penalizes the sending peer and prevents relay.",
+      "phase1": "Abstract interpretation: The gossip validation pipeline return values are: ValidationReject (sidecar dropped, peer penalized), ValidationIgnore (sidecar dropped, no relay), or ValidationAccept (sidecar relayed). KZG failure returns ValidationReject (via validateUnbatchedColumnsKzg) or ValidationIgnore (timeout/context cancellation). Only ValidationAccept triggers relay. KZG must pass to reach ValidationAccept.",
+      "phase2": "Symbolic execution: The only ValidationAccept return in validateDataColumn is at line 226, which is only reachable after: (1) validateWithKzgBatchVerifier returns ValidationAccept at line 148-151, and (2) verifier.VerifiedRODataColumns() succeeds at line 168-173. Both gates require successful KZG proof verification. A relay attempt with invalid KZG proof cannot produce ValidationAccept.",
+      "phase2_5": "The timeout path (ctx.Done() in validateWithKzgBatchVerifier) returns ValidationIgnore, which prevents relay but does not accept the sidecar. This is correct behavior \u2014 in the event of timeout, the message is silently dropped locally, not forwarded.",
+      "phase3": "Invariant: For all sidecars relayed by actor-p2p-peer, the KZG proof is valid as verified by VerifyDataColumnsSidecarKZGProofs (directly or via batch). The libp2p-pubsub contract guarantees only ValidationAccept messages are propagated; any non-Accept return from validateDataColumn suppresses relay.",
+      "phase3_5": "Confirmed secure. Relay enforcement via KZG is correctly implemented.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:30-227",
+          "beacon-chain/sync/batch_verifier.go:157-192",
+          "beacon-chain/sync/service.go:263"
+        ]
+      },
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "No change required. The relay enforcement is correctly implemented via libp2p-pubsub's validator mechanism."
+    },
+    {
+      "check_id": "CHK-0060",
+      "property_id": "PROP-KZG-ALL-SOURCES",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Beacon node rejects sidecars with invalid KZG proofs from all ingress sources",
+      "description": "Three ingress paths exist for data column sidecars: (1) gossip, (2) RPC by-root request, (3) RPC by-range request. All three paths invoke KZG verification before accepting a sidecar as VerifiedRODataColumn. Gossip: validateDataColumn -> validateWithKzgBatchVerifier or validateUnbatchedColumnsKzg. RPC (both by-root and by-range): FetchDataColumnSidecars -> verifyDataColumnSidecarsByPeer -> verifyByRootDataColumnSidecars -> verifier.SidecarKzgProofVerified() which calls peerdas.VerifyDataColumnsSidecarKZGProofs. The ByRootRequestDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified. The type system enforces the distinction: only blocks.VerifiedRODataColumn is accepted into storage and processing, and VerifiedRODataColumn can only be constructed after all requirements including KZG are satisfied.",
+      "phase1": "Abstract interpretation across all paths: (a) Gossip path always calls validateWithKzgBatchVerifier. (b) RPC by-root path calls verifyByRootDataColumnSidecars with ByRootRequestDataColumnSidecarRequirements. (c) RPC by-range path sends sidecars through the same verifyDataColumnSidecarsByPeer -> verifyByRootDataColumnSidecars pipeline. All paths require SidecarKzgProofVerified before producing VerifiedRODataColumn.",
+      "phase2": "Symbolic execution: In verifyByRootDataColumnSidecars: verifier.SidecarKzgProofVerified() is called. If it returns an error, verifiedRoDataColumns is nil and the error propagates. verifier.VerifiedRODataColumns() calls allSatisfied() which requires RequireSidecarKzgProofVerified to be in the satisfied set.",
+      "phase2_5": "Note: ByRangeRequestDataColumnSidecarRequirements is defined in verification/data_column.go but the by-range client-side handler currently uses ByRootRequestDataColumnSidecarRequirements (both sets have the same content: ValidFields + SidecarInclusionProven + SidecarKzgProofVerified). This is functionally equivalent and does not create a gap.",
+      "phase3": "Invariant: For all data column sidecars stored as VerifiedRODataColumn from any ingress path, RequireSidecarKzgProofVerified is satisfied. The type-level enforcement (VerifiedRODataColumn vs RODataColumn) is the primary enforcement mechanism, backed by the requirement gate in VerifiedRODataColumns().",
+      "phase3_5": "Confirmed secure. All ingress paths verify KZG proofs.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:147-153",
+          "beacon-chain/sync/data_column_sidecars.go:958-1006",
+          "beacon-chain/verification/data_column.go:26-57",
+          "beacon-chain/verification/data_column.go:389-405"
+        ]
+      },
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "The ByRangeRequestDataColumnSidecarRequirements constant is defined but currently unused (the by-range client path uses ByRootRequestDataColumnSidecarRequirements). Consider using it explicitly in the by-range path to make the code's intent clearer and reduce the risk of a future divergence."
+    },
+    {
+      "check_id": "CHK-0061",
+      "property_id": "PROP-KZG-TAMPER-REJECTION",
+      "final_classification": "potential-vulnerability",
+      "bug_bounty_eligible": true,
+      "severity": "Medium",
+      "title": "KZG batch verifier goroutine deadlock via context timeout causes denial-of-service: all subsequent KZG verifications time out",
+      "description": "A denial-of-service vulnerability exists in the KZG batch verifier due to a goroutine deadlock triggered by context timeout. The `resChan` in `kzgVerifier` is an unbuffered channel (`make(chan error)` with no buffer). When `validateWithKzgBatchVerifier` is called and the context times out (via `ctx.Done()`) before `verifyKzgBatch` sends to `resChan`, the function returns `ValidationIgnore` and abandons the `resChan`. However, `verifyKzgBatch` later attempts to send `verificationErr` to `verifier.resChan <- verificationErr`. Since nobody is reading the unbuffered channel, this send **blocks forever**, permanently hanging the single `kzgVerifierRoutine` goroutine. After the deadlock, all subsequent calls to `validateWithKzgBatchVerifier` will: (1) successfully write to the buffered `s.kzgChan` (capacity 100) until the buffer fills, then (2) block on `s.kzgChan <- verificationSet`, and (3) if the gossip context has a shorter deadline, time out with `ValidationIgnore`. This effectively disables gossip KZG verification for all subsequent data column sidecars, converting them all to ValidationIgnore (dropped, not rejected). A tampered sidecar is NOT accepted by this path (it becomes ValidationIgnore, not ValidationAccept), but the liveness attack permanently disables data column processing, preventing the node from participating in PeerDAS data availability sampling.",
+      "phase1": "Abstract interpretation: When ctx.Done() fires in validateWithKzgBatchVerifier, the kzgVerifier struct has already been sent to s.kzgChan. The kzgVerifierRoutine goroutine will eventually include this kzgVerifier in a batch and call verifyKzgBatch. verifyKzgBatch iterates over all verifiers in the batch and attempts `verifier.resChan <- verificationErr` for each. Since resChan is unbuffered and the receiver has already returned (ValidationIgnore), the send blocks permanently. The kzgVerifierRoutine goroutine is now deadlocked.",
+      "phase2": "Symbolic execution of deadlock path: T1: validateWithKzgBatchVerifier sends kzgVerifier{resChan=ch} to kzgChan. T1: ctx deadline fires; T1 returns ValidationIgnore; T1 no longer reads from ch. T2 (kzgVerifierRoutine): dequeues kzgVerifier from kzgBatch; calls verifyKzgBatch; at line 212: tries `ch <- verificationErr`; blocks forever since nobody reads ch. kzgVerifierRoutine is permanently blocked. All future kzgChan reads never occur. After 100 items fill the buffer (capacity 100), all future `s.kzgChan <- verificationSet` sends also block. System-wide, no gossip data column sidecars are validated.",
+      "phase2_5": "Attacker-controlled triggering: The `timeout` is `SecondsPerSlot * time.Second = 12 seconds`. The attacker can engineer the deadlock by: (1) flooding the kzgChan with 100 legitimate-looking requests to saturate the channel buffer, (2) then sending one more that gets queued and batched, (3) ensuring the batch takes >12 seconds to process due to queue depth. Alternatively, the attacker can trigger many concurrent gossip validation goroutines by sending many data column sidecars simultaneously, causing some validators to time out. Once a single timeout-abandoned resChan is included in a batch being processed, the entire kzgVerifierRoutine goroutine deadlocks. This is an amplification attack: a single carefully timed attack permanently disables the KZG verification goroutine.",
+      "phase3": "Safety invariant check for tampered data: A tampered sidecar with invalid KZG proof is NOT accepted by the gossip path even after the deadlock. After deadlock, validateWithKzgBatchVerifier returns ValidationIgnore (not ValidationAccept). So no tampered sidecar reaches ValidationAccept through this path. However: The liveness invariant is broken. Legitimate sidecars are also ValidationIgnore (dropped). This prevents the node from participating in PeerDAS data availability sampling, which is a significant liveness failure.",
+      "phase3_5": "Classification rationale: This is a real, exploitable DoS vulnerability. The attack does not cause acceptance of invalid sidecars (critical safety preserved) but permanently disables data column processing in the gossip path (liveness failure). Severity: Medium (liveness impact, not safety impact). The fix is simple: use a buffered resChan (`make(chan error, 1)`) so that the send in verifyKzgBatch never blocks even if the receiver has already timed out.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/batch_verifier.go:163 (make(chan error) - unbuffered resChan)",
+          "beacon-chain/sync/batch_verifier.go:165 (s.kzgChan <- verificationSet)",
+          "beacon-chain/sync/batch_verifier.go:167-173 (context timeout path, ValidationIgnore)",
+          "beacon-chain/sync/batch_verifier.go:194-214 (verifyKzgBatch, blocking send at line 212)",
+          "beacon-chain/sync/service.go:210 (kzgChan buffer = 100)"
+        ]
+      },
+      "attack_scenario": "An attacker connects to a target validator node and floods it with data column sidecar gossip messages simultaneously. The kzgChan fills with 100 items; processing is delayed. When the kzgVerifierRoutine eventually processes a batch that includes a kzgVerifier whose receiver has already timed out (12 second gossip deadline), it attempts to send to the abandoned unbuffered resChan and blocks permanently. The kzgVerifierRoutine goroutine is deadlocked. All subsequent gossip data column sidecars receive ValidationIgnore. The node can no longer participate in PeerDAS column availability. The attack requires no special privileges beyond being a connected gossip peer.",
+      "exploit_conditions": [
+        "The attacker must be a connected gossip peer on the data_column_sidecar subnet",
+        "The attacker must cause the gossip context to expire before kzgVerifierRoutine processes the batch \u2014 achievable by flooding kzgChan with concurrent requests that delay processing beyond 12 seconds",
+        "Only needs to succeed once to permanently deadlock the kzgVerifierRoutine"
+      ],
+      "recommendation": "Change `resChan := make(chan error)` to `resChan := make(chan error, 1)` in both `validateWithKzgBatchVerifier` (line 163 of batch_verifier.go) and `validateWithBatchVerifier` (line 88 of batch_verifier.go) to ensure sends in verifyKzgBatch and verifyBatch never block when the receiver has already timed out. Additionally, consider adding a select with ctx.Done() check inside verifyKzgBatch when sending to resChan, or restart the kzgVerifierRoutine goroutine if it panics/deadlocks."
+    },
+    {
+      "check_id": "CHK-0062",
+      "property_id": "PROP-KZG-ORDER",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "KZG proof verification correctly occurs after structural and signature validation",
+      "description": "The validation order in validateDataColumn is: (1) ValidFields [structural], (2) CorrectSubnet, (3) NotFromFutureSlot, (4) SlotAboveFinalized, (5) SidecarParentSeen, (6) SidecarParentValid, (7) ValidProposerSignature [signature], (8) SidecarParentSlotLower, (9) SidecarDescendsFromFinalized, (10) SidecarInclusionProven [Merkle], (11) KZG proof verification [cryptographic]. KZG proof verification is the most expensive operation (CPU-intensive elliptic curve pairing) and is correctly placed LAST among the mandatory validations. Structural checks (step 1) reject malformed messages before any expensive computation. Signature verification (step 7) rejects unauthenticated messages before KZG computation. This ordering follows best practice for DoS mitigation: cheapest checks first, most expensive last.",
+      "phase1": "Abstract interpretation: Steps 1-10 form the guard conditions for step 11. No sidecar reaches KZG verification without first passing: (a) basic structural validity, (b) subnet correctness, (c) slot timing checks, (d) parent block availability and validity, (e) proposer signature verification, and (f) Merkle inclusion proof. This ordering minimizes unnecessary KZG computations on malformed or unauthenticated inputs.",
+      "phase2": "Symbolic execution: Every return-before-KZG path returns ValidationReject or ValidationIgnore (never ValidationAccept). The ValidProposerSignature check uses a batch signature verifier. The comment in the code explicitly acknowledges the spec ordering deviation: signature is moved before KZG for DoS protection, which is the correct security engineering decision.",
+      "phase2_5": "Comparison with EIP-7594/Fulu spec ordering: The spec requires KZG after signature in the gossip validation rules. The implementation verifies signature before KZG (non-spec ordering) which is strictly more DoS-resistant, not less. The spec says signature SHOULD be verified; the implementation correctly makes it a REJECT condition early in the pipeline. This benefits security.",
+      "phase3": "Ordering invariant: For any sidecar that reaches KZG verification, all preceding checks (structural integrity, subnet assignment, slot timing, parent chain, proposer signature, inclusion proof) have already been verified. A sidecar that fails KZG proof verification cannot be accepted. The ordering provides maximum DoS resistance while maintaining correctness.",
+      "phase3_5": "Confirmed secure. The validation order is correct and matches security best practices, deviating from spec only in a more-secure direction (signature before KZG).",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:81-166",
+          "beacon-chain/sync/validate_data_column.go:127",
+          "beacon-chain/sync/validate_data_column.go:147-153"
+        ]
+      },
+      "attack_scenario": null,
+      "exploit_conditions": null,
+      "recommendation": "No change required. Consider documenting the intentional deviation from spec ordering (signature before KZG) with a more explicit comment explaining the security rationale, as the current comment only says 'not strictly respect the spec ordering here'."
+    },
+    {
+      "check_id": "CHK-0063",
+      "property_id": "PROP-BLS-FIELD-RANGE",
+      "final_classification": "potential-vulnerability",
+      "bug_bounty_eligible": true,
+      "severity": "Low",
+      "title": "bytes_to_bls_field range validation enforced in C-KZG for P2P paths but bypassed in local construction and disk-read paths",
+      "description": "The `bytes_to_bls_field` function in the c-kzg-4844 C library (src/common/bytes.c:64-70) correctly validates that a 32-byte field element is within the BLS scalar field by calling `blst_scalar_fr_check`, returning C_KZG_BADARGS if the value >= BLS_MODULUS. This validation fires in both `recover_cells_and_kzg_proofs` (eip7594.c:221) and `verify_cell_kzg_proof_batch` (eip7594.c:647). All P2P-received data columns go through this validation. However, two local construction paths bypass it: (1) `VerifiedRODataColumnFromDisk` (beacon-chain/verification/filesystem.go:28-56) reads a data column from disk and calls `NewVerifiedRODataColumn` directly without any KZG proof verification; (2) `engine_client.go:ReconstructDataColumnSidecars` (line 657-721) receives blobs+cell-proofs from the execution layer and calls `peerdas.ConstructDataColumnSidecars` followed directly by `NewVerifiedRODataColumn` with a comment 'We trust the execution layer we are connected to' \u2014 no KZG proof batch verification is performed on the reconstructed sidecars. These paths produce `VerifiedRODataColumn` objects whose field elements have never been checked against BLS_MODULUS. The security impact is limited to trusted paths (local disk and trusted EL), but it means the `VerifiedRODataColumn` type does not unconditionally guarantee field element range validation.",
+      "phase1": "Abstract interpretation: The `bytes_to_bls_field` function in the C library correctly rejects values >= BLS_MODULUS. This check is called within `verify_cell_kzg_proof_batch` and `recover_cells_and_kzg_proofs`. The invariant 'all field elements in a VerifiedRODataColumn have been range-checked' is NOT universally maintained: the `VerifiedRODataColumn` type is used as a marker type but `NewVerifiedRODataColumn` does not enforce this invariant for all construction paths.",
+      "phase2": "Tracing the execution paths: Path 1 (P2P gossip): validateDataColumnSidecar -> validateWithKzgBatchVerifier -> verifyKzgBatch -> peerdas.VerifyDataColumnsSidecarKZGProofs -> kzg.VerifyCellKZGProofBatch -> ckzg4844.VerifyCellKZGProofBatch -> C: verify_cell_kzg_proof_batch -> bytes_to_bls_field [VALIDATED]. Path 2 (RPC ByRange/ByRoot): RODataColumnsVerifier.SidecarKzgProofVerified -> verifyDataColumnsCommitment -> same C path [VALIDATED]. Path 3 (Disk read): verification.VerifiedRODataColumnFromDisk -> blocks.NewVerifiedRODataColumn [NO KZG VALIDATION]. Path 4 (EL reconstruction): engine_client.ReconstructDataColumnSidecars -> ConstructDataColumnSidecars -> NewVerifiedRODataColumn [NO FIELD ELEMENT RANGE CHECK].",
+      "phase2_5": "From an adversarial perspective: (1) An attacker who can corrupt the local disk storage of a beacon node could inject data columns with field elements >= BLS_MODULUS. These would be loaded via VerifiedRODataColumnFromDisk and used in reconstruction operations. When ReconstructDataColumnSidecars is called on these corrupted inputs, RecoverCellsAndKZGProofs would call the C library which WOULD detect the invalid field element and return an error \u2014 so the impact is limited to DoS (forcing reconstruction to fail). (2) An attacker controlling the EL could provide invalid blobs/cell-proofs via GetBlobsV2. The beacon node would construct VerifiedRODataColumns from these and broadcast them to peers. Peers receiving these via P2P WOULD fail KZG verification and reject them. The main impact is: trusted-path produced invalid VerifiedRODataColumn objects that waste network resources and may cause reconstruction failures.",
+      "phase3": "The `VerifiedRODataColumn` type is intended as a proof that a data column has been fully validated. However, both filesystem.go and engine_client.go (outside the verification package) call `blocks.NewVerifiedRODataColumn` directly. The invariant that 'VerifiedRODataColumn always has KZG-verified field elements' is broken by design in these paths. The C-KZG library's `bytes_to_bls_field` does correctly validate range \u2014 the issue is that the Go layer does not always invoke this validation before issuing a VerifiedRODataColumn.",
+      "phase3_5": "No practical exploit chain exists for external attackers. The paths bypassing field element validation require local disk write access or EL compromise. If an attacker could write to the beacon node's disk or compromise the connected EL, they have already compromised the node. The consequence is that ReconstructDataColumnSidecars would ultimately fail (C library rejects invalid field elements during reconstruction), causing reconstruction failures rather than silent acceptance of invalid data.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/blockchain/kzg/kzg.go:96-106",
+          "beacon-chain/verification/filesystem.go:28-56",
+          "beacon-chain/execution/engine_client.go:654-721",
+          "beacon-chain/verification/initializer.go:65-73",
+          "github.com/ethereum/c-kzg-4844/v2@v2.1.5/src/common/bytes.c:64-70"
+        ]
+      },
+      "attack_scenario": "An attacker with local disk write access to a beacon node could inject a crafted DataColumnSidecar SSZ file containing field elements >= BLS_MODULUS. When loaded via VerifiedRODataColumnFromDisk, the node would accept it as 'verified'. Subsequent use in reconstruction operations would cause the C library to return C_KZG_BADARGS, leading to reconstruction failures. Separately, a compromised EL could return blobs with out-of-range field elements via GetBlobsV2; these would propagate through ReconstructDataColumnSidecars as VerifiedRODataColumn without field element validation.",
+      "exploit_conditions": [
+        "Attacker has write access to beacon node local filesystem (disk corruption scenario), OR",
+        "Attacker controls the connected execution layer client",
+        "Both conditions represent full node compromise, severely limiting practical impact"
+      ],
+      "recommendation": "Consider adding a post-construction KZG proof verification step in VerifiedRODataColumnFromDisk (similar to what the P2P path does) to ensure the VerifiedRODataColumn type invariant holds unconditionally. For ReconstructDataColumnSidecars, consider calling VerifyDataColumnsSidecarKZGProofs on the reconstructed data before issuing VerifiedRODataColumn. Alternatively, document the trust assumptions explicitly in these paths. The disk-load path in particular should be reviewed since it is used in sync operations where data integrity is critical."
+    },
+    {
+      "check_id": "CHK-0064",
+      "property_id": "PROP-BLS-FIELD-RANGE-TX",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "Type-3 blob transaction field element validation is out-of-scope for Prysm beacon chain \u2014 delegated to execution layer",
+      "description": "CHK-0064 asks whether BLS field element range validation is enforced when an actor-blob-submitter sends type-3 (blob) transactions. This check is architecturally out-of-scope for Prysm's beacon chain. Type-3 (blob) transactions are an execution layer (EL) construct defined in EIP-4844. The EL (go-ethereum) validates blob transactions in the mempool, including their KZG commitments and field elements, before including them in blocks. Prysm is the consensus layer (CL) and never directly processes raw type-3 transactions. Prysm receives blob data only after EL processing: either via (1) `engine_getBlobsV2` / `engine_getPayloadV5` after block production, or (2) as data column sidecars distributed via P2P after the EL has already validated and included the blobs. There is no code path in Prysm's beacon-chain where raw blob transaction bytes are parsed or where BLS field elements from a type-3 transaction are range-checked at the beacon chain level.",
+      "phase1": "Architecture analysis: In Ethereum's split EL/CL architecture, type-3 transactions are processed exclusively by the EL. Prysm (the CL) has no mempool, no transaction parsing code, and no type-3 transaction validation logic. The blob data lifecycle in Prysm starts AFTER EL processing: blobs arrive as data column sidecars via P2P, or as blobs+proofs via the Engine API. Neither of these entry points processes raw transaction bytes.",
+      "phase2": "Searched entire Prysm codebase for blob transaction processing code. Prysm's execution engine interface only interacts with the EL via the Engine API (newPayload, getPayload, getBlobsV2), never receiving raw transaction bytes. The CL's only exposure to blob data is: (1) KZG commitments in beacon block body (already verified by EL), (2) data column sidecars received via P2P (verified via VerifyCellKZGProofBatch), (3) blobs fetched from EL via Engine API (EL-trusted path).",
+      "phase2_5": "From an adversarial perspective: If a user submits a type-3 transaction with a field element >= BLS_MODULUS to the network, the EL would reject it during mempool validation. Even if somehow an EL accepted it (which would be an EL bug, not a CL bug), the resulting beacon block body KZG commitments would be derived from the invalid blob, and the EL would be responsible for the data's integrity. Prysm cannot independently validate blob field elements at the transaction level without re-implementing EL transaction parsing.",
+      "phase3": "The invariant 'actor-blob-submitter transactions are range-validated' is an EL-level invariant enforced in go-ethereum's blob transaction validation. This invariant is outside Prysm's control and trust domain. Prysm's trust model assumes the connected EL has performed this validation.",
+      "phase3_5": "No exploit chain exists within Prysm's beacon chain for this check. Any vulnerability in type-3 transaction field element validation would be in the execution layer client (go-ethereum), not in Prysm.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/execution/engine_client.go:654-721",
+          "beacon-chain/blockchain/kzg/kzg.go:96-106"
+        ]
+      },
+      "attack_scenario": null,
+      "exploit_conditions": [
+        "Not applicable \u2014 this check addresses an execution layer concern"
+      ],
+      "recommendation": "Close this check as out-of-scope for Prysm's beacon chain. If this is a concern for the full Ethereum stack, it should be filed against the execution layer client (e.g., go-ethereum). Consider documenting in Prysm's security documentation that blob field element validation at the transaction level is delegated to the EL."
+    },
+    {
+      "check_id": "CHK-0065",
+      "property_id": "PROP-BLS-FIELD-RANGE-P2P",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Informational",
+      "title": "P2P path properly enforces BLS field element range validation via C-KZG library for all received data column sidecars",
+      "description": "BLS field element range validation is properly enforced for all P2P paths (gossip and RPC) through which actor-p2p-peer may send data column sidecars. For the gossip path: `validateDataColumnSidecar` calls `validateWithKzgBatchVerifier` which routes to `verifyKzgBatch` \u2192 `peerdas.VerifyDataColumnsSidecarKZGProofs` \u2192 `kzg.VerifyCellKZGProofBatch` \u2192 C library `verify_cell_kzg_proof_batch` which calls `bytes_to_bls_field` on each of the 64 field elements in every cell, returning C_KZG_BADARGS if any element >= BLS_MODULUS. On batch verifier failure, it falls back to `validateUnbatchedColumnsKzg` which also calls `VerifyDataColumnsSidecarKZGProofs`. For the RPC ByRange/ByRoot paths: both requirement sets include `RequireSidecarKzgProofVerified`; this is satisfied via `RODataColumnsVerifier.SidecarKzgProofVerified()` which calls `dv.verifyDataColumnsCommitment` \u2014 always set to `peerdas.VerifyDataColumnsSidecarKZGProofs`. The only unvalidated path is `VerifiedRODataColumnFromDisk` (trusted local path) which is not a P2P path. The P2P field element validation is fully implemented and correctly enforced.",
+      "phase1": "Gossip validation path: validateDataColumnSidecar \u2192 GossipDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified \u2192 validateWithKzgBatchVerifier \u2192 kzgVerifierRoutine \u2192 verifyKzgBatch \u2192 peerdas.VerifyDataColumnsSidecarKZGProofs \u2192 kzg.VerifyCellKZGProofBatch \u2192 ckzg4844.VerifyCellKZGProofBatch (C CGo) \u2192 C: verify_cell_kzg_proof_batch \u2192 for each field element: bytes_to_bls_field \u2192 blst_scalar_fr_check [VALIDATED]. RPC path: RODataColumnsVerifier with ByRange/ByRootRequestDataColumnSidecarRequirements \u2192 SidecarKzgProofVerified \u2192 verifyDataColumnsCommitment = peerdas.VerifyDataColumnsSidecarKZGProofs [SAME C PATH, VALIDATED].",
+      "phase2": "Confirmed the complete call chain for both gossip and RPC paths. Key verification: In validate_data_column.go:148-153, after `validateWithKzgBatchVerifier` returns ValidationAccept, `SatisfyRequirement(RequireSidecarKzgProofVerified)` is called \u2014 KZG was already verified by the batch verifier, so the requirement is marked satisfied without double-verification. In batch_verifier.go:194-214, `verifyKzgBatch` calls `peerdas.VerifyDataColumnsSidecarKZGProofs(allDataColumns)` which calls the C library. The fallback path `validateUnbatchedColumnsKzg` also calls `peerdas.VerifyDataColumnsSidecarKZGProofs`. No P2P reception path exists that bypasses KZG verification.",
+      "phase2_5": "An actor-p2p-peer attempting to send a data column sidecar with a field element >= BLS_MODULUS would have it rejected at the C library level in both gossip and RPC paths. The C library's `bytes_to_bls_field` returns C_KZG_BADARGS, which propagates as an error through VerifyCellKZGProofBatch \u2192 VerifyDataColumnsSidecarKZGProofs \u2192 verifyKzgBatch/SidecarKzgProofVerified, resulting in pubsub.ValidationReject for gossip or an error return for RPC. No P2P-received sidecar with out-of-range field elements can advance to storage or use in consensus.",
+      "phase3": "PROVEN: For any DataColumnSidecar received via P2P (gossip or RPC), all field elements within its cells will have been validated by the C library's bytes_to_bls_field (which enforces < BLS_MODULUS) before the sidecar is accepted as VerifiedRODataColumn. The invariant holds for all P2P paths. The only exception (VerifiedRODataColumnFromDisk) is not a P2P path \u2014 it reads data previously validated at reception time.",
+      "phase3_5": "No exploit chain exists for external P2P attackers to bypass BLS field element range validation. The C library validates all field elements before any KZG proof verification can succeed.",
+      "code_scope": {
+        "locations": [
+          "beacon-chain/sync/validate_data_column.go:148-153",
+          "beacon-chain/sync/batch_verifier.go:194-214",
+          "beacon-chain/sync/batch_verifier.go:183-192",
+          "beacon-chain/core/peerdas/p2p_interface.go:61-93",
+          "beacon-chain/verification/data_column.go:41-66",
+          "beacon-chain/verification/initializer.go:65-73",
+          "beacon-chain/verification/filesystem.go:28-56"
+        ]
+      },
+      "attack_scenario": "A malicious P2P peer sends a data_column_sidecar gossip message containing a cell with a field element value >= BLS_MODULUS. Expected outcome: Prysm's gossip validation calls VerifyDataColumnsSidecarKZGProofs \u2192 VerifyCellKZGProofBatch \u2192 C library verify_cell_kzg_proof_batch \u2192 bytes_to_bls_field returns C_KZG_BADARGS \u2192 VerifyCellKZGProofBatch returns error \u2192 validateWithKzgBatchVerifier falls back to validateUnbatchedColumnsKzg which also returns error \u2192 ValidationReject. The malicious sidecar is rejected before storage. Same behavior for RPC paths.",
+      "exploit_conditions": [
+        "Not applicable \u2014 P2P field element validation is correctly enforced",
+        "For disk corruption scenario (not P2P): requires local file system write access"
+      ],
+      "recommendation": "No immediate action required for the P2P path \u2014 validation is correctly implemented and confirmed through the full call chain. For defense-in-depth, consider adding a periodic re-validation of stored data columns to detect disk corruption. Document the trusted-path rationale for VerifiedRODataColumnFromDisk explicitly in the code comment."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 11,
+    "item_count": 15,
+    "timestamp": 1771330963,
+    "processed_ids": [
+      "CHK-0051",
+      "CHK-0052",
+      "CHK-0053",
+      "CHK-0054",
+      "CHK-0055",
+      "CHK-0056",
+      "CHK-0057",
+      "CHK-0058",
+      "CHK-0059",
+      "CHK-0060",
+      "CHK-0061",
+      "CHK-0062",
+      "CHK-0063",
+      "CHK-0064",
+      "CHK-0065"
+    ]
+  }
+}

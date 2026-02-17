@@ -1,0 +1,202 @@
+[
+  {
+    "check_id": "W7B8:W7B8:CHK-0125",
+    "property_id": "PROP-W5B14-13",
+    "phase1_abstract_interpretation": {
+      "summary": "The deduplicate_commitments function in c-kzg-4844/src/eip7594/eip7594.c (lines 343-374) operates in-place on a copy of commitments_bytes using a standard find-or-insert deduplication pattern. The algorithm maintains a monotonically increasing new_count (always <= i), meaning in-place writes to commitments_out[new_count] only overwrite positions that were already fully processed with their indices_out already set. Byte equality via memcmp(48 bytes) is used for deduplication, which is semantically equivalent to G1 point equality for valid BLS12-381 compressed points due to canonical encoding uniqueness. No state anomalies were found.",
+      "state_anomalies_found": [],
+      "cache_analysis": "No caching is involved in deduplicate_commitments. The unique_commitments array is a freshly allocated copy via memcpy. The commitment_indices array is freshly allocated via c_kzg_calloc (zero-initialized). Both are local to the verify_cell_kzg_proof_batch call and not shared across invocations.",
+      "concurrency_analysis": "The deduplication occurs entirely within a single C function call with no shared global state or concurrency. The Go wrapper kzg.VerifyCellKZGProofBatch and the sync package batch_verifier.go manage concurrency via channels, but the actual deduplication in C is single-threaded per call. No race conditions possible in the deduplication logic itself."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Symbolic trace of [C0, C1, C0, C2, C1] demonstrates the algorithm correctly assigns indices [0,1,0,2,1] with unique_commitments=[C0,C1,C2]. A potential in-place overwrite concern (writing to commitments_out[new_count] where new_count < i) was analyzed: the overwritten position was already processed and its indices_out entry was already set, so no corruption occurs. Attempts to construct an off-by-one exploit failed because new_count is always bounded by the number of unique commitments seen so far and the inner loop correctly checks only j < new_count.",
+      "counterexample_found": false,
+      "counterexample": null,
+      "attack_scenarios": [
+        "Attempt: submit commitments in specific order to trigger aliasing in in-place overwrite. Result: not exploitable because overwritten positions were already processed.",
+        "Attempt: submit commitments where new_count + 1 == i to cause boundary confusion. Result: not exploitable because the condition new_count <= i always holds by induction.",
+        "Attempt: provide non-canonical BLS12-381 encoding to make same G1 point appear as different bytes. Result: not exploitable because bytes_to_kzg_commitment in compute_weighted_sum_of_commitments deserializes and re-serializes via blst_p1_deserialize, rejecting non-canonical encodings."
+      ],
+      "timing_dependencies": "None. The deduplication is deterministic and single-threaded with no timing dependencies."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The code path is fully reachable from P2P gossip messages. Any peer can submit a DataColumnSidecar with arbitrary commitments. The flow is: GossipSub message -> validateDataColumn -> validateWithKzgBatchVerifier -> kzgChan -> kzgVerifierRoutine -> verifyKzgBatch -> VerifyDataColumnsSidecarKZGProofs -> kzg.VerifyCellKZGProofBatch -> C verify_cell_kzg_proof_batch -> deduplicate_commitments.",
+      "entry_points": [
+        "P2P GossipSub data_column_sidecar_<id> topic",
+        "RPC data columns by range/root"
+      ],
+      "attacker_controlled": true,
+      "classification": "unreachable",
+      "attack_surface": "While the code is reachable, no exploit exists for the off-by-one concern because the algorithm is provably correct. Attacker-controlled commitment bytes can trigger the deduplication path but cannot cause incorrect index mappings."
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'commitment_indices[k] = j iff unique_commitments[j] == commitments_bytes[k]' holds by construction. The inner loop's break-on-first-match ensures each input commitment maps to exactly one unique commitment index. The in-place compaction correctly maintains this invariant. The bytes_to_kzg_commitment call in compute_weighted_sum_of_commitments provides an additional validation that each unique commitment is a valid G1 point.",
+      "proof_successful": true,
+      "guard_identified": "Inner loop condition j < new_count, combined with the find-or-insert pattern using commitments_equal (memcmp). Additional guard: bytes_to_kzg_commitment validates each unique commitment as a valid BLS12-381 G1 point.",
+      "guard_sufficiency": "Guards are sufficient. The memcmp-based equality is exact for valid G1 points due to canonical compressed encoding. The indices_out assignment occurs before any in-place write to the same position. The new_count invariant (always <= i) ensures no future writes can corrupt processed entries.",
+      "edge_cases": [
+        "All commitments identical: deduplicate to 1 unique commitment, all indices point to 0. Correct.",
+        "All commitments distinct: new_count == num_cells, no in-place overwriting occurs. Correct.",
+        "Single commitment: indices_out[0]=0, count_out=1. Handled by indices_out[0]=0 initialization. Correct.",
+        "Non-canonical G1 encoding: rejected by bytes_to_kzg_commitment in compute_weighted_sum_of_commitments."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "The deduplication algorithm is mathematically correct. The off-by-one concern in commitment_indices does not exist in the actual implementation. The in-place overwrite pattern is a standard and correct optimization. No vulnerability exists.",
+      "recommendation": "No fix needed. The implementation correctly handles commitment deduplication with byte-level equality which is semantically equivalent to G1 point equality for valid BLS12-381 compressed points.",
+      "severity_estimate": "N/A - Not a vulnerability"
+    },
+    "final_classification": "not-a-vulnerability"
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0126",
+    "property_id": "PROP-W5B14-13",
+    "phase1_abstract_interpretation": {
+      "summary": "The commitment_indices mapping is a surjective function from [0,N) to [0,M) where N is the number of cells and M is the number of unique commitments (M <= N). The mapping is intentionally NOT injective (duplicate commitments map to the same unique_commitment index). The unique_commitments array positions [0,M) are distinct by construction via the find-or-insert deduplication. The composition property unique_commitments[commitment_indices[k]] == commitments_bytes[k] holds for all k, which is the only bijectivity property required for correctness of the batch verification.",
+      "state_anomalies_found": [],
+      "cache_analysis": "The unique_commitments and commitment_indices arrays are freshly allocated per invocation of verify_cell_kzg_proof_batch. No persistent state is involved. The weight accumulation in compute_weighted_sum_of_commitments correctly aggregates r_powers[k] per equivalence class.",
+      "concurrency_analysis": "No concurrency concerns in the mapping logic itself. The mapping is computed within a single C function call."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "The required bijectivity is on equivalence classes (each equivalence class maps to exactly one unique commitment), not on individual cells. This is correctly implemented. Attempts to find a scenario where two distinct equivalence classes map to the same unique commitment index failed - the algorithm's correctness ensures unique_commitments[j] != unique_commitments[j'] for j != j'. The weight aggregation sum(r_powers[k] for k in EC_j) * unique_commitments[j] is the correct formulation for batch KZG verification with shared commitments.",
+      "counterexample_found": false,
+      "counterexample": null,
+      "attack_scenarios": [
+        "Attempt: submit two commitments that are semantically the same G1 point but different bytes. Result: only possible with non-canonical encoding, which is rejected by bytes_to_kzg_commitment validation.",
+        "Attempt: exploit the many-to-one nature of commitment_indices to make the verifier misattribute weights. Result: not possible - the weight accumulation is correct by design, and the hash-derived randomness commits to commitment_indices."
+      ],
+      "timing_dependencies": "None."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "Fully reachable via P2P gossip. Any peer can submit DataColumnSidecar messages that exercise the commitment_indices mapping in deduplicate_commitments.",
+      "entry_points": [
+        "P2P GossipSub data_column_sidecar_<id> topic"
+      ],
+      "attacker_controlled": true,
+      "classification": "unreachable",
+      "attack_surface": "Attacker can control commitment bytes in DataColumnSidecar but cannot exploit the mapping bijectivity to forge proofs or bypass verification."
+    },
+    "phase3_invariant_proving": {
+      "summary": "The required bijectivity invariant - each equivalence class of identical commitments maps to exactly one unique_commitment index - holds by the find-or-insert algorithm. The stronger bijectivity (unique_commitments array has no duplicates) also holds. The composition property is proven by the algorithm's correctness and is the foundational invariant for correct weight aggregation in compute_weighted_sum_of_commitments.",
+      "proof_successful": true,
+      "guard_identified": "The deduplication algorithm's inner loop checks all j < new_count before accepting a new commitment, ensuring unique_commitments[j1] != unique_commitments[j2] for j1 != j2.",
+      "guard_sufficiency": "Sufficient. The bijectivity on equivalence classes is maintained exactly.",
+      "edge_cases": [
+        "Empty input: handled by early return when count_out == 0.",
+        "Single cell: indices[0]=0, no deduplication needed. Correct.",
+        "All same commitment: single unique commitment, all weights aggregated to commitment_weights[0]. Correct."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "The mapping bijectivity analysis confirms the algorithm is correct. The mapping is intentionally surjective (many-to-one for duplicates) and bijective on equivalence classes as required. No vulnerability exists.",
+      "recommendation": "No fix needed. The bijectivity properties are correct for the intended algorithm.",
+      "severity_estimate": "N/A - Not a vulnerability"
+    },
+    "final_classification": "not-a-vulnerability"
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0127",
+    "property_id": "PROP-W5B14-13",
+    "phase1_abstract_interpretation": {
+      "summary": "The attacker's ability to forge a valid proof via commitment deduplication depends on whether mixing identical commitments in a batch can cause the pairing equation to accept an invalid proof. Key state: the randomness r is derived from SHA-256 of (DOMAIN || FIELD_ELEMENTS_PER_CELL || num_commitments || num_cells || unique_commitments[0..M-1] || commitment_indices[0..N-1] || cell_indices[0..N-1] || cells[0..N-1] || proofs_bytes[0..N-1]). The hash commits to ALL verifier-visible inputs after deduplication, including commitment_indices and the deduplicated unique_commitments array. This prevents the attacker from predicting or manipulating r before committing to their cell and proof bytes.",
+      "state_anomalies_found": [
+        "Cross-peer batching in verifyKzgBatch: data columns from multiple different P2P peers are batched into a single verify_cell_kzg_proof_batch call. If one peer submits invalid data, ALL batch participants receive the same error and fall back to unbatched individual verification (line 173-177 of batch_verifier.go). This is a performance DoS vector but NOT a correctness issue."
+      ],
+      "cache_analysis": "No caching of verification results. Each call to verifyKzgBatch performs fresh verification of all batched data. The fallback to validateUnbatchedColumnsKzg correctly isolates individual submitters' data for re-verification.",
+      "concurrency_analysis": "The kzgVerifierRoutine drains the kzgChan in a tight loop (lines 69-80 of batch_verifier.go), collecting all pending kzgVerifier items before calling verifyKzgBatch. Multiple goroutines can submit to kzgChan concurrently. The verifyKzgBatch function handles this correctly by sending results back via individual resChan channels. No race conditions in the batch aggregation."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Forgery attempt: attacker submits (C_A = C_H, cell_bad, proof_bad) where C_H is an honest node's commitment also in the batch. After deduplication, C_A and C_H map to the same unique_commitment index j. The weight for j becomes r^a + r^h. For the pairing check to pass with proof_bad, the attacker would need proof_bad to satisfy the combined KZG equation, which requires knowledge of the discrete log of C_H (breaking ECDLP). The hash-derived randomness r commits to all cells and proofs, preventing the attacker from choosing proof_bad after seeing r. No forgery is possible.",
+      "counterexample_found": false,
+      "counterexample": null,
+      "attack_scenarios": [
+        "Scenario 1 (Commitment collision exploit): Attacker submits C_A identical to honest C_H, with invalid cell. Even with same unique_commitment index, the hash r commits to the invalid cell data and proof, making r different from what a valid proof would require. Pairing check fails.",
+        "Scenario 2 (Batch pollution DoS): Attacker submits invalid DataColumnSidecar that batches with honest submissions. Batch verification fails. All honest participants fall back to unbatched verification and succeed. Attacker's individual fallback fails. Net effect: performance degradation (DoS) only, not correctness compromise.",
+        "Scenario 3 (Timing attack via kzgVerifierRoutine): Attacker floods kzgChan to always be in the same batch as honest submissions, maximizing DoS impact. This is a valid DoS vector but not a proof forgery."
+      ],
+      "timing_dependencies": "The kzgVerifierRoutine drain pattern (select with default case) means submissions within the same goroutine scheduling window are batched. An attacker can influence batch composition but cannot use this to forge proofs."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The P2P attack surface is fully open: any peer can submit DataColumnSidecar gossip messages that are processed through the batch KZG verifier. The verifyKzgBatch function aggregates data columns from all kzgVerifier items drained in one cycle, potentially mixing columns from many different peers. The batch pollution DoS is fully exploitable from P2P.",
+      "entry_points": [
+        "P2P GossipSub data_column_sidecar_<id> topics (any of 128 column subnets)",
+        "Multiple concurrent peers submitting to same batch window"
+      ],
+      "attacker_controlled": true,
+      "classification": "defense-in-depth",
+      "attack_surface": "Proof forgery is cryptographically infeasible. Batch pollution DoS is exploitable: attacker submits invalid column, batch fails, honest peers incur extra unbatched verification cost. The fallback mechanism correctly handles this but at performance cost."
+    },
+    "phase3_invariant_proving": {
+      "summary": "The security invariant 'no invalid KZG proof passes batch verification' is protected by the pairing equation soundness and the Schwartz-Zippel random linear combination argument. The deduplication's contribution to this security is: commitment_indices is included in the hash for r, meaning the deduplication structure itself is committed to. An attacker cannot manipulate deduplication to change the effective commitment mappings without changing the hash input, which changes r, which changes the expected proof values.",
+      "proof_successful": true,
+      "guard_identified": "SHA-256 hash of all inputs (unique_commitments after dedup, commitment_indices, cell_indices, cells, proofs) for deriving r. The pairing equation e(proof_lincomb, g2^s) == e(final_g1_sum, g2^generator) as the final verification step.",
+      "guard_sufficiency": "Sufficient for proof forgery prevention. The random linear combination with hash-derived randomness is the standard security mechanism for batch KZG verification, proven secure under the algebraic group model and random oracle model.",
+      "edge_cases": [
+        "Attacker with commitment identical to honest commitment: deduplication maps both to same index, but hash still commits to attacker's invalid cell and proof, preventing forgery.",
+        "Attacker controlling all cells in batch: still cannot forge because ECDLP prevents computing valid KZG proofs for arbitrary data.",
+        "Cross-peer batching with mixed valid/invalid data: handled correctly by fallback mechanism."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "While proof forgery via commitment deduplication is cryptographically infeasible, the batch pollution DoS is a real and exploitable issue: an attacker can deliberately submit invalid DataColumnSidecars to force all concurrent honest batch participants to perform additional unbatched verification work. This is exploitable from P2P with no authentication barrier. The DoS can target validators custodying specific columns during critical slot windows.",
+      "recommendation": "Consider implementing per-peer batch isolation or a two-stage verification: first verify each peer's submission individually (unbatched), then optionally batch for performance. Alternatively, track which kzgVerifier item caused the batch failure and only penalize that peer, avoiding forced unbatched re-verification for honest peers.",
+      "severity_estimate": "Low - DoS via batch pollution, no consensus impact due to correct fallback mechanism"
+    },
+    "final_classification": "informational"
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0128",
+    "property_id": "PROP-W5B14-13",
+    "phase1_abstract_interpretation": {
+      "summary": "Impact analysis shows two distinct failure modes: (1) deduplication bug causing commitment_indices off-by-one would misalign the weighted sum of commitments with the expected pairing equation, causing pairing check failure -> function returns false -> ErrInvalidKZGProof -> ValidationReject (DoS, false negative); (2) deduplication bug causing incorrect proof acceptance would require the pairing equation to accidentally hold, which is cryptographically infeasible (probability ~1/p where p is the BLS12-381 field order). The asymmetry of failures is critical: bugs in deduplication can only cause false negatives, not false positives.",
+      "state_anomalies_found": [
+        "Batch pollution state: verifyKzgBatch sends the same verificationErr to ALL batch participants (line 211-213 of batch_verifier.go). When any column in the batch fails, honest participants are forced to re-verify unbatched. This is an unavoidable consequence of the current architecture.",
+        "Fallback isolation: validateUnbatchedColumnsKzg re-verifies only the individual submitter's own dataColumns (line 186), correctly isolating the impact of the bad actor."
+      ],
+      "cache_analysis": "No verification result caching. Each DataColumnSidecar is independently verified on each receipt. The seenDataColumnCache (line 157 of validate_data_column.go) tracks seen sidecars to avoid duplicate processing, but this is checked AFTER KZG verification.",
+      "concurrency_analysis": "The kzgVerifierRoutine is a single goroutine processing the kzgChan. Multiple goroutines submit to kzgChan but only one goroutine processes batches. The result delivery via individual resChan channels is safe for concurrent receivers."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Two impact scenarios were analyzed: (A) off-by-one in commitment_indices causing pairing check failure for valid data - this would cause ValidDataColumnSidecar to be rejected (ValidationReject), causing the validator to miss data availability check for that slot/column, potentially affecting attestation if the validator custodies that column. (B) deduplication bug causing acceptance of invalid proof - this would require the pairing equation to hold accidentally, which is negligibly probable. Scenario A impact is bounded by the number of validators custodying the affected column and the redundancy factor in the custody design.",
+      "counterexample_found": false,
+      "counterexample": null,
+      "attack_scenarios": [
+        "Off-by-one in commitment_indices (hypothetical): validator rejects valid DataColumnSidecar -> misses DA check for that column -> if validator is sole custodian of that column, DA sampling fails -> block may not reach finality (mild consensus impact). Mitigated by custody redundancy (multiple validators per column).",
+        "Batch pollution with invalid column (real, exploitable): attacker sends invalid column that batches with honest submissions -> all honest participants do extra unbatched verification -> CPU load increase. No correctness impact.",
+        "Mass batch pollution: attacker floods kzgChan with invalid columns from multiple connections -> all honest submissions forced to unbatched verification -> performance DoS during high-load slots."
+      ],
+      "timing_dependencies": "Batch composition depends on goroutine scheduling and arrival timing within the kzgVerifierRoutine drain cycle. An attacker can time submissions to maximize batch membership but this only affects DoS severity, not correctness."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The batch pollution DoS is fully P2P-reachable. The impact on validators depends on whether the attacker can predict which validators will have concurrent honest submissions batched with the attacker's invalid column. The kzgVerifierRoutine drain pattern means submissions within ~microseconds of each other are likely batched together.",
+      "entry_points": [
+        "P2P GossipSub data_column_sidecar_<id> gossip from any peer",
+        "Any unauthenticated P2P peer can submit DataColumnSidecars"
+      ],
+      "attacker_controlled": true,
+      "classification": "exploitable",
+      "attack_surface": "Attacker can send invalid DataColumnSidecar gossip messages targeting specific column subnets. Any peer connection is sufficient. No special permissions required."
+    },
+    "phase3_invariant_proving": {
+      "summary": "The critical security invariant 'invalid KZG proofs are never accepted' holds regardless of deduplication correctness, because pairing equation failures are asymmetric: a bug in commitment_indices causes the pairing check to fail (not pass). The weaker invariant 'valid KZG proofs are always accepted' can be violated by a deduplication bug (false negative), but this is only a DoS impact, not a consensus attack. The actual deduplication implementation is correct (verified in CHK-0125 analysis), so both invariants hold in practice.",
+      "proof_successful": true,
+      "guard_identified": "Pairing check e(proof_lincomb, g2^s) == e(final_g1_sum, g2^generator) as the final verification step in verify_cell_kzg_proof_batch. The asymmetric security of pairings ensures any commitment misattribution causes check failure.",
+      "guard_sufficiency": "Sufficient for the no-false-positive invariant. The no-false-negative invariant relies on correct deduplication, which is verified to be correct.",
+      "edge_cases": [
+        "Attacker targets validator as batch pollution victim: validator's honest columns fail batch, re-verified individually, accepted. Minor performance impact.",
+        "Attacker targets custodian validators: same as above, no correctness impact due to fallback.",
+        "Hypothetical deduplication off-by-one: would cause false negative (rejection of valid data), not false positive (acceptance of invalid data). Impact bounded by custody redundancy."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "The batch pollution DoS described in the attack scenarios is a real, exploitable vulnerability: an attacker can send invalid DataColumnSidecar gossip to force honest validators to perform additional unbatched KZG verification work. While the fallback mechanism prevents correctness issues, the performance impact during high-load periods (many concurrent gossip submissions) could affect validator responsiveness and attestation timeliness. This is exacerbated during periods of high activity.",
+      "recommendation": "Implement per-peer batch isolation in verifyKzgBatch: verify each kzgVerifier item's data columns independently before batching, or implement a mechanism to identify and exclude the failing item without penalizing honest batch participants. Additionally, consider rate-limiting KZG verification submissions per peer to bound DoS impact.",
+      "severity_estimate": "Low - DoS via batch pollution, no risk of invalid proof acceptance, fallback mechanism ensures correctness"
+    },
+    "final_classification": "informational"
+  }
+]

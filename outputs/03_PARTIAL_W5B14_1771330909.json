@@ -1,0 +1,633 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0096",
+      "property_id": "PROP-W5B14-7",
+      "title": "Verify Trust Boundary Integrity for tb-002: Does verify_cell_kzg_proof_batch use byte-exact comparison for commitment deduplication to prevent hash collision attacks?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func VerifyDataColumnsSidecarKZGProofs(sidecars []blocks.RODataColumn) error {\n\tcount := 0\n\tfor _, sidecar := range sidecars {\n\t\tcount += len(sidecar.Column)\n\t}\n\tcommitments := make([]kzg.Bytes48, 0, count)\n\tindices := make([]uint64, 0, count)\n\tcells := make([]kzg.Cell, 0, count)\n\tproofs := make([]kzg.Bytes48, 0, count)\n\tfor _, sidecar := range sidecars {\n\t\tfor i := range sidecar.Column {\n\t\t\tcommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n\t\t\tindices = append(indices, sidecar.Index)\n\t\t\tcells = append(cells, kzg.Cell(sidecar.Column[i]))\n\t\t\tproofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n\t\t}\n\t}\n\tverified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)\n\tif err != nil { return errors.Wrap(err, \"verify cell KZG proof batch\") }\n\tif !verified { return ErrInvalidKZGProof }\n\treturn nil\n}",
+      "state_context": "kzg.VerifyCellKZGProofBatch delegates to ckzg4844.VerifyCellKZGProofBatch (C library). The C library performs deduplicate_commitments via memcmp (byte-exact). SidecarInclusionProven (Merkle proof) binds KzgCommitments bytes to proposer-signed block body before KZG verification.",
+      "phase1_abstract_interpretation": {
+        "summary": "The Go layer constructs commitment arrays from sidecar.KzgCommitments bytes and passes them to the C library without deduplication. The C library's deduplicate_commitments function uses memcmp (byte-exact comparison) over 48 bytes. Commitment bytes in accepted sidecars are guaranteed canonical because SidecarInclusionProven verifies a Merkle proof pinning KzgCommitments to the proposer-signed block body.",
+        "state_anomalies_found": [
+          "No deduplication in Go layer before C library call \u2014 by design, C library handles this",
+          "Byte-exact comparison could fail for non-canonical elliptic curve point encodings, but inclusion proof prevents injection of non-canonical bytes"
+        ],
+        "cache_analysis": "No caching in this code path. Commitment arrays are freshly constructed per verification call.",
+        "concurrency_analysis": "kzgVerifierRoutine is a single goroutine draining kzgChan. No concurrent access to commitment arrays within one verification batch."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attacker cannot inject non-canonical commitment bytes because SidecarInclusionProven enforces bytes.Equal comparison against block commitments. The deduplication algorithm in the C library correctly handles duplicate canonical bytes. No bypass of batch verification is possible through commitment byte manipulation.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Inject non-canonical commitment bytes to bypass deduplication \u2014 BLOCKED by inclusion proof",
+          "Replay same commitment with different byte values \u2014 BLOCKED by Merkle proof binding to block"
+        ],
+        "timing_dependencies": "None. The inclusion proof check is synchronous and happens before KZG verification."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reachable from P2P gossip and RPC paths, but the attacker's control over commitment bytes is bounded by the cryptographic inclusion proof. Any deviation from canonical commitment bytes would fail the inclusion proof check before reaching KZG verification.",
+        "entry_points": [
+          "P2P gossip validateDataColumn",
+          "RPC by-range",
+          "RPC by-root"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker can send DataColumnSidecar with any KzgCommitments bytes, but they must match the proposer's signed block body commitments via valid Merkle proof."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that deduplication is performed correctly holds. The C library's memcmp-based deduplication is correct for canonical G1 points (unique compressed representation). The inclusion proof guard is sufficient to ensure only canonical representations reach the deduplication step.",
+        "proof_successful": true,
+        "guard_identified": "SidecarInclusionProven (Merkle proof against proposer-signed block body) + C library memcmp deduplication",
+        "guard_sufficiency": "Sufficient. The inclusion proof pins commitment bytes to the proposer's block. Canonical G1 points have unique compressed representations, so memcmp equivalence implies cryptographic equivalence.",
+        "edge_cases": [
+          "Test paths or internal reconstruction paths that bypass SidecarInclusionProven could allow non-canonical bytes to reach deduplication",
+          "Future code changes that relax the inclusion proof requirement would expose the deduplication to non-canonical input"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The deduplication is correctly implemented in the C library using byte-exact comparison. The inclusion proof guard ensures commitment bytes are canonical before reaching the deduplication step. No vulnerability exists in this code path.",
+        "recommendation": "Document the invariant that SidecarInclusionProven must always precede VerifyDataColumnsSidecarKZGProofs to maintain the canonical-bytes assumption. Add a comment noting that deduplication is handled by the C library.",
+        "severity_estimate": "N/A \u2014 not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0097",
+      "property_id": "PROP-W5B14-7",
+      "title": "Supporting Check: Does verify_cell_kzg_proof_batch_impl (SG-015) enforce unique commitments in its input list?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// VerifyCellKZGProofBatch delegates to ckzg4844.VerifyCellKZGProofBatch\n// The C library's eip7594.c explicitly implements deduplicate_commitments\n// which takes potentially duplicate commitment bytes and produces unique_commitments\n// and commitment_indices arrays. No pre-condition of unique input is imposed on callers.",
+      "state_context": "The C library's verify_cell_kzg_proof_batch_impl (eip7594.c) explicitly handles duplicates via deduplicate_commitments using memcmp. This is specified behavior per EIP-7594 reference implementation, not a bug.",
+      "phase1_abstract_interpretation": {
+        "summary": "The checklist item claims the Go layer violates a pre-condition requiring unique commitments. Analysis of the C library source shows that verify_cell_kzg_proof_batch explicitly handles duplicate commitments via an internal deduplicate_commitments step. No pre-condition requiring unique commitments exists for the C API; duplication is expected and handled.",
+        "state_anomalies_found": [
+          "Go layer passes potentially duplicate commitments (same blob appearing in multiple column sidecars for different columns) \u2014 this is by design",
+          "C library allocates unique_commitments and commitment_indices arrays sized num_cells to handle all possible duplicates"
+        ],
+        "cache_analysis": "No relevant caching. Deduplication happens fresh in each verify_cell_kzg_proof_batch call.",
+        "concurrency_analysis": "No concurrency issues within the verification algorithm itself."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No pre-condition violation exists. The C library's API design explicitly accepts duplicate commitments. Passing duplicates does not cause incorrect behavior \u2014 deduplicate_commitments produces correct unique_commitments and commitment_indices arrays used correctly in the random linear combination.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Passing N copies of the same commitment \u2014 handled correctly by deduplicate_commitments, weight accumulation in commitment_weights sums correctly"
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The code path is reachable but the alleged pre-condition violation does not exist. The C library's specification and implementation both explicitly handle duplicates. There is no pre-condition being violated.",
+        "entry_points": [
+          "P2P gossip",
+          "RPC paths"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "No attack surface because no pre-condition is violated."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant of correct batch verification holds with duplicate commitments as input. The deduplicate_commitments algorithm correctly builds unique_commitments and commitment_indices, and the subsequent weight aggregation and linear combination correctly account for duplicate entries.",
+        "proof_successful": true,
+        "guard_identified": "C library's internal deduplicate_commitments algorithm",
+        "guard_sufficiency": "Sufficient. No pre-condition violation occurs.",
+        "edge_cases": [
+          "Pathological case: all num_cells commitments are identical \u2014 correct, produces 1 unique commitment with accumulated weight"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No pre-condition violation. The EIP-7594 reference implementation (c-kzg-4844) explicitly handles duplicate commitments. The Go layer's behavior of not deduplicating before the C call is correct and matches the C API contract.",
+        "recommendation": "No fix needed. Consider adding documentation comment to VerifyDataColumnsSidecarKZGProofs noting that commitment deduplication is handled by the underlying c-kzg library.",
+        "severity_estimate": "N/A \u2014 not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0098",
+      "property_id": "PROP-W5B14-7",
+      "title": "Supporting Check: Can a malicious P2P peer craft commitment bytes that bypass deduplication and corrupt weight aggregation?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Commitments are not canonicalized in Go layer before C library call\n// C library validates G1 point encoding in bytes_to_kzg_commitment\n// Inclusion proof (SidecarInclusionProven) binds KzgCommitments bytes to proposer-signed block body",
+      "state_context": "Two attack vectors: (1) Non-canonical G1 point encoding \u2014 blocked by inclusion proof requiring exact byte match against proposer's block; (2) Off-curve commitment bytes \u2014 C library rejects with C_KZG_BADARGS error (returns error, not false positive).",
+      "phase1_abstract_interpretation": {
+        "summary": "The concern is whether attacker-crafted commitment bytes can bypass deduplication through non-canonical representations and corrupt weight aggregation. The critical state transition is P2P input \u2192 inclusion proof check \u2192 KZG verification. The inclusion proof step binds the sidecar's KzgCommitments to the proposer-signed block body using bytes.Equal comparison, preventing byte-level manipulation.",
+        "state_anomalies_found": [
+          "Commitments not canonicalized (e.g., point normalization) in Go layer before C library call",
+          "C library validates commitment bytes in bytes_to_kzg_commitment during compute_weighted_sum_of_commitments, which would reject invalid G1 points"
+        ],
+        "cache_analysis": "Inclusion proof cache (dv.ic) caches validated inclusion proofs by key derived from SignedBlockHeader hash tree root and KzgCommitmentsInclusionProof. Cached results bypass re-verification for seen sidecars.",
+        "concurrency_analysis": "No concurrency issues in the verification path itself."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Two attack vectors analyzed: (1) Non-canonical G1 point encoding to produce different byte representations of the same point \u2014 blocked by inclusion proof requiring exact byte match against proposer's block; (2) Malformed G1 bytes (not on curve) \u2014 would cause bytes_to_kzg_commitment to fail with C_KZG_BADARGS, returning error (not false positive). Neither attack vector can cause incorrect acceptance of invalid data.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Non-canonical commitment bytes: BLOCKED \u2014 inclusion proof requires bytes.Equal against block commitments",
+          "Off-curve commitment bytes: BLOCKED \u2014 C library rejects with C_KZG_BADARGS error (returns error, not false true)",
+          "Two sidecars for same block with different commitment bytes: IMPOSSIBLE \u2014 inclusion proof anchors bytes to block"
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Input canonicalization attack is unreachable due to the inclusion proof pre-condition. The only path where non-canonical bytes could reach the deduplication step is through internal code paths (reconstruction, local generation) that bypass SidecarInclusionProven \u2014 these paths use trusted data, not attacker input.",
+        "entry_points": [
+          "P2P gossip (blocked by inclusion proof)",
+          "Internal reconstruction (trusted source)"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker-controlled commitment bytes must pass inclusion proof (Merkle proof against signed block) before reaching KZG verification."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that only canonical commitment bytes reach the deduplication algorithm holds. The inclusion proof (SidecarInclusionProven) acts as a cryptographic commitment to the exact byte representation of KzgCommitments. The C library also validates G1 point encoding in bytes_to_kzg_commitment, providing defense in depth.",
+        "proof_successful": true,
+        "guard_identified": "SidecarInclusionProven + C library G1 point validation in bytes_to_kzg_commitment",
+        "guard_sufficiency": "Sufficient for all attacker-controlled paths. Internal paths use trusted data.",
+        "edge_cases": [
+          "If a proposer creates a block with malformed commitment bytes (compromised proposer), the sidecar would pass inclusion proof but fail C library G1 validation \u2014 correct rejection behavior"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No exploitable canonicalization vulnerability. Inclusion proof prevents injection of non-canonical bytes from external attackers. C library's G1 point validation handles malformed bytes from any source. No false-positive acceptance is possible.",
+        "recommendation": "Document the dependency: VerifyDataColumnsSidecarKZGProofs must only be called after SidecarInclusionProven to maintain the canonical-bytes invariant. Consider adding an assertion or type-system enforcement.",
+        "severity_estimate": "N/A \u2014 not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0099",
+      "property_id": "PROP-W5B14-7",
+      "title": "Supporting Check: What is the consensus impact if a validator node accepts a batch proof with incorrect deduplication?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 214
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 165,
+              "end": 185
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func verifyKzgBatch(kzgBatch []*kzgVerifier) {\n\tif len(kzgBatch) == 0 { return }\n\tallDataColumns := make([]blocks.RODataColumn, 0, len(kzgBatch))\n\tfor _, kzgVerifier := range kzgBatch {\n\t\tallDataColumns = append(allDataColumns, kzgVerifier.dataColumns...)\n\t}\n\tvar verificationErr error\n\terr := peerdas.VerifyDataColumnsSidecarKZGProofs(allDataColumns)\n\tif err != nil {\n\t\tverificationErr = errors.Wrap(err, \"batch KZG verification failed\")\n\t}\n\t// Send the SAME result to ALL verifiers in the batch\n\tfor _, verifier := range kzgBatch {\n\t\tverifier.resChan <- verificationErr\n\t}\n}\n\n// validateWithKzgBatchVerifier has fallback:\n// if err != nil { return s.validateUnbatchedColumnsKzg(ctx, dataColumns) }",
+      "state_context": "verifyKzgBatch merges ALL pending data columns from ALL submitters into one call. Single verification result propagated to ALL submitters. One invalid column from any peer causes batch failure for all. Fallback (validateUnbatchedColumnsKzg) re-verifies each submitter's columns individually \u2014 prevents false rejection but incurs O(batch_size) CPU overhead per poisoning event.",
+      "phase1_abstract_interpretation": {
+        "summary": "The batch KZG verifier (kzgVerifierRoutine) drains kzgChan and merges all pending submitters' data columns into one verification call. A single invalid column from any peer causes the entire batch to fail. While there is a fallback that re-verifies each submitter's columns individually, this re-verification is unbatched (less efficient) and processes each submitter independently. A malicious peer can force O(n) expensive individual re-verifications per batch window by submitting invalid data.",
+        "state_anomalies_found": [
+          "Single shared result propagated to all batch submitters \u2014 DoS amplification potential",
+          "Fallback to unbatched verification when batch fails \u2014 CPU cost scales with number of honest concurrent submitters",
+          "No rate limiting or per-peer quota on kzgChan submissions visible in the code",
+          "Batch window is determined by channel drain rate (default case in inner select) \u2014 any pending message starts unbatched fallback"
+        ],
+        "cache_analysis": "seenDataColumnCache is checked AFTER KZG verification in validateDataColumn. Cache does not prevent duplicate processing of KZG proofs for the same column before it is marked seen.",
+        "concurrency_analysis": "Multiple goroutines call validateDataColumn concurrently (one per gossip message). All send to s.kzgChan. kzgVerifierRoutine processes them serially but batches concurrent arrivals. The concurrent arrival rate determines batch sizes."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attack: Malicious peer P_attack submits invalid columns at high rate. Honest peers P_1...P_n submit valid columns concurrently. In each batch window, P_attack's invalid column is merged with P_1...P_n's valid columns. Batch fails. Fallback verifies each submitter's columns individually: P_1...P_n each get correct Accept, P_attack gets Reject. But the unbatched fallback costs n times more CPU than the batched path. Under sustained attack, validator's KZG verification thread is continuously running at full unbatched cost.",
+        "counterexample_found": true,
+        "counterexample": "Attacker submits 1 invalid DataColumnSidecar per batch window. With 64 honest peers submitting in the same window, each batch forces 65 individual VerifyDataColumnsSidecarKZGProofs calls instead of 1 batched call. This is a 65x CPU amplification of KZG verification work from a single invalid column per window. At 12s slots with multiple batch windows per slot, sustained attack forces continuous unbatched verification across all validator node KZG operations.",
+        "attack_scenarios": [
+          "Single malicious peer spoiling batches continuously, forcing unbatched fallback for all honest peers in same window",
+          "Multiple malicious peers saturating kzgChan to maximize batch contamination",
+          "Targeting the kzgVerifierRoutine batch window to maximize co-mingling with honest submissions"
+        ],
+        "timing_dependencies": "Attack effectiveness depends on timing: attacker must submit invalid columns that arrive in the same batch window as honest submitters. The kzgVerifierRoutine drains all pending messages before processing."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Fully reachable from P2P gossip. Any Ethereum node can submit DataColumnSidecars over gossipsub. The attacker only needs to be connected to the target validator node. The malicious column must pass ValidFields() (structural check) but need not have a valid KZG proof.",
+        "entry_points": [
+          "P2P gossipsub data_column_sidecar_subnet_id topics"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "attack_surface": "Any P2P peer can send DataColumnSidecars. Structural validity (index range, length checks) is trivially satisfiable. Invalid KZG proof is sufficient to trigger batch poisoning."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that valid columns are not incorrectly rejected HOLDS due to the fallback mechanism. The invariant that verification is computationally bounded FAILS under adversarial conditions. The fallback provides correctness but not liveness under sustained attack.",
+        "proof_successful": true,
+        "guard_identified": "validateWithKzgBatchVerifier fallback: validateUnbatchedColumnsKzg called when batch verification fails",
+        "guard_sufficiency": "Sufficient for CORRECTNESS (valid columns not wrongly rejected). INSUFFICIENT for DoS resistance. The fallback increases CPU cost by up to O(batch_size) per invalid column submission.",
+        "edge_cases": [
+          "If kzgChan becomes full due to high submission rate, validateWithKzgBatchVerifier blocks and the slot-duration timeout causes ValidationIgnore \u2014 legitimate columns lost",
+          "Under extreme load, the fallback verification itself can timeout (SecondsPerSlot timeout), causing ValidationIgnore for legitimate columns"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "Exploitable DoS vector: malicious P2P peers can force CPU amplification on validator nodes by poisoning KZG verification batches. The batch merging of data from multiple untrusted peers without isolation allows one bad actor to degrade performance for all concurrent honest submitters. Under sustained attack, this can delay attestation processing and block validation, potentially affecting validator performance scores.",
+        "recommendation": "1) Isolate batch failures: track which submitter contributed which columns and only fall back for the submitter whose columns failed. 2) Add per-peer rate limiting on kzgChan submissions. 3) Consider verifying submitters' columns independently in separate batches rather than merging all pending columns.",
+        "severity_estimate": "Medium \u2014 DoS on validator KZG verification performance, not a correctness/consensus violation. Fallback correctly validates legitimate columns."
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0100",
+      "property_id": "PROP-W5B14-8",
+      "title": "Verify Trust Boundary Integrity for tb-002: Are all commitment_indices validated to be within bounds of the deduplicated commitments array before array access?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 55
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar \u2014 called BEFORE KZG verification:\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns\n\tif sidecar.Index >= numberOfColumns { return ErrIndexTooLarge } // bounds check\n\tif len(sidecar.KzgCommitments) == 0 { return ErrNoKzgCommitments }\n\tif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) { return ErrMismatchLength }\n\treturn nil\n}\n\n// In VerifyDataColumnsSidecarKZGProofs:\n// indices = append(indices, sidecar.Index) // sidecar.Index validated [0, 127]\n// C library: if (cell_indices[i] >= CELLS_PER_EXT_BLOB) return C_KZG_BADARGS; // CELLS_PER_EXT_BLOB=128\n// commitment_indices: generated INTERNALLY by deduplicate_commitments as sequential [0, num_unique-1], NOT attacker-controlled",
+      "state_context": "Two distinct index types: (1) cell_indices (Go-level, column position [0,127]) passed by Go layer; (2) commitment_indices (C-level, unique commitment position [0,num_unique-1]) generated internally by C library's deduplicate_commitments. Attacker never controls commitment_indices directly. Both bounds are independently verified.",
+      "phase1_abstract_interpretation": {
+        "summary": "The checklist concern is about commitment_indices being out of bounds. Analysis reveals two distinct index types: (1) cell_indices passed by Go (sidecar.Index, column indices [0,127]), and (2) commitment_indices generated internally by the C library's deduplicate_commitments function (sequential IDs [0, num_unique-1]). The Go layer passes cell_indices; the C library generates commitment_indices. Attacker never controls commitment_indices directly.",
+        "state_anomalies_found": [
+          "Terminology confusion between cell_indices (Go-level, column position) and commitment_indices (C-level, unique commitment position)",
+          "No explicit Go-level check that cell_indices are in bounds before C call, but VerifyDataColumnSidecar provides this check",
+          "commitment_indices are internally generated, always in-bounds by construction"
+        ],
+        "cache_analysis": "No caching relevant to bounds checking.",
+        "concurrency_analysis": "No concurrency issues."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempted to construct an out-of-bounds access via: (1) crafting sidecar.Index >= 128 \u2014 BLOCKED by VerifyDataColumnSidecar (ErrIndexTooLarge) which is called before KZG verification; (2) providing cell_indices > CELLS_PER_EXT_BLOB to C library \u2014 BLOCKED by both Go check and C library sanity check; (3) manipulating commitment_indices to be out-of-bounds \u2014 IMPOSSIBLE since these are generated internally as sequential indices. No out-of-bounds access is achievable.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "sidecar.Index = 128 (out of bounds): BLOCKED by VerifyDataColumnSidecar before KZG path",
+          "cell_indices[i] = 128 reaching C library: BLOCKED by VerifyDataColumnSidecar (same check)",
+          "commitment_indices out of bounds: IMPOSSIBLE \u2014 internally generated as [0, num_unique-1] where num_unique <= num_cells"
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Out-of-bounds access path is unreachable. Both the Go pre-check and the C library check enforce identical bounds [0, 127]. The internally generated commitment_indices cannot be attacker-influenced.",
+        "entry_points": [
+          "P2P gossip"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "No attack surface for out-of-bounds access."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that all array accesses are in-bounds holds with two independent guards. The Go-level VerifyDataColumnSidecar enforces cell_index < 128. The C-level sanity check enforces cell_indices[i] < CELLS_PER_EXT_BLOB=128. The commitment_indices are generated as sequential counters [0, num_unique-1] and used to index commitment_weights where commitment_weights is sized >= num_unique \u2014 always in-bounds.",
+        "proof_successful": true,
+        "guard_identified": "VerifyDataColumnSidecar (Go, checked before KZG path) + C library sanity check (defense in depth)",
+        "guard_sufficiency": "Sufficient. Both guards are effective. Defense in depth provides protection even if one guard is bypassed.",
+        "edge_cases": [
+          "NumberOfColumns config mismatch with CELLS_PER_EXT_BLOB: if params.BeaconConfig().NumberOfColumns were set to value > 128, Go allows cell_indices up to that value, but C library would reject anything >= 128 with C_KZG_BADARGS \u2014 still safe",
+          "NumberOfColumns set to 0: VerifyDataColumnSidecar would pass any index (0 >= 0 is false for uint), allowing unbounded indices \u2014 but C library catches this. Config validation at startup should prevent NumberOfColumns=0."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No out-of-bounds array access is possible. Cell indices are validated at the Go layer before reaching the C library. Commitment indices are internally generated and cannot be attacker-controlled. Both the Go and C layers enforce the same bounds independently.",
+        "recommendation": "Consider adding a comment documenting the dual-layer bounds checking. For the edge case where NumberOfColumns=0 (invalid config), add a config validation check to ensure NumberOfColumns > 0 at startup.",
+        "severity_estimate": "N/A \u2014 not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W4B5:W4B5:CHK-0043",
+      "property_id": "PROP-W3B12-47",
+      "title": "Verify Trust Boundary Integrity: Is ModExp gas computed before memory allocation?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "out_of_scope",
+        "resolution_error": "ModExp precompile (EIP-2565/EIP-7883) is an EVM execution layer component. Target repository OffchainLabs/prysm is a consensus layer (beacon chain) client. No ModExp code exists in this codebase.",
+        "resolution_method": "manual_classification"
+      },
+      "code_snippet": "// No ModExp code found in target_workspace (OffchainLabs/prysm)\n// Target is Ethereum consensus layer client, not execution layer\n// ModExp precompile is at address 0x05 in execution clients (go-ethereum, reth, etc.)",
+      "state_context": "Target repository does not contain EVM execution layer code. All searches for 'ModExp', 'modexp', '7883', '7825' returned zero results.",
+      "phase1_abstract_interpretation": {
+        "summary": "No ModExp precompile code exists in the target repository. Zero state anomalies found. The target is a consensus layer client that does not implement EVM precompiles.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No execution paths process ModExp opcodes in this codebase. No counterexample possible.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Classification: unreachable. ModExp (EIP-198/EIP-2565/EIP-7883) is EVM precompile at address 0x05, handled only by execution clients (go-ethereum, reth, besu, etc.). Not applicable to consensus layer.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "N/A \u2014 component not present in target"
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant vacuously inapplicable. Proof not attempted as there is no implementation to analyze.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Component not present in target repository. Must be re-routed to execution client audit (go-ethereum, reth, besu).",
+        "recommendation": "Re-route CHK-0043 to the relevant execution layer client codebase for the Fusaka audit.",
+        "severity_estimate": "N/A \u2014 out of scope for this target"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W4B5:W4B5:CHK-0044",
+      "property_id": "PROP-W3B12-48",
+      "title": "Do specific EIP-7883 test vectors produce expected gas costs?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "out_of_scope",
+        "resolution_error": "EIP-7883 is a modification to ModExp gas calculation (execution layer). No EIP-7883 related code exists in OffchainLabs/prysm (consensus layer).",
+        "resolution_method": "manual_classification"
+      },
+      "code_snippet": "// No EIP-7883 related code found in target_workspace\n// EIP-7883 modifies the ModExp precompile gas formula for execution layer",
+      "state_context": "EIP-7883 removes the division by 3 in the ModExp gas formula and sets a minimum of 500. This is entirely an execution layer concern. Prysm has no knowledge of this.",
+      "phase1_abstract_interpretation": {
+        "summary": "No EIP-7883 ModExp gas formula code in prysm. Zero state anomalies.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No implementation to test vectors against. No counterexample possible.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Classification: unreachable. EIP-7883 is an execution-layer modification.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "N/A \u2014 component not present in target"
+      },
+      "phase3_invariant_proving": {
+        "summary": "Property is entirely an execution-layer invariant. Not applicable to consensus layer.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "EIP-7883 test vector compliance check cannot be performed on a consensus layer client. Must be re-routed to execution client audit.",
+        "recommendation": "Re-route CHK-0044 to the relevant execution layer client codebase.",
+        "severity_estimate": "N/A \u2014 out of scope for this target"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W4B5:W4B5:CHK-0045",
+      "property_id": "PROP-W3B12-49",
+      "title": "Verify Trust Boundary Integrity: Is EIP-7825 gas cap activated only at Fusaka fork block?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "out_of_scope",
+        "resolution_error": "EIP-7825 (transaction gas limit cap of 16,777,216) is an execution layer EIP. OffchainLabs/prysm carries gas_limit as a pass-through field in execution payloads but does not enforce EIP-7825 cap logic.",
+        "resolution_method": "manual_classification"
+      },
+      "code_snippet": "// GasLimit appears in execution payload structs (pass-through from execution engine)\n// No EIP-7825 gas capping logic found in target_workspace\n// Prysm's fork activation (config/params/config.go) is consensus epoch-based, not EVM precompile gating",
+      "state_context": "Prysm passes gas_limit fields from execution payloads as-is. The EIP-7825 cap enforcement is an execution engine responsibility. Prysm's Fusaka fork activation manages consensus layer features (PeerDAS, etc.), not EVM gas limit caps.",
+      "phase1_abstract_interpretation": {
+        "summary": "Prysm carries gas_limit in execution payload structs as a pass-through field from the execution engine. No EIP-7825 capping logic exists in prysm. No state anomalies.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No fork-activation gate for EIP-7825 exists in prysm. No counterexample.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Classification: unreachable. Fork activation for EVM features must be in execution clients.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "N/A \u2014 component not present in target"
+      },
+      "phase3_invariant_proving": {
+        "summary": "Prysm fork params in config/params/config.go are consensus epoch-based, not EVM block-based. EIP-7825 activation is not an invariant that can be proven in the consensus layer client.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "EIP-7825 gas cap is an execution layer feature not present in the target beacon chain client. Must be re-routed to execution client audit.",
+        "recommendation": "Re-route CHK-0045 to go-ethereum or other execution client Fusaka audit.",
+        "severity_estimate": "N/A \u2014 out of scope for this target"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W4B5:W4B5:CHK-0046",
+      "property_id": "PROP-W3B12-50",
+      "title": "Verify Trust Boundary Integrity: Is EIP-7883 ModExp formula activated only at Fusaka fork block?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "out_of_scope",
+        "resolution_error": "EIP-7883 ModExp formula change is an execution layer upgrade. OffchainLabs/prysm is a consensus layer client. No ModExp or EIP-7883 activation code exists in this codebase.",
+        "resolution_method": "manual_classification"
+      },
+      "code_snippet": "// No EIP-7883 ModExp activation code in target_workspace\n// Prysm's Fusaka/Fulu fork activation (config/params/config.go) handles consensus features only\n// EVM precompile upgrade gating is an execution client responsibility",
+      "state_context": "EIP-7883 modifies the ModExp precompile gas formula (removing /3, minimum 500). Fork activation gating for this change must be implemented in execution clients, not beacon chain clients.",
+      "phase1_abstract_interpretation": {
+        "summary": "No ModExp formula code in prysm. Fulu/Fusaka fork activation in prysm config is consensus-layer only. Zero state anomalies.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No EIP-7883 formula to evaluate activation gating against.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Classification: unreachable. EVM precompile upgrade gating is an execution client responsibility.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "N/A \u2014 component not present in target"
+      },
+      "phase3_invariant_proving": {
+        "summary": "config/params/config.go defines consensus fork epochs, not EVM precompile activation blocks. EIP-7883 activation is not verifiable in this codebase.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "EIP-7883 ModExp formula activation check cannot be performed on a consensus layer client. Must be re-routed to execution client audit.",
+        "recommendation": "Re-route CHK-0046 to the relevant execution layer client codebase for the Fusaka audit.",
+        "severity_estimate": "N/A \u2014 out of scope for this target"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 14,
+    "item_count": 9,
+    "timestamp": 1771330909,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0096",
+      "W7B8:W7B8:CHK-0097",
+      "W7B8:W7B8:CHK-0098",
+      "W7B8:W7B8:CHK-0099",
+      "W7B8:W7B8:CHK-0100",
+      "W4B5:W4B5:CHK-0043",
+      "W4B5:W4B5:CHK-0044",
+      "W4B5:W4B5:CHK-0045",
+      "W4B5:W4B5:CHK-0046"
+    ]
+  }
+}

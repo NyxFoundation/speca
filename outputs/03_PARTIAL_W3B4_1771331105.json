@@ -1,0 +1,948 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0146",
+      "property_id": "PROP-W5B14-18",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is the recovered polynomial degree validated before truncation in recover_polynomialcoeff?",
+      "severity": "Medium",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether recover_polynomialcoeff validates polynomial degree before truncation to FIELD_ELEMENTS_PER_BLOB. The Go code in ReconstructDataColumnSidecars calls kzg.RecoverCellsAndKZGProofs which calls ckzg4844.RecoverCellsAndKZGProofs. No polynomial coefficient array is exposed in Go - the function returns CellsAndProofs (cells+proofs bytes). The recover_polynomialcoeff function is entirely internal to the c-kzg-4844 C library. The Go wrapper has no visibility into intermediate polynomial degree state.",
+        "state_space_analysis": "State space of Go code: (cellIndices []uint64, partialCells []Cell) -> (CellsAndProofs, error). The polynomial recovery internals (degree checking, truncation) exist exclusively within the C library's opaque implementation. There is no intermediate state accessible to Go code where polynomial degree could be inspected or validated.",
+        "potential_violations": [
+          "If c-kzg-4844 had a bug in degree validation, it would be a C library bug, not a Prysm Go bug",
+          "No Go-level degree validation is possible since polynomial coefficients are never materialized in Go"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "RecoverCellsAndKZGProofs(cellIndices, partialCells) -> type conversion -> ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells) -> (ckzgCells, ckzgProofs, err). If err != nil, error is returned. No polynomial degree validation occurs in Go because no polynomial representation exists in Go.",
+        "attack_scenarios": [
+          "An attacker cannot trigger a Go-level degree violation because no such check exists in Go",
+          "Even if c-kzg-4844 returned malformed cells due to a degree bug, subsequent KZG proof verification would catch it"
+        ],
+        "counterexample": "No counterexample in Go code. The function recover_polynomialcoeff does not exist in Prysm Go codebase."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "An adversary auditing Prysm Go code cannot find a polynomial degree validation gap because there is no such check - the entire operation is delegated to c-kzg-4844. The adversary attack surface in Go is limited to inputs passed to the C library and output handling (error propagation), both correctly implemented.",
+        "exploitation_feasibility": "Not exploitable at Go level. Any exploitation would require a bug in c-kzg-4844.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'All polynomial degree validation is the responsibility of c-kzg-4844'. Holds by construction - the Go code has no polynomial representation. Go wrapper correctly forwards errors from the C library.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "The Go code provides no polynomial-level guarantees because it operates on opaque cell/proof byte arrays. Mathematical guarantees are entirely provided by c-kzg-4844's EIP-7594 implementation."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope for Go audit. recover_polynomialcoeff and its polynomial degree validation are implemented exclusively in the c-kzg-4844 C library. No Go-level vulnerability exists.",
+        "reasoning": "The Go code in Prysm does not implement recover_polynomialcoeff. kzg.RecoverCellsAndKZGProofs is a thin wrapper that type-converts inputs, calls ckzg4844.RecoverCellsAndKZGProofs, and propagates errors. This item should be directed to the c-kzg-4844 audit scope.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\tckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n\tfor i := range partialCells { ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i]) }\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n\tif err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n\treturn makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0147",
+      "property_id": "PROP-W5B14-18",
+      "title": "Supporting Check: Does the validator node detect and reject incorrect polynomials from recovery?",
+      "severity": "Medium",
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether a validator can detect incorrect polynomials from recovery. Abstract states: (1) gossip validation of incoming sidecars - KZG proofs verified via VerifyDataColumnsSidecarKZGProofs before storage as VerifiedRODataColumn; (2) reconstruction - ReconstructDataColumnSidecars takes verified inputs, calls c-kzg-4844, marks outputs as VerifiedRODataColumn WITHOUT re-verifying KZG proofs; (3) reconstructed sidecars are saved and broadcast. Critical gap: reconstructed sidecars bypass KZG proof verification.",
+        "state_space_analysis": "State machine: incoming_sidecar -> gossip_validate (KZG verified) -> reconstruction_triggered -> recover_cells_and_proofs (c-kzg-4844) -> mark_as_VerifiedRODataColumn_without_reverification -> saved_to_store -> broadcast_to_peers. The reconstruction output path completely skips VerifyDataColumnsSidecarKZGProofs. If c-kzg-4844 returned incorrect cells+proofs (library bug, regression, or supply chain compromise), those would propagate as 'verified' to local store and peers.",
+        "potential_violations": [
+          "Reconstructed sidecars are marked VerifiedRODataColumn without KZG proof re-verification - unconditionally trusts c-kzg-4844 output",
+          "The comment 'reconstructed sidecars are also verified' is an informal assertion, not an enforced cryptographic invariant",
+          "VerifiedRODataColumn type semantic contract is violated for the reconstruction path"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Trace: verified inputs (KZG proofs cryptographically checked via gossip) -> ckzg4844.RecoverCellsAndKZGProofs returns (cells, proofs). In reconstruction.go: for _, sidecar := range reconstructedSidecars { roSidecar, _ := blocks.NewRODataColumnWithRoot(sidecar, blockRoot); verifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar) /* NO KZG verification! */; reconstructedVerifiedRoSidecars = append(..., verifiedRoSidecar) }. No call to VerifyDataColumnsSidecarKZGProofs anywhere in the reconstruction path.",
+        "attack_scenarios": [
+          "Scenario 1: c-kzg-4844 library compromise or supply chain attack - reconstructed sidecars with wrong data propagate as 'verified' to local store and broadcast to peers without detection at this node",
+          "Scenario 2: Future c-kzg-4844 regression in RecoverCellsAndKZGProofs - Prysm would not catch it since it does not re-verify reconstruction output",
+          "Scenario 3: Receiving peers validate via gossip pipeline, limiting network-wide propagation - but local node data store corrupted and incorrect sidecars broadcast"
+        ],
+        "counterexample": "Missing defense-in-depth in reconstruction.go:\n// reconstructedSidecars, err := dataColumnsSidecars(signedBlockHeader, kzgCommitments, ...)\n// MISSING: if err := VerifyDataColumnsSidecarKZGProofs(reconstructedROSidecars); err != nil { return nil, err }\n// PRESENT (but incorrect): for _, sidecar := range reconstructedSidecars {\n//     verifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar) // marked verified WITHOUT KZG check!\n// }"
+      },
+      "phase2_5": {
+        "adversarial_analysis": "The vulnerability requires trusting c-kzg-4844 to produce correct outputs without secondary validation. The Go comment explicitly acknowledges this trust assumption. Defense-in-depth would require re-verifying reconstructed proofs via VerifyDataColumnsSidecarKZGProofs. The missing verification is a real gap: the VerifiedRODataColumn semantic contract (KZG proofs cryptographically verified) is violated for reconstructed sidecars. Practical exploitation requires: (a) a bug in c-kzg-4844's RecoverCellsAndKZGProofs producing cells/proofs inconsistent with commitments, or (b) supply chain attack on the C library.",
+        "exploitation_feasibility": "Low in practice (requires library-level issue), but represents a meaningful defense-in-depth gap. Local node data integrity depends entirely on c-kzg-4844 correctness without secondary validation.",
+        "attack_complexity": "high"
+      },
+      "phase3": {
+        "invariant_proving": "Required invariant: 'All VerifiedRODataColumn objects have had their KZG proofs cryptographically verified'. This invariant is BROKEN for reconstructed sidecars. blocks.NewVerifiedRODataColumn(roSidecar) is used for both: (a) gossip-validated sidecars (KZG verified), and (b) reconstructed sidecars (KZG NOT re-verified). The Go type system cannot distinguish these cases.",
+        "guards_sufficient": false,
+        "mathematical_guarantee": "No mathematical guarantee exists at Go level that reconstructed sidecars have valid KZG proofs. The guarantee is an informal assertion about c-kzg-4844 correctness. Defense-in-depth would require calling VerifyDataColumnsSidecarKZGProofs on reconstructed sidecars before marking as VerifiedRODataColumn."
+      },
+      "phase3_5": {
+        "final_verdict": "Vulnerability - missing KZG proof re-verification of reconstructed sidecars. The VerifiedRODataColumn type invariant is violated: reconstructed sidecars are marked verified without cryptographic verification. While practical exploitation requires c-kzg-4844 to produce incorrect outputs, the defense-in-depth gap is real.",
+        "reasoning": "In ReconstructDataColumnSidecars, the code marks reconstructed sidecars as VerifiedRODataColumn without calling VerifyDataColumnsSidecarKZGProofs. The reasoning in the comment ('inputs were verified, therefore outputs are verified') is a trust assumption not enforced by code. Fix: add VerifyDataColumnsSidecarKZGProofs call on reconstructedSidecars (as []RODataColumn) before wrapping with NewVerifiedRODataColumn.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// reconstruction.go - marks reconstructed sidecars as verified WITHOUT re-verifying KZG proofs:\nfor _, sidecar := range reconstructedSidecars {\n\troSidecar, err := blocks.NewRODataColumnWithRoot(sidecar, blockRoot)\n\tif err != nil { return nil, errors.Wrap(err, \"new RO data column with root\") }\n\tverifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar) // NO KZG verification here!\n\treconstructedVerifiedRoSidecars = append(reconstructedVerifiedRoSidecars, verifiedRoSidecar)\n}\n// Comment in source: 'Input sidecars are verified, and we reconstructed ourselves the missing sidecars.\n// As a consequence, reconstructed sidecars are also verified.' - informal assertion, not enforced"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0148",
+      "property_id": "PROP-W5B14-18",
+      "title": "Supporting Check: Can a P2P peer craft cell data to force polynomial degree >= FIELD_ELEMENTS_PER_BLOB?",
+      "severity": "Medium",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether a P2P peer can craft cell data with polynomial degree >= FIELD_ELEMENTS_PER_BLOB. Abstract state: attacker-controlled sidecar enters gossip validation pipeline. The pipeline runs: ValidFields -> VerifyDataColumnSidecar (structural checks) -> SidecarInclusionProven (commitment must match signed block's blob_kzg_commitments) -> validateWithKzgBatchVerifier -> VerifyDataColumnsSidecarKZGProofs (KZG batch proof verification). KZG proofs cryptographically commit to polynomial content - forging proofs for wrong-degree polynomials requires breaking BLS12-381 discrete log.",
+        "state_space_analysis": "Attacker cell state space: (cell_bytes, kzg_proof, commitment). For cell to pass KZG verification, cell_bytes must be consistent with the polynomial committed in commitment. The commitment must match the block's blob_kzg_commitments (via SidecarInclusionProven). An honest commitment encodes a polynomial of degree < FIELD_ELEMENTS_PER_BLOB. The attacker cannot forge cells claiming higher degree without breaking the KZG binding assumption.",
+        "potential_violations": [
+          "If KZG proof verification were skipped, attacker-crafted cells could reach reconstruction",
+          "Gossip validation pipeline mandates KZG proof verification before any sidecar is accepted"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attacker sends DataColumnSidecar with crafted cell data. Gossip validation: (1) verifier.ValidFields() structural checks; (2) verifier.SidecarInclusionProven() - KZG commitments must be in signed block - attacker cannot change; (3) validateWithKzgBatchVerifier -> VerifyDataColumnsSidecarKZGProofs -> kzg.VerifyCellKZGProofBatch. KZG proof verification fails for wrong polynomial content. Sidecar rejected, never stored, never used in reconstruction.",
+        "attack_scenarios": [
+          "Attacker cannot provide cells with wrong polynomial degree: valid KZG proofs are computationally infeasible to forge for wrong polynomial evaluations",
+          "KZG commitment system binds cells to the committed polynomial degree"
+        ],
+        "counterexample": "No counterexample. The KZG proof system and gossip validation pipeline prevent this attack."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "A maximally adversarial peer can craft arbitrary byte sequences for cell data. However, gossip validation pipeline provides cryptographic barriers: (1) commitment must match signed block's blob_kzg_commitments (Merkle proof), (2) KZG proof must verify against commitment and cell data. Breaking these requires solving discrete log in BLS12-381.",
+        "exploitation_feasibility": "Computationally infeasible - requires breaking BLS12-381 discrete log.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'Cells used in reconstruction have been KZG-verified against correct commitments from a signed block'. This invariant holds: gossip validation enforces (a) commitment consistency with signed block via inclusion proof, (b) KZG proof verification for each cell. Only VerifiedRODataColumn objects (passed all gossip checks) are accepted as input to ReconstructDataColumnSidecars.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "KZG commitment scheme provides binding commitment to polynomial. Opening proofs for evaluations must match the committed polynomial. Gossip validation cryptographically enforces this binding."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Gossip validation pipeline's mandatory KZG proof verification and commitment inclusion proof check prevent P2P peers from injecting cells with incorrect polynomial degree into reconstruction.",
+        "reasoning": "The attack requires bypassing cryptographic KZG proof verification (computationally infeasible). The validation pipeline correctly enforces these checks before any sidecar reaches reconstruction. No Go-level weakness enables this attack.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 89
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Gossip validation pipeline (validate_data_column.go):\n// verifier.SidecarInclusionProven() -> commitment must match signed block's blob_kzg_commitments\n// validateWithKzgBatchVerifier() -> VerifyDataColumnsSidecarKZGProofs -> VerifyCellKZGProofBatch\n// Both checks use BLS12-381 KZG - computationally infeasible to forge"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0149",
+      "property_id": "PROP-W5B14-19",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is division by zero prevented in recover_polynomialcoeff when computing reconstructed[i] = ez_over_coset[i] / zp_over_coset[i]?",
+      "severity": "High",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property concerns division by zero in recover_polynomialcoeff's coset evaluation (ez_over_coset[i] / zp_over_coset[i]). The Go code has no implementation of this function. All division operations are internal to the c-kzg-4844 C library. The Go wrapper only converts types and calls ckzg4844.RecoverCellsAndKZGProofs, propagating any error returned.",
+        "state_space_analysis": "Go state space: (error, no_error). If c-kzg-4844 encounters division-by-zero, it would return error or trigger C-level behavior. Go correctly checks err != nil and returns it. No Go-level division occurs.",
+        "potential_violations": [
+          "Division by zero inside c-kzg-4844 if PRIMITIVE_ROOT_OF_UNITY is incorrectly defined - c-kzg-4844 scope",
+          "Go wrapper correctly propagates any error"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Go path: ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells) -> (cells, proofs, err). If err != nil: return CellsAndProofs{}, errors.Wrap(err, ...). Propagates via errgroup.Wait() -> ReconstructDataColumnSidecars returns nil, error. No crash, no undefined behavior at Go level.",
+        "attack_scenarios": [
+          "Any division-by-zero in c-kzg-4844 propagates as a Go error, not a crash",
+          "Cell indices are validated before passing to c-kzg-4844 via VerifyDataColumnSidecar bounds check"
+        ],
+        "counterexample": "No counterexample at Go level. This function does not exist in Prysm Go code."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Even if division-by-zero existed in c-kzg-4844 under some cell pattern, Go error handling prevents crashes at Go level. The error propagates cleanly.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'Division by zero in coset shift cannot cause Go-level crashes'. Holds because no division occurs in Go, and c-kzg-4844 errors are propagated via error return value through errgroup.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Go error handling guarantees that any c-kzg-4844 error is propagated without data corruption."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. Division by zero prevention in recover_polynomialcoeff's coset shift is entirely within c-kzg-4844 C library. Go wrapper correctly propagates errors.",
+        "reasoning": "The function recover_polynomialcoeff and coset division are not in Prysm Go code. Go only calls ckzg4844.RecoverCellsAndKZGProofs and propagates its error.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// kzg.go - No coset division in Go code:\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n\tif err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n\treturn makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0150",
+      "property_id": "PROP-W5B14-19",
+      "title": "Supporting Check: Is PRIMITIVE_ROOT_OF_UNITY correctly defined and verified as a primitive root?",
+      "severity": "High",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "PRIMITIVE_ROOT_OF_UNITY is a mathematical constant hardcoded in c-kzg-4844. It is not defined or configurable from Go. No Prysm Go code references this constant. Entirely within c-kzg-4844 library scope.",
+        "state_space_analysis": "Go state space: none relevant. PRIMITIVE_ROOT_OF_UNITY does not appear in any Prysm Go file. The Go code provides no mechanism to override or inspect this constant.",
+        "potential_violations": [
+          "Wrong PRIMITIVE_ROOT_OF_UNITY in c-kzg-4844 would corrupt all polynomial operations - c-kzg-4844 concern",
+          "No Go-level violation possible"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No Go execution path touches PRIMITIVE_ROOT_OF_UNITY. Constant is in c-kzg-4844 static compilation.",
+        "attack_scenarios": [
+          "An attacker cannot influence PRIMITIVE_ROOT_OF_UNITY from Go layer"
+        ],
+        "counterexample": "No counterexample in Go code."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Compile-time constant in c-kzg-4844. Cannot be influenced from Go.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Not applicable at Go level.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Not applicable at Go level. c-kzg-4844 test suite and audits provide this guarantee."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. PRIMITIVE_ROOT_OF_UNITY is internal to c-kzg-4844 with no Go-layer exposure.",
+        "reasoning": "Prysm Go code has no reference to PRIMITIVE_ROOT_OF_UNITY. Property belongs entirely to c-kzg-4844 audit scope.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// PRIMITIVE_ROOT_OF_UNITY does not appear in any Prysm Go file.\n// It is a constant in the c-kzg-4844 C library used internally for FFT/coset operations."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0151",
+      "property_id": "PROP-W5B14-19",
+      "title": "Supporting Check: Can an attacker trigger division by zero through specific cell withholding patterns?",
+      "severity": "High",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether specific cell withholding patterns could trigger division by zero in recovery. Go analysis: ReconstructDataColumnSidecars collects available columns via sidecarByIndex map, enforces 50% threshold, then calls ckzg4844.RecoverCellsAndKZGProofs. The vanishing polynomial for missing cells should never evaluate to zero at available coset points per EIP-7594 Reed-Solomon construction with PRIMITIVE_ROOT_OF_UNITY coset shift.",
+        "state_space_analysis": "State: sidecarCount in [MinimumColumnCountToReconstruct(), NumberOfColumns). For any valid subset meeting the 50% threshold, c-kzg-4844's Reed-Solomon recovery should not encounter division by zero. Go ensures: (1) indices valid via gossip validation, (2) 50% threshold enforced, (3) indices unique via map deduplication.",
+        "potential_violations": [
+          "If c-kzg-4844 has edge cases for specific patterns, error would be returned - not crash",
+          "Threshold prevents degenerate cases"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Adversary withholds cells to create specific missing patterns: provides exactly MinimumColumnCountToReconstruct() cells. Go code validates threshold met. Cells and indices passed to ckzg4844.RecoverCellsAndKZGProofs. If c-kzg-4844 fails for specific pattern, error propagated through errgroup. No silent data corruption.",
+        "attack_scenarios": [
+          "Attacker withholds up to 50% of cells with specific patterns - Reed-Solomon guarantees recovery for any valid threshold-meeting subset",
+          "Any c-kzg-4844 failure returns error rather than producing silent wrong output"
+        ],
+        "counterexample": "No counterexample at Go level. 50% threshold and unique indices guarantee mathematical recovery is defined."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "An adversary controlling which cells to provide cannot cause division by zero in Go code (no division in Go). Go error handling catches and propagates any c-kzg-4844 error. Reed-Solomon coding theory guarantees recovery for any threshold-meeting valid input subset.",
+        "exploitation_feasibility": "No exploitation path in Go code.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'Cell withholding patterns cannot cause Go-level crashes or silent data corruption'. Holds: (1) 50% threshold enforced in Go, (2) Go errgroup error handling propagates any c-kzg-4844 failure, (3) cell indices unique and bounded.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Reed-Solomon coding theory: any subset of at least n/2 code symbols uniquely determines the original polynomial. PRIMITIVE_ROOT_OF_UNITY coset shift ensures Z(x) is non-zero at available evaluation points. 50% threshold Go check enforces the mathematical precondition."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability at Go level. Cell withholding patterns cannot trigger division by zero in Go code. Mathematical properties of Reed-Solomon codes ensure recovery is well-defined for any valid cell subset meeting the 50% threshold. Any c-kzg-4844 error is properly propagated.",
+        "reasoning": "Go correctly implements threshold check and error propagation. Division by zero in coset evaluation is mathematically impossible for well-formed inputs per EIP-7594 design and is handled entirely within c-kzg-4844. Go error handling ensures any c-kzg-4844 failure is returned as error rather than causing crashes.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// 50% threshold check:\nsidecarCount := len(sidecarByIndex)\nif uint64(sidecarCount) < MinimumColumnCountToReconstruct() { return nil, ErrNotEnoughDataColumnSidecars }\n// Error propagation from c-kzg-4844:\ncellsAndProofsForBlob, err := kzg.RecoverCellsAndKZGProofs(cellsIndices, cells)\nif err != nil { return errors.Wrapf(err, ...) }\nif err := wg.Wait(); err != nil { return nil, errors.Wrap(err, ...) }"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0152",
+      "property_id": "PROP-W5B14-19",
+      "title": "Supporting Check: Does the validator node have defensive error handling for unexpected division by zero?",
+      "severity": "Medium",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property examines whether Go code has defensive error handling for any division-by-zero from c-kzg-4844. Abstract states: (1) c-kzg-4844 returns error -> Go handles it; (2) c-kzg-4844 panics from C -> CGO behavior. The Go wrapper checks err != nil and returns. Full error propagation: kzg.RecoverCellsAndKZGProofs -> errgroup.Go goroutine -> wg.Wait() -> ReconstructDataColumnSidecars returns error.",
+        "state_space_analysis": "Error propagation: c-kzg-4844 error -> errors.Wrap(err, ...) -> errgroup captures goroutine error -> wg.Wait() returns error -> errors.Wrap(err, ...) -> return nil, error. No error silently dropped. errgroup pattern correctly captures errors from parallel goroutines.",
+        "potential_violations": [
+          "If c-kzg-4844 panics via CGO (C segfault), behavior may be undefined at OS level",
+          "Standard error return path is correctly handled"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "All error paths: ckzg4844.RecoverCellsAndKZGProofs returns (_, _, err) where err != nil -> return CellsAndProofs{}, errors.Wrap(err, ...) -> errgroup goroutine returns error -> wg.Wait() returns error -> ReconstructDataColumnSidecars returns nil, errors.Wrap(err, ...). Every error path handled. No silent failures.",
+        "attack_scenarios": [
+          "Division by zero returned as error: correctly handled",
+          "Unexpected error: correctly handled and propagated",
+          "Multiple goroutines failing: errgroup captures first error"
+        ],
+        "counterexample": "No counterexample. Error handling is complete and correct."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Error handling chain is correct and complete. An adversary cannot cause silent error swallowing. errgroup pattern ensures all goroutine errors are captured.",
+        "exploitation_feasibility": "No exploitation path. Error handling is defensive and complete.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'All errors from c-kzg-4844 are propagated without being silently dropped'. Proof: kzg.RecoverCellsAndKZGProofs checks err != nil explicitly. errgroup.Group captures goroutine errors. wg.Wait() returns first non-nil error. ReconstructDataColumnSidecars returns (nil, error) on any failure.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Go error handling mechanics guarantee that errors returned by value (error interface) are never silently dropped when explicitly checked. errgroup library guarantees goroutine error capture."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Go code has correct and complete defensive error handling for any errors from c-kzg-4844 including division-by-zero scenarios. All error paths handled without silent failures.",
+        "reasoning": "The error handling in kzg.RecoverCellsAndKZGProofs, the errgroup pattern in ReconstructDataColumnSidecars, and the overall call chain correctly propagate all errors. No error is silently dropped.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 86,
+              "end": 100
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Correct error handling:\nckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\nif err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n\ncellsAndProofsForBlob, err := kzg.RecoverCellsAndKZGProofs(cellsIndices, cells)\nif err != nil { return errors.Wrapf(err, \"recover cells and KZG proofs for blob %d\", blobIndex) }\n\nif err := wg.Wait(); err != nil { return nil, errors.Wrap(err, \"wait for RecoverCellsAndKZGProofs\") }"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0153",
+      "property_id": "PROP-W5B14-20",
+      "title": "Invariant Falsification: Can coset_fft_field shift_factor deviate from PRIMITIVE_ROOT_OF_UNITY through any state transition or initialization path?",
+      "severity": "High",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "Both coset_fft_field and shift_factor are internal to c-kzg-4844. No Go code in Prysm references either concept. The Go wrapper provides no mechanism to configure, override, or inspect shift_factor or PRIMITIVE_ROOT_OF_UNITY.",
+        "state_space_analysis": "Go state space: empty with respect to this property. No Go variables, constants, or functions correspond to coset_fft_field or shift_factor. The FFT computation with coset shift is opaque C code.",
+        "potential_violations": [
+          "Wrong shift_factor in c-kzg-4844 would corrupt all coset evaluations - c-kzg-4844 concern",
+          "No Go-level violation possible"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No Go execution path touches coset_fft_field or shift_factor.",
+        "attack_scenarios": [
+          "No attack vector at Go layer for this property"
+        ],
+        "counterexample": "No counterexample in Go code."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "An adversary cannot influence coset_fft_field's shift_factor from Go layer. It is a compile-time/init-time constant in c-kzg-4844.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Not applicable at Go level.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Not applicable at Go level. c-kzg-4844 library guarantees cover shift_factor correctness."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. coset_fft_field and shift_factor are internal c-kzg-4844 C library concepts with no Go-layer exposure.",
+        "reasoning": "Prysm Go code has no concept of coset_fft_field or shift_factor. These are internal to c-kzg-4844. Property belongs to c-kzg-4844 audit scope.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "ComputeCellsAndKZGProofs",
+            "line_range": {
+              "start": 84,
+              "end": 94
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ConstructDataColumnSidecars",
+            "line_range": {
+              "start": 131,
+              "end": 175
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// coset_fft_field and shift_factor do not exist in any Prysm Go file.\n// They are internal to the c-kzg-4844 C library initialized at library load time."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0154",
+      "property_id": "PROP-W5B14-21",
+      "title": "Verify Trust Boundary Integrity for tb-001/tb-002/tb-003: Is the bit-reversal permutation (brp) correctly implemented as an involution in polynomial_eval_to_coeff, coset_for_cell, and coset_shift_for_cell?",
+      "severity": "Critical",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The bit-reversal permutation (BRP) is an algorithmic component of FFT used in polynomial operations within c-kzg-4844. The property asks whether BRP is correctly implemented as an involution (brp(brp(i)) = i). This is entirely a c-kzg-4844 internal concern. No Go code in Prysm implements or references BRP. The code excerpt itself notes: 'bit-reversal permutation is implemented inside c-kzg-4844 C library (ckzg4844.RecoverCellsAndKZGProofs)'.",
+        "state_space_analysis": "Go state space: empty with respect to BRP. The Go code operates on cell and proof byte arrays which are outputs of c-kzg-4844's internal computations including any BRP.",
+        "potential_violations": [
+          "If BRP incorrectly implemented in c-kzg-4844, cell ordering would be wrong - detectable by KZG proof verification failures",
+          "No Go-level violation possible"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No BRP computation in Go code. Entirely out of scope for Go audit.",
+        "attack_scenarios": [
+          "No attack vector at Go layer for BRP correctness",
+          "BRP incorrectness would manifest as KZG proof verification failures"
+        ],
+        "counterexample": "No counterexample in Go code."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "BRP correctness cannot be influenced from Go layer. Any BRP error manifests as KZG proof verification failures at VerifyDataColumnsSidecarKZGProofs level.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Not applicable at Go level.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Not applicable at Go level. BRP correctness is a mathematical property of c-kzg-4844 FFT implementation."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. Bit-reversal permutation is implemented exclusively in c-kzg-4844 C library with no Go-layer representation. Property belongs to c-kzg-4844 audit scope.",
+        "reasoning": "Prysm Go code has no BRP implementation or reference. The code excerpt itself notes the BRP is inside the C library.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 74,
+              "end": 96
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Bit-reversal permutation (brp) does not exist in any Prysm Go file.\n// From code excerpt: 'bit-reversal permutation is implemented inside c-kzg-4844 C library'\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n\treturn makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0155",
+      "property_id": "PROP-W5B14-22",
+      "title": "Can division by zero polynomial be triggered via crafted missing cell indices in divide_polynomialcoeff?",
+      "severity": "High",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether crafted missing cell indices could trigger division by zero in divide_polynomialcoeff. This function is implemented exclusively in c-kzg-4844. Go code determines which cell indices are present (from sidecarByIndex map) and passes them to ckzg4844.RecoverCellsAndKZGProofs. Missing indices are implicitly the complement, computed by the C library internally. No explicit missing index list is constructed in Go.",
+        "state_space_analysis": "Go provides present cell indices to c-kzg-4844. The library internally determines missing indices as the complement set. The Go code has no divide_polynomialcoeff implementation. The 50% threshold ensures missing count is at most ceil(n/2), keeping the vanishing polynomial at manageable degree.",
+        "potential_violations": [
+          "Crafted missing cell pattern could trigger c-kzg-4844 internal division by zero - c-kzg-4844 scope",
+          "Go error propagation correctly handles any returned error"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Go code: present indices from sidecarByIndex map keys (unique, gossip-validated, < numberOfColumns). Missing indices computed by c-kzg-4844 internally. No Go code touches divide_polynomialcoeff. Edge case: all cells present -> vanishing polynomial is constant 1, valid. Edge case: exactly 50% missing -> handled per spec.",
+        "attack_scenarios": [
+          "Attacker provides minimal set of cells to maximize missing indices (50% threshold) - c-kzg-4844 handles maximum missing case per spec",
+          "Any c-kzg-4844 error is propagated correctly"
+        ],
+        "counterexample": "No counterexample in Go code. divide_polynomialcoeff is entirely in c-kzg-4844."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Adversary can control which cells they provide (indirectly controlling missing indices), but divide_polynomialcoeff is entirely in C. 50% threshold prevents degenerate cases. Any c-kzg-4844 error is properly propagated.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Not applicable at Go level for divide_polynomialcoeff internals. The 50% threshold provides the mathematical precondition for recovery feasibility.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "50% threshold ensures mathematical recovery is possible. divide_polynomialcoeff implementation and zero-divisor prevention are c-kzg-4844 responsibilities."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. divide_polynomialcoeff is implemented in c-kzg-4844 C library only. Go correctly enforces the 50% threshold and propagates errors. Property belongs to c-kzg-4844 audit scope.",
+        "reasoning": "The function divide_polynomialcoeff does not exist in Prysm Go code. Go enforces the precondition (50% threshold) and propagates errors from c-kzg-4844.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 59,
+              "end": 101
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// divide_polynomialcoeff does not exist in any Prysm Go file.\n// Go code only enforces the 50% threshold precondition:\nif uint64(sidecarCount) < MinimumColumnCountToReconstruct() { return nil, ErrNotEnoughDataColumnSidecars }\n// Then delegates entirely to c-kzg-4844:\nckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0156",
+      "property_id": "PROP-W5B14-23",
+      "title": "Verify Trust Boundary Integrity for tb-002/tb-003: Are all xs values validated to be distinct before Lagrange interpolation in interpolate_polynomialcoeff?",
+      "severity": "Critical",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property examines whether duplicate column indices (xs values) could be passed to interpolate_polynomialcoeff. In Go, ReconstructDataColumnSidecars uses a map for deduplication: sidecarByIndex := make(map[uint64]blocks.VerifiedRODataColumn, len(verifiedRoSidecars)). Map assignment with same key overwrites previous value (last-write-wins), ensuring each column index appears exactly once. Cell indices extracted from map keys for ckzg4844.RecoverCellsAndKZGProofs are guaranteed unique by Go map semantics.",
+        "state_space_analysis": "Pre-condition: verifiedRoSidecars may contain entries with duplicate column Index values. Post-condition after map construction: sidecarByIndex has at most one entry per column index. Deduplication is implicit in Go map semantics: `sidecarByIndex[inVerifiedRoSidecar.Index] = inVerifiedRoSidecar`. Cell indices from map keys are necessarily unique.",
+        "potential_violations": [
+          "Last-write-wins deduplication: but both cells for same index must have been gossip-validated with valid KZG proofs for the same commitment, so they represent identical polynomial evaluations",
+          "Deduplication correctly prevents duplicate xs from reaching c-kzg-4844"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Input: [sidecar(Index=5, data_A), sidecar(Index=5, data_B), sidecar(Index=7, data_C)]. After map: sidecarByIndex = {5: sidecar(data_B), 7: sidecar(data_C)}. sidecarCount = 2. cellsIndices = [5, 7] - no duplicates. data_A == data_B since both KZG-verified against same commitment for column 5. Last-write-wins is benign. Map guarantees unique xs for c-kzg-4844.",
+        "attack_scenarios": [
+          "Attacker provides duplicate column indices: map deduplication prevents duplicate xs from reaching c-kzg-4844",
+          "Two different verified cells for same column index: KZG-verified against same commitment, must be identical data",
+          "Duplicate injection reduces effective sidecar count, could push below threshold (self-harm DoS, not exploit)"
+        ],
+        "counterexample": "No counterexample. Go map deduplication robustly prevents duplicate xs from reaching c-kzg-4844."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Map deduplication is a Go language-level guarantee. An adversary cannot bypass it. Even with crafted duplicate inputs, the map ensures unique indices. Last-write-wins is benign because gossip-validated cells for same column index and commitment are mathematically identical.",
+        "exploitation_feasibility": "No exploitation path. Map deduplication is a language-level guarantee.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'All column indices passed to ckzg4844.RecoverCellsAndKZGProofs are unique'. Proof: indices are extracted from sidecarByIndex map keys via `for columnIndex, sidecar := range sidecarByIndex`. Go map keys are unique by definition. Invariant holds unconditionally as a language-level guarantee.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Go map semantics guarantee unique keys. The invariant 'unique xs for interpolation' is proven by the map construction pattern. No additional explicit uniqueness validation is needed."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Go code's map-based deduplication (sidecarByIndex) robustly ensures unique column indices are passed to c-kzg-4844, preventing any duplicate xs scenario in interpolate_polynomialcoeff. Correct and complete implementation.",
+        "reasoning": "Map construction with column Index as key provides Go language-level guarantee of uniqueness. Indices from map keys are necessarily unique. This is a correct implementation of the duplicate-prevention requirement.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Deduplication via map in ReconstructDataColumnSidecars:\nsidecarByIndex := make(map[uint64]blocks.VerifiedRODataColumn, len(verifiedRoSidecars))\nfor _, inVerifiedRoSidecar := range verifiedRoSidecars {\n\tsidecarByIndex[inVerifiedRoSidecar.Index] = inVerifiedRoSidecar  // last-write-wins deduplication\n}\n// Cell indices from map keys are guaranteed unique:\nfor columnIndex, sidecar := range sidecarByIndex {\n\tcellsIndices = append(cellsIndices, columnIndex)  // unique by Go map key invariant\n\tcells = append(cells, kzg.Cell(cell))\n}"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0157",
+      "property_id": "PROP-W5B14-24",
+      "title": "Verify Trust Boundary Integrity for tb-001/tb-003: Is len(a) + len(b) <= FIELD_ELEMENTS_PER_EXT_BLOB validated before polynomial multiplication in multiply_polynomialcoeff?",
+      "severity": "High",
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "multiply_polynomialcoeff is implemented exclusively in c-kzg-4844. The Go code in Prysm never calls multiply_polynomialcoeff directly. No polynomial coefficient arrays are ever constructed or passed from Go code. Go operates on fixed-size Cell byte arrays only.",
+        "state_space_analysis": "Go state space: no polynomial coefficient arrays exist. type Cell [BytesPerCell]byte is fixed-size at compile time. No variable-length polynomial arrays are created in Go. All polynomial operations are internal to c-kzg-4844.",
+        "potential_violations": [
+          "If multiply_polynomialcoeff in c-kzg-4844 has integer overflow in len(a) + len(b) - c-kzg-4844 concern",
+          "No Go-level exposure"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No Go execution path touches multiply_polynomialcoeff.",
+        "attack_scenarios": [
+          "No attack vector at Go layer"
+        ],
+        "counterexample": "No counterexample in Go code."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Not applicable at Go layer. multiply_polynomialcoeff inputs are entirely internal to c-kzg-4844.",
+        "exploitation_feasibility": "Not exploitable at Go level.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Not applicable at Go level.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Not applicable at Go level. Bounds checking in multiply_polynomialcoeff is a c-kzg-4844 responsibility."
+      },
+      "phase3_5": {
+        "final_verdict": "Out of scope. multiply_polynomialcoeff is implemented in c-kzg-4844 C library only. No Go code constructs or passes polynomial coefficient arrays. Property belongs to c-kzg-4844 audit scope.",
+        "reasoning": "Prysm Go code has no multiply_polynomialcoeff implementation. Go operates on fixed-size Cell arrays.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "ComputeCellsAndKZGProofs",
+            "line_range": {
+              "start": 84,
+              "end": 94
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ConstructDataColumnSidecars",
+            "line_range": {
+              "start": 131,
+              "end": 175
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// multiply_polynomialcoeff does not exist in any Prysm Go file.\n// Go code operates on fixed-size Cell arrays:\n// type Cell [BytesPerCell]byte  (compile-time constant size)\n// type BytesPerCell = ckzg4844.BytesPerCell"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0158",
+      "property_id": "PROP-W5B14-25",
+      "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) before array access in coset_shift_for_cell?",
+      "severity": "Critical",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property asks whether cell_index (column index) is validated within [0, CELLS_PER_EXT_BLOB) before coset_shift_for_cell. Go validation: VerifyDataColumnSidecar checks sidecar.Index >= numberOfColumns -> ErrIndexTooLarge. Called in gossip validation via verifier.ValidFields(). Any sidecar reaching reconstruction has Index < numberOfColumns. In EIP-7594, numberOfColumns == CELLS_PER_EXT_BLOB == 128. Therefore Go ensures all cell indices are in [0, 128) matching c-kzg-4844's expectation.",
+        "state_space_analysis": "State: sidecar.Index in [0, numberOfColumns) by gossip validation enforcement. In reconstruction: cellsIndices from sidecarByIndex map keys = sidecar.Index values, all < numberOfColumns. Per EIP-7594 config: numberOfColumns = BeaconConfig().NumberOfColumns = 128 = CELLS_PER_EXT_BLOB. Cell indices passed to c-kzg-4844 are in [0, 128), matching expected range for coset_shift_for_cell's internal array access.",
+        "potential_violations": [
+          "If BeaconConfig().NumberOfColumns misconfigured to > CELLS_PER_EXT_BLOB, indices could be outside c-kzg-4844's range - c-kzg-4844 would return error for invalid indices",
+          "Configuration mismatch is a deployment concern, not a code vulnerability"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Trace: sidecar.Index = X. Gossip validation: VerifyDataColumnSidecar checks X >= numberOfColumns (128), returns ErrIndexTooLarge if so. If X < 128, stored as VerifiedRODataColumn. In reconstruction: X added to cellsIndices. Passed to ckzg4844.RecoverCellsAndKZGProofs. Inside c-kzg-4844, coset_shift_for_cell accesses roots_brp[FIELD_ELEMENTS_PER_CELL * X]. For X < 128 and FIELD_ELEMENTS_PER_CELL * 128 <= FIELD_ELEMENTS_PER_EXT_BLOB, access is within bounds.",
+        "attack_scenarios": [
+          "Attacker sends sidecar with Index = 128: VerifyDataColumnSidecar returns ErrIndexTooLarge, rejected",
+          "Attacker sends sidecar with Index = UINT64_MAX: VerifyDataColumnSidecar returns ErrIndexTooLarge (UINT64_MAX >= 128)",
+          "All out-of-bounds cell indices caught at gossip validation boundary"
+        ],
+        "counterexample": "No counterexample. Go bounds check sidecar.Index >= numberOfColumns correctly rejects all out-of-bounds indices."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Go bounds check in VerifyDataColumnSidecar (sidecar.Index >= numberOfColumns) is robust. Runs at gossip validation boundary BEFORE any sidecar is accepted. An adversary cannot bypass this check to inject out-of-bounds indices into reconstruction.",
+        "exploitation_feasibility": "No exploitation path for correctly configured nodes. Bounds check is at P2P boundary.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'All cell_indices passed to ckzg4844.RecoverCellsAndKZGProofs are < numberOfColumns (= CELLS_PER_EXT_BLOB)'. Proof: (1) VerifyDataColumnSidecar enforces sidecar.Index < numberOfColumns. (2) VerifiedRODataColumn objects have Index < numberOfColumns. (3) ReconstructDataColumnSidecars only accepts VerifiedRODataColumn inputs. (4) cellsIndices come from map keys = sidecar.Index values. Invariant holds by chain: gossip_validation -> VerifiedRODataColumn -> reconstruction.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Go bounds check ensures all passed indices are in [0, numberOfColumns). With numberOfColumns = 128 = CELLS_PER_EXT_BLOB per EIP-7594, all indices within c-kzg-4844's expected range."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Go gossip validation checks sidecar.Index < numberOfColumns (128 per EIP-7594) before any sidecar is accepted. This ensures all cell indices passed to c-kzg-4844 (including for coset_shift_for_cell's internal array access) are within valid range [0, CELLS_PER_EXT_BLOB).",
+        "reasoning": "VerifyDataColumnSidecar's index bounds check (sidecar.Index >= numberOfColumns -> ErrIndexTooLarge) is applied at the P2P gossip boundary. All VerifiedRODataColumn objects have been validated to have Index < numberOfColumns = CELLS_PER_EXT_BLOB. The protection is in place and correct.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar in p2p_interface.go (called in gossip validation):\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns\n\tif sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }  // bounds check: Index in [0, 128)\n\t// ...\n}\n// This check runs BEFORE sidecar can reach reconstruction or c-kzg-4844 calls."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0159",
+      "property_id": "PROP-W5B14-26",
+      "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) and slice bounds checked in coset_for_cell?",
+      "severity": "Critical",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "Same bounds analysis as CHK-0158 but for coset_for_cell (c-kzg-4844 internal function returning a full coset as a slice). Go-level enforcement identical: VerifyDataColumnSidecar rejects any sidecar with Index >= numberOfColumns. Both coset_shift_for_cell and coset_for_cell receive the same validated indices. The single Go bounds check at gossip validation boundary protects all downstream c-kzg-4844 internal functions uniformly.",
+        "state_space_analysis": "State space identical to CHK-0158. Cell indices from sidecarByIndex map keys are all < numberOfColumns. For coset_for_cell: start = FIELD_ELEMENTS_PER_CELL * X. Slice: roots_brp[start : start + FIELD_ELEMENTS_PER_CELL]. For X < 128: start + FIELD_ELEMENTS_PER_CELL <= 128 * FIELD_ELEMENTS_PER_CELL = FIELD_ELEMENTS_PER_EXT_BLOB = len(roots_brp). Access within bounds.",
+        "potential_violations": [
+          "Same analysis as CHK-0158: if numberOfColumns != CELLS_PER_EXT_BLOB, mismatch could occur - mitigated by c-kzg-4844 error returns",
+          "Slice operation bounds bounded by same cell_index validation"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Identical trace to CHK-0158. cell_index X < numberOfColumns from gossip validation. In c-kzg-4844's coset_for_cell: start = FIELD_ELEMENTS_PER_CELL * X. For X < 128: start + FIELD_ELEMENTS_PER_CELL <= FIELD_ELEMENTS_PER_EXT_BLOB = len(roots_brp). Access within bounds.",
+        "attack_scenarios": [
+          "Same scenarios as CHK-0158: out-of-bounds cell_index rejected by VerifyDataColumnSidecar before reaching reconstruction",
+          "No additional attack vectors specific to coset_for_cell vs coset_shift_for_cell"
+        ],
+        "counterexample": "No counterexample. Same analysis as CHK-0158."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Identical to CHK-0158. The same VerifyDataColumnSidecar check protects both coset_shift_for_cell and coset_for_cell. No additional vulnerability specific to coset_for_cell's slice operation.",
+        "exploitation_feasibility": "No exploitation path. Same analysis as CHK-0158.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Same invariant as CHK-0158 applies to coset_for_cell. The slice operation (roots_brp[start : start + FIELD_ELEMENTS_PER_CELL]) is bounded by same cell_index validation: X < 128 implies start + FIELD_ELEMENTS_PER_CELL <= FIELD_ELEMENTS_PER_EXT_BLOB = len(roots_brp).",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Same as CHK-0158. Single Go bounds check provides necessary precondition for all c-kzg-4844 internal functions accessing roots_brp with cell_index."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Go gossip validation pipeline's VerifyDataColumnSidecar bounds check protects coset_for_cell's slice operation from out-of-bounds access. Same analysis and conclusion as CHK-0158.",
+        "reasoning": "Cell_index bounds validation (sidecar.Index >= numberOfColumns check) applies uniformly to all downstream operations including coset_for_cell inside c-kzg-4844. Protection is at P2P entry boundary.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Same bounds check as CHK-0158 protects coset_for_cell:\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns\n\tif sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }  // ensures X in [0, 128)\n}\n// coset_for_cell receives only validated indices:\n// start = FIELD_ELEMENTS_PER_CELL * X, slice roots_brp[start:start+FIELD_ELEMENTS_PER_CELL]\n// For X < 128: start + FIELD_ELEMENTS_PER_CELL <= FIELD_ELEMENTS_PER_EXT_BLOB = len(roots_brp)"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0160",
+      "property_id": "PROP-W5B14-27",
+      "title": "Verify Trust Boundary Integrity for tb-002: Does cell_to_coset_evals produce exactly FIELD_ELEMENTS_PER_CELL elements and validate byte segment sizes?",
+      "severity": "Medium",
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "phase1": {
+        "abstract_interpretation": "The property examines whether cell_to_coset_evals output size is validated. In Prysm, Cell is defined as type Cell [BytesPerCell]byte - a fixed-size array at compile time. BytesPerCell = FIELD_ELEMENTS_PER_CELL * BYTES_PER_FIELD_ELEMENT is a compile-time constant. Structural validation: VerifyDataColumnSidecar checks len(sidecar.Column) == len(sidecar.KzgCommitments) == len(sidecar.KzgProofs). Content validation: VerifyDataColumnsSidecarKZGProofs via VerifyCellKZGProofBatch validates cell bytes are valid polynomial evaluations.",
+        "state_space_analysis": "Cell size state: fixed at compile time. type Cell [BytesPerCell]byte. BytesPerCell is a constant (ckzg4844.BytesPerCell = 2048 bytes = 128 field elements * 32 bytes/element). A Cell value in Go always has exactly BytesPerCell bytes - Go's type system enforces this unconditionally. The ckzg4844.Cell type is also a fixed-size array matching BytesPerCell.",
+        "potential_violations": [
+          "If a Cell value somehow had wrong size: impossible by Go type system",
+          "If c-kzg-4844's cell_to_coset_evals produced wrong number of elements: internal to C library, not exposed in Go"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Trace: Go Cell = [BytesPerCell]byte. Converted to ckzg4844.Cell via ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i]) - direct fixed-size array copy. Inside c-kzg-4844, cell_to_coset_evals operates on fixed-size array. Output cells part of ckzg4844.RecoverCellsAndKZGProofs return value. makeCellsAndProofs processes these fixed-size arrays. No dynamic sizing anywhere.",
+        "attack_scenarios": [
+          "Attacker cannot provide wrong-size Cell data: Go Cell type is fixed-size array, P2P deserialization into Cell enforces BytesPerCell bytes",
+          "Wrong content inside a Cell would produce invalid KZG proofs, caught by VerifyDataColumnsSidecarKZGProofs in gossip validation"
+        ],
+        "counterexample": "No counterexample. Fixed-size array types in Go prevent cell size mismatches by construction."
+      },
+      "phase2_5": {
+        "adversarial_analysis": "Go type system's fixed-size array semantics make cell size manipulation impossible from Go layer. An adversary providing cell bytes via P2P: the bytes must deserialize into fixed Cell type. Any extra or missing bytes in P2P message cause deserialization failure before Cell type is populated.",
+        "exploitation_feasibility": "Not exploitable. Fixed-size array type guarantee in Go.",
+        "attack_complexity": "impractical"
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: 'All Cell values have exactly BytesPerCell bytes'. Enforced by Go's type system - type Cell [BytesPerCell]byte is compile-time constant-size array. Cannot be violated at runtime by any Go code. Secondary invariant: 'Cell content represents valid field element evaluations' - enforced by KZG proof verification in gossip validation.",
+        "guards_sufficient": true,
+        "mathematical_guarantee": "Go's type system provides compile-time guarantee that Cell values have exactly BytesPerCell bytes. This is a language-level invariant, stronger than any runtime check. KZG proof verification provides cryptographic guarantee of cell content correctness."
+      },
+      "phase3_5": {
+        "final_verdict": "Not a vulnerability. Go Cell type (type Cell [BytesPerCell]byte) is a fixed-size array whose size is enforced at compile time. Cell size mismatches are impossible at Go type level. KZG proof verification in gossip validation cryptographically validates cell content. cell_to_coset_evals output size concern is handled by Go's type system and c-kzg-4844's fixed-size types.",
+        "reasoning": "Cell type provides compile-time size invariant enforcement - stronger than any runtime check. VerifyDataColumnSidecar checks structural consistency, and VerifyDataColumnsSidecarKZGProofs validates cell content via batch KZG proof verification. All three layers together ensure cell_to_coset_evals receives properly-sized and cryptographically-valid cell data.",
+        "confidence": "high"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "ComputeCells",
+            "line_range": {
+              "start": 54,
+              "end": 69
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Fixed-size Cell type prevents output size issues:\n// type Cell [BytesPerCell]byte  (compile-time constant: 2048 bytes = 128 field elements * 32 bytes)\n\n// In kzg.go - fixed-size array copy:\nfor i := range partialCells {\n\tckzgPartialCells[i] = ckzg4844.Cell(partialCells[i])  // fixed-size array copy\n}\n\n// In p2p_interface.go - structural length validation:\nif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n\treturn ErrMismatchLength\n}"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 4,
+    "item_count": 15,
+    "timestamp": 1771331105,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0146",
+      "W7B8:W7B8:CHK-0147",
+      "W7B8:W7B8:CHK-0148",
+      "W7B8:W7B8:CHK-0149",
+      "W7B8:W7B8:CHK-0150",
+      "W7B8:W7B8:CHK-0151",
+      "W7B8:W7B8:CHK-0152",
+      "W7B8:W7B8:CHK-0153",
+      "W7B8:W7B8:CHK-0154",
+      "W7B8:W7B8:CHK-0155",
+      "W7B8:W7B8:CHK-0156",
+      "W7B8:W7B8:CHK-0157",
+      "W7B8:W7B8:CHK-0158",
+      "W7B8:W7B8:CHK-0159",
+      "W7B8:W7B8:CHK-0160"
+    ]
+  }
+}
