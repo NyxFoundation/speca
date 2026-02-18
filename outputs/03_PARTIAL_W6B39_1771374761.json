@@ -1,0 +1,420 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0091",
+      "property_id": "PROP-W5B14-5",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0091",
+        "title": "Supporting Check: Do actor-p2p-peer and actor-validator-node correctly invoke verify_cell_kzg_proof_batch_impl before accepting data column sidecars?",
+        "severity": "Critical",
+        "bug_class": "Verification Bypass"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "verifyKzgBatch",
+            "line_range": {
+              "start": 194,
+              "end": 216
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/sync/data_column_sidecars.go",
+            "symbol": "verifyDataColumnSidecarsByPeer",
+            "line_range": {
+              "start": 942,
+              "end": 981
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// beacon-chain/sync/batch_verifier.go:verifyKzgBatch\nfunc verifyKzgBatch(kzgBatch []*kzgVerifier) {\n\tif len(kzgBatch) == 0 { return }\n\tallDataColumns := make([]blocks.RODataColumn, 0, len(kzgBatch))\n\tfor _, kzgVerifier := range kzgBatch {\n\t\tallDataColumns = append(allDataColumns, kzgVerifier.dataColumns...)\n\t}\n\tvar verificationErr error\n\terr := peerdas.VerifyDataColumnsSidecarKZGProofs(allDataColumns)\n\tif err != nil {\n\t\tverificationErr = errors.Wrap(err, \"batch KZG verification failed\")\n\t}\n\t// Send the SAME error to ALL verifiers - shared contamination\n\tfor _, verifier := range kzgBatch {\n\t\tverifier.resChan <- verificationErr\n\t}\n}",
+      "state_context": "verifyKzgBatch is called by kzgVerifierRoutine which drains all pending items from kzgChan into a single batch. Multiple gossip goroutines from different peers write to kzgChan concurrently. A single invalid proof from one peer contaminates all others in the same batch.",
+      "phase1": {
+        "summary": "The batch KZG verification path has a shared-result contamination issue: verifyKzgBatch() collects all pending kzgVerifier items from the channel, merges their data columns into one flat slice, calls VerifyDataColumnsSidecarKZGProofs on the entire merged set, and if that fails, broadcasts the SAME error to ALL verifiers regardless of which item caused the failure. This forces all legitimate gossip validators to fall back to the slower unbatched path.",
+        "state_anomalies_found": [
+          "verifyKzgBatch sends identical error to ALL waiting goroutines regardless of which data columns caused the failure",
+          "A single attacker-controlled invalid data column from Peer A causes Peer B's valid columns to receive an error, triggering the unbatched fallback path for ALL",
+          "Context timeout on kzgChan send is unbounded: if kzgVerifierRoutine is blocked, gossip goroutines block indefinitely on a full channel",
+          "kzgChan buffer of 100 allows DoS vector if the verifier routine falls behind under load",
+          "When batch error occurs, validateUnbatchedColumnsKzg is called with the original dataColumns, providing correct security via second verification path"
+        ],
+        "concurrency_analysis": "kzgVerifierRoutine is a single goroutine draining kzgChan. Multiple gossip goroutines write concurrently. Shared error result propagation creates cross-peer contamination."
+      },
+      "phase2": {
+        "summary": "Concrete DoS exploit confirmed: a malicious peer flooding gossip with invalid KZG proofs forces all concurrent honest-peer gossip messages into the slower unbatched sequential verification path. Security invariant (no unverified data accepted) is preserved by the fallback path, but throughput is degraded in an attacker-controlled manner.",
+        "counterexample_found": true,
+        "counterexample": "BATCH CONTAMINATION DoS: Attacker Peer A sends a DataColumnSidecar with an invalid KZG proof at the same time as Honest Peer B sends a valid column. Both enter the same kzgBatch slice in kzgVerifierRoutine. verifyKzgBatch merges both, the batch fails (due to A's invalid proof), and BOTH A's and B's resChan receive the same error. B's validateWithKzgBatchVerifier falls back to validateUnbatchedColumnsKzg which re-verifies correctly. This is semantically correct but the attacker forces honest validators to always pay unbatched verification cost.",
+        "attack_scenarios": [
+          "Batch contamination DoS: Flood kzgChan with many invalid gossip messages. All concurrent legitimate messages get batched with invalid ones, receive errors, fall back to sequential verification. Sustained attack degrades gossip processing throughput significantly.",
+          "Context timeout race: If kzgChan is full (100 items) and context has limited TTL, ctx.Done() fires before batch is processed. The sidecar is ignored (ValidationIgnore) with no error. The SatisfyRequirement call is never reached, so no unverified data is accepted. This is correct but enables targeted liveness attacks against specific gossip topics.",
+          "Empty verification bypass analysis: VerifyCellKZGProofBatch with num_cells==0 returns true. Protected by ErrNoKzgCommitments in ValidFields() check before KZG verification is reached."
+        ]
+      },
+      "phase2_5": {
+        "classification": "defense-in-depth",
+        "entry_points": [
+          "GossipSub /eth2/<fork_digest>/data_column_sidecar_<subnet_id> -> validateDataColumn -> validateWithKzgBatchVerifier -> verifyKzgBatch",
+          "P2P by-root/by-range request -> verifyDataColumnSidecarsByPeer -> verifyByRootDataColumnSidecars -> SidecarKzgProofVerified -> VerifyDataColumnsSidecarKZGProofs"
+        ],
+        "attacker_controlled": true,
+        "notes": "Any connected P2P peer can send crafted DataColumnSidecar gossip. The attack surface is wide (all connected peers). The batch contamination is directly reachable via gossip with minimal stake/cost."
+      },
+      "phase3": {
+        "summary": "Security invariant 'no data column is accepted without successful KZG verification' holds. SatisfyRequirement(RequireSidecarKzgProofVerified) is called ONLY after validateWithKzgBatchVerifier returns ValidationAccept. The fallback validateUnbatchedColumnsKzg also verifies before returning ValidationAccept. The liveness/performance invariant does NOT hold under attack: batch contamination forces constant fallback to O(n) sequential verification instead of O(1) batch verification.",
+        "proof_successful": true,
+        "guard_identified": "Two-layer guard: (1) verifyKzgBatch with unbatched fallback in gossip path; (2) verifyByRootDataColumnSidecars with direct KZG check in P2P path.",
+        "guard_sufficiency": "Sufficient for security correctness. Insufficient for liveness: attacker can exploit shared-error propagation to degrade KZG verification throughput for all concurrent gossip validators.",
+        "edge_cases": [
+          "Empty sidecar batch returns true -- guarded by ErrNoKzgCommitments in ValidFields()",
+          "Context cancellation before batch processing returns ValidationIgnore -- secure, no bypass",
+          "kzgChan full causes gossip goroutine stall -- not a security bypass but an availability issue"
+        ]
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true,
+      "severity": "Medium",
+      "reasoning": "The shared-error contamination in verifyKzgBatch is a confirmed design flaw where one attacker's invalid proof causes all concurrent honest peers' valid data to be re-verified via the slower unbatched path. The security invariant (no unverified data accepted) is preserved by the fallback, but the performance degradation is fully attacker-controlled. A malicious peer with minimal cost can force the entire KZG verification pipeline into sequential mode, degrading gossip processing throughput. This constitutes an economically viable DoS attack against beacon node gossip processing.",
+      "fix_recommendation": "In verifyKzgBatch, on failure, do NOT broadcast the same error to all verifiers. Two options: (1) On batch failure, re-verify each kzgVerifier's data columns independently within verifyKzgBatch and send per-item results. (2) Return a sentinel 'batch failed, retry individually' signal so each caller re-verifies its own data. Option 1 is preferred as it keeps the per-item isolation inside the verifier routine rather than in each calling goroutine."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0092",
+      "property_id": "PROP-W5B14-6",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0092",
+        "title": "Verify Trust Boundary Integrity for tb-002/tb-008: Does hash_to_bls_field produce uniformly random BLS field elements with full ~2^255 bit entropy?",
+        "severity": "Critical",
+        "bug_class": "Insufficient Entropy"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n\tckzgCells := make([]ckzg4844.Cell, len(cells))\n\tfor i := range cells {\n\t\tckzgCells[i] = ckzg4844.Cell(cells[i])\n\t}\n\treturn ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}\n// This is a pure pass-through. hash_to_bls_field is implemented in the c-kzg C library.",
+      "state_context": "The hash_to_bls_field function within c-kzg uses SHA-256 over all commitments, cells, proofs, and domain separator to derive the challenge r. SHA-256 output (256 bits) is reduced mod BLS12-381 field order r (~254.85 bits). No external randomness or PRNG is involved.",
+      "phase1": {
+        "summary": "The hash_to_bls_field implementation in the c-kzg C library uses SHA-256 over a deterministic preimage containing all batch inputs and domain separator. The 256-bit SHA-256 output is reduced mod the BLS12-381 field order r via blst_fr_from_scalar. The effective entropy is ~254.85 bits (bounded by log2(r)). The Go wrapper at kzg.go:98-106 is a pure type-conversion pass-through with zero entropy-related logic.",
+        "state_anomalies_found": [
+          "SHA-256 produces 256 bits; BLS12-381 scalar field order ~254.85 bits. The reduction introduces a negligible statistical bias of ~2^{-255} (probability that a specific field element is slightly more likely). This is cryptographically negligible.",
+          "No external randomness injected. The challenge is purely Fiat-Shamir (deterministic given inputs). This is the intended design per EIP-7594.",
+          "blst_scalar_from_bendian (big-endian byte interpretation) + blst_fr_from_scalar (field reduction) is the standard, audited approach used across the Ethereum ecosystem."
+        ]
+      },
+      "phase2": {
+        "summary": "The entropy question is entirely within the c-kzg C library. The Go code introduces no entropy weakness. SHA-256 provides ~254 bits of entropy for r, far exceeding the 128-bit security requirement. No practical attack exists.",
+        "counterexample_found": false,
+        "counterexample": "None. Finding a SHA-256 preimage that produces a specific target field element requires ~2^{254} operations -- computationally infeasible. The ~2^{-255} field reduction bias provides zero practical attack advantage.",
+        "attack_scenarios": [
+          "Collision attack: Find two distinct input sets with the same SHA-256 hash (same r). Requires ~2^{128} operations. Economically infeasible and provides no practical benefit given the existing KZG soundness proof.",
+          "Zero-challenge attack: Find inputs such that hash_to_bls_field outputs r=0. Probability ~2^{-255} per attempt. Infeasible."
+        ]
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": true,
+        "notes": "Attacker controls SHA-256 preimage (cells, commitments, proofs) but cannot feasibly control SHA-256 output. The attack is computationally infeasible regardless of P2P control."
+      },
+      "phase3": {
+        "summary": "The invariant 'challenge r has sufficient entropy to prevent proof forgery' holds. SHA-256 with ~254-bit effective output entropy (after BLS field reduction) far exceeds the 128-bit security target. The blst library's field reduction is the industry-standard approach. No vulnerability in Go layer or C library.",
+        "proof_successful": true,
+        "guard_identified": "SHA-256 Fiat-Shamir transform with ~254-bit effective entropy.",
+        "guard_sufficiency": "Sufficient. Cryptographically sound implementation."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Low",
+      "reasoning": "The hash_to_bls_field function correctly implements the standard Fiat-Shamir heuristic using SHA-256. The entropy is ~254 bits, far exceeding the 128-bit security requirement. The Go wrapper code (kzg.go:98-106) is a pure pass-through with no entropy-related logic. No vulnerability exists in the Go codebase or the underlying c-kzg library. The field reduction bias of ~2^{-255} is cryptographically negligible. This item is correctly implemented per the EIP-7594 specification."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0093",
+      "property_id": "PROP-W5B14-6",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0093",
+        "title": "Supporting Check: Does the Fiat-Shamir challenge r correctly bind ALL inputs in verify_cell_kzg_proof_batch_impl?",
+        "severity": "Critical",
+        "bug_class": "Fiat-Shamir Binding Vulnerability"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// The Fiat-Shamir challenge computation (in c-kzg library) binds:\n// SHA-256(domain_separator || FIELD_ELEMENTS_PER_BLOB || FIELD_ELEMENTS_PER_CELL ||\n//         num_commitments || num_cells ||\n//         all_unique_commitment_bytes... ||\n//         per_cell: commitment_index || cell_index || cell_data || proof...)\n// Go wrapper is a pure pass-through: all 4 arrays passed unchanged to C library.",
+      "state_context": "The c-kzg compute_verify_cell_kzg_proof_batch_challenge function hashes: domain separator (16 bytes), structural constants (FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL as uint64), count fields (num_commitments, num_cells as uint64), deduplicated unique commitment bytes (48 bytes each), and for each cell: commitment_index (uint64), cell_index (uint64), all cell data bytes (BYTES_PER_CELL), proof (48 bytes).",
+      "phase1": {
+        "summary": "The Fiat-Shamir challenge computation binds all relevant inputs. Commitment deduplication uses commitment_indices to preserve the full mapping. The domain separator prevents cross-context confusion. An assert(offset == bytes + input_size) provides runtime completeness verification.",
+        "state_anomalies_found": [
+          "Commitment deduplication is performed before hashing: unique_commitments (deduplicated list) + commitment_indices (per-cell mapping). This is semantically equivalent to hashing all original commitments and preserves all information.",
+          "Domain separator 'RCKZGCBATCH__V1_' (16 bytes) prevents cross-version/cross-context challenge collisions.",
+          "The hash input includes ALL cells and ALL proofs in their entirety -- no truncation or sampling occurs."
+        ]
+      },
+      "phase2": {
+        "summary": "Comprehensive analysis of the c-kzg challenge computation confirms complete input binding. All attacker-controlled fields (cells, proofs, commitments, indices) are included in the SHA-256 preimage. Changing any input changes the challenge, causing the linear combination check to fail with overwhelming probability.",
+        "counterexample_found": false,
+        "counterexample": "None. Any modification to cells, proofs, or commitments changes the SHA-256 preimage, producing a different r. The modified inputs will fail the pairing check for the new r with probability ~1-2^{-254}.",
+        "attack_scenarios": [
+          "Commitment substitution: Attacker swaps commitment C1 for C2 while keeping cells/proofs. SHA-256 preimage changes (commitment bytes differ), new r produced, pairing check fails.",
+          "Cell data substitution: Attacker modifies a cell while keeping proof and commitment. SHA-256 preimage changes (cell data bytes differ), new r produced, linear combination fails.",
+          "Length extension: SHA-256 is immune to length extension attacks (unlike MD5/SHA-1). Explicit length fields in preimage provide additional protection."
+        ]
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": true,
+        "notes": "Attacker modifying any input field changes the challenge r, invalidating any pre-computed forgery attempt. The Fiat-Shamir binding is complete and prevents input substitution attacks."
+      },
+      "phase3": {
+        "summary": "The invariant 'challenge r correctly binds ALL inputs' is proven by inspection of the c-kzg compute_verify_cell_kzg_proof_batch_challenge function. The SHA-256 preimage includes domain separator, structural constants, count fields, all unique commitment bytes with per-cell index mapping, and per-cell (commitment_index, cell_index, all cell bytes, proof bytes). This is complete and correct per EIP-7594 specification.",
+        "proof_successful": true,
+        "guard_identified": "Complete SHA-256 Fiat-Shamir binding of all inputs: domain separator + structural constants + count fields + all unique commitments + per-cell (index + data + proof).",
+        "guard_sufficiency": "Sufficient and correct. Runtime assert verifies hash input completeness."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Low",
+      "reasoning": "The Fiat-Shamir binding is complete and correct. ALL inputs are bound: commitments (deduplicated with indices preserved), cell_indices, cells, proofs, and structural parameters. The Go code is a transparent pass-through. The c-kzg implementation matches the EIP-7594 specification and includes a runtime assert to verify preimage completeness. No unbound inputs exist that could enable a substitution or forgery attack."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0094",
+      "property_id": "PROP-W5B14-6",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0094",
+        "title": "Supporting Check: Is the random challenge r resistant to attacker influence through crafted P2P inputs?",
+        "severity": "Critical",
+        "bug_class": "Challenge Manipulation"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Attacker controls P2P DataColumnSidecar fields: KzgCommitments[], Column[] (cells), KzgProofs[], Index\n// These map directly to: commitments, cells, proofs, cell_indices in VerifyDataColumnsSidecarKZGProofs\n// The challenge r = SHA256(domain || constants || num_commitments || num_cells || all_inputs...)\n// Full preimage control by attacker; zero SHA-256 output control due to preimage resistance.",
+      "state_context": "Attacker fully controls the SHA-256 preimage (all bytes except domain separator and compile-time constants) but cannot steer SHA-256 output. KzgCommitments must be valid G1 curve points (validated by C library). KzgProofs must be valid G1 points. Invalid points result in C_KZG_BADARGS error before challenge computation.",
+      "phase1": {
+        "summary": "Attacker controls all variable bytes in the SHA-256 preimage via P2P DataColumnSidecar fields. G1 point validation in the C library constrains commitments and proofs to the BLS12-381 G1 subgroup. Even with full preimage control, SHA-256's preimage resistance makes targeted challenge manipulation computationally infeasible.",
+        "state_anomalies_found": [
+          "Attacker chooses arbitrary Cell data (2048 bytes per cell, up to 128 cells per blob = 262KB of preimage data). Large input surface does not help due to SHA-256 preimage resistance.",
+          "G1 point validation in C library constrains commitments and proofs to valid curve points before challenge computation. Invalid points rejected early with C_KZG_BADARGS.",
+          "The sidecar Index field (column index 0..127) controls cell_indices in the hash. All cells in a sidecar share the same Index. Attacker can use multiple sidecars with different Index values but this provides no advantage."
+        ]
+      },
+      "phase2": {
+        "summary": "No feasible challenge manipulation attack exists. Steering SHA-256 output to a specific value requires inverting SHA-256 (~2^{254} operations). Engineering a 'weak' challenge (e.g., r=1 or r=small prime) requires the same computational effort. The attack surface is wide (full preimage control) but the cryptographic primitive (SHA-256) is sound.",
+        "counterexample_found": false,
+        "counterexample": "None. Finding inputs such that SHA-256(inputs) mod r_BLS == target_r requires ~2^{254} SHA-256 evaluations for any specific target_r. Even if target_r = 1 (trivial challenge), this is infeasible.",
+        "attack_scenarios": [
+          "Chosen-input attack: Attacker crafts inputs hoping SHA-256(input) produces a weak r (e.g., r=1 making all r^i=1). Requires ~2^{254} SHA-256 evaluations. Economically infeasible.",
+          "Birthday attack: Find two distinct input batches with same SHA-256 hash (same r), allowing cross-batch replay. Requires ~2^{128} operations. Infeasible in practice; economic cost vastly exceeds potential gain.",
+          "Large-batch r manipulation: Attacker sends many concurrent gossip messages to inflate kzgBatch size, hoping that including attacker-controlled cells changes r for honest senders' cells beneficially. Due to Fiat-Shamir, each unique input combination produces an independent unpredictable r. No advantage gained."
+        ]
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": true,
+        "notes": "Full preimage control confirmed from P2P inputs. Zero SHA-256 output control confirmed due to preimage resistance. G1 point validation provides additional constraint on commitment/proof fields."
+      },
+      "phase3": {
+        "summary": "The invariant 'attacker cannot influence r to a specific value' holds under SHA-256 preimage resistance (~128-bit security). The Go code passes P2P-received bytes to the C library transparently without introducing any weakness. G1 point validation in the C library prevents arbitrary byte injection for commitment/proof fields.",
+        "proof_successful": true,
+        "guard_identified": "SHA-256 preimage resistance prevents challenge steering. G1 point validation in C library prevents arbitrary commitment/proof byte injection.",
+        "guard_sufficiency": "Sufficient under standard cryptographic assumptions (SHA-256 preimage resistance, BLS12-381 G1 group security).",
+        "edge_cases": [
+          "Quantum adversary: Grover reduces SHA-256 preimage to ~2^{128} quantum operations. Not a current operational threat.",
+          "C library G1 validation bug: If the C library accepted non-curve-point bytes as commitments/proofs, attacker could potentially manipulate the challenge computation or pairing evaluation. This is a c-kzg implementation concern, not a Go-layer issue."
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Low",
+      "reasoning": "No feasible attack exists against challenge randomness from P2P inputs. The attacker controls the SHA-256 preimage but cannot steer the output due to preimage resistance (~128-bit security). The Go wrapper passes data transparently. G1 point validation in the C library prevents injection of arbitrary bytes for cryptographic fields. The construction is sound under standard assumptions."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0095",
+      "property_id": "PROP-W5B14-6",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0095",
+        "title": "Supporting Check: Can an attacker exploit weak entropy to forge proofs where invalid cells pass batch verification?",
+        "severity": "Critical",
+        "bug_class": "Proof Forgery via Entropy Exhaustion"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Batch verification equation (conceptually):\n// Verify: sum_i(r^i * proof_i) == sum_i(r^i * (commitment_i evaluated at coset_i))\n// using a single pairing check.\n// For forgery: attacker needs sum_i(r^i * error_i) == 0 where error_i = (forged_proof_i - correct_proof_i)\n// Requires r to be a root of the polynomial sum_i(x^i * error_i), probability ~2^{-254} for random r.",
+      "state_context": "VerifyCellKZGProofBatch in c-kzg: (1) computes challenge r = hash_to_bls_field(all_inputs) with ~254-bit entropy, (2) computes r^0, r^1, ..., r^{n-1} (n = num_cells), (3) executes single pairing check with these weights. blst_fr_from_scalar reduction introduces ~2^{-255} bias, cryptographically negligible.",
+      "phase1": {
+        "summary": "The batch verification linear combination check is sound when r has sufficient entropy. With ~254-bit effective entropy (SHA-256 output mod BLS12-381 field order), the probability that an attacker-crafted invalid batch passes the linear combination check is ~2^{-254} per attempt. The Fiat-Shamir setting ensures r is computed AFTER all proofs/cells are committed (they are the hash preimage), eliminating adaptive attack advantage.",
+        "state_anomalies_found": [
+          "blst_fr_from_scalar performs reduction mod r_BLS. For SHA-256 outputs >= r_BLS (~1/2 of all 256-bit values), the reduced value is in the lower half. This creates negligible bias (~2^{-255}) that provides no practical attack advantage.",
+          "r^i for large i: r is computed, then powers are computed iteratively. blst_fr_mul is used for each multiplication. Overflow is handled by the field arithmetic (operations are mod r_BLS). No integer overflow risk.",
+          "num_cells == 1 edge case: only r^0 = 1 is used, degenerating to a direct (non-randomized) KZG proof check. Still secure as a single proof is verifiable directly."
+        ]
+      },
+      "phase2": {
+        "summary": "Proof forgery via entropy exhaustion is computationally infeasible. The security analysis confirms: (1) r has ~254 bits of effective entropy, (2) attacker cannot steer r to a specific value (preimage resistance), (3) each forgery attempt is independent (Fiat-Shamir), (4) success probability per attempt is ~2^{-254}, (5) even with 2^{64} attempts, overall success probability is ~2^{-190}. The attack described in the checklist (low-entropy r enabling forgery) does not apply to this implementation.",
+        "counterexample_found": false,
+        "counterexample": "None. Entropy exhaustion attack assumes r has low entropy (e.g., <40 bits). With ~254-bit entropy in this implementation, the attack requires 2^{254} attempts -- far beyond feasibility. Even if an attacker could make 2^{40} attempts per second for 2^{80} seconds, success probability would be ~2^{-134}.",
+        "attack_scenarios": [
+          "Entropy exhaustion (infeasible): Attacker tries 2^k (cells, proofs) pairs hoping SHA-256(modified_inputs) mod r_BLS gives a challenge that the forged batch satisfies. Each attempt changes the inputs, producing an independent new r. Success probability per attempt ~2^{-254}. Infeasible even with 2^{100} attempts.",
+          "Single-cell batch forgery: num_cells=1, r^0=1. The check reduces to a direct pairing: e(proof, [tau - cell_index]G2) == e(cell_commitment, G2). Forging this requires breaking BLS12-381 DLP or t-SDH. Infeasible.",
+          "Structured error cancellation: Attacker constructs forged cells such that sum_i(r^i * error_i) == 0 for the resulting r. Finding such a polynomial identity that happens to map to the actual r (determined by SHA-256 of the forged inputs) requires inverting SHA-256. Infeasible."
+        ]
+      },
+      "phase2_5": {
+        "classification": "unreachable",
+        "attacker_controlled": true,
+        "notes": "Proof forgery is reachable in principle (any P2P peer can send crafted sidecars) but computationally infeasible. The security bound comes from ~254-bit challenge entropy and BLS12-381 t-SDH hardness assumption."
+      },
+      "phase3": {
+        "summary": "The invariant 'invalid cells cannot pass batch KZG verification' holds under the t-SDH assumption and SHA-256 random oracle model. The 254-bit entropy of r makes coincidental batch proof forgery negligible (~2^{-254} per attempt). The blst field reduction bias is ~2^{-255}, providing no practical attack leverage. The Go wrapper introduces no weakness.",
+        "proof_successful": true,
+        "guard_identified": "BLS12-381 pairing-based batch KZG soundness with SHA-256 Fiat-Shamir derived challenge r of ~254-bit effective entropy.",
+        "guard_sufficiency": "Sufficient. Implementation matches EIP-7594 specification and is based on well-established cryptographic primitives (SHA-256, BLS12-381, KZG commitments).",
+        "edge_cases": [
+          "num_cells == 1: degenerates to direct KZG proof check (r^0=1). Secure but no batch optimization benefit.",
+          "Very large batches (many sidecars): larger n increases the polynomial degree that must vanish at r. Higher-degree polynomial makes forgery HARDER (more constraints must be satisfied), not easier.",
+          "Zero-entropy edge case: if hash_to_bls_field produced r=0 (probability ~2^{-255}), the linear combination collapses to trivially true. This is a negligible probability event and not a practical attack vector."
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "severity": "Low",
+      "reasoning": "Proof forgery via entropy exhaustion is computationally infeasible with ~254-bit challenge entropy. The c-kzg implementation of hash_to_bls_field correctly uses SHA-256 with full input binding, providing ~128-bit security against batch proof forgery under standard cryptographic assumptions. The Go wrapper at kzg.go:98-106 is a pure type-conversion pass-through. The attack described in this checklist item does not apply to implementations with SHA-256-derived challenges of this entropy level. This item is correctly implemented per EIP-7594 specification."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 6,
+    "batch_index": 39,
+    "item_count": 5,
+    "timestamp": 1771374761,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0091",
+      "W7B8:W7B8:CHK-0092",
+      "W7B8:W7B8:CHK-0093",
+      "W7B8:W7B8:CHK-0094",
+      "W7B8:W7B8:CHK-0095"
+    ]
+  }
+}

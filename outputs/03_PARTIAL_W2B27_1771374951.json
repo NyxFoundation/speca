@@ -1,0 +1,436 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-44-001",
+      "property_id": "PROP-W2B3-44",
+      "title": "Can ENR epoch be manipulated to reflect sync state instead of wall-clock time?",
+      "severity": "Medium",
+      "bug_class": "State Consistency",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/p2p/fork_watcher.go",
+            "symbol": "forkWatcher",
+            "line_range": {
+              "start": 11,
+              "end": 40
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/p2p/fork.go",
+            "symbol": "updateENR",
+            "line_range": {
+              "start": 127,
+              "end": 160
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "github_raw_fetch"
+      },
+      "code_snippet": "func (s *Service) forkWatcher() {\n\tif s.dv5Listener == nil {\n\t\treturn\n\t}\n\tslotTicker := slots.NewSlotTicker(s.genesisTime, params.BeaconConfig().SecondsPerSlot)\n\tvar scheduleEntry params.NetworkScheduleEntry\n\tfor {\n\t\tselect {\n\t\tcase currSlot := <-slotTicker.C():\n\t\t\tcurrentEpoch := slots.ToEpoch(currSlot)\n\t\t\tnewEntry := params.GetNetworkScheduleEntry(currentEpoch)\n\t\t\tif newEntry.ForkDigest != scheduleEntry.ForkDigest {\n\t\t\t\tnextEntry := params.NextNetworkScheduleEntry(currentEpoch)\n\t\t\t\tif err := updateENR(s.dv5Listener.LocalNode(), newEntry, nextEntry); err != nil {\n\t\t\t\t\tlog.WithFields(newEntry.LogFields()).WithError(err).Error(\"Could not add fork entry\")\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tscheduleEntry = newEntry\n\t\t\t}\n\t\tcase <-s.ctx.Done():\n\t\t\tslotTicker.Done()\n\t\t\treturn\n\t\t}\n\t}\n}",
+      "state_context": "SlotTicker is a pure wall-clock ticker (genesisTime + SecondsPerSlot intervals), completely independent of sync state. scheduleEntry is goroutine-local. LocalNode() is internally synchronized. No shared state between forkWatcher goroutine and sync subsystem.",
+      "phase1_abstract_interpretation": {
+        "summary": "forkWatcher operates on a pure wall-clock slot ticker (slots.NewSlotTicker using genesisTime and SecondsPerSlot). It is completely independent of sync state by design \u2014 the ENR reflects the protocol schedule, not sync completeness. scheduleEntry is a goroutine-local variable initialized to zero. The first tick triggers an ENR update, creating a startup window of up to SecondsPerSlot (12s) where the ENR may not reflect the current fork digest. concurrency is safe as scheduleEntry is local and LocalNode() is internally synchronized.",
+        "state_anomalies_found": [
+          "12-second initialization window: scheduleEntry starts at zero, ENR update only triggered on first slot tick \u2014 peer comparisons during this window see startup-time ENR",
+          "updateENR failures cause persistent retry (every slot tick) with no exponential backoff \u2014 potential log spam",
+          "No call to updateENR at service Start() \u2014 depends on service constructor's initial ENR setup for pre-first-tick behavior"
+        ],
+        "cache_analysis": "No caching in forkWatcher. ENR updates are immediate writes to LocalNode (thread-safe).",
+        "concurrency_analysis": "scheduleEntry is goroutine-local. LocalNode().Set() is internally synchronized via go-ethereum's enode package mutex. No data races."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No attacker-controllable input path exists to manipulate the ENR epoch. genesisTime and SecondsPerSlot are fixed at node startup. A malicious peer can only influence their own ENR; the local node's ENR is a write-only output of forkWatcher. The initialization gap is not attacker-exploitable as it depends on service startup timing, not external input.",
+        "counterexample_found": false,
+        "counterexample": "N/A \u2014 the ENR epoch is derived exclusively from wall-clock genesisTime + slot intervals. No external actor can inject a different epoch value.",
+        "attack_scenarios": [
+          "Malicious peer advertises incorrect fork digest in their ENR: rejected by compareForkENR using local ENR as ground truth",
+          "Initialization window (first 12s): peers connecting before first tick see startup-configured ENR \u2014 not attacker-exploitable, depends on service constructor"
+        ],
+        "timing_dependencies": "12-second window at startup and fork epoch boundaries where ENR is briefly stale. Not attacker-exploitable."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "forkWatcher is an internal background goroutine with no external input surface. Only the ENR output is readable by external peers (read-only discovery). No attacker can write to the local node's ENR.",
+        "entry_points": [
+          "p2p discovery (read-only access to ENR)",
+          "service Start()"
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "attack_surface": "No external attack surface. Attacker can only observe the ENR, not influence forkWatcher's computation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that ENR reflects the wall-clock fork schedule is maintained. Guards (ForkDigest change detection, continue-on-error) are sufficient. The 12-second staleness window is within spec-allowed MAXIMUM_GOSSIP_CLOCK_DISPARITY tolerance. The design is intentionally sync-state independent per the Ethereum p2p specification.",
+        "proof_successful": true,
+        "guard_identified": "ForkDigest != scheduleEntry.ForkDigest check with continue-on-error and wall-clock slot ticker",
+        "guard_sufficiency": "Sufficient for the stated invariant. 12-second staleness is within acceptable bounds per Ethereum p2p spec.",
+        "edge_cases": [
+          "First slot tick after startup \u2014 pre-tick ENR set by service constructor, not forkWatcher",
+          "Repeated updateENR failures \u2014 no backoff, persistent log spam per slot"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No attacker-controllable manipulation of the ENR epoch is possible. The wall-clock independence from sync state is correct and intentional per the Ethereum p2p specification. The initialization window is a design property within spec-allowed clock disparity tolerance.",
+        "recommendation": "Informational: Consider calling updateENR once at service Start() to eliminate the 12-second initialization gap. Add exponential backoff for persistent updateENR failures to reduce log spam.",
+        "severity_estimate": "Informational (design observation)"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "The forkWatcher goroutine is a wall-clock-driven internal goroutine with no external input surface. No attacker can manipulate the ENR epoch to reflect sync state. The sync-state independence is correct per spec. No exploitable vulnerability exists."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-45-001",
+      "property_id": "PROP-W2B3-45",
+      "title": "Verify Trust Boundary Integrity for tb-001/tb-002: Can a malicious peer forge a data column sidecar with a valid BLS proposer signature?",
+      "severity": "Critical",
+      "bug_class": "Authentication Bypass",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/ValidProposerSignature",
+            "line_range": {
+              "start": 229,
+              "end": 275
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/SidecarProposerExpected",
+            "line_range": {
+              "start": 407,
+              "end": 492
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "github_raw_fetch"
+      },
+      "code_snippet": "func (dv *RODataColumnsVerifier) ValidProposerSignature(ctx context.Context) (err error) {\n\tif ok, err := dv.results.cached(RequireValidProposerSignature); ok {\n\t\treturn err\n\t}\n\tdefer dv.recordResult(RequireValidProposerSignature, &err)\n\tfor _, dataColumn := range dv.dataColumns {\n\t\tsignatureData := columnToSignatureData(dataColumn)\n\t\tseen, err := dv.sc.SignatureVerified(signatureData)\n\t\tif err != nil {\n\t\t\tcolumnVerificationProposerSignatureCache.WithLabelValues(\"hit-invalid\").Inc()\n\t\t\treturn columnErrBuilder(ErrInvalidProposerSignature)\n\t\t}\n\t\tif seen {\n\t\t\tcolumnVerificationProposerSignatureCache.WithLabelValues(\"hit-valid\").Inc()\n\t\t\tcontinue\n\t\t}\n\t\tparentState, err := dv.parentState(ctx, dataColumn)\n\t\tif err != nil {\n\t\t\treturn columnErrBuilder(errors.Wrap(err, \"parent state\"))\n\t\t}\n\t\tif err = dv.sc.VerifySignature(signatureData, parentState); err != nil {\n\t\t\treturn columnErrBuilder(errors.Wrap(err, \"verify signature\"))\n\t\t}\n\t}\n\treturn nil\n}",
+      "state_context": "signatureData cache (LRU-256, shared across all verifier instances via *sharedResources). stateByRoot is per-verifier-instance. Domain uses DomainBeaconProposer + genesisValidatorsRoot (chain-specific binding). hashicorp/golang-lru is thread-safe.",
+      "phase1_abstract_interpretation": {
+        "summary": "ValidProposerSignature implements BLS signature verification with an LRU signature cache keyed on signatureData{Root, Parent, Signature, Proposer, Slot}. The signature cache (size 256) is shared across verifier instances. Cache hits bypass full BLS \u2014 valid only if the previous verification was sound. The domain binding uses genesisValidatorsRoot to tie signatures to a specific chain. The LRU size of 256 is small for PeerDAS with 128 columns per block.",
+        "state_anomalies_found": [
+          "LRU signature cache size 256 \u2014 can be evicted under high column traffic, forcing unnecessary re-BLS-verification (performance degradation, not security bypass)",
+          "Double BLS verification race: two goroutines on same signatureData before cache population \u2014 both get correct result but waste CPU (performance only)",
+          "No cache size increase proportional to PeerDAS column count increase"
+        ],
+        "cache_analysis": "sigCache LRU-256 is thread-safe. Cache hits for valid entries skip BLS (correct behavior \u2014 hit implies prior successful verification). stateByRoot is per-verifier-instance, no cross-request contamination. Cache eviction forces re-verification but does not allow bypassing authentication.",
+        "concurrency_analysis": "hashicorp/golang-lru is thread-safe. RODataColumnsVerifier is per-goroutine (not thread-safe per documentation). Shared sigCache correctly handles concurrent access."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "BLS signature forgery requires the proposer's private key \u2014 computationally infeasible under BLS-12-381 security assumptions. Cache-based authentication bypass is not possible because LRU cache hits only occur after a prior successful BLS verification. LRU eviction attacks increase CPU cost but do not bypass authentication. BLS malleability is not exploitable due to subgroup checks enforced by Prysm's BLS library.",
+        "counterexample_found": false,
+        "counterexample": "N/A \u2014 BLS forgery is computationally infeasible without the proposer's private key.",
+        "attack_scenarios": [
+          "Cache eviction DoS: send 256+ unique invalid-signature sidecars to evict legitimate LRU entries, forcing BLS re-verification \u2014 amplifies CPU cost but no authentication bypass",
+          "BLS malleability: Prysm enforces G2 subgroup checks, negated signature forms fail verification",
+          "Wrong-key signature: providing validator Q's signature with ProposerIndex=P fails because validators[P].PublicKey is used for verification"
+        ],
+        "timing_dependencies": "Double-computation race on cache miss is performance-only, not security-relevant."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "ValidProposerSignature is reachable from any libp2p gossip peer. The LRU eviction DoS is fully reachable from any unauthenticated peer. Signature forgery is not reachable without the proposer's private key.",
+        "entry_points": [
+          "libp2p gossip pubsub (validateDataColumn)",
+          "after SidecarParentValid check"
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "attack_surface": "Any unauthenticated gossip peer can reach ValidProposerSignature. LRU eviction DoS is reachable. Authentication bypass is not reachable."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The authentication invariant holds under BLS security assumptions. The signature cache correctly only caches results of actual BLS verification \u2014 cache hits cannot be manufactured without a prior valid BLS verification. The domain binding (genesisValidatorsRoot) prevents cross-chain replay. Guards are sufficient for authentication.",
+        "proof_successful": true,
+        "guard_identified": "BLS VerifySignature with sigCache(LRU-256) + DomainBeaconProposer domain binding including genesisValidatorsRoot",
+        "guard_sufficiency": "Sufficient for authentication. LRU eviction affects performance only. Domain binding prevents cross-chain replay. Guard holds under BLS security assumptions.",
+        "edge_cases": [
+          "LRU size 256 may be undersized for PeerDAS traffic (128 columns \u00d7 multiple concurrent proposers)",
+          "Cache miss under high load forces full BLS re-verification \u2014 performance concern only"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No authentication bypass is possible. BLS signature forgery is computationally infeasible. The LRU eviction attack is a minor performance concern. The verification logic is correct and complete.",
+        "recommendation": "Informational: Consider increasing sigCache LRU size to at least 512-1024 entries to accommodate PeerDAS's higher column traffic (128 columns per block). Current size of 256 may cause excessive BLS re-verifications under load.",
+        "severity_estimate": "Informational (performance note)"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "BLS forgery is computationally infeasible. The signature cache cannot be poisoned to bypass authentication. All attack paths examined fail against the BLS security assumption and correct domain binding. No vulnerability found."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-46-001",
+      "property_id": "PROP-W2B3-46",
+      "title": "Verify Trust Boundary Integrity for tb-001: Is three-layer integrity verification enforced for all sidecars?",
+      "severity": "Critical",
+      "bug_class": "Input Validation",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/ValidFields",
+            "line_range": {
+              "start": 117,
+              "end": 132
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/SidecarInclusionProven",
+            "line_range": {
+              "start": 356,
+              "end": 388
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/SidecarKzgProofVerified",
+            "line_range": {
+              "start": 389,
+              "end": 406
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "github_raw_fetch"
+      },
+      "code_snippet": "// Three requirement sets:\n// GossipDataColumnSidecarRequirements (12 checks): full suite\n// ByRangeRequestDataColumnSidecarRequirements (3 checks): ValidFields + InclusionProven + KzgProofVerified\n// ByRootRequestDataColumnSidecarRequirements (3 checks): ValidFields + InclusionProven + KzgProofVerified\n\n// SatisfyRequirement bypass mechanism:\nfunc (dv *RODataColumnsVerifier) SatisfyRequirement(req Requirement) {\n\tdv.recordResult(req, nil)\n}\n\n// Usage in validateDataColumn (sync package) after batch KZG:\nverifier.SatisfyRequirement(verification.RequireSidecarKzgProofVerified)",
+      "state_context": "allSatisfied() checks len(done) != len(reqs) \u2014 extra SatisfyRequirement calls for out-of-reqs requirements cause len(done) > len(reqs) \u2192 allSatisfied() returns false. By-range/by-root paths intentionally omit 9 checks including proposer signature and proposer identity. This is per-spec for sync path sidecars.",
+      "phase1_abstract_interpretation": {
+        "summary": "Three distinct requirement sets enforce different security levels for gossip vs sync paths. SatisfyRequirement is an unrestricted bypass that records any Requirement as satisfied without actual verification. By-range/by-root paths omit proposer signature and identity checks entirely \u2014 a malicious sync peer can provide sidecars with arbitrary ProposerIndex values that pass the three-layer check (ValidFields + InclusionProven + KzgProofVerified). allSatisfied() length guard prevents accidentally marking extra requirements as done (would cause verification failure).",
+        "state_anomalies_found": [
+          "SatisfyRequirement accepts any Requirement constant without type restriction \u2014 any code holding a verifier reference can bypass any check",
+          "By-range/by-root: ProposerIndex field is NOT verified \u2014 malicious sync peer can inject arbitrary ProposerIndex in a sidecar that passes all three enforced checks",
+          "allSatisfied() length check prevents SatisfyRequirement misuse for out-of-reqs requirements (causes len(done) > len(reqs) \u2192 failure)"
+        ],
+        "cache_analysis": "SidecarInclusionProven uses an inclusion proof cache (ic). SidecarKzgProofVerified uses verifyDataColumnsCommitment (batch KZG). results.done is per-verifier-instance. No cross-request contamination.",
+        "concurrency_analysis": "RODataColumnsVerifier is not thread-safe by design. Per-goroutine usage. Inclusion proof cache (ic) \u2014 thread-safety depends on implementation (assumed safe)."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "A malicious sync peer can craft a DataColumnSidecar with valid KZG proofs and a valid inclusion proof (commitment genuinely in the block's merkle tree) but with an arbitrary ProposerIndex. This sidecar passes ByRangeRequestDataColumnSidecarRequirements and becomes a VerifiedRODataColumn with an incorrect ProposerIndex metadata field. This represents a metadata integrity violation for sync-sourced sidecars.",
+        "counterexample_found": true,
+        "counterexample": "Construct: sidecar with (1) column data that produces valid KZG proofs for real commitments in block B, (2) valid inclusion proof showing those commitments ARE in block B's merkle tree, (3) ProposerIndex=99999 (not block B's actual proposer). This sidecar passes ByRangeRequestDataColumnSidecarRequirements and is accepted as VerifiedRODataColumn with incorrect ProposerIndex. The impact depends on whether downstream consumers rely on ProposerIndex from verified sidecars for security decisions.",
+        "attack_scenarios": [
+          "Malicious sync peer serves by-range sidecars with arbitrary ProposerIndex: passes three-layer verification, accepted with wrong metadata",
+          "SatisfyRequirement misuse in future code: developer calls SatisfyRequirement(RequireValidProposerSignature) without actual verification \u2014 compiler allows this"
+        ],
+        "timing_dependencies": "No timing dependency \u2014 structural design choice."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "By-range/by-root paths are reachable from any sync peer during initial sync or forward sync. An eclipse-attacked or malicious peer in the sync peer set can serve malformed sidecars that pass reduced verification.",
+        "entry_points": [
+          "DataColumnSidecarsByRange v1 RPC handler",
+          "DataColumnSidecarsByRoot v1 RPC handler",
+          "batch sync block processing"
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "attack_surface": "Reachable from any sync peer. Requires attacker to be in local node's peer set during sync operations."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The three-layer integrity check (ValidFields + InclusionProven + KZG) is enforced for ALL paths. The stronger invariant of proposer identity verification is only enforced on the gossip path \u2014 by-range/by-root intentionally omit this per Ethereum consensus spec (sync peers are assumed to serve pre-verified block data). SatisfyRequirement is a documented escape hatch with legitimate uses; the allSatisfied() guard prevents accidental misuse.",
+        "proof_successful": true,
+        "guard_identified": "allSatisfied() against per-path reqs slice; per-path requirement sets enforced by verifier constructor",
+        "guard_sufficiency": "Sufficient for three-layer integrity as defined. The missing proposer check in sync paths is spec-intentional \u2014 the block root provides the cryptographic binding to the chain.",
+        "edge_cases": [
+          "VerifiedRODataColumn from by-range path has unverified ProposerIndex \u2014 downstream consumers must not rely on ProposerIndex for security decisions",
+          "SatisfyRequirement with out-of-reqs requirement causes allSatisfied() to fail \u2014 silently drops the verification result"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The by-range/by-root omission of proposer signature verification is explicitly specified behavior per the Ethereum consensus spec for sync paths. The three-layer integrity (ValidFields + InclusionProven + KZG) is consistently enforced for all paths. The ProposerIndex metadata vulnerability in sync-sourced sidecars is a known design trade-off \u2014 the KZG proof binds the column data to real commitments, and the inclusion proof binds commitments to the block, which is the cryptographically meaningful verification for data availability.",
+        "recommendation": "Informational: Document that VerifiedRODataColumn from by-range/by-root paths has unverified ProposerIndex metadata. Downstream consumers should not use ProposerIndex from sync-sourced sidecars for security decisions. Consider adding a type-level distinction (e.g., GossipVerifiedRODataColumn vs SyncVerifiedRODataColumn) to prevent misuse.",
+        "severity_estimate": "Low (informational \u2014 spec-compliant design)"
+      },
+      "final_classification": "informational",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "Three-layer integrity (ValidFields + InclusionProven + KZG) is enforced for all sidecar paths. Proposer identity omission in sync paths is spec-intentional. The counterexample (arbitrary ProposerIndex in sync sidecar) is a design trade-off. No bug bounty eligible vulnerability."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-47-001",
+      "property_id": "PROP-W2B3-47",
+      "title": "Verify Trust Boundary Integrity for tb-001: Is gossip validation ordered from cheapest to most expensive?",
+      "severity": "Critical",
+      "bug_class": "Denial of Service",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "github_raw_fetch"
+      },
+      "code_snippet": "// Actual validation ordering in validateDataColumn:\n// 1. ValidFields()                     - REJECT - O(fields) cheap\n// 2. CorrectSubnet()                   - REJECT - O(1) cheap\n// 3. NotFromFutureSlot()               - IGNORE - O(1) cheap\n// 4. SlotAboveFinalized()              - IGNORE - O(1) cheap\n// 5. SidecarParentSeen()               - IGNORE - O(cache) medium\n// 6. SidecarParentValid()              - REJECT - O(cache) cheap\n// 7. ValidProposerSignature()          - REJECT - O(BLS) EXPENSIVE ~2-5ms\n// 8. SidecarParentSlotLower()          - REJECT - O(1) cheap\n// 9. SidecarDescendsFromFinalized()    - REJECT - O(cache) medium\n// 10. SidecarInclusionProven()         - REJECT - O(merkle) medium\n// 11. validateWithKzgBatchVerifier()   - REJECT - O(KZG) MOST EXPENSIVE\n// 12. hasSeenDataColumnIndex()         - IGNORE - O(cache) cheap  \u2190 CRITICAL ORDERING BUG\n// 13. SidecarProposerExpected()        - REJECT - O(shuffling) expensive\n\n// hasSeenDataColumnIndex FIRES AFTER KZG (position 12 vs 11)\n// Replay of accepted sidecar triggers full KZG verification before dedup detection",
+      "state_context": "hasSeenDataColumnIndex is keyed on (slot, proposerIndex, columnIndex). It is populated after a sidecar is accepted. The seenDataColumnCache is an LRU. validateWithKzgBatchVerifier performs KZG cell proof batch verification \u2014 the most expensive operation (~equivalent to EIP-4844 blob verification). No KZG result cache exists for individual sidecar verification. Signature cache (LRU-256) mitigates BLS amplification but no equivalent exists for KZG.",
+      "phase1_abstract_interpretation": {
+        "summary": "The gossip validation ordering has two critical placement issues: (1) ValidProposerSignature (BLS verify, ~2-5ms) is at position 7, before cheaper checks at positions 8-9 (SidecarParentSlotLower, SidecarDescendsFromFinalized). (2) hasSeenDataColumnIndex (dedup cache) is at position 12, AFTER validateWithKzgBatchVerifier (KZG, position 11). The second issue is the critical finding: replay of any previously-accepted sidecar triggers a full KZG batch verification before the duplicate is detected. The signature cache mitigates BLS amplification for cached entries but no equivalent cache exists for KZG results.",
+        "state_anomalies_found": [
+          "CRITICAL: hasSeenDataColumnIndex at position 12 is AFTER KZG verification at position 11 \u2014 replay of accepted sidecars triggers full KZG re-verification on every replay",
+          "ValidProposerSignature (BLS, ~2-5ms) at position 7 is before SidecarParentSlotLower (position 8, microseconds) and SidecarDescendsFromFinalized (position 9, cache lookup) \u2014 minor ordering suboptimality, mitigated by sigCache",
+          "No KZG result cache: validateWithKzgBatchVerifier has no equivalent of the signature LRU cache \u2014 KZG is re-run on every non-deduplicated invocation",
+          "Concurrent goroutines racing on same sidecar all execute KZG before any records dedup \u2014 N concurrent connections \u00d7 KZG cost per replay"
+        ],
+        "cache_analysis": "sigCache (LRU-256) provides BLS deduplication for recently-seen signatures. No KZG result cache identified. seenDataColumnCache (LRU) is the post-acceptance dedup store but it fires AFTER KZG, not before. Inclusion proof cache (ic) deduplicated inclusion proofs \u2014 this is correctly placed.",
+        "concurrency_analysis": "Multiple concurrent validateDataColumn goroutines for the same sidecar (from different peers) each run KZG independently before any goroutine has populated the seenDataColumnCache. This multiplies KZG cost by the number of concurrent senders."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Replay-based KZG amplification: an attacker observes a valid gossip sidecar and replays it from N peer connections. Each replay traverses through positions 1-11 (including KZG at position 11) before reaching position 12 (hasSeenDataColumnIndex) which returns IGNORE. The cost to the victim is N \u00d7 KZG_verification_cost per replay wave. With PeerDAS having 128 columns per block and N=10 concurrent peers, an attacker can trigger 1280 KZG verifications per slot wave. The attacker needs only to be a connected gossip peer and observe valid sidecars \u2014 no cryptographic capability required.",
+        "counterexample_found": true,
+        "counterexample": "1. Attacker connects to victim as N=10 libp2p gossip peers. 2. Attacker observes valid sidecar (slot S, proposer P, column I) on the network. 3. Attacker simultaneously sends the same sidecar from all N peers to victim. 4. Victim spawns N concurrent validateDataColumn goroutines. 5. Each goroutine executes: ValidFields\u2192CorrectSubnet\u2192NotFromFutureSlot\u2192SlotAboveFinalized\u2192SidecarParentSeen\u2192SidecarParentValid\u2192ValidProposerSignature (sigCache hit on 2nd+)\u2192SidecarParentSlotLower\u2192SidecarDescendsFromFinalized\u2192SidecarInclusionProven\u2192validateWithKzgBatchVerifier [KZG]\u2192hasSeenDataColumnIndex [IGNORE]. 6. Result: N KZG verifications for 1 unique sidecar. At N=10, 128 columns, 10s window: up to 12800 KZG verifications instead of 128.",
+        "attack_scenarios": [
+          "Replay flood from multiple peers: observe valid sidecar, replay from N peers simultaneously \u2014 N \u00d7 KZG cost before dedup",
+          "128-column wave: replay all 128 column indices' valid sidecars from multiple connections \u2014 128 \u00d7 N KZG verifications per wave",
+          "Concurrent goroutine race: even without explicit replay, N simultaneous legitimate deliveries of the same sidecar from the gossip mesh cause N KZG verifications"
+        ],
+        "timing_dependencies": "Race between concurrent validateDataColumn goroutines: all execute KZG before any sets the dedup cache. Critical window = duration of KZG verification (~1-5ms per sidecar at EIP-4844 level)."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The replay attack is fully reachable from any peer in the local node's gossip mesh. An attacker needs only to observe a valid gossip sidecar (trivial on a public network) and replay it from multiple peer connections. libp2p gossip scoring will eventually penalize peers that send invalid messages, but: (1) the replayed sidecar is VALID (just duplicated), so gossip scoring may not penalize it as 'invalid', and (2) the scoring response time is too slow to prevent a burst amplification attack.",
+        "entry_points": [
+          "libp2p gossip pubsub subscriptions (data_column_sidecar_N topics, N=0..DataColumnSidecarSubnetCount)",
+          "any connected gossip peer"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "attack_surface": "Any peer in the gossip mesh \u2014 no cryptographic capability required. Attacker only needs to observe and replay valid sidecars. Potentially achievable even by a non-malicious network with high fanout delivering the same sidecar from multiple mesh peers simultaneously."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that cheap checks precede expensive checks is violated for hasSeenDataColumnIndex placement (after KZG). The KZG amplification via replay is an exploitable resource exhaustion vulnerability. libp2p gossip scoring does not prevent this because replayed valid sidecars may not trigger the 'invalid' scoring penalty. The BLS ordering suboptimality (position 7 before 8-9) is minor and mitigated by the signature cache.",
+        "proof_successful": false,
+        "guard_identified": "hasSeenDataColumnIndex (post-KZG dedup), sigCache (pre-BLS dedup for cached signatures)",
+        "guard_sufficiency": "sigCache is sufficient to prevent BLS amplification for cached signatures. No equivalent guard exists for KZG \u2014 hasSeenDataColumnIndex fires AFTER KZG, providing no pre-KZG deduplication. The ordering invariant is violated.",
+        "edge_cases": [
+          "libp2p mesh naturally delivers the same message from multiple mesh peers \u2014 even without an attacker, N mesh peers can trigger N KZG verifications for the same sidecar",
+          "setSeenDataColumnIndex must be called after acceptance (in post-validation handler) \u2014 there is a window between KZG completion and dedup cache population",
+          "Gossip scoring for duplicate valid messages: libp2p may not penalize duplicate delivery of valid messages, allowing sustained replay attacks without peer banning"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "The hasSeenDataColumnIndex dedup check firing AFTER KZG verification (position 12 vs position 11) enables replay-based KZG amplification DoS from any gossip peer. This is an exploitable resource exhaustion vulnerability: (1) attacker needs only to observe and replay valid sidecars \u2014 no cryptographic capability required, (2) KZG verification is the most expensive operation in the pipeline, (3) amplification scales with number of peers \u00d7 number of columns, (4) PeerDAS's 128 columns per block makes this particularly impactful, (5) even non-malicious mesh behavior can trigger this amplification. This could degrade validator duties on high-traffic networks by exhausting CPU resources during KZG verification.",
+        "recommendation": "Move hasSeenDataColumnIndex check to BEFORE ValidProposerSignature (after CorrectSubnet, NotFromFutureSlot, SlotAboveFinalized \u2014 the cheap but sufficient pre-checks). This would short-circuit processing of known-accepted sidecars before any expensive cryptographic operations. Additionally, consider adding a KZG result cache keyed on (blockRoot, columnIndex, kzgProofHash) to deduplicate KZG computation for sidecars from the same block.",
+        "severity_estimate": "Medium-High \u2014 exploitable resource exhaustion DoS, no cryptographic capability required, scales with PeerDAS column count"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true,
+      "reasoning_summary": "VULNERABILITY CONFIRMED: hasSeenDataColumnIndex dedup check is placed at position 12, after validateWithKzgBatchVerifier (KZG, position 11). This ordering allows any gossip peer to replay valid accepted sidecars and trigger full KZG batch verification before the duplicate is detected. KZG is the most expensive operation in the pipeline. With 128 PeerDAS columns and multiple peer connections, this is an exploitable CPU amplification DoS. Fix: move hasSeenDataColumnIndex to before position 7 (after cheap preliminary checks)."
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-48-001",
+      "property_id": "PROP-W2B3-48",
+      "title": "Verify Trust Boundary Integrity for tb-001: Can a non-proposer node get a sidecar accepted by claiming proposer identity?",
+      "severity": "Critical",
+      "bug_class": "Privilege Escalation",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/SidecarProposerExpected",
+            "line_range": {
+              "start": 407,
+              "end": 492
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/ValidProposerSignature",
+            "line_range": {
+              "start": 229,
+              "end": 275
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "github_raw_fetch"
+      },
+      "code_snippet": "func (dv *RODataColumnsVerifier) SidecarProposerExpected(ctx context.Context) (err error) {\n\t// targetRootFromCache: caches targetRoot by (slot, parentRoot)\n\t// dataColumnEpoch = slots.ToEpoch(slot) - 1 (if epoch > 0)\n\tfor _, dataColumn := range dv.dataColumns {\n\t\tdataColumnSlot := dataColumn.Slot()\n\t\tparentRoot := dataColumn.ParentRoot()\n\t\ttargetRoot, err := targetRootFromCache(dataColumnSlot, parentRoot)\n\t\t...\n\t\tcheckpoint := &forkchoicetypes.Checkpoint{Root: targetRoot, Epoch: dataColumnEpoch}\n\t\tidx, cached := dv.pc.Proposer(checkpoint, dataColumnSlot)\n\t\tif !cached {\n\t\t\tparentState, err := dv.parentState(ctx, dataColumn)\n\t\t\tidx, err = dv.pc.ComputeProposer(ctx, parentRoot, dataColumnSlot, parentState)\n\t\t}\n\t\tif idx != dataColumn.ProposerIndex() {\n\t\t\treturn columnErrBuilder(errSidecarUnexpectedProposer)\n\t\t}\n\t}\n\treturn nil\n}",
+      "state_context": "Two-layer proposer defense: (1) BLS sig verified under validators[ProposerIndex].PublicKey with DomainBeaconProposer + genesisValidatorsRoot domain, (2) ProposerIndex checked against shuffling-derived expected proposer for (slot, parentRoot). Both use parentRoot from the immutable sidecar. parentState retrieved consistently by parentRoot. epoch-1 computation is consistent between targetRootFromCache and checkpoint.Epoch.",
+      "phase1_abstract_interpretation": {
+        "summary": "Two-layer proposer identity verification is implemented: ValidProposerSignature verifies BLS signature under validators[ProposerIndex].PublicKey, and SidecarProposerExpected verifies ProposerIndex matches shuffling-computed expected proposer for (slot, parentRoot). Both layers use consistent state retrieval via parentRoot. The epoch-1 computation appears identically in targetRootFromCache and checkpoint.Epoch \u2014 consistent but a maintenance hazard. No cross-layer inconsistency found.",
+        "state_anomalies_found": [
+          "epoch-1 computation appears twice in SidecarProposerExpected (in targetRootFromCache and in checkpoint construction) \u2014 maintenance hazard, not a security issue",
+          "targetRootBySlotParentRoot map is per-call local scope \u2014 correct, no cross-request contamination",
+          "propCache.Proposer uses global proposer index cache keyed by (checkpoint, slot) \u2014 thread-safe, consistent"
+        ],
+        "cache_analysis": "targetRootBySlotParentRoot is a local per-call map for batching within one verifier invocation. propCache.Proposer is a global proposer index cache \u2014 correctly thread-safe. parentState uses per-verifier-instance stateByRoot map. No cross-request cache contamination possible.",
+        "concurrency_analysis": "No data races in SidecarProposerExpected. sidecar fields are immutable (RODataColumn). parentState is per-verifier-instance. propCache is globally thread-safe. No TOCTOU \u2014 ProposerIndex in sidecar cannot change between layers."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No path exists for a non-proposer to get a sidecar accepted. Attacking ValidProposerSignature requires the proposer's private BLS key (computationally infeasible). Attacking SidecarProposerExpected by manipulating ProposerIndex fails because ValidProposerSignature verifies the signature under validators[ProposerIndex].PublicKey \u2014 a wrong index means the wrong public key is used for verification. Both layers are jointly necessary and together sufficient.",
+        "counterexample_found": false,
+        "counterexample": "N/A \u2014 both attack paths require the expected proposer's private key, which is computationally infeasible to obtain.",
+        "attack_scenarios": [
+          "ProposerIndex = expected proposer, but attacker's signature: fails ValidProposerSignature (verifies under wrong public key vs signature)",
+          "ProposerIndex = attacker's own validator index, valid attacker signature: fails SidecarProposerExpected (attacker index != expected proposer for this slot)",
+          "ProposerIndex = expected, valid attacker signature over correct block root: impossible without expected proposer's private key",
+          "propCache poisoning via forked state: not feasible without controlling forkchoice TargetRootForEpoch"
+        ],
+        "timing_dependencies": "No TOCTOU \u2014 ProposerIndex in immutable RODataColumn cannot change between ValidProposerSignature and SidecarProposerExpected. parentState is immutable per root. Both checks reference the same consistent state."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "SidecarProposerExpected is reachable from gossip validation after ValidProposerSignature. A non-proposer reaching SidecarProposerExpected will have already passed BLS verification (meaning they have the expected proposer's private key \u2014 i.e., they ARE the proposer or have stolen the key). Privilege escalation by identity claim is not reachable without key possession.",
+        "entry_points": [
+          "libp2p gossip pubsub (validateDataColumn, position 13)",
+          "only reachable after passing ValidProposerSignature (position 7)"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "Privilege escalation by identity claim is computationally infeasible. An attacker without the proposer's private key cannot pass ValidProposerSignature."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that only the expected proposer can get a gossip sidecar accepted holds. The two-layer defense is jointly necessary and sufficient: BLS alone doesn't verify the proposer is the EXPECTED one; shuffling check alone doesn't verify the signer's identity. Together they provide complete proposer identity binding. The proof is sound under BLS-12-381 security assumptions and correct forkchoice state.",
+        "proof_successful": true,
+        "guard_identified": "ValidProposerSignature (BLS under validators[ProposerIndex].PublicKey + DomainBeaconProposer) AND SidecarProposerExpected (ProposerIndex == shuffling_expected_proposer(slot, parentRoot))",
+        "guard_sufficiency": "Both guards together are necessary and sufficient. Neither alone is sufficient for complete proposer identity verification. The combination correctly binds: (1) signer identity to ProposerIndex, (2) ProposerIndex to the slot's expected proposer.",
+        "edge_cases": [
+          "epoch-1 computation consistency: verified as consistent between targetRootFromCache and checkpoint.Epoch in the same function",
+          "parentState consistency between the two checks: both use parentRoot key from immutable sidecar, accessing the same beacon state",
+          "In batch sync path: SatisfyRequirement is used to bypass SidecarProposerExpected and SidecarParentSeen \u2014 documented intentional bypass for batch efficiency"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No privilege escalation is possible. The two-layer proposer identity verification (BLS signature + shuffling check) is correctly implemented and jointly sufficient. A non-proposer cannot forge a valid BLS signature under the expected proposer's public key. All attack paths examined require the expected proposer's private key.",
+        "recommendation": "Informational: Extract the epoch-1 computation into a shared helper function in SidecarProposerExpected to reduce maintenance risk of inconsistency between the two usages within the same function.",
+        "severity_estimate": "N/A \u2014 not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "Two-layer proposer identity verification (BLS + shuffling) is correctly implemented and jointly sufficient. No path exists for a non-proposer to get a sidecar accepted without possessing the expected proposer's private key. All attack scenarios fail against the BLS security assumption. No vulnerability found."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 27,
+    "item_count": 5,
+    "timestamp": 1771374951,
+    "processed_ids": [
+      "W3B4:W3B4:CHK-W2B3-44-001",
+      "W3B4:W3B4:CHK-W2B3-45-001",
+      "W3B4:W3B4:CHK-W2B3-46-001",
+      "W3B4:W3B4:CHK-W2B3-47-001",
+      "W3B4:W3B4:CHK-W2B3-48-001"
+    ]
+  }
+}

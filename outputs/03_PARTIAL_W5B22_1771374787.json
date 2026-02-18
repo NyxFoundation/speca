@@ -1,0 +1,361 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-25-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-25-003",
+        "title": "Does the beacon node correctly maintain data availability consistency when receiving duplicate sidecar tuples?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "bug_class": "State Consistency",
+        "property_id": "PROP-W2B3-25"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/subscriber_data_column_sidecar.go",
+            "symbol": "receiveDataColumnSidecar",
+            "line_range": {
+              "start": 37,
+              "end": 60
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "hasSeenDataColumnIndex",
+            "line_range": {
+              "start": 230,
+              "end": 236
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) receiveDataColumnSidecar(ctx context.Context, sidecar blocks.VerifiedRODataColumn) error {\n\tslot := sidecar.SignedBlockHeader.Header.Slot\n\tproposerIndex := sidecar.SignedBlockHeader.Header.ProposerIndex\n\tcolumnIndex := sidecar.Index\n\ts.setSeenDataColumnIndex(slot, proposerIndex, columnIndex)\n\tif err := s.cfg.chain.ReceiveDataColumn(sidecar); err != nil {\n\t\treturn errors.Wrap(err, \"receive data column\")\n\t}\n\treturn nil\n}",
+      "state_context": "Service.seenDataColumnCache is *slotAwareCache (custom type). Unlike seenBlockCache and seenBlobCache, there is NO companion seenDataColumnLock sync.RWMutex in the Service struct. The slotAwareCache has an internal mutex protecting individual operations but NOT the compound check-then-set sequence. hasSeenDataColumnIndex is called in validateDataColumn (gossip validator, concurrent). setSeenDataColumnIndex is called in receiveDataColumnSidecar BEFORE ReceiveDataColumn (chain storage).",
+      "phase1_abstract_interpretation": {
+        "summary": "Abstract state analysis reveals a TOCTOU (Time-of-Check-Time-of-Use) race condition. The seen-cache check (hasSeenDataColumnIndex) in validateDataColumn and the seen-cache write (setSeenDataColumnIndex) in receiveDataColumnSidecar are not atomic. Two concurrent gossip validators processing the same (slot, proposerIndex, columnIndex) tuple can both observe 'not seen', both proceed to ValidationAccept, and both invoke chain.ReceiveDataColumn with the same sidecar.",
+        "state_transitions": [
+          "Goroutine A: validateDataColumn -> hasSeenDataColumnIndex(slot, pi, ci) -> false (cache miss)",
+          "Goroutine B: validateDataColumn -> hasSeenDataColumnIndex(slot, pi, ci) -> false (cache miss, concurrent)",
+          "Goroutine A: ValidationAccept -> receiveDataColumnSidecar -> setSeenDataColumnIndex -> ReceiveDataColumn",
+          "Goroutine B: ValidationAccept -> receiveDataColumnSidecar -> setSeenDataColumnIndex -> ReceiveDataColumn (DUPLICATE)"
+        ],
+        "invariants_violated": [
+          "PROP-W2B3-25: For any (slot, proposerIndex, columnIndex) tuple, chain.ReceiveDataColumn MUST be called at most once",
+          "Each distinct (slot, proposerIndex, columnIndex) should be processed exactly once"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution confirms the race window. The gossip handler validateDataColumn acquires no lock before the hasSeenDataColumnIndex check. Two concurrent goroutines executing this path interleave without synchronization. The slotAwareCache.Get() is individually thread-safe (internal RWMutex), but the compound 'Get-then-set-later' pattern creates a gap. Crucially, the seenBlockCache and seenBlobCache have external service-level locks (seenBlockLock, seenBlobLock) that serialize their compound check-then-act operations, but seenDataColumnCache has no equivalent external lock.",
+        "concrete_attack": {
+          "description": "Attacker broadcasts a valid data column sidecar on two different P2P connections simultaneously. Two libp2p goroutines in the gossip handler concurrently call validateDataColumn. Both call hasSeenDataColumnIndex and get false (cache miss). Both proceed through KZG/signature verification. Both call receiveDataColumnSidecar. setSeenDataColumnIndex is called by both (idempotent on cache), but ReceiveDataColumn is called twice with the same sidecar.",
+          "trigger": "Two peers simultaneously broadcasting identical valid (slot, proposerIndex, columnIndex) sidecars",
+          "impact": "Duplicate processing of data column sidecars in chain storage. Depending on ReceiveDataColumn semantics, this could cause duplicate storage writes, wasted processing, or if ReceiveDataColumn is not idempotent, chain state corruption."
+        },
+        "second_finding": {
+          "description": "In slotAwareCache.pruneOldestSlots(), stale slot keys are removed from the slotToKeys map but the corresponding cache entries are NOT removed from the underlying LRU cache via c.cache.Remove(key). This creates ghost entries that occupy LRU slots, causing the cache to silently grow beyond its intended size limit and potentially causing seen-entries for recent slots to be evicted prematurely (because the LRU fills up with ghost entries).",
+          "location": "beacon-chain/sync/slot_aware_cache.go (pruneOldestSlots)",
+          "impact": "Memory leak; premature eviction of recent seen-entries enabling replayed data column sidecars to be re-processed"
+        },
+        "confidence": "HIGH"
+      },
+      "phase2_5_counterexample": {
+        "found": true,
+        "scenario": "Two goroutines G1 and G2 concurrently process valid copies of sidecar(slot=1000, proposerIndex=5, columnIndex=42). Timeline: G1 calls hasSeenDataColumnIndex -> false; G2 calls hasSeenDataColumnIndex -> false; G1 calls setSeenDataColumnIndex; G1 calls ReceiveDataColumn; G2 calls setSeenDataColumnIndex (noop); G2 calls ReceiveDataColumn (DUPLICATE). ReceiveDataColumn is called twice.",
+        "exploitability": "Moderate - requires two near-simultaneous peers; timing window is bounded by goroutine scheduling latency"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'each (slot, proposerIndex, columnIndex) tuple is processed at most once' is NOT provably maintained by the current implementation. The missing external lock analogous to seenBlockLock/seenBlobLock means the compound check-then-set cannot be made atomic. The fix is straightforward: add a seenDataColumnLock sync.RWMutex to Service and use it to serialize the hasSeenDataColumnIndex + ValidationAccept + setSeenDataColumnIndex sequence, matching the pattern used for blocks and blobs.",
+        "fix_recommendation": "1. Add `seenDataColumnLock sync.RWMutex` to Service struct (parallel to seenBlockLock, seenBlobLock). 2. In validateDataColumn, acquire seenDataColumnLock.Lock() before hasSeenDataColumnIndex check and release after setSeenDataColumnIndex. OR acquire lock only around the check and use a compare-and-set approach. 3. Fix pruneOldestSlots to call c.cache.Remove(key) for all evicted slot keys.",
+        "confidence": "HIGH"
+      },
+      "phase3_5_bug_bounty_assessment": {
+        "eligible": true,
+        "severity": "Medium",
+        "rationale": "TOCTOU race in the seen-cache for data column sidecars. Analogous protective locks exist for blobs and blocks but are missing for data columns. Duplicate ReceiveDataColumn calls can cause wasted processing; if ReceiveDataColumn is not idempotent, this could lead to state inconsistency. The ghost-entry bug in pruneOldestSlots compounds the issue by enabling stale entries to re-trigger processing. This is a real concurrency bug in new Fusaka/PeerDAS code.",
+        "cwe": "CWE-362 (Race Condition), CWE-400 (Resource Exhaustion)"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-001",
+        "title": "Verify Trust Boundary Integrity for tb-002: Is max_blobs_per_block correctly derived from the epoch-dependent get_blob_parameters at block validation?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Input Validation",
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/blob.go",
+            "symbol": "MaxBlobsPerBlock",
+            "line_range": {
+              "start": 127,
+              "end": 135
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func validateDenebBeaconBlock(blk interfaces.ReadOnlyBeaconBlock) error {\n\tif blk.Version() < version.Deneb {\n\t\treturn nil\n\t}\n\tcommits, err := blk.Body().BlobKzgCommitments()\n\tif err != nil {\n\t\treturn errors.New(\"unable to read commitments from deneb block\")\n\t}\n\tmaxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())\n\tif len(commits) > maxBlobsPerBlock {\n\t\treturn errors.Wrapf(errRejectCommitmentLen, \"%d > %d\", len(commits), maxBlobsPerBlock)\n\t}\n\treturn nil\n}",
+      "state_context": "MaxBlobsPerBlock(slot) consults BlobSchedule first (Fulu-era dynamic schedule), then falls back to DeprecatedMaxBlobsPerBlockElectra / DeprecatedMaxBlobsPerBlock. The BlobSchedule is sorted on first call with an in-place sort (potential data race on concurrent first calls). validateDenebBeaconBlock applies to all blocks with version >= Deneb (including Fulu, Electra). The limit is derived from the block's own slot field, which is covered by proposer signature.",
+      "phase1_abstract_interpretation": {
+        "summary": "The epoch-dependent MaxBlobsPerBlock check is present and correctly applied at gossip validation time. The slot-to-epoch derivation is deterministic and based on the block's signed slot. The BlobSchedule lookup correctly finds the most-recent applicable schedule entry. For Fulu blocks, BlobSchedule takes precedence. The guard blk.Version() < version.Deneb correctly applies to Deneb (4), Electra (5), and Fulu (6) blocks.",
+        "invariants_checked": [
+          "validateDenebBeaconBlock applies to all post-Deneb blocks including Fulu",
+          "MaxBlobsPerBlock(slot) returns the correct epoch-specific limit via BlobSchedule for Fulu",
+          "The limit check uses the block's own slot (covered by proposer signature, not manipulable without signature invalidation)"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Two potential concerns identified and analyzed: (1) BlobSchedule in-place sort on every call if unsorted: MaxBlobsPerBlock modifies b.BlobSchedule slice in place on concurrent first calls, creating a theoretical data race on the slice header. However, in practice, InitializeForkSchedule() is called at startup and BlobSchedule is pre-sorted, so the runtime sort branch is never taken after startup. This is a defense-in-depth concern, not an active exploit path. (2) If BlobSchedule is empty on a Fulu network and FuluForkEpoch is set but ElectraForkEpoch is MaxUint64, the function would return DeprecatedMaxBlobsPerBlock (Deneb limit) which may be incorrect for Fulu. However, this requires a misconfigured deployment.",
+        "concrete_scenarios_tested": [
+          "Block with max+1 commitments at Fulu epoch: REJECTED (BlobSchedule limit applied)",
+          "Block with exactly max commitments at epoch boundary: ACCEPTED (correct)",
+          "Block proposer attempting to use old epoch limit: REJECTED (slot-based derivation uses block's own slot)"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_5_counterexample": {
+        "found": false,
+        "justification": "No exploitable counterexample found. The slot-based limit derivation is deterministic and cryptographically bound to the block via proposer signature. A proposer cannot use a different slot's limit without invalidating their signature. The BlobSchedule sort concern is pre-startup only."
+      },
+      "phase3_invariant_proving": {
+        "summary": "PROP-W2B3-26 holds: max_blobs_per_block is correctly derived from the epoch-dependent BlobSchedule at block validation. The trust boundary is properly enforced at the gossip validation layer. The check is consistent with the verification/blob.go BlobIndexInBounds check which uses the same MaxBlobsPerBlock(slot) function.",
+        "confidence": "HIGH"
+      },
+      "phase3_5_bug_bounty_assessment": {
+        "eligible": false,
+        "severity": "Informational",
+        "rationale": "The epoch-dependent blob limit derivation is correctly implemented. The BlobSchedule concurrent-sort concern is a theoretical data race that does not manifest in practice due to startup initialization order. No exploitable vulnerability identified."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-002",
+        "title": "Verify Block Proposer Cannot Exploit Epoch-Dependent Blob Limits",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "missingBlobIndices",
+            "line_range": {
+              "start": 612,
+              "end": 635
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// validateDenebBeaconBlock:\nmaxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())\nif len(commits) > maxBlobsPerBlock {\n    return errors.Wrapf(errRejectCommitmentLen, \"%d > %d\", len(commits), maxBlobsPerBlock)\n}\n\n// missingBlobIndices:\nmaxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(slot)\nif len(expected) > maxBlobsPerBlock {\n    return nil, errMaxBlobsExceeded\n}\n\n// isDataAvailable routing:\nif blockVersion >= version.Fulu {\n    return s.areDataColumnsAvailable(ctx, root, block)\n}\nif blockVersion >= version.Deneb {\n    return s.areBlobsAvailable(ctx, root, block)\n}",
+      "state_context": "Defense-in-depth: MaxBlobsPerBlock check applied at gossip validation AND at DA check (missingBlobIndices). Fulu blocks route to areDataColumnsAvailable (not areBlobsAvailable). A block proposer's only control is over the signed slot field; changing the slot invalidates the proposer signature. The epoch derived from slot determines the MaxBlobsPerBlock limit.",
+      "phase1_abstract_interpretation": {
+        "summary": "A block proposer cannot exploit epoch-dependent blob limits because: (1) The limit is derived from the block's own slot field; (2) The slot is covered by the proposer's BLS signature; (3) Changing the slot to claim an older/different limit would invalidate the signature and cause REJECT at ValidProposerSignature check. Defense-in-depth: the same MaxBlobsPerBlock(slot) check exists at both gossip validation and DA check layers.",
+        "invariants_checked": [
+          "Slot-based epoch derivation is cryptographically bound to block",
+          "MaxBlobsPerBlock applied consistently at gossip (validateDenebBeaconBlock) and DA (missingBlobIndices) layers",
+          "Fulu blocks correctly routed to data column availability (not blob availability)"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "All attack vectors tested: (1) Proposer forges slot to use different epoch limit -> signature verification fails. (2) Proposer uses MAX+1 commitments for current epoch -> REJECTED at gossip. (3) Proposer submits block at epoch boundary with OLD limit -> slot derives OLD epoch, limit correctly reflects OLD epoch. (4) Proposer targets Fulu block with blob limits from Electra -> isDataAvailable routes to areDataColumnsAvailable, bypassing areBlobsAvailable's missingBlobIndices check. This is correct behavior since Fulu uses data columns, not blob sidecars.",
+        "confidence": "HIGH"
+      },
+      "phase2_5_counterexample": {
+        "found": false,
+        "justification": "No counterexample found. The slot-to-epoch-to-limit derivation is deterministic, consistent across all validation layers, and cryptographically bound to the block via proposer signature. The epoch boundary case is correctly handled by slot-based derivation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant holds: a block proposer cannot exploit epoch-dependent blob limits. The consistency of MaxBlobsPerBlock(slot) across both gossip validation and DA check layers, combined with the cryptographic binding of the slot to the proposer signature, prevents any manipulation.",
+        "confidence": "HIGH"
+      },
+      "phase3_5_bug_bounty_assessment": {
+        "eligible": false,
+        "severity": "Informational",
+        "rationale": "The property is correctly implemented. No exploitable path exists for a proposer to use a different epoch's blob limit."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-26-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-26-003",
+        "title": "Verify Beacon Node Epoch Derivation from Current State",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-26"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/p2p/fork_watcher.go",
+            "symbol": "forkWatcher",
+            "line_range": {
+              "start": 11,
+              "end": 40
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) forkWatcher() {\n\tif s.dv5Listener == nil {\n\t\treturn\n\t}\n\tslotTicker := slots.NewSlotTicker(s.genesisTime, params.BeaconConfig().SecondsPerSlot)\n\tvar scheduleEntry params.NetworkScheduleEntry\n\tfor {\n\t\tselect {\n\t\tcase currSlot := <-slotTicker.C():\n\t\t\tcurrentEpoch := slots.ToEpoch(currSlot)\n\t\t\tnewEntry := params.GetNetworkScheduleEntry(currentEpoch)\n\t\t\tif newEntry.ForkDigest != scheduleEntry.ForkDigest {\n\t\t\t\tnextEntry := params.NextNetworkScheduleEntry(currentEpoch)\n\t\t\t\tif err := updateENR(s.dv5Listener.LocalNode(), newEntry, nextEntry); err != nil {\n\t\t\t\t\tlog.WithFields(newEntry.LogFields()).WithError(err).Error(\"Could not add fork entry\")\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tscheduleEntry = newEntry\n\t\t\t}\n\t\tcase <-s.ctx.Done():\n\t\t\tslotTicker.Done()\n\t\t\treturn\n\t\t}\n\t}\n}",
+      "state_context": "forkWatcher uses wall-clock slot ticks for epoch derivation, not chain finalized state. For Fulu, the ENR ForkDigest encodes BPOEpoch + MaxBlobsPerBlock via XOR with hash(BPOEpoch || MaxBlobsPerBlock). The GetNetworkScheduleEntry retrieves the epoch-appropriate NetworkScheduleEntry from the pre-computed networkSchedule. ENR update failure causes `continue` (retry next slot) without updating scheduleEntry.",
+      "phase1_abstract_interpretation": {
+        "summary": "The forkWatcher correctly derives epoch from wall-clock slot ticks. This is intentional: ENR fork digest updates must happen proactively to enable peer discovery for the upcoming fork, not reactively after chain finalization. The retry-on-failure pattern (continue without updating scheduleEntry) correctly ensures the ENR is eventually updated. The NetworkScheduleEntry.ForkDigest for Fulu correctly encodes MaxBlobsPerBlock, enabling peers to find each other across BlobSchedule (BPO) changes.",
+        "invariants_checked": [
+          "Wall-clock epoch derivation is correct for ENR/peer-discovery purposes",
+          "MaxBlobsPerBlock encoded in ForkDigest for Fulu via XOR hash",
+          "Retry-on-failure prevents stale ENR from persisting indefinitely"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Potential concern: during a BPO (Blob Parameter Override) epoch transition, if the local node's wall clock leads the chain head, the node's ENR briefly advertises the new MaxBlobsPerBlock limit before the chain has confirmed the transition. Peers could connect based on the new ForkDigest and then find the node's chain head is still on the old parameters. However: (1) this is a bounded-time window (at most one slot's duration); (2) the peer connection attempt would naturally resolve as the chain progresses; (3) this is standard behavior for all fork transitions, not specific to BPO. No exploitable security issue.",
+        "confidence": "HIGH"
+      },
+      "phase2_5_counterexample": {
+        "found": false,
+        "justification": "The wall-clock epoch derivation for ENR updates is the correct and intentional design. The brief period where ENR advertises a future fork/BPO is bounded and self-correcting. This is not an exploitable vulnerability."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The forkWatcher correctly maintains the invariant that the node's ENR reflects the current or upcoming epoch's network schedule entry. The retry mechanism ensures eventual consistency. The ForkDigest correctly encodes BPO parameters for Fulu.",
+        "confidence": "HIGH"
+      },
+      "phase3_5_bug_bounty_assessment": {
+        "eligible": false,
+        "severity": "Informational",
+        "rationale": "Wall-clock epoch derivation for ENR updates is correct and intentional. No exploitable vulnerability identified."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-001",
+        "title": "Verify Trust Boundary Integrity for tb-002: Are blocks with zero blob KZG commitments correctly accepted as valid?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Input Validation",
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_beacon_blocks.go",
+            "symbol": "validateDenebBeaconBlock",
+            "line_range": {
+              "start": 317,
+              "end": 337
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areBlobsAvailable",
+            "line_range": {
+              "start": 855,
+              "end": 930
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// validateDenebBeaconBlock:\nmaxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(blk.Slot())\nif len(commits) > maxBlobsPerBlock {  // strictly greater: 0 always passes\n    return errors.Wrapf(errRejectCommitmentLen, ...)\n}\nreturn nil\n\n// areBlobsAvailable:\nexpected := len(kzgCommitments)\nif expected == 0 {\n    return nil  // zero commitments => immediately valid\n}\n\n// missingBlobIndices:\nif len(expected) == 0 {\n    return nil, nil  // zero commitments => no blobs missing\n}",
+      "state_context": "Three independent validation layers all correctly handle zero-commitment case. validateDenebBeaconBlock uses strictly-greater check (not >=). areBlobsAvailable has explicit early return for zero commitments. missingBlobIndices has explicit early return for zero commitments. All three layers are consistent with EIP-4844/Deneb spec that allows blob-less blocks.",
+      "phase1_abstract_interpretation": {
+        "summary": "Formal analysis of the zero-commitment path through all validation layers: Layer 1 (gossip): len(commits)=0, check 0 > maxBlobsPerBlock is false, return nil (valid). Layer 2 (DA check): expected=0, return nil immediately. Layer 3 (missingBlobIndices): len(expected)=0, return nil,nil. All three layers consistently accept zero-commitment blocks without requiring any blob sidecars.",
+        "invariants_checked": [
+          "Zero-commitment blocks pass gossip validation",
+          "Zero-commitment blocks pass DA check without requiring sidecars",
+          "No minimum commitment count check exists at any layer",
+          "Behavior is consistent across all validation layers"
+        ],
+        "confidence": "HIGH"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Adversarial analysis: Could a zero-commitment block be used to bypass some later check? No: (1) The block body's BlobKzgCommitments field is part of the SSZ merkle tree; (2) Submitting a zero-commitment block does not affect other block fields; (3) There is no interaction between zero-commitment blocks and other validation paths; (4) The spec explicitly allows blob-less blocks (blocks are not required to have blobs). Could an attacker submit a zero-commitment Fulu block to bypass data availability? No: Fulu blocks route to areDataColumnsAvailable which checks data columns, not blobs. A zero-commitment Fulu block would still need to satisfy column availability for any columns referenced in the block body.",
+        "confidence": "HIGH"
+      },
+      "phase2_5_counterexample": {
+        "found": false,
+        "justification": "Zero-commitment blocks are correctly and intentionally accepted at all validation layers. This matches the EIP-4844/Deneb specification. No attack scenario found where this behavior creates a vulnerability."
+      },
+      "phase3_invariant_proving": {
+        "summary": "PROP-W2B3-27 holds: blocks with zero blob KZG commitments are correctly accepted as valid without requiring any blob sidecars. The invariant is provably maintained across all three validation layers. The behavior is consistent with the Ethereum consensus specification.",
+        "confidence": "HIGH"
+      },
+      "phase3_5_bug_bounty_assessment": {
+        "eligible": false,
+        "severity": "Informational",
+        "rationale": "Zero-commitment blocks are correctly accepted per the Deneb/EIP-4844 specification. No vulnerability exists. All three validation layers consistently implement the correct behavior."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 22,
+    "item_count": 5,
+    "timestamp": 1771374787,
+    "processed_ids": [
+      "W3B4:W3B4:CHK-W2B3-25-003",
+      "W3B4:W3B4:CHK-W2B3-26-001",
+      "W3B4:W3B4:CHK-W2B3-26-002",
+      "W3B4:W3B4:CHK-W2B3-26-003",
+      "W3B4:W3B4:CHK-W2B3-27-001"
+    ]
+  }
+}

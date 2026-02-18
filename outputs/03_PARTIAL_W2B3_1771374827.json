@@ -1,0 +1,367 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0111",
+      "title": "Supporting Check: Does verify_cell_kzg_proof_batch validate cell_index bounds BEFORE passing to coset_for_cell and coset_shift_for_cell?",
+      "severity": "High",
+      "property_id": "PROP-W5B14-10",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar - p2p_interface.go:37\nif sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }\n\n// VerifyDataColumnsSidecarKZGProofs - p2p_interface.go:77\nindices = append(indices, sidecar.Index)\n\n// VerifyCellKZGProofBatch - kzg.go:96-106\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n    ckzgCells := make([]ckzg4844.Cell, len(cells))\n    for i := range cells { ckzgCells[i] = ckzg4844.Cell(cells[i]) }\n    return ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}",
+      "state_context": "numberOfColumns = params.BeaconConfig().NumberOfColumns = 128 (CELLS_PER_EXT_BLOB in C library also = 128). Cell index comes from sidecar.Index which is validated at Go layer before KZG call. C library ckzg4844 performs its own sanity check loop over all cell_indices before any coset computation.",
+      "phase1": {
+        "abstract_interpretation": "Trace: P2P gossip \u2192 decodePubsubMessage (SSZ UnmarshalSSZ) \u2192 NewRODataColumn \u2192 validateDataColumn \u2192 verifier.ValidFields() \u2192 VerifyDataColumnSidecar(). At VerifyDataColumnSidecar (p2p_interface.go:37): `if sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }` where numberOfColumns = params.BeaconConfig().NumberOfColumns = 128. This maps exactly to CELLS_PER_EXT_BLOB = 128. After this guard, sidecar.Index \u2208 [0,127]. In VerifyDataColumnsSidecarKZGProofs, `indices = append(indices, sidecar.Index)` passes the already-validated index to kzg.VerifyCellKZGProofBatch \u2192 ckzg4844.VerifyCellKZGProofBatch (C binding). The C library in eip7594.c contains an explicit sanity loop before any coset_for_cell/coset_shift_for_cell usage: `for (size_t i = 0; i < num_cells; i++) { if (cell_indices[i] >= CELLS_PER_EXT_BLOB) return C_KZG_BADARGS; }`. Defense is dual-layer: Go guard at VerifyDataColumnSidecar + C guard in ckzg4844.",
+        "invariants_checked": [
+          "sidecar.Index < 128 enforced before KZG call",
+          "C library validates cell_indices[i] < CELLS_PER_EXT_BLOB = 128 before coset access",
+          "Both guards are redundant and consistent"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack vector: P2P peer sends DataColumnSidecar with Index = 128 (= CELLS_PER_EXT_BLOB). SSZ UnmarshalSSZ decodes field as uint64. validateDataColumn calls ValidFields() \u2192 VerifyDataColumnSidecar(). At line 37: `sidecar.Index (128) >= numberOfColumns (128)` \u2192 true \u2192 returns ErrIndexTooLarge \u2192 validateDataColumn returns pubsub.ValidationReject. KZG code never reached. Alternative: attacker somehow bypasses Go guard (e.g., data mutated after validation). VerifyCellKZGProofBatch passes cell_index to C library. C library sanity check: `cell_indices[i] >= CELLS_PER_EXT_BLOB` \u2192 C_KZG_BADARGS returned \u2192 Go wrapper returns error \u2192 VerifyDataColumnsSidecarKZGProofs returns error \u2192 validateDataColumn rejects. No path to out-of-bounds array access.",
+        "counterexample_search": "No counterexample found. Requires simultaneous bypass of: (1) Go bounds check at VerifyDataColumnSidecar, (2) C library sanity check in ckzg4844. Both are independent and redundant."
+      },
+      "phase2_5": {
+        "adversarial_challenge": "Challenging the guard sufficiency: (1) Race condition? validateDataColumn processes one sidecar atomically in goroutine; sidecar is immutable RODataColumn. (2) Type confusion? sidecar.Index is uint64 read from SSZ uint64 field - no sign extension or truncation possible. (3) TOCTOU? ValidFields result is cached but VerifyDataColumnsSidecarKZGProofs reads sidecar.Index directly - consistent with cached validation. (4) Multiple sidecars in batch? verifyKzgBatch aggregates multiple sidecars, but each was individually validated through ValidFields before entering batch. Guards are sufficient."
+      },
+      "phase3": {
+        "invariant_proving": "Formal proof: Let I = sidecar.Index (uint64). VerifyDataColumnSidecar establishes postcondition: I < 128. VerifyDataColumnsSidecarKZGProofs uses I as cell_index. ckzg4844 precondition: cell_index < CELLS_PER_EXT_BLOB = 128. Since postcondition of VerifyDataColumnSidecar (I < 128) satisfies precondition of ckzg4844 (I < 128), no out-of-bounds access possible. QED.",
+        "proof_status": "PROVED"
+      },
+      "phase3_5": {
+        "final_assessment": "The invariant is maintained. Both Go-layer and C-layer guards are present and consistent. No vulnerability exists."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "cell_index (= sidecar.Index) is validated < numberOfColumns (128) by VerifyDataColumnSidecar at the Go layer before any KZG operation. The C library ckzg4844 additionally validates cell_indices[i] < CELLS_PER_EXT_BLOB = 128 before any coset_for_cell/coset_shift_for_cell computation. Both guards are consistent (both threshold = 128) and redundant. No path to out-of-bounds access exists."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0112",
+      "title": "Supporting Check: Can integer overflow in FIELD_ELEMENTS_PER_CELL * cell_index bypass bounds checking or cause unexpected array access?",
+      "severity": "High",
+      "property_id": "PROP-W5B14-10",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar - p2p_interface.go:37\nif sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }\n// numberOfColumns = 128 = CELLS_PER_EXT_BLOB\n\n// In C library (ckzg4844), the multiplication FIELD_ELEMENTS_PER_CELL * cell_index:\n// FIELD_ELEMENTS_PER_CELL = 64, max cell_index = 127\n// max product = 64 * 127 = 8128 (no overflow possible for uint64)",
+      "state_context": "FIELD_ELEMENTS_PER_CELL = 64 (constant), CELLS_PER_EXT_BLOB = 128, cell_index \u2208 [0,127] after Go guard. The multiplication FIELD_ELEMENTS_PER_CELL * cell_index is performed inside the C library (ckzg4844). Maximum product = 64*127 = 8128, which is far below uint64 max (~1.8\u00d710^19).",
+      "phase1": {
+        "abstract_interpretation": "Abstract domain: cell_index \u2208 [0, 127] (established by Go guard at VerifyDataColumnSidecar). FIELD_ELEMENTS_PER_CELL = 64 (compile-time constant). Product range: [0*64, 127*64] = [0, 8128]. Overflow threshold for uint64: 2^64 - 1 \u2248 1.8\u00d710^19. 8128 << 2^64. The conditions for integer overflow (product \u2265 2^64) and for passing bounds check (cell_index \u2264 127) are mutually exclusive: to overflow uint64, cell_index \u2265 2^64/64 = 2^58 \u2248 2.88\u00d710^17, but cell_index \u2264 127 is enforced. The two constraints cannot be simultaneously satisfied.",
+        "invariants_checked": [
+          "cell_index \u2208 [0, 127] enforced pre-multiplication",
+          "FIELD_ELEMENTS_PER_CELL * cell_index \u2264 8128 < 2^64",
+          "No overflow possible in any reachable state"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Symbolic execution of attack path: Attacker crafts DataColumnSidecar with Index = X. SSZ decodes X as uint64. VerifyDataColumnSidecar: X >= 128 \u2192 reject (X \u2264 127 required). With X \u2264 127: FIELD_ELEMENTS_PER_CELL (64) * X \u2264 64*127 = 8128. Overflow of uint64 requires product \u2265 2^64. 8128 < 2^64. QED: no overflow. The only path where overflow would be theoretically possible (X \u2265 2^58) is blocked by the bounds check (X < 128). No race condition, no TOCTOU, no type confusion possible: X is read-only uint64 field.",
+        "counterexample_search": "No counterexample found. The set of X values that cause overflow (X \u2265 2^58) and the set of X values that pass the bounds check (X \u2264 127) have empty intersection."
+      },
+      "phase2_5": {
+        "adversarial_challenge": "Could overflow occur in any other multiplication in the call chain? (1) len(cells) * sizeof(ckzg4844.Cell): cells count bounded by len(sidecar.Column) \u2264 4096 (SSZ max), sizeof(Cell) = 2048. Product = 4096*2048 = ~8MB. No overflow. (2) Array index computation in C: FIELD_ELEMENTS_PER_CELL * cell_index as analyzed above. (3) commitments/indices/cells/proofs arrays: all bounded by sidecar.Column count \u2264 4096. No overflow vectors found."
+      },
+      "phase3": {
+        "invariant_proving": "Theorem: \u2200 cell_index \u2208 [0, 127], FIELD_ELEMENTS_PER_CELL * cell_index < 2^64. Proof: max(FIELD_ELEMENTS_PER_CELL * cell_index) = 64 * 127 = 8128. 8128 < 2^64 = 18446744073709551616. QED. The integer overflow condition is mathematically impossible given the enforced domain of cell_index.",
+        "proof_status": "PROVED"
+      },
+      "phase3_5": {
+        "final_assessment": "Integer overflow in FIELD_ELEMENTS_PER_CELL * cell_index is mathematically impossible given the validated domain [0,127] for cell_index. No vulnerability."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "With cell_index constrained to [0,127] by VerifyDataColumnSidecar, the maximum product FIELD_ELEMENTS_PER_CELL (64) * cell_index (127) = 8128. This is trivially within uint64 range (max ~1.8\u00d710^19). The two conditions required for an attack \u2014 (a) overflow (requires cell_index \u2265 2^58) and (b) passing bounds check (requires cell_index \u2264 127) \u2014 are mutually exclusive."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0113",
+      "title": "Verify Trust Boundary Integrity for tb-002: Are commitment_bytes, cell, and proof_bytes lengths validated to exact constants before processing in verify_cell_kzg_proof_batch?",
+      "severity": "Critical",
+      "property_id": "PROP-W5B14-11",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "proto/prysm/v1alpha1/fulu.ssz.go",
+            "symbol": "DataColumnSidecar.UnmarshalSSZ",
+            "line_range": {
+              "start": 2039,
+              "end": 2160
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// fulu.ssz.go: DataColumnSidecar.UnmarshalSSZ - ACTUAL enforcement layer\n// Column field (2048 bytes each):\nnum, err := ssz.DivideInt2(len(buf), 2048, 4096)  // rejects if not multiple of 2048\nfor ii := 0; ii < num; ii++ {\n    d.Column[ii] = append(d.Column[ii], buf[ii*2048:(ii+1)*2048]...)  // exactly 2048 bytes\n}\n// KzgCommitments field (48 bytes each):\nnum, err := ssz.DivideInt2(len(buf), 48, 4096)  // rejects if not multiple of 48\nfor ii := 0; ii < num; ii++ {\n    d.KzgCommitments[ii] = append(d.KzgCommitments[ii], buf[ii*48:(ii+1)*48]...)  // exactly 48 bytes\n}\n// KzgProofs field (48 bytes each): identical pattern\n\n// p2p_interface.go: VerifyDataColumnSidecar - MISSING individual element length checks\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n    if sidecar.Index >= numberOfColumns { return ErrIndexTooLarge }\n    if len(sidecar.KzgCommitments) == 0 { return ErrNoKzgCommitments }\n    if len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n        return ErrMismatchLength\n    }\n    return nil  // NO per-element length validation!\n}\n\n// p2p_interface.go: VerifyDataColumnsSidecarKZGProofs - PANIC if wrong element sizes\ncells = append(cells, kzg.Cell(sidecar.Column[i]))  // panics if len(Column[i]) != 2048\ncommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))  // panics if len != 48",
+      "state_context": "Defense is entirely at SSZ deserialization layer. VerifyDataColumnSidecar validates count parity and index bounds but not individual element byte lengths. Any non-SSZ code path creating DataColumnSidecar with wrong element sizes would bypass the guard and reach panicking type conversions in VerifyDataColumnsSidecarKZGProofs.",
+      "phase1": {
+        "abstract_interpretation": "P2P attack surface analysis: All P2P gossip messages go through decodePubsubMessage \u2192 SSZ UnmarshalSSZ. SSZ deserialization enforces exact element sizes via DivideInt2 and fixed-stride slicing (buf[ii*48:(ii+1)*48] = exactly 48 bytes by arithmetic). So for the P2P attack surface specifically: all element lengths are guaranteed correct post-deserialization. However, VerifyDataColumnSidecar does not re-validate element lengths, creating a defense-in-depth gap for non-P2P code paths (e.g., by-range, by-root requests, test code, future serialization formats).",
+        "invariants_checked": [
+          "SSZ layer: column elements exactly 2048 bytes (enforced by DivideInt2 and fixed stride)",
+          "SSZ layer: commitment elements exactly 48 bytes",
+          "SSZ layer: proof elements exactly 48 bytes",
+          "VerifyDataColumnSidecar: does NOT validate individual element lengths",
+          "Type conversions in VerifyDataColumnsSidecarKZGProofs: panic if element sizes wrong"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "P2P attack path: attacker sends commitment with len != 48. SSZ parsing: DivideInt2(total_commitments_bytes, 48, 4096) returns error if total not divisible by 48. Even if total is divisible by 48, each element is exactly buf[ii*48:(ii+1)*48] = 48 bytes. Type conversion kzg.Bytes48(commitment_slice_of_48_bytes) = OK. Non-P2P path (by-range, by-root): data comes from database/disk stored after block inclusion. Same SSZ decoding applies. Protobuf JSON path: Not used for P2P gossip in Prysm (SSZ only). The non-P2P paths that bypass SSZ would need to construct DataColumnSidecar directly with wrong element sizes - not possible through normal network interfaces.",
+        "counterexample_search": "No exploitable counterexample found for P2P attack surface. Gap exists for internal code paths but not externally reachable."
+      },
+      "phase2_5": {
+        "adversarial_challenge": "Could an attacker exploit the missing element length check in VerifyDataColumnSidecar? The function is called by: (1) validateDataColumn (P2P gossip) - data is SSZ-deserialized, elements correct size; (2) verifyByRangeDataColumnSidecars / verifyByRootDataColumnSidecars - data comes from SSZ-deserialized beacon block body; (3) testing/spec test runner - uses GenerateTestDataColumns. No attack vector found where attacker-controlled bytes reach VerifyDataColumnSidecar with incorrect element sizes AND bypass SSZ deserialization. The gap is real but not currently externally exploitable."
+      },
+      "phase3": {
+        "invariant_proving": "Property: For all externally-reachable DataColumnSidecar objects, \u2200i: len(Column[i]) = 2048 \u2227 len(KzgCommitments[i]) = 48 \u2227 len(KzgProofs[i]) = 48. Proof: All external entry points (P2P gossip, by-range, by-root requests) use SSZ deserialization which enforces exact element sizes by construction. VerifyDataColumnSidecar gap exists but is not reachable with incorrect element sizes from external inputs. Property holds for external threat model.",
+        "proof_status": "PROVED (for external threat model), UNPROVEN (for internal/future code paths)"
+      },
+      "phase3_5": {
+        "final_assessment": "Not exploitable from P2P. Defense-in-depth gap: VerifyDataColumnSidecar should validate individual element byte lengths to prevent future code paths from creating panics. Current state: SSZ layer enforces lengths, application layer does not. This is an informational finding recommending defense-in-depth improvement."
+      },
+      "final_classification": "informational",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "Element byte lengths (commitment: 48, cell: 2048, proof: 48) are enforced by SSZ deserialization (fulu.ssz.go:DataColumnSidecar.UnmarshalSSZ) via DivideInt2 and fixed-stride slicing. All external entry points use SSZ. VerifyDataColumnSidecar does NOT validate individual element lengths, creating a defense-in-depth gap. If any future code path constructs DataColumnSidecar with wrong-sized elements and calls VerifyDataColumnsSidecarKZGProofs, the Go type conversions (kzg.Cell(...), kzg.Bytes48(...)) will panic. Currently not exploitable from P2P. Recommend adding element length validation to VerifyDataColumnSidecar for defense-in-depth.",
+      "recommendation": "Add per-element length validation in VerifyDataColumnSidecar: for each commitment, check len == 48; for each cell element, check len == 2048; for each proof, check len == 48."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0114",
+      "title": "Supporting Check: Can a malicious P2P peer send commitment_bytes with incorrect length to cause crash or memory corruption?",
+      "severity": "Critical",
+      "property_id": "PROP-W5B14-11",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "proto/prysm/v1alpha1/fulu.ssz.go",
+            "symbol": "DataColumnSidecar.UnmarshalSSZ",
+            "line_range": {
+              "start": 2039,
+              "end": 2160
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// Vulnerable conversion (panics if len(slice) != 48):\ncommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n// where kzg.Bytes48 = ckzg4844.Bytes48 = [48]byte\n\n// Protection layer: fulu.ssz.go DataColumnSidecar.UnmarshalSSZ\n// KzgCommitments section:\nbuf = tail[o2:o3]  // exact slice of commitments data\nnum, err := ssz.DivideInt2(len(buf), 48, 4096)  // REJECTS if total not divisible by 48\nif err != nil { return err }  // error returned, no commitment array created\nfor ii := 0; ii < num; ii++ {\n    // Each element is exactly 48 bytes by fixed-stride slice:\n    d.KzgCommitments[ii] = append(d.KzgCommitments[ii], buf[ii*48:(ii+1)*48]...)\n    // len of each element = (ii+1)*48 - ii*48 = 48 (by arithmetic)\n}",
+      "state_context": "P2P uses SSZ encoding (snappy-compressed SSZ). DataColumnSidecar.UnmarshalSSZ enforces that KzgCommitments section is exactly divisible by 48 bytes, and each element is exactly 48 bytes by fixed-stride slicing. Wrong-length commitment bytes cause UnmarshalSSZ to return error, which causes decodePubsubMessage to return error, which causes validateDataColumn to return pubsub.ValidationReject. The panic code path is not reachable from P2P.",
+      "phase1": {
+        "abstract_interpretation": "Attack scenario: attacker sends DataColumnSidecar with KzgCommitments[0] of length 47 or 49. SSZ wire format: KzgCommitments is a list with fixed-size elements (48 bytes per the ssz-size tag). The serialized KzgCommitments section has total length = num_commitments * 48. DivideInt2(total_length, 48, 4096) checks: (1) total_length % 48 == 0 (returns error if not), (2) total_length / 48 <= 4096. If attacker sends 47 or 49 bytes for one commitment, total section length = 47 or 49, which is not divisible by 48 \u2192 DivideInt2 error \u2192 UnmarshalSSZ returns error \u2192 decodePubsubMessage returns error \u2192 validateDataColumn returns pubsub.ValidationReject. The panic at kzg.Bytes48(commitment_slice) is never reached.",
+        "invariants_checked": [
+          "SSZ UnmarshalSSZ: commitment buffer length must be divisible by 48 (DivideInt2 check)",
+          "Each commitment element: exactly 48 bytes by buf[ii*48:(ii+1)*48] construction",
+          "Error from UnmarshalSSZ propagates to validateDataColumn as REJECT before any type conversion"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Symbolic execution: commitment_section_length = N bytes (attacker-controlled). Case N % 48 != 0: DivideInt2 returns error \u2192 UnmarshalSSZ returns error \u2192 decodePubsubMessage returns error at `s.cfg.p2p.Encoding().DecodeGossip(msg.Data, m)` \u2192 validateDataColumn line 52-54: `m, err := s.decodePubsubMessage(msg); if err != nil { return pubsub.ValidationReject, err }`. DoS impossible: validation rejects without crashing. Case N % 48 == 0: each element is exactly 48 bytes \u2192 kzg.Bytes48(48-byte-slice) \u2192 valid conversion \u2192 no panic. Result: no P2P-reachable crash or memory corruption.",
+        "counterexample_search": "No counterexample found. The only scenario that reaches the panic code path (wrong-length slice reaching kzg.Bytes48) requires bypassing SSZ deserialization. This is not possible through P2P."
+      },
+      "phase2_5": {
+        "adversarial_challenge": "Could attacker bypass SSZ via snappy decompression vulnerability? Snappy decompression is standard and length-prefix validated. Could an attacker exploit Go's SSZ library (fastssz) to produce wrong-length slices? The DivideInt2 function and fixed-stride slicing are simple arithmetic that cannot produce wrong lengths. Could attacker exploit protobuf deserialization (JSON)? P2P uses SSZ encoding, not JSON. No bypass vector identified."
+      },
+      "phase3": {
+        "invariant_proving": "Theorem: For all P2P-originating DataColumnSidecar objects, \u2200i: len(KzgCommitments[i]) = 48. Proof: (1) P2P decoding calls SSZ UnmarshalSSZ; (2) UnmarshalSSZ creates KzgCommitments[ii] from buf[ii*48:(ii+1)*48]; (3) len(buf[ii*48:(ii+1)*48]) = (ii+1)*48 - ii*48 = 48 by arithmetic; (4) Any deviation in wire format detected by DivideInt2 at deserialization, causing error return before array construction. QED.",
+        "proof_status": "PROVED"
+      },
+      "phase3_5": {
+        "final_assessment": "Not exploitable from P2P. The SSZ deserialization layer completely prevents wrong-length commitment bytes from reaching the type conversion code. The panic code path requires crafting a DataColumnSidecar object with wrong-length elements internally, which is not achievable through the P2P interface."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "SSZ UnmarshalSSZ for DataColumnSidecar enforces exactly 48 bytes per KzgCommitment element via DivideInt2 divisibility check and fixed-stride slicing (buf[ii*48:(ii+1)*48]). P2P gossip messages always go through this deserialization. A malicious peer sending wrong-length commitment bytes gets their message rejected at deserialization (pubsub.ValidationReject), never reaching the type conversion that would panic. No crash or memory corruption is achievable via P2P."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0115",
+      "title": "Supporting Check: Can a malicious P2P peer send cell with incorrect length to cause crash or memory corruption?",
+      "severity": "Critical",
+      "property_id": "PROP-W5B14-11",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "proto/prysm/v1alpha1/fulu.ssz.go",
+            "symbol": "DataColumnSidecar.UnmarshalSSZ",
+            "line_range": {
+              "start": 2039,
+              "end": 2160
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// Vulnerable conversion (panics if len(slice) != 2048):\ncells = append(cells, kzg.Cell(sidecar.Column[i]))\n// where kzg.Cell = [BytesPerCell]byte = [2048]byte\n\n// Protection layer: fulu.ssz.go DataColumnSidecar.UnmarshalSSZ\n// Column section:\nbuf = tail[o1:o2]  // exact slice of column data\nnum, err := ssz.DivideInt2(len(buf), 2048, 4096)  // REJECTS if total not divisible by 2048\nif err != nil { return err }  // error returned, no column array created\nfor ii := 0; ii < num; ii++ {\n    // Each element is exactly 2048 bytes by fixed-stride slice:\n    d.Column[ii] = append(d.Column[ii], buf[ii*2048:(ii+1)*2048]...)\n    // len of each element = (ii+1)*2048 - ii*2048 = 2048 (by arithmetic)\n}",
+      "state_context": "Identical protection mechanism as CHK-0114 but for 2048-byte cell elements. SSZ UnmarshalSSZ enforces exactly 2048 bytes per cell via DivideInt2(len(buf), 2048, 4096) and fixed-stride slicing. kzg.Cell = [2048]byte. A malicious P2P message with wrong cell length is rejected at SSZ deserialization. The panic path requires an invalid cell length to bypass SSZ.",
+      "phase1": {
+        "abstract_interpretation": "Attack scenario: attacker sends DataColumnSidecar with Column[0] of length != 2048 (e.g., 2047 or 4096 bytes). SSZ wire format: Column is a list with fixed-size elements (2048 bytes per ssz-size tag). Total column section length = num_cells * 2048. DivideInt2(total_length, 2048, 4096) checks: total_length % 2048 == 0. If not: error \u2192 UnmarshalSSZ returns error \u2192 validateDataColumn rejects. If attacker sends total that is divisible by 2048 (e.g., sends 4096 bytes for 2 cells): each element = exactly 2048 bytes. No wrong-length cell possible through P2P.",
+        "invariants_checked": [
+          "SSZ UnmarshalSSZ: column buffer length must be divisible by 2048",
+          "Each column element: exactly 2048 bytes by buf[ii*2048:(ii+1)*2048]",
+          "kzg.Cell([2048]byte) conversion: only reached with exactly 2048-byte slices",
+          "Error propagation: UnmarshalSSZ error \u2192 decodePubsubMessage error \u2192 ValidationReject"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Symbolic execution: column_section_length = N bytes (attacker-controlled). Case N % 2048 != 0: DivideInt2 returns error. UnmarshalSSZ returns error. decodePubsubMessage returns error. validateDataColumn: `m, err := s.decodePubsubMessage(msg); if err != nil { log.WithError(err).Error('Failed to decode message'); return pubsub.ValidationReject, err }`. Message is rejected, no crash. Case N % 2048 == 0: Column[ii] = buf[ii*2048:(ii+1)*2048] = exactly 2048 bytes. kzg.Cell(Column[ii]) = kzg.Cell([2048 bytes]) \u2192 valid [2048]byte conversion \u2192 no panic. No attack path to crash.",
+        "counterexample_search": "No counterexample found. Identical reasoning to CHK-0114 with cell size 2048 instead of commitment size 48."
+      },
+      "phase2_5": {
+        "adversarial_challenge": "Could attacker send a cell that is a valid multiple of 2048 but represents a truncated/padded cell? The column section in SSZ is: offsets point to exact region, DivideInt2 computes count = len/2048, each element is exactly 2048 bytes. An attacker cannot make Column[i] have a different length than 2048 while keeping total section length divisible by 2048. The protection is mathematically tight. Could protobuf JSON path be used? Prysm's P2P uses SSZ encoding exclusively for gossip messages. No alternative deserialization path exists for gossip."
+      },
+      "phase3": {
+        "invariant_proving": "Theorem: For all P2P-originating DataColumnSidecar objects, \u2200i: len(Column[i]) = 2048. Proof: (1) P2P decoding calls SSZ UnmarshalSSZ; (2) Column section parsed with DivideInt2(len, 2048, 4096), returning error if len%2048!=0; (3) Each Column[ii] is constructed from buf[ii*2048:(ii+1)*2048]; (4) len(buf[ii*2048:(ii+1)*2048]) = 2048 by arithmetic; (5) Any deviation in wire format rejected at step (2). QED.",
+        "proof_status": "PROVED"
+      },
+      "phase3_5": {
+        "final_assessment": "Not exploitable from P2P. SSZ deserialization completely prevents wrong-length cell elements from reaching the type conversion code. The panic at kzg.Cell(wrong_length_slice) is unreachable through any P2P attack path."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "SSZ UnmarshalSSZ for DataColumnSidecar enforces exactly 2048 bytes per Column element via DivideInt2(len(buf), 2048, 4096) divisibility check and fixed-stride slicing. P2P gossip messages always go through SSZ deserialization. A malicious peer sending wrong-length cell data gets rejected at deserialization (pubsub.ValidationReject) before any type conversion. kzg.Cell([]byte) panics only if len != 2048, which cannot happen for SSZ-deserialized data. No crash or memory corruption achievable via P2P. Defense-in-depth gap noted: VerifyDataColumnSidecar does not validate individual element lengths (see CHK-0113).",
+      "related_finding": "CHK-0113 (informational): defense-in-depth gap where VerifyDataColumnSidecar does not validate individual element byte lengths"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 3,
+    "item_count": 5,
+    "timestamp": 1771374827,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0111",
+      "W7B8:W7B8:CHK-0112",
+      "W7B8:W7B8:CHK-0113",
+      "W7B8:W7B8:CHK-0114",
+      "W7B8:W7B8:CHK-0115"
+    ]
+  }
+}

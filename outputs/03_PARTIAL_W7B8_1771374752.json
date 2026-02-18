@@ -1,0 +1,439 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0136",
+      "property_id": "PROP-W5B14-15",
+      "title": "Supporting Check: Can an attacker inject duplicate cell_indices via P2P gossip?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/data_columns_reconstruct.go",
+            "symbol": "reconstructSaveBroadcastDataColumnSidecars",
+            "line_range": {
+              "start": 1,
+              "end": 80
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 170
+            },
+            "role": "validation"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/core/peerdas/reconstruction.go\n// Deduplication via map:\nsidecarByIndex := make(map[uint64]blocks.VerifiedRODataColumn, len(verifiedRoSidecars))\nfor _, inVerifiedRoSidecar := range verifiedRoSidecars {\n    sidecarByIndex[inVerifiedRoSidecar.Index] = inVerifiedRoSidecar\n}\n// cellsIndices built from map keys \u2192 guaranteed unique\nfor columnIndex, sidecar := range sidecarByIndex {\n    cells = append(cells, kzg.Cell(cell))\n    cellsIndices = append(cellsIndices, columnIndex)\n}\n\n// beacon-chain/sync/validate_data_column.go\n// Gossip-layer deduplication:\nif s.hasSeenDataColumnIndex(roDataColumn.Slot(), roDataColumn.ProposerIndex(), roDataColumn.DataColumnSidecar.Index) {\n    return pubsub.ValidationIgnore, nil\n}",
+      "state_context": "reconstructionLock (sync.Mutex) prevents concurrent reconstructions; seenDataColumnCache (LRU) deduplicates gossip messages by (slot, proposerIndex, columnIndex)",
+      "phase1_abstract_interpretation": {
+        "summary": "Three independent deduplication mechanisms prevent duplicate cell_indices from reaching the polynomial recovery function. (1) P2P gossip layer uses seenDataColumnCache keyed on (slot, proposerIndex, columnIndex) \u2014 duplicate messages return ValidationIgnore. (2) ReconstructDataColumnSidecars uses a Go map sidecarByIndex[index] that naturally deduplicates by last-write-wins semantics, guaranteeing unique map keys when building cellsIndices. (3) The ckzg4844 C library has a null-sentinel duplicate detection (eip7594.c lines 236-244) as a third independent layer.",
+        "state_anomalies_found": [],
+        "cache_analysis": "seenDataColumnCache is LRU-keyed by (slot, proposerIndex, columnIndex). First valid message for a tuple is accepted; all subsequent messages return ValidationIgnore, never reaching storage or reconstruction.",
+        "concurrency_analysis": "reconstructionLock prevents concurrent reconstructions. Within a single reconstruction, errgroup parallelizes across blobIndex but each goroutine uses its own cellsIndices slice derived from the shared, already-deduplicated sidecarByIndex map."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No counterexample found. Attacker broadcasts two gossip messages with same (slot, proposer, index=5). First message passes full validation and gets stored. Second message hits seenDataColumnCache and returns ValidationIgnore \u2014 never reaches storage. Reconstruction reads from storage keyed by column index, making it structurally impossible to have two entries for the same index.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Send two gossip messages with same (slot, proposer, index=5): second message hits seenDataColumnCache \u2192 ValidationIgnore, dropped before storage.",
+          "Send gossip with valid KZG proof for index=5 twice: KZG proof is the same for the same cell, cannot be forged for different cell data at same index (binding property of KZG commitments)."
+        ],
+        "timing_dependencies": "No race window. seenDataColumnCache check is synchronous in pubsub handler goroutine."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Attack reaches validateDataColumn but is neutralized at seenDataColumnCache before storage. Even if that cache were bypassed, the sidecarByIndex map in ReconstructDataColumnSidecars provides structural deduplication.",
+        "entry_points": [
+          "P2P gossip /eth2/.../data_column_sidecar_<subnet>"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker controls gossip message content but cannot get two entries for the same column index into the reconstruction input."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'cellsIndices passed to RecoverCellsAndKZGProofs are unique' is proven by Go map key uniqueness. seenDataColumnCache and storage key uniqueness provide defense-in-depth. C library null-sentinel (eip7594.c:236-244) is a final safety net.",
+        "proof_successful": true,
+        "guard_identified": "seenDataColumnCache [IGNORE] + sidecarByIndex map key uniqueness + C library null-sentinel check",
+        "guard_sufficiency": "Fully sufficient. Each layer independently guarantees no duplicates.",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No exploitable path. Three independent deduplication mechanisms exist at network, Go, and C layers. The attack is blocked at the earliest point (gossip deduplication cache) and has structural prevention at subsequent layers.",
+        "recommendation": "No action required. Current design is correct.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "Duplicate cell_indices from P2P gossip are prevented by three independent mechanisms: (1) seenDataColumnCache in validateDataColumn which returns ValidationIgnore for any repeated (slot, proposer, column_index) tuple after the first valid message; (2) sidecarByIndex map in ReconstructDataColumnSidecars which structurally deduplicates by Go map key uniqueness; (3) C library null-sentinel duplicate detection in recover_cells_and_kzg_proofs. The VerifiedRODataColumn type system ensures only validated sidecars reach reconstruction. No path allows duplicate indices to reach the polynomial recovery function."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0137",
+      "property_id": "PROP-W5B14-16",
+      "title": "Verify Trust Boundary Integrity: Are all cell_indices validated to be in [0, CELLS_PER_EXT_BLOB) before polynomial recovery begins?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 45
+            },
+            "role": "primary-validation"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 170
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/core/peerdas/p2p_interface.go:VerifyDataColumnSidecar\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n    numberOfColumns := params.BeaconConfig().NumberOfColumns  // = 128\n    if sidecar.Index >= numberOfColumns {\n        return ErrIndexTooLarge  // rejects index >= 128\n    }\n    // ...\n}\n\n// beacon-chain/blockchain/kzg/kzg.go:RecoverCellsAndKZGProofs\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n    ckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n    for i := range partialCells { ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i]) }\n    // C library validates: if (cell_indices[i] >= CELLS_PER_EXT_BLOB) return C_KZG_BADARGS;\n    ckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n    if err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n    return makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}",
+      "state_context": "params.BeaconConfig().NumberOfColumns = 128 (runtime config); CELLS_PER_EXT_BLOB = 128 (C compile-time constant = FIELD_ELEMENTS_PER_EXT_BLOB / FIELD_ELEMENTS_PER_CELL = 8192/64). Both values are numerically equal in current codebase.",
+      "phase1_abstract_interpretation": {
+        "summary": "The range check sidecar.Index < numberOfColumns (= 128 from params.BeaconConfig()) is numerically equivalent to cell_index < CELLS_PER_EXT_BLOB (= 128 from C library compile-time constant). Both are 128 in the current codebase. Validation occurs at VerifyDataColumnSidecar for all ingress paths (gossip, ByRange, ByRoot) via ValidFields() requirement. The C library also validates independently via explicit range check before CELL_INDICES_RBL array access.",
+        "state_anomalies_found": [
+          "Theoretical config divergence risk: if NumberOfColumns in BeaconConfig were changed without recompiling the C library, Go validation would accept indices the C library rejects \u2014 resulting in errors (not crashes) due to C_KZG_BADARGS handling."
+        ],
+        "cache_analysis": "No cache relevant. Validation is per-sidecar at ingestion.",
+        "concurrency_analysis": "No concurrency issues. Validation is stateless."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No counterexample found for current codebase. Both Go (NumberOfColumns=128) and C (CELLS_PER_EXT_BLOB=128) boundaries are identical. A sidecar with Index=128 is rejected at ValidFields() with ErrIndexTooLarge before storage. A sidecar with Index=127 passes all validation and is processed correctly. Even in misconfiguration (NumberOfColumns > 128), C library returns C_KZG_BADARGS (error, not crash), which Go wraps and returns up the call stack \u2014 no crash, no UB.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Inject sidecar with Index=128: rejected at VerifyDataColumnSidecar (ErrIndexTooLarge) \u2192 ValidationReject \u2192 no storage.",
+          "Misconfiguration scenario (not an attack): NumberOfColumns=256 while CELLS_PER_EXT_BLOB=128. Indices 128-255 pass Go check but C library returns BADARGS \u2014 error handled gracefully."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "ValidFields() is the first check after message decoding in validateDataColumn and in ByRange/ByRoot handlers. All paths that produce VerifiedRODataColumn enforce this check. Out-of-range indices cannot reach ReconstructDataColumnSidecars.",
+        "entry_points": [
+          "P2P gossip",
+          "DataColumnsByRange RPC",
+          "DataColumnsByRoot RPC"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "All ingress paths enforce RequireValidFields which calls VerifyDataColumnSidecar (index < 128)."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'all cell_indices < CELLS_PER_EXT_BLOB at ckzg4844 call site' is established by Go-level VerifyDataColumnSidecar (equivalent range check) and reinforced by C-level validation. Numerical equivalence of NumberOfColumns (128) and CELLS_PER_EXT_BLOB (128) is a correctness assumption that currently holds.",
+        "proof_successful": true,
+        "guard_identified": "VerifyDataColumnSidecar (index < 128) at all ingress points + C library explicit range check (eip7594.c:211-217)",
+        "guard_sufficiency": "Sufficient for current codebase. Future risk if constants diverge.",
+        "edge_cases": [
+          "NumberOfColumns is a runtime config value; CELLS_PER_EXT_BLOB is a compile-time C constant. A future protocol change that updates one without the other could create a mismatch \u2014 but the C library provides error-return defense-in-depth even in that case."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Range validation is correct and sufficient. Both bounds equal 128. The C library provides defense-in-depth validation. No exploitable path exists in the current codebase.",
+        "recommendation": "Add a compile-time or init-time assertion: assert(params.BeaconConfig().NumberOfColumns == ckzg4844.CellsPerExtBlob) to make the correctness assumption explicit and prevent future misconfiguration.",
+        "severity_estimate": "Low (informational recommendation)"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "cell_indices are validated at [0, numberOfColumns=128) by VerifyDataColumnSidecar for all P2P ingress paths. This is numerically equivalent to the C library's CELLS_PER_EXT_BLOB=128. The C library provides defense-in-depth with an explicit range check (eip7594.c:211-217) before any array access. The VerifiedRODataColumn type acts as an unforgeable proof token that validation has occurred. No out-of-range index can reach polynomial recovery from external attacker input."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0138",
+      "property_id": "PROP-W5B14-16",
+      "title": "Supporting Check: Does coset_for_cell crash or produce undefined behavior with out-of-range cell_index?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 45
+            },
+            "role": "validation"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/blockchain/kzg/kzg.go:RecoverCellsAndKZGProofs\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n    ckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n    for i := range partialCells { ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i]) }\n    // C library: recover_cells_and_kzg_proofs validates indices BEFORE get_inv_coset_shift_for_cell:\n    //   for (uint64_t i = 0; i < num_cells; i++) {\n    //       if (cell_indices[i] >= CELLS_PER_EXT_BLOB) { ret = C_KZG_BADARGS; goto out; }\n    //   }\n    //   // Only then: new_fr_array, get_inv_coset_shift_for_cell (accesses CELL_INDICES_RBL[cell_index])\n    ckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n    if err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n    return makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}",
+      "state_context": "get_inv_coset_shift_for_cell and get_coset_shift_pow_for_cell access CELL_INDICES_RBL[cell_index] (static array of size CELLS_PER_EXT_BLOB=128). These are static internal C functions only reachable after the explicit range check at lines 211-217 of eip7594.c. The C library returns C_KZG_BADARGS for invalid inputs \u2014 Go wrapper converts to error return.",
+      "phase1_abstract_interpretation": {
+        "summary": "CELL_INDICES_RBL[cell_index] (analogous to coset_for_cell) would cause out-of-bounds memory access (C undefined behavior, potential segfault or memory corruption) if cell_index >= CELLS_PER_EXT_BLOB = 128. However, recover_cells_and_kzg_proofs validates all cell indices (eip7594.c lines 211-217) before any call to the functions that access CELL_INDICES_RBL. The unsafe functions are internal static helpers only callable after validation passes. The Go wrapper returns an error on C_KZG_BADARGS, preventing propagation as a panic.",
+        "state_anomalies_found": [
+          "Latent UB: get_inv_coset_shift_for_cell and related functions access CELL_INDICES_RBL[cell_index] without bounds checking, relying entirely on the caller contract established by recover_cells_and_kzg_proofs lines 211-217."
+        ],
+        "cache_analysis": "No cache involved.",
+        "concurrency_analysis": "No concurrency issues in this code path."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The range check at eip7594.c lines 211-217 is a complete pre-condition check over all input indices before any unsafe array access. No path through the public C API allows calling get_inv_coset_shift_for_cell with an out-of-range index. The Go wrapper returns an error on C_KZG_BADARGS. There is no way for an external attacker to reach the unsafe array access.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Direct call to C library with cell_index=200 would access CELL_INDICES_RBL[200] out of bounds \u2014 but this is not achievable through the Go API since Go validates before calling C.",
+          "P2P injection of sidecar with Index=200: rejected at VerifyDataColumnSidecar before reaching RecoverCellsAndKZGProofs."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The dangerous code path (CELL_INDICES_RBL unchecked access) is only reachable within the C library after passing the explicit range check at lines 211-217. From an external attacker via P2P, the index is validated at the Go layer (VerifyDataColumnSidecar) before ever reaching the C library. The static internal functions are not callable from Go.",
+        "entry_points": [
+          "Internal C library only \u2014 not externally reachable"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "No external path reaches the unsafe array access. Both the C library's own range check and Go-level validation prevent it."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The contract 'cell_index < CELLS_PER_EXT_BLOB when CELL_INDICES_RBL is accessed' is maintained by the caller contract established by recover_cells_and_kzg_proofs range check. The static internal C functions lack their own bounds check but rely on this caller contract which is enforced by the public API. The latent UB is a code quality concern, not an exploitable vulnerability.",
+        "proof_successful": true,
+        "guard_identified": "recover_cells_and_kzg_proofs (eip7594.c:211-217) range check before all code paths that access CELL_INDICES_RBL",
+        "guard_sufficiency": "Sufficient for all external call paths. Internal static helpers lack their own bounds check but the caller contract is enforced.",
+        "edge_cases": [
+          "If the C library API were extended to allow direct calling of internal helper functions, or if the range check were removed, the latent UB would become exploitable. Currently a static function boundary prevents external access."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Latent C undefined behavior is not exploitable through the Go or P2P interface. The public C API validates all inputs before reaching any unsafe array access. An attacker cannot trigger the out-of-bounds access path.",
+        "recommendation": "Informational: Add a bounds assertion (assert(cell_index < CELLS_PER_EXT_BLOB)) in get_inv_coset_shift_for_cell and related functions as defense-in-depth, making the caller contract explicit.",
+        "severity_estimate": "Low (informational \u2014 code quality concern in C library)"
+      },
+      "final_classification": "informational",
+      "bug_bounty_eligible": false,
+      "reasoning": "coset_for_cell (implemented as CELL_INDICES_RBL array access in get_inv_coset_shift_for_cell) would cause C undefined behavior (out-of-bounds access) with invalid cell_index. However, recover_cells_and_kzg_proofs (the public API) validates all indices before any code path that accesses CELL_INDICES_RBL. From an external attacker perspective via P2P, VerifyDataColumnSidecar at the Go layer blocks out-of-range indices before they reach the C library. The latent UB is a code quality finding (informational), not an exploitable bug bounty finding."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0139",
+      "property_id": "PROP-W5B14-16",
+      "title": "Supporting Check: Can an attacker inject out-of-range cell_indices via P2P gossip to crash a node?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 170
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 45
+            },
+            "role": "validation"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "RODataColumnsVerifier/ValidFields",
+            "line_range": {
+              "start": 117,
+              "end": 133
+            },
+            "role": "validation"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/sync/validate_data_column.go:validateDataColumn\n// [REJECT] The sidecar is valid as verified by verify_data_column_sidecar(sidecar).\nif err := verifier.ValidFields(); err != nil {\n    return pubsub.ValidationReject, err  // peer penalized\n}\n\n// beacon-chain/verification/data_column.go:ValidFields\nfunc (dv *RODataColumnsVerifier) ValidFields() (err error) {\n    for _, dataColumn := range dv.dataColumns {\n        if err := peerdas.VerifyDataColumnSidecar(dataColumn); err != nil {\n            return columnErrBuilder(errors.Wrap(err, \"verify data column sidecar\"))\n        }\n    }\n    return nil\n}\n\n// beacon-chain/core/peerdas/p2p_interface.go:VerifyDataColumnSidecar\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n    numberOfColumns := params.BeaconConfig().NumberOfColumns  // = 128\n    if sidecar.Index >= numberOfColumns {\n        return ErrIndexTooLarge  // Index >= 128 \u2192 REJECT\n    }\n    // ...\n}",
+      "state_context": "validateDataColumn is the gossip subscription handler. ValidationReject causes the message to be dropped and the peer's gossip score to be penalized. The GossipDataColumnSidecarRequirements list includes RequireValidFields as the first content check, meaning out-of-range indices are blocked at the earliest validation point.",
+      "phase1_abstract_interpretation": {
+        "summary": "The P2P gossip path has ValidFields() as the first substantive validation check after message decoding. This calls VerifyDataColumnSidecar() which rejects sidecar.Index >= 128 with ErrIndexTooLarge \u2192 ValidationReject. The sidecar never reaches storage, never triggers reconstruction, never reaches RecoverCellsAndKZGProofs. Additionally, CorrectSubnet would also fail for any out-of-range index since the sidecar would not match the expected subnet for any valid subscription. The attacker's peer is penalized by the GossipScorer.",
+        "state_anomalies_found": [],
+        "cache_analysis": "seenDataColumnCache is only populated for accepted sidecars. Rejected sidecars leave no state traces.",
+        "concurrency_analysis": "No concurrency issues. Validation is synchronous in the pubsub handler goroutine."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attacker crafts sidecar with Index=200 (or any value >= 128). ValidFields() checks VerifyDataColumnSidecar: sidecar.Index(200) >= numberOfColumns(128) \u2192 ErrIndexTooLarge \u2192 ValidationReject \u2192 message dropped, peer penalized. No crash occurs. Even with Index=2^64-1 (max uint64), same result: immediate rejection at ValidFields(). No code path allows an out-of-range index to reach any crash-inducing function.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Inject sidecar with Index=128: rejected at ValidFields() \u2192 ValidationReject. No crash.",
+          "Inject sidecar with Index=0xFFFFFFFFFFFFFFFF: rejected at ValidFields() \u2192 ValidationReject. No crash.",
+          "Inject multiple sidecars with out-of-range indices (rate-limited): each rejected individually. No amplification or crash possible."
+        ],
+        "timing_dependencies": "None. Validation is synchronous. No race window."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "ValidFields() is the first check after message decoding. Out-of-range indices are rejected at this gate \u2014 the earliest possible point before any state modification. The attacker cannot bypass this check because it is a synchronous precondition before any message is accepted.",
+        "entry_points": [
+          "P2P gossip /eth2/.../data_column_sidecar_<subnet>"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker controls message content. ValidFields() unconditionally rejects Index >= 128 before any state modification or function call that could crash."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'VerifiedRODataColumn.Index < 128 for all objects in the system' is established by ValidFields() at all ingress points (gossip, ByRange RPC, ByRoot RPC) and structurally enforced by the VerifiedRODataColumn type. ReconstructDataColumnSidecars only accepts []VerifiedRODataColumn inputs. The VerifiedRODataColumn type is an unforgeable proof token \u2014 it can only be created via verifier.VerifiedRODataColumns() which requires all requirements to be satisfied.",
+        "proof_successful": true,
+        "guard_identified": "VerifyDataColumnSidecar (index < 128) enforced as RequireValidFields at all ingress points; VerifiedRODataColumn type as proof token",
+        "guard_sufficiency": "Fully sufficient. All three ingress paths (gossip, ByRange, ByRoot) enforce RequireValidFields. The type system ensures no VerifiedRODataColumn with out-of-range index can exist.",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Complete protection at the network boundary. Out-of-range indices cannot reach any sensitive code path. The attack is definitively blocked at the first validation gate with peer penalization. No crash scenario is achievable.",
+        "recommendation": "No action required. Current design correctly rejects out-of-range indices at the earliest point.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "An attacker cannot inject out-of-range cell_indices via P2P gossip to crash a node. ValidFields() \u2192 VerifyDataColumnSidecar() is the first check in validateDataColumn (after message decoding) and unconditionally rejects sidecar.Index >= numberOfColumns(128) with ValidationReject. The sidecar never reaches storage or reconstruction. The VerifiedRODataColumn type system provides a structural guarantee that all validated sidecars have valid indices. No crash path is reachable from external P2P input."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0140",
+      "property_id": "PROP-W5B14-16",
+      "title": "Supporting Check: Is cell_index range validation performed before resource allocation in recovery?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/blockchain/kzg/kzg.go:RecoverCellsAndKZGProofs\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n    // Go allocation: bounded, max 128 * BytesPerCell = 256KB\n    ckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n    for i := range partialCells { ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i]) }\n    // C library order:\n    //   1. if (num_cells > CELLS_PER_EXT_BLOB) return C_KZG_BADARGS;  // line 200\n    //   2. if (num_cells < CELLS_PER_BLOB) return C_KZG_BADARGS;      // line 206\n    //   3. for each index: if >= CELLS_PER_EXT_BLOB return BADARGS;    // lines 211-217\n    //   4. new_fr_array(&recovered_cells_fr, FIELD_ELEMENTS_PER_EXT_BLOB)  // line 220 - expensive\n    //   5. new_g1_array(&recovered_proofs_g1, CELLS_PER_EXT_BLOB)         // line 223 - expensive\n    ckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n    if err != nil { return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\") }\n    return makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}\n\n// beacon-chain/core/peerdas/reconstruction.go: parallel recovery\n// blobCount goroutines, each max 128 cells * 2048 bytes = 256KB per goroutine\nfor blobIndex := range uint64(blobCount) {\n    wg.Go(func() error {\n        // ...\n        cellsAndProofsForBlob, err := kzg.RecoverCellsAndKZGProofs(cellsIndices, cells)\n        // ...\n    })\n}",
+      "state_context": "At Go layer: ckzgPartialCells allocation is bounded by len(partialCells) = len(sidecarByIndex) <= NumberOfColumns = 128. Max per goroutine: 128 * BytesPerCell(2048) = 256KB. At C layer: expensive allocations (new_fr_array for 8192 elements, new_g1_array for 128 elements) occur AFTER all validation checks. blobCount max = MAX_BLOBS_PER_BLOCK (6 per EIP-7594 spec). Max concurrent memory: 6 * 256KB = 1.5MB.",
+      "phase1_abstract_interpretation": {
+        "summary": "At the Go layer, ckzgPartialCells allocation (max 256KB) precedes the C call but is trivially bounded by the number of VerifiedRODataColumn inputs (max 128 per column count). At the C library layer, the ordering is: (1) num_cells range checks (lines 200, 206), (2) cell_index range validation for each cell (lines 211-217), then (3) expensive new_fr_array and new_g1_array allocations (lines 220-223). Validation strictly precedes expensive allocation at the C level. The Go allocation is bounded and not a DoS concern.",
+        "state_anomalies_found": [],
+        "cache_analysis": "No cache involved.",
+        "concurrency_analysis": "blobCount goroutines run in parallel; each makes its own ckzgPartialCells allocation. Max concurrent memory is blobCount * 256KB = 6 * 256KB = 1.5MB \u2014 negligible. The C library allocations (new_fr_array, new_g1_array) are within each goroutine, allocated only after validation, and bounded."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Even if an attacker could reach the Go allocation with maximum inputs (128 cells), the allocation is 256KB \u2014 not a viable DoS vector. At the C layer, an input with invalid cell_index triggers early return via 'goto out' at line 217 before the new_fr_array call at line 220. The goto out path does not trigger the expensive allocations. Resource usage is strictly bounded by validated inputs.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Maximum legitimate input (128 valid cells): 128 * 2048B = 256KB Go allocation + C allocations of 8192*32B + 128*96B = 274KB. Total: ~530KB per blob goroutine. With 6 blobs: ~3.2MB. Not a DoS concern.",
+          "Invalid cell index in C call: early return at goto out before new_fr_array, no expensive allocation."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Reconstruction is triggered internally by reconstructSaveBroadcastDataColumnSidecars, not directly by attacker messages. The inputs to RecoverCellsAndKZGProofs are derived from verified sidecars (bounded count, valid indices). No external attacker path allows controlling the number or content of cells in a way that could cause resource exhaustion.",
+        "entry_points": [
+          "Internal: triggered by reconstructSaveBroadcastDataColumnSidecars after enough verified sidecars accumulate"
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "attack_surface": "Reconstruction is not directly triggered by single attacker messages. The inputs are derived from stored VerifiedRODataColumn objects."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'cell index validation precedes expensive C-level resource allocation' holds by explicit ordering in eip7594.c: three validation checks (lines 200, 206, 211-217) precede new_fr_array and new_g1_array (lines 220-223). The Go-level allocation is trivially bounded by NumberOfColumns=128. The invariant 'cell_index range check precedes CELL_INDICES_RBL access' is also maintained by this same ordering.",
+        "proof_successful": true,
+        "guard_identified": "eip7594.c validation sequence: num_cells checks (lines 200, 206) + cell index range validation (lines 211-217) BEFORE new_fr_array/new_g1_array (lines 220-223)",
+        "guard_sufficiency": "Fully sufficient. Resource allocation is bounded and validation precedes all expensive operations at both Go and C layers.",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Allocation ordering is correct. Validation (both count and index range) precedes expensive C-level allocations. Go-level allocation is bounded at max 256KB per goroutine. No DoS or resource exhaustion vulnerability exists.",
+        "recommendation": "No action required. The current ordering is correct.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "Cell index range validation (and cell count validation) occurs in eip7594.c BEFORE the expensive new_fr_array (8192 field elements) and new_g1_array (128 G1 points) allocations. The Go-level ckzgPartialCells allocation is bounded at max 128 * 2048 bytes = 256KB, controlled by the number of VerifiedRODataColumn inputs which are bounded by NumberOfColumns. Reconstruction is triggered internally after sufficient verified sidecars accumulate \u2014 it is not directly triggered by a single attacker message. No resource exhaustion or ordering vulnerability exists."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 7,
+    "batch_index": 8,
+    "item_count": 5,
+    "timestamp": 1771374752,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0136",
+      "W7B8:W7B8:CHK-0137",
+      "W7B8:W7B8:CHK-0138",
+      "W7B8:W7B8:CHK-0139",
+      "W7B8:W7B8:CHK-0140"
+    ]
+  }
+}

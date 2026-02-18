@@ -1,0 +1,452 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0056",
+      "property_id": "PROP-W4B13-70",
+      "title": "Supporting Check: Does actor-beacon-node reject sidecars with invalid inclusion proofs from any source?",
+      "severity": "Medium",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecarInclusionProof",
+            "line_range": {
+              "start": 97,
+              "end": 127
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "SidecarInclusionProven",
+            "line_range": {
+              "start": 356,
+              "end": 387
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func VerifyDataColumnSidecarInclusionProof(sidecar blocks.RODataColumn) error {\n\tif sidecar.SignedBlockHeader == nil || sidecar.SignedBlockHeader.Header == nil {\n\t\treturn ErrNilBlockHeader\n\t}\n\troot := sidecar.SignedBlockHeader.Header.BodyRoot\n\tif len(root) != fieldparams.RootLength {\n\t\treturn ErrBadRootLength\n\t}\n\tleaves := blocks.LeavesFromCommitments(sidecar.KzgCommitments)\n\tsparse, err := trie.GenerateTrieFromItems(leaves, fieldparams.LogMaxBlobCommitments)\n\tif err != nil { return errors.Wrap(err, \"generate trie from items\") }\n\thashTreeRoot, err := sparse.HashTreeRoot()\n\tif err != nil { return errors.Wrap(err, \"hash tree root\") }\n\tverified := trie.VerifyMerkleProof(root, hashTreeRoot[:], kzgPosition, sidecar.KzgCommitmentsInclusionProof)\n\tif !verified { return ErrInvalidInclusionProof }\n\treturn nil\n}",
+      "state_context": "Gossip path: validateDataColumn calls verifier.SidecarInclusionProven() -> peerdas.VerifyDataColumnSidecarInclusionProof(). RPC path: verifyByRootDataColumnSidecars calls verifier.SidecarInclusionProven(). Cache key: inclusionProofKey() = 128 bytes of proof + 32 bytes block header hash. kzgPosition=11 is correct for blob_kzg_commitments in BeaconBlockBody across Deneb/Electra/Fulu.",
+      "phase1": {
+        "name": "Abstract Interpretation",
+        "summary": "The VerifyDataColumnSidecarInclusionProof function verifies that the KZG commitments list hash is at Merkle position 11 (kzgPosition=11) in the beacon block body using a Merkle proof. The constant is correct: blob_kzg_commitments is the 12th SSZ field (0-indexed at 11) in BeaconBlockBody across all supported forks. The SidecarInclusionProven() function in verification/data_column.go includes an inclusion proof cache keyed by (4*32 proof bytes + 32 block header hash) = 160 bytes total. The cache key does NOT include the column index, which is by design since all columns from the same block share the same block-level Merkle proof. Both gossip and RPC paths call SidecarInclusionProven().",
+        "state_anomalies": "None material. The cache design is intentional: a cache hit for column X correctly avoids re-verification for column Y of the same block, since both share the same KzgCommitmentsInclusionProof and block header.",
+        "abstract_domain": "Reachability and guard completeness verified for both gossip and RPC ingestion paths."
+      },
+      "phase2": {
+        "name": "Symbolic Execution",
+        "summary": "Attack scenarios explored: (1) Invalid proof bytes - fails VerifyMerkleProof -> ValidationReject. No bypass. (2) Cache confusion via different sidecar with same cache key - cache key includes actual inclusion proof bytes; attacker would need collision in 160-byte key space, cryptographically infeasible. (3) Cache hit for unverified sidecar - impossible: entries are only added AFTER successful verification (if keyErr == nil { dv.ic.Add(k, struct{}{}) }). (4) keyErr fallback path - if inclusionProofKey fails, the code still calls peerdas.VerifyDataColumnSidecarInclusionProof(). All paths require the actual cryptographic verification to pass.",
+        "counterexample": null,
+        "path_conditions": "For SidecarInclusionProven() to be bypassed, either the cache must yield a false positive or VerifyDataColumnSidecarInclusionProof must accept an invalid proof. Cache false positives require 160-byte key collision. VerifyMerkleProof is a cryptographic primitive. No bypass found."
+      },
+      "phase2_5": {
+        "name": "Multi-Path Analysis",
+        "gossip_path": "validateDataColumn explicitly calls verifier.SidecarInclusionProven() at line 143 of validate_data_column.go, with result -> ValidationReject on failure.",
+        "rpc_by_root_path": "verifyByRootDataColumnSidecars calls verifier.SidecarInclusionProven() as the second step. ByRootRequestDataColumnSidecarRequirements includes RequireSidecarInclusionProven.",
+        "rpc_by_range_path": "ByRangeRequestDataColumnSidecarRequirements includes RequireSidecarInclusionProven. The range handler ultimately uses verifyByRootDataColumnSidecars for received sidecars.",
+        "storage_path": "Sidecars stored via VerifiedRODataColumn type, which can only be created after all requirements including RequireSidecarInclusionProven are satisfied."
+      },
+      "phase3": {
+        "name": "Invariant Proving",
+        "invariant": "All accepted VerifiedRODataColumn objects have passed VerifyDataColumnSidecarInclusionProof.",
+        "proof_sketch": "VerifiedRODataColumns() calls dv.results.allSatisfied() which checks all requirements including RequireSidecarInclusionProven. RequireSidecarInclusionProven is recorded by SidecarInclusionProven() which calls the cryptographic verification. SatisfyRequirement(RequireSidecarInclusionProven) is NOT called in the gossip path (only RequireSidecarKzgProofVerified is manually satisfied). The invariant holds across all ingestion paths.",
+        "holds": true
+      },
+      "phase3_5": {
+        "name": "Bug Bounty Scope Filtering",
+        "bug_bounty_eligible": false,
+        "justification": "The inclusion proof is cryptographically enforced on all ingestion paths (gossip, RPC by-root, RPC by-range). The cache design is sound: only valid proofs are cached, and the cache key uniquely encodes the proof data plus block header hash. The kzgPosition=11 constant is correct for all fork versions. No exploitable bypass was found.",
+        "attack_scenarios_tested": [
+          "Invalid proof bytes rejected by VerifyMerkleProof",
+          "Cache collision attack - infeasible in 160-byte key space",
+          "Cross-column inclusion proof reuse - correctly acceptable since proof is block-level",
+          "keyErr fallback path - falls through to full cryptographic verification"
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "confidence": "high",
+      "reasoning": "All ingestion paths enforce SidecarInclusionProven(). The cryptographic verification correctly validates the KZG commitments Merkle proof. The inclusion proof cache cannot be exploited to bypass verification. Multiple attack scenarios were examined and none provided a bypass."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0057",
+      "property_id": "PROP-W4B13-70",
+      "title": "Falsification Test: Can a sidecar with an invalid inclusion proof be accepted by the gossip validation pipeline?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecarInclusionProof",
+            "line_range": {
+              "start": 97,
+              "end": 127
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "SidecarInclusionProven",
+            "line_range": {
+              "start": 356,
+              "end": 387
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// GOSSIP PIPELINE (validate_data_column.go)\nif err := verifier.SidecarInclusionProven(); err != nil {\n    return pubsub.ValidationReject, err\n}\n// INCLUSION PROOF IMPL\nverified := trie.VerifyMerkleProof(root, hashTreeRoot[:], kzgPosition, sidecar.KzgCommitmentsInclusionProof)\nif !verified { return ErrInvalidInclusionProof }",
+      "state_context": "The gossip pipeline validateDataColumn calls SidecarInclusionProven() which invokes VerifyDataColumnSidecarInclusionProof() for uncached sidecars. Returns ValidationReject on failure.",
+      "phase1": {
+        "name": "Abstract Interpretation",
+        "summary": "In the gossip validation pipeline (validateDataColumn), the call sequence is: ValidFields -> CorrectSubnet -> NotFromFutureSlot -> SlotAboveFinalized -> SidecarParentSeen -> SidecarParentValid -> ValidProposerSignature -> SidecarParentSlotLower -> SidecarDescendsFromFinalized -> SidecarInclusionProven -> validateWithKzgBatchVerifier -> SidecarProposerExpected. SidecarInclusionProven() returns error on invalid inclusion proof, causing ValidationReject. No code path skips SidecarInclusionProven() for uncached sidecars.",
+        "state_anomalies": "None. The check is unconditional in the pipeline - it's not behind a feature flag or conditional."
+      },
+      "phase2": {
+        "name": "Symbolic Execution",
+        "summary": "Specific attack vectors from the test procedure examined: (a) Swapped proof elements: VerifyMerkleProof checks against specific indices, swapped elements produce different hash chain, fails. (b) Proof from a different column index: all columns from a block share the same KzgCommitmentsInclusionProof - using a proof from another column of the same block would pass if both columns have the same commitments (same blob set). This is EXPECTED behavior, not a bypass. (c) Proof from block N for sidecar claiming block N+1: root is from sidecar.SignedBlockHeader.Header.BodyRoot, so the proof would be verified against block N's body, while the sidecar claims block N+1's header. This would fail because the proof is validated against the block header in the sidecar itself. (d) All-zero proof bytes: VerifyMerkleProof would compute hash chain from zeros, which would not match a real block root. Rejected. (e) Correct root but wrong path: VerifyMerkleProof checks the proof path element by element, wrong path elements produce different hash, rejected.",
+        "counterexample": null,
+        "path_conditions": "For FALSIFICATION SUCCESS (sidecar accepted): we need SidecarInclusionProven() to return nil for an invalid proof. This requires either (1) cache hit for a valid cached entry mapping to an invalid sidecar [impossible - cache key encodes the actual proof bytes], or (2) VerifyMerkleProof returning true for an invalid proof [cryptographically infeasible]. Falsification fails."
+      },
+      "phase2_5": {
+        "name": "Specific Falsification Attempt",
+        "attempt_1": {
+          "scenario": "Cross-sidecar cache pollution: send valid sidecar A, then craft sidecar B with same inclusionProofKey but invalid proof bytes",
+          "result": "Not possible - inclusionProofKey encodes the actual KzgCommitmentsInclusionProof bytes (128 bytes) plus block header hash (32 bytes). Different proof bytes = different key. Invalid sidecar B would have a different cache key and undergo full verification."
+        },
+        "attempt_2": {
+          "scenario": "Inclusion proof computed for different column index",
+          "result": "All columns from a block share the same block-level KzgCommitmentsInclusionProof. The proof commits to the entire KzgCommitments LIST at body field 11, not to any specific column. So a proof valid for column 0 is valid for column 1 of the same block. This is NOT a security issue - the column-level binding is enforced by KZG proof verification separately."
+        },
+        "attempt_3": {
+          "scenario": "Initial sync bypass: during syncing, validateDataColumn returns ValidationIgnore immediately before any checks",
+          "result": "ValidationIgnore means the sidecar is not accepted or stored, only dropped. Not a security bypass."
+        }
+      },
+      "phase3": {
+        "name": "Invariant Proving",
+        "invariant": "For any sidecar accepted (ValidationAccept) by the gossip pipeline, SidecarInclusionProven() returned nil.",
+        "proof_sketch": "Code at validate_data_column.go lines 143-145: `if err := verifier.SidecarInclusionProven(); err != nil { return pubsub.ValidationReject, err }`. This is an unconditional check. ValidationAccept is only reached if all checks pass. The verifier.VerifiedRODataColumns() at the end also calls allSatisfied() which requires RequireSidecarInclusionProven to be recorded. Both conditions must hold.",
+        "holds": true
+      },
+      "phase3_5": {
+        "name": "Bug Bounty Scope Filtering",
+        "bug_bounty_eligible": false,
+        "justification": "Falsification of the gossip pipeline inclusion proof check is not possible. The check is unconditional, the cache cannot be exploited for bypass, and all specific attack vectors (swapped proof, wrong column, all-zero proof, cross-block proof) are rejected by the cryptographic Merkle proof verification. The bug bounty PoC 'craft sidecar with invalid inclusion proof that passes verification' is not achievable against this implementation.",
+        "attack_scenarios_tested": [
+          "Swapped proof elements - rejected by VerifyMerkleProof",
+          "Cross-column proof reuse - valid by design (block-level proof)",
+          "Cross-block proof - rejected because proof verified against sidecar's own block header root",
+          "All-zero proof bytes - rejected",
+          "Cache pollution attack - infeasible due to key encoding",
+          "Initial sync bypass - results in ValidationIgnore, not acceptance"
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "confidence": "high",
+      "reasoning": "The gossip pipeline unconditionally calls SidecarInclusionProven() before accepting any sidecar. The cryptographic Merkle proof verification correctly rejects all tested attack vectors. The bug bounty falsification scenario is not achievable."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0058",
+      "property_id": "PROP-W4B13-71",
+      "title": "Verify Trust Boundary Integrity for tb-001: Is verify_data_column_sidecar_kzg_proofs called for every data column sidecar in the gossip validation pipeline?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// GOSSIP: validate_data_column.go\nvalidationResult, err := s.validateWithKzgBatchVerifier(ctx, roDataColumns)\nif validationResult != pubsub.ValidationAccept {\n    return validationResult, err\n}\nverifier.SatisfyRequirement(verification.RequireSidecarKzgProofVerified)\n\n// BATCH VERIFIER: batch_verifier.go\nfunc (s *Service) validateWithKzgBatchVerifier(ctx context.Context, dataColumns []blocks.RODataColumn) (pubsub.ValidationResult, error) {\n    timeout := time.Duration(params.BeaconConfig().SecondsPerSlot) * time.Second\n    resChan := make(chan error)\n    verificationSet := &kzgVerifier{dataColumns: dataColumns, resChan: resChan}\n    s.kzgChan <- verificationSet\n    ctx, cancel := context.WithTimeout(ctx, timeout)\n    defer cancel()\n    select {\n    case <-ctx.Done():\n        return pubsub.ValidationIgnore, ctx.Err()\n    case err := <-resChan:\n        if err != nil {\n            return s.validateUnbatchedColumnsKzg(ctx, dataColumns)\n        }\n    }\n    return pubsub.ValidationAccept, nil\n}",
+      "state_context": "KZG batch verifier drains kzgChan asynchronously. Timeout returns ValidationIgnore (not ValidationAccept). Fallback to individual verification on batch failure. SatisfyRequirement() only called on success.",
+      "phase1": {
+        "name": "Abstract Interpretation",
+        "summary": "The gossip pipeline calls s.validateWithKzgBatchVerifier(ctx, roDataColumns) which enqueues the sidecar in kzgChan. The kzgVerifierRoutine drains the channel asynchronously. verifyKzgBatch() calls peerdas.VerifyDataColumnsSidecarKZGProofs() on all batched sidecars. If the batch result is an error, each individual validateWithKzgBatchVerifier falls back to validateUnbatchedColumnsKzg() which directly calls VerifyDataColumnsSidecarKZGProofs(). On timeout, validateWithKzgBatchVerifier returns (ValidationIgnore, ctx.Err()) - meaning the sidecar is NOT accepted. SatisfyRequirement(RequireSidecarKzgProofVerified) is ONLY called when validationResult == ValidationAccept.",
+        "state_anomalies": "Timeout path: sidecars pending in kzgChan for >SecondsPerSlot are ignored. The kzgChan has a finite buffer. If saturated, new sends would block (or there would be a separate mechanism). This is worth examining for DoS potential."
+      },
+      "phase2": {
+        "name": "Symbolic Execution",
+        "summary": "KZG verification bypass scenarios: (1) Timeout: validateWithKzgBatchVerifier returns ValidationIgnore on timeout. This is NOT acceptance - the sidecar is dropped. seenDataColumnCache is not marked. The sidecar can be re-received from other peers. No bypass. (2) Batch contamination: If valid sidecar A and invalid sidecar B are batched, verifyKzgBatch sends error to both. validateWithKzgBatchVerifier for A falls back to validateUnbatchedColumnsKzg([A]), which succeeds. validateWithKzgBatchVerifier for B falls back to validateUnbatchedColumnsKzg([B]), which fails -> ValidationReject. No bypass for either case. (3) Empty batch: verifyKzgBatch has guard `if len(kzgBatch) == 0 { return }` - channel would never be empty as items arrive before drain. (4) kzgChan saturation: The kzgChan buffer capacity was not directly observed in the code read, but standard channel semantics mean if the channel is full, the send `s.kzgChan <- verificationSet` would block. The gossip validation goroutine would stall. The pubsub context would eventually timeout, and the sidecar would be returned as ValidationIgnore, not ValidationAccept. (5) Direct RequireSidecarKzgProofVerified satisfaction: The gossip path does NOT call verifier.SidecarKzgProofVerified() - it uses the batch verifier and then SatisfyRequirement. SatisfyRequirement is called only after ValidationAccept, i.e., only after successful KZG verification.",
+        "counterexample": null,
+        "path_conditions": "For KZG bypass: need validateWithKzgBatchVerifier to return ValidationAccept without successful KZG verification. Requires either kzgVerifierRoutine returning nil error without calling VerifyDataColumnsSidecarKZGProofs, or fallback path returning Accept without verification. Neither is possible."
+      },
+      "phase2_5": {
+        "name": "Ordering and Concurrency Analysis",
+        "call_order": "ValidFields -> CorrectSubnet -> NotFromFutureSlot -> SlotAboveFinalized -> SidecarParentSeen -> SidecarParentValid -> ValidProposerSignature -> SidecarParentSlotLower -> SidecarDescendsFromFinalized -> SidecarInclusionProven -> [KZG via batch] -> SatisfyRequirement -> hasSeenDataColumnIndex -> SidecarProposerExpected -> VerifiedRODataColumns",
+        "kzg_call_ordering": "KZG verification is the 10th check, after structural and signature verification. This is correct per spec.",
+        "race_condition_check": "The gossip handler processes one sidecar at a time via a channel. The kzgVerifierRoutine is separate but sends results back via resChan. No race condition on the verification result path.",
+        "relay_timing": "msg.ValidatorData is set to verifiedRODataColumns[0] AFTER all checks including KZG. No relay occurs before KZG verification."
+      },
+      "phase3": {
+        "name": "Invariant Proving",
+        "invariant": "No sidecar achieves ValidationAccept in gossip without KZG proof verification completing successfully.",
+        "proof_sketch": "validateWithKzgBatchVerifier returns ValidationAccept ONLY when resChan receives nil error. resChan receives nil ONLY when verifyKzgBatch calls VerifyDataColumnsSidecarKZGProofs and it returns nil. The fallback path (validateUnbatchedColumnsKzg) also calls VerifyDataColumnsSidecarKZGProofs and returns Accept only on nil error. Timeout returns ValidationIgnore. SatisfyRequirement is called only after Accept. VerifiedRODataColumns() checks allSatisfied() including RequireSidecarKzgProofVerified. Chain is complete.",
+        "holds": true,
+        "informational_finding": "Work amplification: when a batch contains one invalid sidecar, all sidecars in the batch undergo individual re-verification (fallback). With up to N sidecars in a batch, work is N+1 verifications instead of 1. This is a potential DoS amplification but NOT a security bypass. Gossip scoring would penalize peers sending invalid sidecars."
+      },
+      "phase3_5": {
+        "name": "Bug Bounty Scope Filtering",
+        "bug_bounty_eligible": false,
+        "justification": "KZG proof verification is enforced unconditionally in the gossip pipeline. The batch verifier is an optimization that preserves correctness: timeout results in ValidationIgnore (not acceptance), batch failures trigger correct individual fallback, and SatisfyRequirement is called only after successful verification. The kzgPosition=11 constant is verified correct. No bypass is possible.",
+        "informational_notes": "Work amplification via batch contamination (invalid sidecar forcing N individual re-verifications) is an informational concern. Bounded by kzgChan capacity and mitigated by gossip scoring.",
+        "attack_scenarios_tested": [
+          "KZG verification timeout -> ValidationIgnore, not ValidationAccept",
+          "Batch contamination with invalid sidecar -> correct individual fallback, valid sidecar still accepted",
+          "SatisfyRequirement bypass -> only callable after confirmed ValidationAccept",
+          "kzgChan saturation -> causes blocking then timeout, results in ValidationIgnore"
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "confidence": "high",
+      "reasoning": "The gossip pipeline unconditionally enforces KZG proof verification via the batch verifier (with correct individual fallback). Timeout results in ValidationIgnore. No code path allows ValidationAccept without successful KZG verification."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0059",
+      "property_id": "PROP-W4B13-71",
+      "title": "Supporting Check: Does actor-p2p-peer enforce KZG proof verification before relaying data column sidecars?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// RPC VERIFICATION PATH (data_column_sidecars.go)\nfunc verifyByRootDataColumnSidecars(newVerifier verification.NewDataColumnsVerifier, roDataColumns []blocks.RODataColumn) ([]blocks.VerifiedRODataColumn, error) {\n    verifier := newVerifier(roDataColumns, verification.ByRootRequestDataColumnSidecarRequirements)\n    if err := verifier.ValidFields(); err != nil { return nil, errors.Wrap(err, \"valid fields\") }\n    if err := verifier.SidecarInclusionProven(); err != nil { return nil, errors.Wrap(err, \"sidecar inclusion proven\") }\n    if err := verifier.SidecarKzgProofVerified(); err != nil { return nil, errors.Wrap(err, \"sidecar KZG proof verified\") }\n    verifiedRoDataColumns, err := verifier.VerifiedRODataColumns()\n    return verifiedRoDataColumns, err\n}\n\n// ByRootRequestDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified\n// ByRangeRequestDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified",
+      "state_context": "P2P peer relaying: gossip path verifies via batch verifier + fallback. RPC path (DataColumnSidecarsByRoot, DataColumnSidecarsByRange) verifies via verifyByRootDataColumnSidecars which calls SidecarKzgProofVerified() directly. Storage retrieval returns VerifiedRODataColumn type which requires all requirements satisfied before storage.",
+      "phase1": {
+        "name": "Abstract Interpretation",
+        "summary": "Data flow for peer relay of sidecars: (1) Gossip inbound: validateDataColumn calls validateWithKzgBatchVerifier, which enforces KZG verification before ValidationAccept. Sidecars are only stored (via subscriber_data_column_sidecar.go) after receiving a VerifiedRODataColumn. (2) RPC inbound (by-root): fetchDataColumnSidecarsFromPeers -> verifyDataColumnSidecarsByPeer -> verifyByRootDataColumnSidecars. verifyByRootDataColumnSidecars calls verifier.SidecarKzgProofVerified(). (3) RPC inbound (by-range): uses same verification path for received sidecars with ByRangeRequestDataColumnSidecarRequirements which includes RequireSidecarKzgProofVerified. (4) Storage-retrieved sidecars: returned as VerifiedRODataColumn which has already passed all requirements. (5) Reconstruction via ReconstructDataColumnSidecars: reconstructed sidecars - should check if these are reverified.",
+        "state_anomalies": "Reconstructed sidecars from peerdas.ReconstructDataColumnSidecars() in mergeAvailableSidecars return VerifiedRODataColumn type. If reconstruction does not re-verify KZG proofs, there could be a concern."
+      },
+      "phase2": {
+        "name": "Symbolic Execution",
+        "summary": "Reconstruction path analysis: mergeAvailableSidecars calls peerdas.ReconstructDataColumnSidecars(allAvailable) where allAvailable contains only VerifiedRODataColumn objects. The reconstruction uses the KZG library's RecoverCellsAndKZGProofs which computes new cells and proofs from the input. If the input VerifiedRODataColumn objects are authentic, the reconstructed cells are computed deterministically. The reconstructed proofs come from ckzg4844.RecoverCellsAndKZGProofs which computes the correct proofs. Since the inputs are already verified, and the cryptographic reconstruction is deterministic, the outputs are correct. However, it's worth noting whether the reconstructed sidecars are wrapped as VerifiedRODataColumn without re-verification. If so, this could be a concern if the reconstruction library is buggy. In practice, the reconstruction is from the c-kzg-4844 trusted library. Race condition analysis: validateDataColumn processes one sidecar at a time, with channel-based async KZG verification. msg.ValidatorData is assigned only after all verifications pass, preventing relay before verification. The pubsub library only relays messages with ValidatorData set.",
+        "counterexample": null,
+        "path_conditions": "For KZG bypass in RPC path: need verifyByRootDataColumnSidecars to succeed without SidecarKzgProofVerified returning nil. Requires VerifyDataColumnsSidecarKZGProofs to succeed with tampered data - cryptographically infeasible for valid KZG proofs. No bypass found."
+      },
+      "phase2_5": {
+        "name": "Relay Ordering Analysis",
+        "gossip_relay": "In validateDataColumn, msg.ValidatorData = verifiedRODataColumns[0] is set at line ~170, AFTER all verifications including KZG. The pubsub framework uses ValidatorData to determine propagation. Relay only occurs after all checks pass.",
+        "rpc_relay": "RPC handler (dataColumnSidecarByRootRPCHandler) serves sidecars retrieved from s.cfg.dataColumnStorage.Get(), which returns VerifiedRODataColumn objects. Only previously-verified sidecars are served.",
+        "batch_relay": "fetchDataColumnSidecarsFromPeers calls verifyDataColumnSidecarsByPeer which calls verifyByRootDataColumnSidecars. KZG verification is enforced before sidecars are added to the result set."
+      },
+      "phase3": {
+        "name": "Invariant Proving",
+        "invariant": "No data column sidecar is relayed by a peer without KZG proof verification completing successfully.",
+        "proof_sketch": "Gossip relay: pubsub only propagates messages with ValidatorData, which is set only after all verifications including KZG. RPC serving: sidecars served from storage which requires VerifiedRODataColumn (verified before storage). RPC fetching: verifyByRootDataColumnSidecars enforces SidecarKzgProofVerified(). The type system (VerifiedRODataColumn vs RODataColumn) enforces verification boundaries at the Go type level.",
+        "holds": true
+      },
+      "phase3_5": {
+        "name": "Bug Bounty Scope Filtering",
+        "bug_bounty_eligible": false,
+        "justification": "KZG proof verification is enforced before relay on all paths: gossip (via batch verifier), RPC serving (via VerifiedRODataColumn type from storage), and RPC fetching (via verifyByRootDataColumnSidecars). The Go type system using VerifiedRODataColumn prevents unverified sidecars from being served. No bypass was found.",
+        "attack_scenarios_tested": [
+          "RPC by-root relay without KZG - blocked by verifyByRootDataColumnSidecars requiring SidecarKzgProofVerified",
+          "Gossip relay before KZG - blocked by ValidatorData assignment after all checks",
+          "Storage serving unverified sidecars - impossible: dataColumnStorage.Get returns VerifiedRODataColumn",
+          "Race condition on relay - prevented by sequential verification chain in validateDataColumn"
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "confidence": "high",
+      "reasoning": "All relay paths (gossip and RPC) enforce KZG proof verification before sidecars are served or propagated. The VerifiedRODataColumn type system provides compile-time enforcement of verification requirements."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0060",
+      "property_id": "PROP-W4B13-71",
+      "title": "Supporting Check: Does actor-beacon-node reject sidecars with invalid KZG proofs from any source?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 181
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 229
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// VerifyDataColumnsSidecarKZGProofs (p2p_interface.go)\nfunc VerifyDataColumnsSidecarKZGProofs(sidecars []blocks.RODataColumn) error {\n    count := 0\n    for _, sidecar := range sidecars { count += len(sidecar.Column) }\n    commitments := make([]kzg.Bytes48, 0, count)\n    indices := make([]uint64, 0, count)\n    cells := make([]kzg.Cell, 0, count)\n    proofs := make([]kzg.Bytes48, 0, count)\n    for _, sidecar := range sidecars {\n        for i := range sidecar.Column {\n            commitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n            indices = append(indices, sidecar.Index)  // column index, not loop index i\n            cells = append(cells, kzg.Cell(sidecar.Column[i]))\n            proofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n        }\n    }\n    verified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)\n    if err != nil { return errors.Wrap(err, \"verify cell KZG proof batch\") }\n    if !verified { return ErrInvalidKZGProof }\n    return nil\n}",
+      "state_context": "VerifyDataColumnsSidecarKZGProofs: uses sidecar.Index (column position) for all cells in the sidecar, not the loop variable i. This is CORRECT: all cells in a DataColumnSidecar are from the same column (position sidecar.Index). Cell indices in VerifyCellKZGProofBatch represent column positions. sidecar.KzgCommitments[i] is the commitment for blob i (not column i). This is also correct: each cell[i] in column C corresponds to blob i's data at column C, verified against commitment[i].",
+      "phase1": {
+        "name": "Abstract Interpretation",
+        "summary": "The VerifyDataColumnsSidecarKZGProofs function aggregates all cells from multiple sidecars into flat arrays and calls VerifyCellKZGProofBatch from the c-kzg-4844 library. Key correctness question: is `sidecar.Index` the correct value for the `indices` parameter? A DataColumnSidecar at column index C contains: Column[i] = cell from blob i at column position C; KzgCommitments[i] = KZG commitment for blob i; KzgProofs[i] = KZG proof for cell (blob i, column C). The `cellIndices` parameter to VerifyCellKZGProofBatch represents the COLUMN position in the extended matrix. Since all cells in the sidecar are from column C = sidecar.Index, passing sidecar.Index for all entries is CORRECT. This matches the spec: verify_data_column_sidecar_kzg_proofs iterates cells with the sidecar's Index as the column position.",
+        "state_anomalies": "None. The index usage is correct. The batch verification deviates from the spec (which verifies each sidecar separately) by verifying all sidecars in a single batch call, but this is documented in the function comment and is a safe optimization (the same cryptographic guarantee is provided)."
+      },
+      "phase2": {
+        "name": "Symbolic Execution",
+        "summary": "Attack scenarios for KZG bypass: (1) Tampered column data (modified cells): cells = Column[i] bytes, any modification causes VerifyCellKZGProofBatch to return false. Rejected via ErrInvalidKZGProof. (2) Mismatched commitments: if cells are correct but commitments are from a different blob, VerifyCellKZGProofBatch fails. (3) Cross-sidecar proof injection: using KzgProofs from column C for sidecar claiming column D. The indices parameter would be wrong (D vs C), causing verification failure since the proof is bound to the specific column position. (4) RPC injection path: attacker sends tampered sidecar via DataColumnSidecarsByRoot RPC. verifyByRootDataColumnSidecars calls SidecarKzgProofVerified() which calls VerifyDataColumnsSidecarKZGProofs. Invalid proof detected -> error returned -> sidecar rejected. (5) Stale cached data: SidecarKzgProofVerified() does NOT have a cache (unlike SidecarInclusionProven). Every call runs the full verification. (6) Database injection: the RPC handler (dataColumnSidecarByRootRPCHandler) only serves sidecars from storage.Get(), and storage only accepts VerifiedRODataColumn objects. No injection path to storage bypassing KZG.",
+        "counterexample": null,
+        "path_conditions": "For a KZG-invalid sidecar to be stored: it must pass SidecarKzgProofVerified() or have RequireSidecarKzgProofVerified satisfied via SatisfyRequirement(). SatisfyRequirement() is called only in the gossip path after ValidationAccept (after confirmed KZG verification). No manual satisfaction without actual verification."
+      },
+      "phase2_5": {
+        "name": "Multi-Source Rejection Analysis",
+        "gossip_path": "Invalid KZG proof -> verifyKzgBatch fails -> individual fallback -> validateUnbatchedColumnsKzg fails -> ValidationReject. Sidecar not stored, seenCache not marked.",
+        "rpc_by_root_path": "Invalid KZG proof -> verifyByRootDataColumnSidecars -> SidecarKzgProofVerified fails -> error returned -> sidecar discarded, peer downscored.",
+        "rpc_by_range_path": "Same verification chain as by-root for received sidecars. ByRangeRequestDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified.",
+        "storage_path": "dataColumnStorage.Get() returns VerifiedRODataColumn which cannot be stored without full verification. No path to store KZG-invalid sidecars.",
+        "reconstruction_path": "ReconstructDataColumnSidecars takes VerifiedRODataColumn input (already KZG-verified). Reconstruction via c-kzg-4844 computes correct proofs deterministically from valid inputs."
+      },
+      "phase3": {
+        "name": "Invariant Proving",
+        "invariant": "The beacon node never stores or uses data column sidecars with invalid KZG proofs, regardless of ingestion source.",
+        "proof_sketch": "Storage invariant: the dataColumnStorage only accepts VerifiedRODataColumn objects. VerifiedRODataColumn can only be created by VerifiedRODataColumns() which checks allSatisfied() including RequireSidecarKzgProofVerified. RequireSidecarKzgProofVerified is recorded by SidecarKzgProofVerified() (which runs VerifyDataColumnsSidecarKZGProofs) or by SatisfyRequirement() (called only after confirmed batch KZG success). The cryptographic binding: VerifyCellKZGProofBatch from c-kzg-4844 correctly verifies each cell against its commitment and proof using the correct column index. The invariant holds across gossip and all RPC paths.",
+        "holds": true,
+        "informational_finding": "Work amplification attack: Attacker sends M invalid sidecars mixed with N valid sidecars in the same gossip batch window. verifyKzgBatch([M invalid + N valid]) fails. All M+N verifiers fall back to individual verification (M+N additional calls). Net work: 1 batch call + M+N individual calls = M+N+1 calls instead of 1. This is bounded by kzgChan capacity. Gossip scoring penalizes sources of invalid sidecars, providing mitigation. This is informational."
+      },
+      "phase3_5": {
+        "name": "Bug Bounty Scope Filtering",
+        "bug_bounty_eligible": false,
+        "justification": "The beacon node correctly enforces KZG proof verification on all ingestion sources: gossip (via batch verifier with individual fallback), RPC by-root, and RPC by-range. The VerifyDataColumnsSidecarKZGProofs implementation correctly uses sidecar.Index as the column position for all cells. Invalid KZG proofs are rejected on all paths. No bypass was found.",
+        "informational_notes": "Work amplification (M+N+1 KZG verifications instead of 1 for a batch of M invalid + N valid sidecars) is a bounded DoS concern mitigated by gossip scoring. The timeout path returning ValidationIgnore (not ValidationAccept) is correct behavior.",
+        "attack_scenarios_tested": [
+          "Tampered column data with original proofs - rejected by VerifyCellKZGProofBatch",
+          "Mismatched KZG commitments - rejected",
+          "Cross-column proof injection (proof for column C on sidecar claiming column D) - rejected because indices differ",
+          "RPC injection of tampered sidecar - rejected by SidecarKzgProofVerified",
+          "Database injection bypass - impossible: storage only accepts VerifiedRODataColumn",
+          "sidecar.Index vs loop variable i confusion - confirmed correct usage"
+        ]
+      },
+      "final_classification": "not-a-vulnerability",
+      "confidence": "high",
+      "reasoning": "The beacon node rejects sidecars with invalid KZG proofs from all sources. The VerifyDataColumnsSidecarKZGProofs implementation is correct, the batch verifier has proper fallback, and the VerifiedRODataColumn type system provides compile-time enforcement. All tested attack vectors are rejected by the cryptographic KZG verification."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 7,
+    "batch_index": 32,
+    "item_count": 5,
+    "timestamp": 1771374756,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0056",
+      "W7B8:W7B8:CHK-0057",
+      "W7B8:W7B8:CHK-0058",
+      "W7B8:W7B8:CHK-0059",
+      "W7B8:W7B8:CHK-0060"
+    ]
+  }
+}

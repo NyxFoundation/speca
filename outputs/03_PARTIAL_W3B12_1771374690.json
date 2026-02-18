@@ -1,0 +1,312 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0156",
+      "title": "Verify Trust Boundary Integrity for tb-002/tb-003: Are all xs values validated to be distinct before Lagrange interpolation in interpolate_polynomialcoeff?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 30,
+              "end": 105
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\tckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n\tfor i := range partialCells {\n\t\tckzgPartialCells[i] = ckzg4844.Cell(partialCells[i])\n\t}\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n\tif err != nil {\n\t\treturn CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\")\n\t}\n\treturn makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}\n\n// In reconstruction.go:\nsidecarByIndex := make(map[uint64]blocks.VerifiedRODataColumn, len(verifiedRoSidecars))\nfor _, inVerifiedRoSidecar := range verifiedRoSidecars {\n    sidecarByIndex[inVerifiedRoSidecar.Index] = inVerifiedRoSidecar  // map deduplicates\n}\nfor columnIndex, sidecar := range sidecarByIndex {\n    cellsIndices = append(cellsIndices, columnIndex)  // unique by construction\n}",
+      "state_context": "ReconstructDataColumnSidecars uses a map[uint64]VerifiedRODataColumn (sidecarByIndex) to deduplicate sidecars by column index before building cellsIndices. Go maps cannot have duplicate keys. The C library ckzg4844.RecoverCellsAndKZGProofs also independently checks for duplicate cell indices.",
+      "phase1": {
+        "data_flow": "P2P message \u2192 gossip handler \u2192 RODataColumn \u2192 VerifyDataColumnSidecar (validates index range, commitment count, length matching) \u2192 VerifyDataColumnsSidecarKZGProofs (batch KZG proof verification) \u2192 VerifiedRODataColumn \u2192 ReconstructDataColumnSidecars. Inside reconstruction, sidecars are placed into sidecarByIndex map (keyed by column index), then for each blobIndex a goroutine builds cellsIndices[]uint64 and cells[]kzg.Cell from the map iteration. These are passed to kzg.RecoverCellsAndKZGProofs \u2192 ckzg4844.RecoverCellsAndKZGProofs (Go binding) \u2192 C recover_cells_and_kzg_proofs. The C function is where Lagrange interpolation occurs via vanishing_polynomial_for_missing_cells and recover_cells.",
+        "validation_gaps": "Prysm Go layer does NOT explicitly validate that cellIndices passed to RecoverCellsAndKZGProofs are distinct. However, the upstream deduplication via map[uint64]blocks.VerifiedRODataColumn (sidecarByIndex) in ReconstructDataColumnSidecars structurally prevents duplicate indices from being constructed, because map keys are unique by definition. The Go binding itself only checks len(cellIndices) != len(cells). The C library is the explicit duplicate detection layer.",
+        "attack_surface": "An attacker would need to bypass the sidecarByIndex map deduplication. This is impossible from within ReconstructDataColumnSidecars since map insertion with the same key overwrites silently. The only alternative path to RecoverCellsAndKZGProofs with duplicates would be through a direct caller that does not use the map \u2014 no such caller exists in the codebase."
+      },
+      "phase2": {
+        "symbolic_trace": "Let attacker send two RODataColumn sidecars both with sidecar.Index = 5. After gossip verification (VerifyDataColumnSidecar passes for each), both are VerifiedRODataColumn. In ReconstructDataColumnSidecars: sidecarByIndex[5] = sidecar_a; sidecarByIndex[5] = sidecar_b (overwrites). Result: sidecarByIndex has exactly one entry for key 5. When building cellsIndices in the goroutine, the map range yields only one entry per key. cellsIndices = [5], cells = [cell_b]. No duplicate. This is passed to C library. C library bounds check: cell_indices[0]=5 < 128=CELLS_PER_EXT_BLOB, passes. The recovered_cells_fr array (size FIELD_ELEMENTS_PER_EXT_BLOB=8192) is initialized to FR_NULL. At index 5*64=320, cells_fr[320..383] are populated from cell_b. No duplicate \u2014 no BADARGS error. Recovery proceeds normally.",
+        "key_finding": "The map-based deduplication in ReconstructDataColumnSidecars (sidecarByIndex) is a structural guarantee: Go maps cannot have duplicate keys. Even if an attacker sends 1000 sidecars all with Index=5, the map will retain only one. The C library recover_cells_and_kzg_proofs also independently checks for duplicate cell indices by tracking which positions in recovered_cells_fr have been populated (using FR_NULL sentinel) and returns C_KZG_BADARGS on collision. Two independent layers of defense exist."
+      },
+      "phase2_5": {
+        "attack_scenario": "Attacker crafts gossip messages with two DataColumnSidecars both having the same Index=5 but different cell data. Both sidecars pass gossip validation (VerifyDataColumnSidecar checks index < 128, commitments non-empty, lengths matching). Both become VerifiedRODataColumn. ReconstructDataColumnSidecars is called with both. Map insertion deduplicates to one entry. Only one cell_index=5 reaches C library. No Lagrange division by zero.",
+        "attacker_controlled": false,
+        "exploit_steps": "No viable exploit path. Attacker cannot force duplicate cellIndices into RecoverCellsAndKZGProofs from any P2P entry point because: (1) the map deduplication in ReconstructDataColumnSidecars prevents it structurally; and (2) the C library has its own explicit duplicate detection returning C_KZG_BADARGS. The architectural threat model (direct Lagrange division by zero) is not applicable to this FFT-based recovery implementation."
+      },
+      "phase3": {
+        "invariant_status": "holds",
+        "justification": "Invariant: All cell indices passed to RecoverCellsAndKZGProofs are distinct. This holds because: (a) the sidecarByIndex map in ReconstructDataColumnSidecars is the only path from P2P to RecoverCellsAndKZGProofs, and Go maps have unique keys by definition; (b) the C library independently validates for duplicates in recover_cells_and_kzg_proofs; (c) the recovery algorithm derives missing cells by iterating over all CELLS_PER_EXT_BLOB indices and checking is_in_array, not through direct Lagrange interpolation of provided xs values."
+      },
+      "phase3_5": {
+        "final_classification": "not_a_vulnerability",
+        "severity": "Informational",
+        "bug_bounty_eligible": false,
+        "confidence": "high",
+        "reasoning": "Two independent safeguards prevent this attack: (1) structural deduplication via Go map in ReconstructDataColumnSidecars (the only P2P entry point to RecoverCellsAndKZGProofs) eliminates duplicates before the C call; (2) the C library recover_cells_and_kzg_proofs explicitly detects duplicate cell indices via FR_NULL sentinel tracking and returns C_KZG_BADARGS on collision. Furthermore, the recovery algorithm (vanishing_polynomial_for_missing_cells + recover_cells) identifies the missing set by iterating over all CELLS_PER_EXT_BLOB indices, so the architectural threat model in the checklist item was not applicable to this FFT-based implementation.",
+        "attack_vector": "None viable. P2P \u2192 map deduplication eliminates duplicates before reaching C library.",
+        "impact": "None. Both defense layers catch this independently.",
+        "recommendation": "No code change required. As defense-in-depth documentation, a comment in ReconstructDataColumnSidecars could note that the map deduplication also prevents duplicate cell indices from reaching the C library."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0157",
+      "title": "Verify Trust Boundary Integrity for tb-001/tb-003: Is len(a) + len(b) <= FIELD_ELEMENTS_PER_EXT_BLOB validated before polynomial multiplication in multiply_polynomialcoeff?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "ComputeCellsAndKZGProofs",
+            "line_range": {
+              "start": 84,
+              "end": 94
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ConstructDataColumnSidecars",
+            "line_range": {
+              "start": 131,
+              "end": 175
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func ComputeCellsAndKZGProofs(blob *Blob) (CellsAndProofs, error) {\n\tvar ckzgBlob ckzg4844.Blob\n\tcopy(ckzgBlob[:], blob[:])\n\tckzgCells, ckzgProofs, err := ckzg4844.ComputeCellsAndKZGProofs(&ckzgBlob)\n\tif err != nil { return CellsAndProofs{}, err }\n\treturn makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}\n\n// Recovery path:\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\t// No polynomial degree check in Go layer\n\t// C library uses FFT-based fixed-size buffers (FIELD_ELEMENTS_PER_EXT_BLOB=8192)\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n}",
+      "state_context": "The 'multiply_polynomialcoeff' function is an EIP-7594 spec pseudocode name that does not exist in c-kzg-4844 v2.1.1. The actual C implementation uses FFT-based polynomial arithmetic over fixed-size FIELD_ELEMENTS_PER_EXT_BLOB=8192 arrays. The C library validates num_cells is in [CELLS_PER_BLOB, CELLS_PER_EXT_BLOB], bounding the missing cell count and therefore the vanishing polynomial degree.",
+      "phase1": {
+        "data_flow": "P2P \u2192 sidecar validation \u2192 KZG proof verification. For blob recovery: ReconstructDataColumnSidecars \u2192 kzg.RecoverCellsAndKZGProofs \u2192 C recover_cells_and_kzg_proofs \u2192 recover_cells (internal) \u2192 vanishing_polynomial_for_missing_cells \u2192 compute_vanishing_polynomial_from_roots. The checklist references 'multiply_polynomialcoeff' and 'interpolate_polynomialcoeff' \u2014 these are EIP-7594 spec pseudocode function names. In c-kzg-4844 v2.1.1, polynomial multiplication is NOT performed via a naive multiply_polynomialcoeff. Instead, the vanishing polynomial is constructed by compute_vanishing_polynomial_from_roots over stack-allocated arrays, and recovery uses FFT-based operations (fr_fft, coset_fft) over fixed-size FIELD_ELEMENTS_PER_EXT_BLOB (8192) arrays.",
+        "validation_gaps": "The Go layer performs no polynomial degree bound validation. However, the C library uses fixed-size arrays throughout: all polynomial coefficient arrays are allocated with FIELD_ELEMENTS_PER_EXT_BLOB (8192) elements. The short_vanishing_poly has (len_missing_cells + 1) elements. The Go layer does not validate num_cells before passing to C; the C layer validates num_cells range (CELLS_PER_BLOB to CELLS_PER_EXT_BLOB), which constrains len_missing to [0, CELLS_PER_EXT_BLOB). vanishing_polynomial_for_missing_cells further constrains len_missing to [1, CELLS_PER_EXT_BLOB-1).",
+        "attack_surface": "The multiplication referenced in CHK-0157 does not exist as a discrete function in the C library implementation. The concern about 'oversized vanishing polynomial' is moot because all arrays are fixed-size (FIELD_ELEMENTS_PER_EXT_BLOB), the num_cells input is bounds-checked by the C library, and the missing cells count is derived (not attacker-supplied)."
+      },
+      "phase2": {
+        "symbolic_trace": "Attacker sends sidecars such that num_cells_provided approaches the minimum: CELLS_PER_BLOB = 64. The C library's vanishing_polynomial_for_missing_cells receives len_missing_cells = CELLS_PER_EXT_BLOB - 64 = 64. short_vanishing_poly is allocated with 65 elements. The expansion loop: for i in 0..64: vanishing_poly[i * 64] = short_vanishing_poly[i]. Max index: 64 * 64 = 4096 < 8192 = FIELD_ELEMENTS_PER_EXT_BLOB. Safe. At the boundary: if len_missing_cells = CELLS_PER_EXT_BLOB - 1 = 127, the function returns C_KZG_BADARGS early. So len_missing_cells is bounded in [1, CELLS_PER_EXT_BLOB-1). The maximum expansion index is (CELLS_PER_EXT_BLOB-1) * FIELD_ELEMENTS_PER_CELL = 127 * 64 = 8128 < 8192. No overflow.",
+        "key_finding": "The 'multiply_polynomialcoeff' function from the EIP-7594 spec does not exist by that name in c-kzg-4844 v2.1.1. The actual implementation uses FFT-based polynomial arithmetic over statically-sized FIELD_ELEMENTS_PER_EXT_BLOB arrays. Degree overflow is structurally impossible: all polynomial arrays are fixed-size, and the C library validates that num_cells is in [CELLS_PER_BLOB, CELLS_PER_EXT_BLOB], which in turn bounds the missing cell count. The Go layer has no polynomial multiplication code."
+      },
+      "phase2_5": {
+        "attack_scenario": "An attacker would need to cause the vanishing polynomial's degree to exceed FIELD_ELEMENTS_PER_EXT_BLOB. This requires len_missing_cells >= CELLS_PER_EXT_BLOB, which is explicitly rejected by the early exit in vanishing_polynomial_for_missing_cells. The attacker cannot independently specify len_missing_cells \u2014 it is derived from the total domain minus provided cells. The Go layer's only control is the number of valid sidecars provided; the C layer independently computes the missing count.",
+        "attacker_controlled": false,
+        "exploit_steps": "No exploit path. The checklist's threat model assumes a 'multiply_polynomialcoeff' function with an explicit degree bound check that is absent from Go. The actual C implementation uses fixed-size FFT buffers and validates input cardinality. The maximum degree of any polynomial in the recovery pipeline is bounded by FIELD_ELEMENTS_PER_EXT_BLOB by construction."
+      },
+      "phase3": {
+        "invariant_status": "holds",
+        "justification": "Invariant: All polynomial operations in the recovery pipeline are performed over arrays of size exactly FIELD_ELEMENTS_PER_EXT_BLOB = 8192. This holds because: (1) all intermediate arrays are allocated with FIELD_ELEMENTS_PER_EXT_BLOB elements; (2) the short_vanishing_poly used in compute_vanishing_polynomial_from_roots has degree len_missing_cells, bounded to [1, CELLS_PER_EXT_BLOB-1) by C library input validation; (3) the stride-based expansion (vanishing_poly[i * FIELD_ELEMENTS_PER_CELL] for i < len_missing_cells+1) never exceeds FIELD_ELEMENTS_PER_EXT_BLOB; (4) no Go-level polynomial multiplication occurs."
+      },
+      "phase3_5": {
+        "final_classification": "not_a_vulnerability",
+        "severity": "Informational",
+        "bug_bounty_eligible": false,
+        "confidence": "high",
+        "reasoning": "The checklist item is based on an EIP-7594 spec pseudocode function 'multiply_polynomialcoeff' that does not exist in the c-kzg-4844 v2.1.1 C implementation used by Prysm. The actual implementation uses FFT-based polynomial arithmetic over statically-sized FIELD_ELEMENTS_PER_EXT_BLOB arrays. Degree overflow is structurally impossible. The Go layer has no polynomial multiplication code and performs no size checks because the C layer handles all polynomial arithmetic with fixed-size buffers. The C library validates num_cells is in [CELLS_PER_BLOB, CELLS_PER_EXT_BLOB] which bounds all derived polynomial degrees.",
+        "attack_vector": "None viable. The precondition for this attack (unbounded polynomial degree) cannot be satisfied given the FFT-based fixed-buffer design of the C library.",
+        "impact": "None.",
+        "recommendation": "No code change required. The checklist assumption that 'multiply_polynomialcoeff' exists as a discrete function with an explicit degree bound check is not applicable to this implementation. Documentation of this architectural difference may be useful for future audits."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0158",
+      "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) before array access in coset_shift_for_cell?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 109,
+              "end": 122
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Go P2P validation (p2p_interface.go):\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns  // = 128 = CELLS_PER_EXT_BLOB\n\tif sidecar.Index >= numberOfColumns {\n\t\treturn ErrIndexTooLarge  // Rejects index >= 128\n\t}\n\t// ... other checks\n\treturn nil\n}\n\n// C library (verify_cell_kzg_proof_batch) sanity check:\n// if (cell_indices[i] >= CELLS_PER_EXT_BLOB) { ret = C_KZG_BADARGS; goto out; }\n// Then get_coset_shift_pow_for_cell(&h_k_pow, cell_indices[i], s) called\n// CELL_INDICES_RBL[cell_index] accessed (128-element table)\n// get_inv_coset_shift_for_cell called with loop variable i (not attacker cell_indices[i])",
+      "state_context": "numberOfColumns (Go config) = 128 = CELLS_PER_EXT_BLOB (C constant). VerifyDataColumnSidecar rejects sidecar.Index >= 128. C library sanity check rejects cell_indices[i] >= 128 before any coset function access. CELL_INDICES_RBL has exactly 128 entries. get_inv_coset_shift_for_cell is called with loop variable i in [0, 127], not attacker-supplied values.",
+      "phase1": {
+        "data_flow": "P2P \u2192 gossip handler \u2192 VerifyDataColumnSidecar (checks sidecar.Index < numberOfColumns = 128) \u2192 VerifyDataColumnsSidecarKZGProofs (builds indices array using sidecar.Index, calls kzg.VerifyCellKZGProofBatch) \u2192 C verify_cell_kzg_proof_batch. Inside verify_cell_kzg_proof_batch, after its own bounds check (cell_indices[i] >= CELLS_PER_EXT_BLOB \u2192 BADARGS), calls compute_commitment_to_aggregated_interpolation_poly \u2192 for each column i (0..CELLS_PER_EXT_BLOB-1), calls get_inv_coset_shift_for_cell(i, s) \u2014 loop variable, not attacker-controlled. computed_weighted_sum_of_proofs calls get_coset_shift_pow_for_cell(&h_k_pow, cell_indices[i], s) where cell_indices[i] is attacker-supplied but pre-validated.",
+        "validation_gaps": "Prysm Go layer validates sidecar.Index < numberOfColumns (128). The C library verify_cell_kzg_proof_batch validates cell_indices[i] >= CELLS_PER_EXT_BLOB \u2192 BADARGS. The CELL_INDICES_RBL array access with attacker-supplied index is never possible with index >= 128. get_inv_coset_shift_for_cell is called with loop variable, not attacker data.",
+        "attack_surface": "The C library's bounds check in verify_cell_kzg_proof_batch runs first (sanity check loop, lines 856-859) before any computational functions. The Go-level check (< 128) and C-level check (< 128) are equivalent. Two independent layers of defense."
+      },
+      "phase2": {
+        "symbolic_trace": "Attacker sets sidecar.Index = 127 (valid: < 128). In VerifyDataColumnsSidecarKZGProofs, indices = [127]. In C verify_cell_kzg_proof_batch: sanity check: cell_indices[0] = 127 < 128 = CELLS_PER_EXT_BLOB, passes. In computed_weighted_sum_of_proofs: get_coset_shift_pow_for_cell(&h_k_pow, 127, s). Inside: cell_idx_rbl = CELL_INDICES_RBL[127] = 127 (valid index). h_k_pow_idx = 127 * 64 = 8128 < 8193 = roots_of_unity array size. Safe. Attacker tries sidecar.Index = 128: VerifyDataColumnSidecar returns ErrIndexTooLarge immediately. Rejected before KZG verification path.",
+        "key_finding": "numberOfColumns (128) == CELLS_PER_EXT_BLOB (128). The Go-level bound check (< 128) and C-level bound check (>= CELLS_PER_EXT_BLOB = 128) are equivalent. A sidecar.Index of 128 or greater is rejected by VerifyDataColumnSidecar before reaching the C library. The C library also independently validates, providing defense-in-depth. CELL_INDICES_RBL array access with attacker-supplied index is never possible with index >= 128."
+      },
+      "phase2_5": {
+        "attack_scenario": "Attacker crafts a DataColumnSidecar with Index = 200. P2P gossip validation: VerifyDataColumnSidecar checks 200 >= 128 \u2192 ErrIndexTooLarge. Sidecar rejected. No KZG path reached. Alternative: attacker tries to reach get_coset_shift_pow_for_cell with value >= 128 \u2014 impossible because: (1) Go blocks it at sidecar validation; (2) C library blocks it at the sanity check loop before calling computational functions; (3) get_inv_coset_shift_for_cell uses loop variable i (not attacker cell_indices[i]) from 0 to CELLS_PER_EXT_BLOB-1.",
+        "attacker_controlled": false,
+        "exploit_steps": "No exploit path. The Go bound check (sidecar.Index < 128) and C bound check (cell_indices[i] < 128) both enforce the same constraint, providing two independent layers before the CELL_INDICES_RBL array access."
+      },
+      "phase3": {
+        "invariant_status": "holds",
+        "justification": "Invariant: All cell_index values reaching get_inv_coset_shift_for_cell or get_coset_shift_pow_for_cell are in [0, CELLS_PER_EXT_BLOB). This holds because: (1) get_inv_coset_shift_for_cell is only called with loop variable i in [0, CELLS_PER_EXT_BLOB), not with attacker-supplied cell_indices[i]; (2) get_coset_shift_pow_for_cell is called with cell_indices[i], but the C library's sanity check loop explicitly rejects any cell_indices[i] >= CELLS_PER_EXT_BLOB before reaching this function; (3) the Go layer's VerifyDataColumnSidecar rejects sidecar.Index >= numberOfColumns = 128 = CELLS_PER_EXT_BLOB before any C call. numberOfColumns == CELLS_PER_EXT_BLOB is confirmed: both are 128 in the Fulu configuration."
+      },
+      "phase3_5": {
+        "final_classification": "not_a_vulnerability",
+        "severity": "Informational",
+        "bug_bounty_eligible": false,
+        "confidence": "high",
+        "reasoning": "The invariant is protected by two independent checks: the Go layer (sidecar.Index < numberOfColumns = 128) and the C library sanity check loop (cell_indices[i] >= CELLS_PER_EXT_BLOB \u2192 BADARGS). Both bounds equal CELLS_PER_EXT_BLOB = 128, making them equivalent. Critically, get_inv_coset_shift_for_cell is never called with attacker-supplied values \u2014 it is called with loop variable i from a for loop over [0, CELLS_PER_EXT_BLOB). get_coset_shift_pow_for_cell is called with attacker-supplied values but only after the C library's pre-validation loop. The CELL_INDICES_RBL array access is therefore safe.",
+        "attack_vector": "None viable. Index out-of-bounds attack blocked at Go layer and redundantly at C library entry point.",
+        "impact": "None.",
+        "recommendation": "No code change required. Minor note for future maintainers: if CELLS_PER_EXT_BLOB or NumberOfColumns are ever changed independently, both the Go-level check in VerifyDataColumnSidecar and the C-level sanity check must remain consistent with the CELL_INDICES_RBL table size. A compile-time static assertion in the C library could enforce this more robustly."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0159",
+      "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) and slice bounds checked in coset_for_cell?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// Same VerifyDataColumnSidecar check as CHK-0158:\n// sidecar.Index < numberOfColumns (128) enforced at P2P layer\n\n// C library compute_commitment_to_aggregated_interpolation_poly:\n// for (uint64_t i = 0; i < CELLS_PER_EXT_BLOB; i++) {\n//   if (!is_cell_used[i]) {\n//     get_inv_coset_shift_for_cell(&inv_coset_shift, i, s);  // loop var i, not attacker cell_indices\n//   }\n// }\n// CELL_INDICES_RBL[i] for i in [0, 127] \u2014 all within 128-element table\n// inv_coset_factor_idx = FIELD_ELEMENTS_PER_EXT_BLOB - cell_idx_rbl in [8065, 8192]\n// s->roots_of_unity has 8193 elements \u2014 all accesses safe",
+      "state_context": "Companion to CHK-0158. Same two-layer defense. get_inv_coset_shift_for_cell uses loop variable i from [0, CELLS_PER_EXT_BLOB-1), not attacker-supplied cell_indices. CELL_INDICES_RBL[i] for i in [0, 127] gives values in [0, 127] (7-bit BRP). Derived indices into roots_of_unity are in [8065, 8192] \u2014 within bounds of 8193-element array.",
+      "phase1": {
+        "data_flow": "Same as CHK-0158: P2P \u2192 VerifyDataColumnSidecar \u2192 VerifyDataColumnsSidecarKZGProofs \u2192 C verify_cell_kzg_proof_batch \u2192 compute_commitment_to_aggregated_interpolation_poly (where a for loop from 0 to CELLS_PER_EXT_BLOB-1 uses is_cell_used[i] as a gate, then calls get_inv_coset_shift_for_cell(i, s) \u2014 loop variable i, not attacker-supplied). The 'coset_for_cell' function in the checklist corresponds to the CELL_INDICES_RBL lookup in both get_inv_coset_shift_for_cell and get_coset_shift_pow_for_cell.",
+        "validation_gaps": "Identical to CHK-0158. The Go layer validates sidecar.Index < 128. The C library validates cell_indices[i] < CELLS_PER_EXT_BLOB before any coset function is called with attacker-supplied values. get_inv_coset_shift_for_cell uses its own assert in debug builds. CELL_INDICES_RBL[i] for any i in [0, 127] gives values in [0, 127].",
+        "attack_surface": "Effectively identical to CHK-0158. The second coset function is another entry point to CELL_INDICES_RBL, but the protection is the same: Go-level index check + C-level sanity check + structural loop variable usage for get_inv_coset_shift_for_cell."
+      },
+      "phase2": {
+        "symbolic_trace": "For the coset_for_cell (get_inv_coset_shift_for_cell) path in compute_commitment_to_aggregated_interpolation_poly: loop variable i ranges 0..127. is_cell_used[i] gates execution. get_inv_coset_shift_for_cell(i, s): cell_idx_rbl = CELL_INDICES_RBL[i] where i < 128. CELL_INDICES_RBL has 128 entries. Access safe. cell_idx_rbl is a 7-bit value (max 0x7f = 127). inv_coset_factor_idx = FIELD_ELEMENTS_PER_EXT_BLOB - cell_idx_rbl = 8192 - cell_idx_rbl, range [8065, 8192]. s->roots_of_unity has FIELD_ELEMENTS_PER_EXT_BLOB+1 = 8193 entries. Index 8192 is valid. For get_coset_shift_pow_for_cell with cell_indices[i] (attacker-supplied but pre-validated to < 128): h_k_pow_idx = cell_idx_rbl * FIELD_ELEMENTS_PER_CELL, max = 127 * 64 = 8128 < 8193. Safe.",
+        "key_finding": "The CELL_INDICES_RBL table has exactly CELLS_PER_EXT_BLOB = 128 entries, all values in [0, 127]. The roots_of_unity array has FIELD_ELEMENTS_PER_EXT_BLOB+1 = 8193 entries. All derived indices are within bounds by construction. The assert statements would catch out-of-range cases in debug builds. The primary attacker-supplied index is bounded by both Go and C checks before these internal functions are reached."
+      },
+      "phase2_5": {
+        "attack_scenario": "Identical to CHK-0158. Attacker cannot supply a cell_index >= 128 to the coset functions because: (1) sidecar.Index >= 128 is rejected by VerifyDataColumnSidecar; (2) C sanity check loop rejects cell_indices[i] >= 128 before compute_commitment_to_aggregated_interpolation_poly is invoked; (3) the loop in compute_commitment_to_aggregated_interpolation_poly uses its own loop variable i (not attacker cell_indices[i]) for the get_inv_coset_shift_for_cell call.",
+        "attacker_controlled": false,
+        "exploit_steps": "No exploit path. Same two-layer defense as CHK-0158. The only theoretical concern would be if CELL_INDICES_RBL had fewer than CELLS_PER_EXT_BLOB entries or if roots_of_unity had fewer than FIELD_ELEMENTS_PER_EXT_BLOB+1 entries \u2014 these are compile-time constants, not runtime-variable."
+      },
+      "phase3": {
+        "invariant_status": "holds",
+        "justification": "Invariant: All index accesses to CELL_INDICES_RBL use indices in [0, CELLS_PER_EXT_BLOB) and all derived indices into roots_of_unity are in [0, FIELD_ELEMENTS_PER_EXT_BLOB]. This holds because: CELL_INDICES_RBL is a 128-element compile-time array; get_inv_coset_shift_for_cell is called with loop variable i from [0, 127]; get_coset_shift_pow_for_cell is called with attacker cell_indices[i] values pre-validated to < 128 by C sanity check; inv_coset_factor_idx = 8192 - cell_idx_rbl where cell_idx_rbl <= 127, so inv_coset_factor_idx >= 8065; h_k_pow_idx = cell_idx_rbl * 64 <= 127 * 64 = 8128; both are <= 8192 and roots_of_unity has 8193 elements."
+      },
+      "phase3_5": {
+        "final_classification": "not_a_vulnerability",
+        "severity": "Informational",
+        "bug_bounty_eligible": false,
+        "confidence": "high",
+        "reasoning": "This is a companion to CHK-0158 with identical protection. The coset functions (get_inv_coset_shift_for_cell, get_coset_shift_pow_for_cell) both use CELL_INDICES_RBL[cell_index] as the first operation. This 128-element table access is safe for all valid cell_index values [0, 127]. Attacker-controlled sidecar.Index is bounded at the Go layer (< 128) and again at the C library entry (< CELLS_PER_EXT_BLOB = 128). The specific internal function call path from compute_commitment_to_aggregated_interpolation_poly uses a loop counter (not attacker data) for get_inv_coset_shift_for_cell.",
+        "attack_vector": "None viable. Identical to CHK-0158.",
+        "impact": "None.",
+        "recommendation": "No code change required. Note for future maintainers: if CELLS_PER_EXT_BLOB or NumberOfColumns are ever changed independently, both bounds must remain consistent with the CELL_INDICES_RBL table size. A compile-time static assertion (static_assert) in the C library could enforce this more robustly."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0160",
+      "title": "Verify Trust Boundary Integrity for tb-002: Does cell_to_coset_evals produce exactly FIELD_ELEMENTS_PER_CELL elements and validate byte segment sizes?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "ComputeCells",
+            "line_range": {
+              "start": 54,
+              "end": 69
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// kzg.Cell type definition (kzg.go):\ntype Cell [BytesPerCell]byte  // Fixed-size array: [2048]byte\n// BytesPerCell = ckzg4844.BytesPerCell = FIELD_ELEMENTS_PER_CELL * BYTES_PER_FIELD_ELEMENT = 64 * 32 = 2048\n\n// P2P KZG verification:\ncells = append(cells, kzg.Cell(sidecar.Column[i]))  // type conversion between identical [2048]byte types\n// kzg.VerifyCellKZGProofBatch \u2192 ckzg4844.VerifyCellKZGProofBatch\n// C: for (uint64_t j = 0; j < FIELD_ELEMENTS_PER_CELL; j++) {\n//   offset = j * BYTES_PER_FIELD_ELEMENT;\n//   bytes_to_bls_field(fr_ptr, (const Bytes32 *)&cells[i].bytes[offset]);\n// }  // max offset = 63 * 32 = 2016 < 2048: always in bounds",
+      "state_context": "kzg.Cell = [BytesPerCell]byte (fixed-size Go array). Cannot be undersized by Go type system. SSZ deserialization of DataColumnSidecar enforces correct byte length before reaching application code. C library accesses cell bytes via j * BYTES_PER_FIELD_ELEMENT for j < FIELD_ELEMENTS_PER_CELL = 64, max offset 2016 < 2048.",
+      "phase1": {
+        "data_flow": "P2P \u2192 DataColumnSidecar (sidecar.Column[i] is a byte slice deserialized from SSZ) \u2192 VerifyDataColumnSidecar (validates len(sidecar.Column) == len(sidecar.KzgCommitments)) \u2192 VerifyDataColumnsSidecarKZGProofs \u2192 kzg.Cell(sidecar.Column[i]) type conversion \u2192 ckzg4844.Cell (passed to C verify_cell_kzg_proof_batch). Cell data deserialized via SSZ before reaching Prysm application code. In C verify_cell_kzg_proof_batch, field elements extracted from cell bytes via bytes_to_bls_field at offset = fr_index * BYTES_PER_FIELD_ELEMENT for fr_index < FIELD_ELEMENTS_PER_CELL=64.",
+        "validation_gaps": "The Go type kzg.Cell is defined as '[BytesPerCell]byte' \u2014 a fixed-size array of exactly BytesPerCell = 2048 bytes. In Go, fixed-size arrays CANNOT be undersized; they are always exactly BytesPerCell bytes, zero-padded if necessary. The conversion kzg.Cell(sidecar.Column[i]) only compiles if sidecar.Column[i] is itself a [2048]byte type. The SSZ deserialization framework ensures the correct size or returns an error. There is no path where a Cell reaches the C library with fewer than BytesPerCell bytes.",
+        "attack_surface": "An attacker would need to deliver a Cell value with fewer than 2048 bytes. In Go with fixed-size arrays, this is a type system guarantee: you cannot have a [2048]byte with fewer than 2048 bytes. The type conversion from SSZ-deserialized data enforces the byte count at the deserialization boundary."
+      },
+      "phase2": {
+        "symbolic_trace": "SSZ deserialization of DataColumnSidecar produces sidecar.Column[i] as a fixed-size [BytesPerCell]byte. kzg.Cell(sidecar.Column[i]) is a type assertion between identical underlying types [2048]byte \u2014 a zero-copy conversion. The resulting ckzg4844.Cell passed to C is a C.Cell struct with a bytes[2048] field, always fully populated. In C verify_cell_kzg_proof_batch, bytes_to_bls_field accesses cells[cell_index].bytes[offset] where offset = fr_index * 32, fr_index < 64, so max offset = 63 * 32 = 2016 < 2048. No OOB access. In C recover_cells_and_kzg_proofs, same access pattern: cells[i].bytes[j * BYTES_PER_FIELD_ELEMENT] for j < FIELD_ELEMENTS_PER_CELL = 64. All safe.",
+        "key_finding": "Go's fixed-size array type system prevents undersized cells. kzg.Cell = [BytesPerCell]byte is a compile-time guarantee that the array is exactly 2048 bytes. The only way to produce a differently-sized cell would be through unsafe pointer manipulation, which is not present in this code path. SSZ deserialization rejects payloads that do not match the expected fixed size."
+      },
+      "phase2_5": {
+        "attack_scenario": "Attacker sends a DataColumnSidecar P2P message with truncated cell data. SSZ deserialization of the DataColumnSidecar fails because the Column field has an incorrect byte count for the fixed-size Cell type \u2014 the message is rejected at the P2P layer before reaching any application code. Alternatively, if SSZ deserialization were permissive: the Go type system would still enforce the fixed-size array invariant at the type conversion step. There is no mechanism for a runtime-short cell to propagate past the type system boundary.",
+        "attacker_controlled": false,
+        "exploit_steps": "No exploit path. Go fixed-size array types cannot be undersized. SSZ provides the first deserialization boundary, Go types provide the second structural guarantee. The C library then operates on a struct with a correctly-sized bytes[] field."
+      },
+      "phase3": {
+        "invariant_status": "holds",
+        "justification": "Invariant: All Cell values reaching C library functions have exactly BytesPerCell = 2048 bytes. This holds because: (1) kzg.Cell is defined as '[BytesPerCell]byte' \u2014 a Go fixed-size array \u2014 which by language specification always occupies exactly BytesPerCell bytes in memory; (2) SSZ deserialization validates the byte length of fixed-size fields and returns an error for malformed messages; (3) the type conversion kzg.Cell(sidecar.Column[i]) between identical fixed-size array types is a no-op that cannot change the byte count; (4) CGO passes the &cells[0] pointer to C with num_cells elements, each of size sizeof(Cell) = BytesPerCell. There is no dynamic slice involved \u2014 the Cell type is a struct { bytes[BYTES_PER_CELL] uint8_t } in C and [BYTES_PER_CELL]byte in Go."
+      },
+      "phase3_5": {
+        "final_classification": "not_a_vulnerability",
+        "severity": "Informational",
+        "bug_bounty_eligible": false,
+        "confidence": "high",
+        "reasoning": "The threat model for CHK-0160 assumes cells can be 'undersized' \u2014 shorter than FIELD_ELEMENTS_PER_CELL * BYTES_PER_FIELD_ELEMENT bytes. This assumption is invalidated by Go's type system: kzg.Cell = [BytesPerCell]byte is a fixed-size array. Fixed-size arrays in Go are always exactly their declared size; they cannot be shorter. SSZ deserialization provides the outer boundary enforcement. The C library's bytes_to_bls_field extraction loop accesses the fixed-size cell struct's bytes[] field (BYTES_PER_CELL = 2048 via the C Cell typedef), always producing exactly FIELD_ELEMENTS_PER_CELL=64 elements. The cell_to_coset_evals function referenced in the checklist corresponds to this extraction loop \u2014 it produces exactly 64 elements by construction.",
+        "attack_vector": "None viable. Go fixed-size arrays and SSZ deserialization prevent undersized cells from entering the application layer.",
+        "impact": "None.",
+        "recommendation": "No code change required. The choice of a fixed-size array type [BytesPerCell]byte (rather than a slice []byte) is a deliberate and effective security decision that prevents this class of vulnerability. This architectural choice should be documented for future maintainers."
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 12,
+    "item_count": 5,
+    "timestamp": 1771374690,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0156",
+      "W7B8:W7B8:CHK-0157",
+      "W7B8:W7B8:CHK-0158",
+      "W7B8:W7B8:CHK-0159",
+      "W7B8:W7B8:CHK-0160"
+    ]
+  }
+}

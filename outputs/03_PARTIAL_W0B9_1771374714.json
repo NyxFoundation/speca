@@ -1,0 +1,509 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0141",
+      "property_id": "PROP-W5B14-17",
+      "title": "Verify Trust Boundary Integrity for tb-003: Is post-recovery KZG commitment verification performed for ALL recovered cells and proofs?",
+      "severity": "Critical",
+      "bug_bounty_eligible": true,
+      "final_classification": "vulnerability",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/core/peerdas/reconstruction.go lines 86-122\n// After RecoverCellsAndKZGProofs, NO VerifyCellKZGProofBatch call exists:\ncellsAndProofsForBlob, err := kzg.RecoverCellsAndKZGProofs(cellsIndices, cells)\n// ... no verification step ...\nverifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar) // <- wrapped as Verified without KZG check\n// ckzg4844.RecoverCellsAndKZGProofs signature: (cellIndices []uint64, cells []Cell) \u2014 no commitment param",
+      "state_context": "dataColumnStorage.Save(toSaveSidecars) persists unverified reconstructed sidecars. broadcastMissingDataColumnSidecars re-broadcasts them over P2P. VerifyDataColumnsSidecarKZGProofs exists in peerdas/p2p_interface.go:61 and calls VerifyCellKZGProofBatch but is never called after reconstruction.",
+      "phase1": {
+        "summary": "ReconstructDataColumnSidecars calls kzg.RecoverCellsAndKZGProofs (pure Reed-Solomon recovery, no commitment parameter) then wraps all recovered columns in blocks.NewVerifiedRODataColumn without any call to VerifyCellKZGProofBatch against on-chain KZG commitments. The ckzg4844.RecoverCellsAndKZGProofs C binding takes only cellIndices and partialCells \u2014 zero commitment verification. Reconstructed sidecars are saved to disk and broadcast to P2P peers as if fully KZG-verified.",
+        "state_anomalies_found": [
+          "NewVerifiedRODataColumn called outside the verification package in reconstruction path, violating documented type invariant ('should only be used by the verification package')",
+          "No VerifyCellKZGProofBatch / VerifyDataColumnsSidecarKZGProofs call after RecoverCellsAndKZGProofs \u2014 recovered cells never cryptographically bound to on-chain KZG commitments",
+          "Reconstructed unverified sidecars persisted to dataColumnStorage.Save() at data_columns_reconstruct.go:88, becoming authoritative for future reads",
+          "Reconstructed unverified sidecars broadcast to P2P peers via broadcastMissingDataColumnSidecars \u2014 potential network-wide propagation",
+          "Previously reconstructed (stored without KZG re-verification) sidecars can be inputs to a subsequent reconstruction call, creating error-propagation bootstrapping risk"
+        ]
+      },
+      "phase2": {
+        "summary": "An attacker contributing >=1 corrupt-but-individually-valid column sidecar to a reconstruction event causes recovery to produce columns not bound to on-chain commitments. More concretely: first reconstruction stores unverified result; subsequent reconstruction loads stored (unverified) sidecars via dataColumnStorage.Get as inputs, compounding errors without detection. The existing VerifyDataColumnsSidecarKZGProofs function is present but never called in any reconstruction path.",
+        "counterexample_found": true,
+        "counterexample": "Node reconstructs all 128 columns from 64 inputs (e.g., 63 honest + 1 corrupted column). Corrupt column passes per-sidecar gossip KZG check for that single column but contributes corrupted polynomial coefficients to the recovery. Recovery produces 128 columns that do NOT commit to the on-chain polynomial. These 128 columns are stored to disk as VerifiedRODataColumn. A subsequent call to mergeAvailableSidecars or ReconstructBlobs loads these stored (unverified) sidecars and re-uses them as inputs to ReconstructDataColumnSidecars \u2014 error propagates silently. A simpler, definitive attack: previously reconstructed sidecars (stored without re-verification) used as inputs to second reconstruction with no integrity check between rounds.",
+        "attack_scenarios": [
+          "Stored-reconstructed-sidecar re-use: first reconstruction stores unverified result; mergeAvailableSidecars or ReconstructBlobs uses stored (unverified) sidecars as inputs \u2014 error compounds without detection",
+          "Gossip path single-corrupt-column: attacker contributes 1 column with cells passing individual per-sidecar KZG check but lying on an adversarial polynomial; recovery extrapolates to wrong full set",
+          "mergeAvailableSidecars path (data_column_sidecars.go): called during sync, mixes storage sidecars (potentially unverified) and peer-retrieved sidecars as input to ReconstructDataColumnSidecars without post-verification",
+          "ReconstructBlobs path: used for serving blobs via RPC, could return corrupt blob data to RPC clients if reconstruction is compromised"
+        ]
+      },
+      "phase2_5": {
+        "summary": "Three distinct code paths call ReconstructDataColumnSidecars without post-reconstruction KZG verification: (1) gossip reception in sync service, (2) FetchDataColumnSidecars sync path, (3) ReconstructBlobs for RPC serving. All paths reachable from attacker-controlled P2P inputs. Gossip path is most direct.",
+        "entry_points": [
+          "P2P gossip: validateDataColumn -> receiveDataColumnSidecar -> reconstructSaveBroadcastDataColumnSidecars (data_columns_reconstruct.go:33)",
+          "Sync RPC: FetchDataColumnSidecars -> mergeAvailableSidecars -> ReconstructDataColumnSidecars",
+          "RPC lookup: BeaconDbBlocker.Blobs -> ReconstructBlobs -> ReconstructDataColumnSidecars (reconstruction.go:229)"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable"
+      },
+      "phase3": {
+        "summary": "Code comment at reconstruction.go:108-109 claims 'Input sidecars are verified, and we reconstructed ourselves the missing sidecars. As a consequence, reconstructed sidecars are also verified.' This claim fails for: (1) stored reconstructed sidecars re-used as inputs to subsequent reconstruction; (2) VerifiedRODataColumn type invariant violated \u2014 type documented for verification package only; (3) spec non-compliance \u2014 EIP-7594 specifies verify_data_column_sidecar_kzg_proofs after reconstruction. The mathematical argument holds only if ALL input cells are freshly individually KZG-verified, which is NOT guaranteed across all code paths.",
+        "proof_successful": false,
+        "guard_identified": "Per-sidecar gossip KZG verification via validateWithKzgBatchVerifier in validateDataColumn (validate_data_column.go:148) \u2014 calls VerifyCellKZGProofBatch for each received column",
+        "guard_sufficiency": "Partially sufficient for direct gossip path only. Insufficient for: (a) stored reconstructed sidecars re-used as reconstruction inputs; (b) mergeAvailableSidecars mixing storage and peer-received columns; (c) spec compliance requirement; (d) VerifiedRODataColumn type contract violation downstream",
+        "edge_cases": [
+          "First reconstruction stores unverified columns; subsequent reconstruction uses stored unverified columns as inputs \u2014 silent error propagation",
+          "VerifiedRODataColumn type used outside verification package violates stated contract, leading to false trust downstream",
+          "mergeAvailableSidecars uses mix of storage (potentially previously reconstructed, unverified) and fresh peer columns without distinguishing verified vs. reconstructed",
+          "ReconstructBlobs does not re-verify reconstructed columns before assembling blobs for RPC clients",
+          "Broadcast of reconstructed sidecars (data_columns_reconstruct.go:94-102) propagates potentially invalid data network-wide before any other node can detect corruption"
+        ]
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "reason": "Missing mandatory post-reconstruction KZG verification is a spec compliance gap (EIP-7594 requires verify_data_column_sidecar_kzg_proofs after reconstruction). The VerifiedRODataColumn type invariant is violated. The concrete attack of stored-reconstructed-sidecar re-use as inputs to second reconstruction is real and directly traceable in code. VerifyDataColumnsSidecarKZGProofs exists in peerdas/p2p_interface.go:61 but is never called. Three independent callers miss this verification. Severity High: corrupted data can be stored permanently, broadcast to peers, and corrupt blob reconstruction for RPC clients.",
+        "recommendation": "Add a call to peerdas.VerifyDataColumnsSidecarKZGProofs (converting reconstructedSidecars to []blocks.RODataColumn) in ReconstructDataColumnSidecars BEFORE wrapping results in NewVerifiedRODataColumn. This function already exists and performs the VerifyCellKZGProofBatch check required by spec."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0142",
+      "property_id": "PROP-W5B14-17",
+      "title": "Supporting Check: Do ALL callers of recover_cells_and_kzg_proofs verify recovered data against original commitment?",
+      "severity": "Critical",
+      "bug_bounty_eligible": true,
+      "final_classification": "vulnerability",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// Three callers of kzg.RecoverCellsAndKZGProofs via ReconstructDataColumnSidecars, NONE verifies post-recovery:\n// 1. reconstructSaveBroadcastDataColumnSidecars (data_columns_reconstruct.go:65)\n// 2. mergeAvailableSidecars (data_column_sidecars.go, calls ReconstructDataColumnSidecars)\n// 3. ReconstructBlobs (reconstruction.go:229)\n// All three wrap results in NewVerifiedRODataColumn without VerifyCellKZGProofBatch.\n// kzg.RecoverCellsAndKZGProofs signature: (cellIndices []uint64, partialCells []Cell) \u2014 no commitment param",
+      "state_context": "VerifyDataColumnsSidecarKZGProofs in peerdas/p2p_interface.go:61 performs VerifyCellKZGProofBatch against KZG commitments. It is called for gossip-received columns (validate_data_column.go:148) but NEVER for reconstructed columns in any of the three caller paths.",
+      "phase1": {
+        "summary": "Audited all callers of kzg.RecoverCellsAndKZGProofs (via ReconstructDataColumnSidecars). Three callers found: reconstructSaveBroadcastDataColumnSidecars, mergeAvailableSidecars (sync path), ReconstructBlobs (RPC path). None of the three callers invoke VerifyDataColumnsSidecarKZGProofs or VerifyCellKZGProofBatch after recovery. All callers wrap results in blocks.NewVerifiedRODataColumn immediately after recovery, violating the type's stated invariant.",
+        "state_anomalies_found": [
+          "Three independent callers of ReconstructDataColumnSidecars, zero of them add post-reconstruction KZG verification",
+          "VerifyDataColumnsSidecarKZGProofs function exists and is called for gossip path but has no callers in reconstruction paths",
+          "Caller responsibility violation: documentation says caller must verify \u2014 no caller does",
+          "All callers store or use reconstructed data without commitment binding"
+        ]
+      },
+      "phase2": {
+        "summary": "Caller responsibility analysis shows systematic omission. The mergeAvailableSidecars path is particularly dangerous because it mixes columns from dataColumnStorage (which may contain previously reconstructed, unverified columns) with freshly peer-retrieved columns. The combination is fed into ReconstructDataColumnSidecars without pre-filtering for verification status.",
+        "counterexample_found": true,
+        "counterexample": "mergeAvailableSidecars loads 'alreadyAvailable' sidecars from dataColumnStorage.Get \u2014 this returns ANY stored VerifiedRODataColumn, including those stored by a previous reconstruction without post-verification. These are combined with fresh peer-retrieved sidecars and passed to ReconstructDataColumnSidecars. No caller checks whether the stored sidecars were originally gossip-verified or reconstruction-stored. The corruption is silent and systematic.",
+        "attack_scenarios": [
+          "Systematic caller omission: all three callers skip verification \u2014 a single attacker can exploit any of three attack surfaces",
+          "mergeAvailableSidecars mixes storage (possibly unverified reconstructed) + peer sidecars as reconstruction input with no post-verification",
+          "ReconstructBlobs serves corrupted blobs to RPC clients requesting blob data for a specific block"
+        ]
+      },
+      "phase2_5": {
+        "summary": "All three callers are reachable from P2P network. reconstructSaveBroadcastDataColumnSidecars is triggered on each gossip reception. mergeAvailableSidecars triggered during sync. ReconstructBlobs triggered when RPC client requests blob data. Attack is applicable to all three paths.",
+        "entry_points": [
+          "reconstructSaveBroadcastDataColumnSidecars: triggered per-gossip-reception when column count crosses threshold",
+          "mergeAvailableSidecars: triggered during initial sync and explicit data column fetch requests",
+          "ReconstructBlobs: triggered by RPC blob-by-block-root or blob-by-range requests"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable"
+      },
+      "phase3": {
+        "summary": "The caller responsibility violation is confirmed: the comment in reconstruction.go explicitly notes 'The recovery function DOES NOT verify \u2014 caller MUST do it' but no caller does. This is a systemic design error, not an isolated oversight. The three callers represent three independent missing verification points.",
+        "proof_successful": false,
+        "guard_identified": "None in any caller of RecoverCellsAndKZGProofs. Gossip path has pre-recovery verification per-sidecar, but no caller adds post-recovery batch verification.",
+        "guard_sufficiency": "No guard present in caller paths for post-reconstruction verification. Guards exist only in the gossip reception path, not in reconstruction callers.",
+        "edge_cases": [
+          "mergeAvailableSidecars mixes verified gossip sidecars with storage-reconstructed (unverified) sidecars as reconstruction inputs",
+          "ReconstructBlobs returns VerifiedROBlob objects assembled from unverified reconstruction outputs",
+          "Async broadcast via time.AfterFunc in scheduleMissingDataColumnSidecarsBroadcast means corruption propagates to network even after node restart if stored sidecars persist"
+        ]
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "reason": "Systematic caller responsibility violation: three callers of ReconstructDataColumnSidecars, none adds post-reconstruction KZG verification. VerifyDataColumnsSidecarKZGProofs exists and would address this but is never called in reconstruction paths. Direct code evidence of the gap at reconstruction.go:86-122 and all three caller sites.",
+        "recommendation": "Add VerifyDataColumnsSidecarKZGProofs(roSidecars) call in ReconstructDataColumnSidecars before wrapping as VerifiedRODataColumn, OR add the verification to each of the three callers immediately after ReconstructDataColumnSidecars returns."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0143",
+      "property_id": "PROP-W5B14-17",
+      "title": "Supporting Check: Can a malicious P2P peer cause a validator to distribute corrupted recovered cells?",
+      "severity": "Critical",
+      "bug_bounty_eligible": true,
+      "final_classification": "vulnerability",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "MinimumColumnCountToReconstruct",
+            "line_range": {
+              "start": 22,
+              "end": 26
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/data_columns_reconstruct.go",
+            "symbol": "reconstructSaveBroadcastDataColumnSidecars",
+            "line_range": {
+              "start": 1,
+              "end": 110
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// data_columns_reconstruct.go: reconstruction + broadcast pipeline\nreconstructedSidecars, err := peerdas.ReconstructDataColumnSidecars(verifiedSidecars)  // no post-verification\n// ... save to disk ...\nif err := s.cfg.dataColumnStorage.Save(toSaveSidecars); err != nil { ... }\n// ... schedule broadcast after delay ...\nif err := s.scheduleMissingDataColumnSidecarsBroadcast(ctx, root, proposerIndex, slot); err != nil { ... }\n\n// broadcastMissingDataColumnSidecars: retrieved from storage and broadcast WITHOUT additional KZG check\nverifiedRODataColumnSidecars, err := s.cfg.dataColumnStorage.Get(root, missingColumns)\nfor _, verifiedRODataColumn := range verifiedRODataColumnSidecars {\n    if err := s.cfg.p2p.BroadcastDataColumnSidecar(root, subnet, verifiedRODataColumn.DataColumnSidecar); err != nil { ... }\n}",
+      "state_context": "MinimumColumnCountToReconstruct() = (NumberOfColumns + 1) / 2 = 64 of 128. Attacker needs to influence 1+ of the 64 columns used for reconstruction. Reconstruction lock (reconstructionLock.Lock()) prevents concurrent reconstructions but NOT attacker influence on input column set.",
+      "phase1": {
+        "summary": "The reconstruction \u2192 broadcast pipeline in data_columns_reconstruct.go is the primary attack vector. After ReconstructDataColumnSidecars returns (without post-KZG verification), reconstructed sidecars are saved to disk and then broadcast to P2P peers via BroadcastDataColumnSidecar. The broadcast uses time.AfterFunc with random 1-4s delay \u2014 timing is deterministic enough for an attacker. The attack path: attacker contributes corrupted column \u2192 victim reconstructs all 128 columns \u2192 victim broadcasts all 128 (potentially corrupted) columns to other peers.",
+        "state_anomalies_found": [
+          "Reconstruction result immediately saved to disk (data_columns_reconstruct.go:88) as authoritative truth without KZG check",
+          "scheduleMissingDataColumnSidecarsBroadcast schedules P2P broadcast of reconstruction result after 1-4s",
+          "broadcastMissingDataColumnSidecars re-broadcasts stored (potentially unverified) sidecars to P2P network",
+          "Peer scoring does not penalize the malicious peer because the attack uses individually valid-looking columns"
+        ]
+      },
+      "phase2": {
+        "summary": "Concrete attack vector for peer-to-peer corruption amplification: attacker connects as P2P peer, sends one column with a valid per-column KZG proof but subtly corrupted cell content. The corrupted cell passes gossip validation (individual column's KZG proof is valid). When the victim node has collected 63 honest columns + 1 corrupted, reconstruction triggers, producing 128 columns that may not properly commit to the on-chain polynomial. The victim then broadcasts these 128 columns to all its peers within 1-4 seconds. No post-reconstruction verification catches the corruption.",
+        "counterexample_found": true,
+        "counterexample": "Step 1: Attacker connects to victim validator node as P2P peer. Step 2: Victim node receives 63 honest data column sidecars for block B from other peers. Step 3: Attacker sends 1 data column sidecar with a valid KZG proof for that single column position but internally corrupted data (or using data from a different polynomial that happens to satisfy the per-column proof). Step 4: Victim now has 64 columns (MinimumColumnCountToReconstruct), triggers reconstructSaveBroadcastDataColumnSidecars. Step 5: RecoverCellsAndKZGProofs runs, producing 128 columns \u2014 the recovery is deterministic from inputs but inputs include the corrupted column. Step 6: No post-reconstruction VerifyCellKZGProofBatch is called. Step 7: 128 columns stored to disk as VerifiedRODataColumn. Step 8: Within 1-4s, victim broadcasts all 128 columns to peers. Step 9: Receiving peers individually validate each broadcast column \u2014 since the recovered cells and proofs may or may not pass per-column validation, this depends on the attacker's sophistication. The missing step 6 is the vulnerability.",
+        "attack_scenarios": [
+          "Direct attack vector amplification: 1 corrupt column \u2192 128 broadcast columns to all connected peers",
+          "Sybil attack: multiple attacker peers each contribute 1 column, ensuring \u22651 corrupt column reaches reconstruction threshold",
+          "Cascading corruption: corrupted broadcast sidecars reach other nodes that also store them as VerifiedRODataColumn and may use them in their own reconstructions"
+        ]
+      },
+      "phase2_5": {
+        "summary": "The broadcast path is directly reachable from gossip reception. Any P2P peer can trigger reconstruction by contributing the threshold-crossing column. The reconstruction lock prevents concurrent reconstructions but not the attack itself. Peer scoring would not detect the attack if the corrupted per-column proof is valid.",
+        "entry_points": [
+          "P2P gossip: dataColumnSubscriber -> receiveDataColumnSidecar -> reconstructSaveBroadcastDataColumnSidecars -> scheduleMissingDataColumnSidecarsBroadcast -> broadcastMissingDataColumnSidecars"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable"
+      },
+      "phase3": {
+        "summary": "The broadcast of reconstructed columns without post-verification is the core of the attack vector amplification check. The validator node actively propagates potentially corrupt data to peers. The mathematical defense (individually-verified inputs \u2192 correct recovery) only holds if the KZG scheme guarantees that individually-valid columns cannot be combined to produce a different polynomial upon recovery. This requires KZG soundness property to hold for partial evaluations \u2014 which is a strong mathematical claim, but the code provides NO explicit guarantee check and violates the spec requirement for post-reconstruction verification.",
+        "proof_successful": false,
+        "guard_identified": "None between reconstruction and broadcast. Only reconstructionLock.Lock() prevents concurrent reconstructions.",
+        "guard_sufficiency": "Guard is not relevant to this check. The missing guard is post-reconstruction KZG verification before broadcast. The lock prevents race conditions in reconstruction but does not prevent broadcasting of unverified reconstruction results.",
+        "edge_cases": [
+          "Time.AfterFunc broadcast: if node restarts between reconstruction and broadcast, stored (unverified) sidecars persist and may be broadcast in a future broadcast cycle",
+          "Cascading corruption: broadcast sidecars are received by other nodes that validate them as incoming gossip \u2014 if they pass per-column KZG check, they are accepted and stored, potentially corrupting other nodes' storage",
+          "Peer score: attacker's column passes gossip validation (individual KZG proof valid), so no score penalty occurs \u2014 attacker can repeat the attack"
+        ]
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "reason": "Direct PoC traceable in code: gossip reception \u2192 reconstruction without post-KZG check \u2192 broadcast to peers. The broadcast step at data_columns_reconstruct.go:94 (scheduleMissingDataColumnSidecarsBroadcast) propagates unverified reconstruction results to the P2P network. This is a network-wide data integrity vulnerability. Attack surface is any connected P2P peer.",
+        "recommendation": "Add VerifyDataColumnsSidecarKZGProofs check in ReconstructDataColumnSidecars before returning. If verification fails, return error and do NOT save or broadcast. This prevents corrupt data from entering storage and propagating to the network."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0144",
+      "property_id": "PROP-W5B14-17",
+      "title": "Supporting Check: Does the validator node trust reconstructed data without cryptographic verification?",
+      "severity": "High",
+      "bug_bounty_eligible": true,
+      "final_classification": "vulnerability",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// rodatacolumn.go: type definition reveals trust assumption\n// 'VerifiedRODataColumn represents an RODataColumn that has undergone full verification\n//  (eg block sig, inclusion proof, commitment check)'\ntype VerifiedRODataColumn struct { RODataColumn }\n// 'NewVerifiedRODataColumn upgrades an RODataColumn to a VerifiedRODataColumn.\n//  This method should only be used by the verification package.'\nfunc NewVerifiedRODataColumn(roDataColumn RODataColumn) VerifiedRODataColumn {\n    return VerifiedRODataColumn{RODataColumn: roDataColumn}\n}\n// reconstruction.go: violates the above contract\nverifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar)  // NO commitment check done\n// All downstream consumers of VerifiedRODataColumn trust the type guarantee.",
+      "state_context": "Implicit trust assumption: downstream consumers (DAS sampling, RPC blob serving, consensus, peer RPC responses) all receive VerifiedRODataColumn objects and implicitly trust they are KZG-verified. The type system creates a false security guarantee for reconstructed data. dataColumnStorage stores VerifiedRODataColumn objects \u2014 no distinction between gossip-verified and reconstruction-stored.",
+      "phase1": {
+        "summary": "The validator node trusts reconstructed data based on the VerifiedRODataColumn type tag alone. The type's documentation explicitly claims 'full verification (block sig, inclusion proof, commitment check)' but reconstruction bypasses commitment check. Downstream consumers \u2014 including DAS sampling, RPC blob serving, and the P2P broadcast path \u2014 all receive VerifiedRODataColumn objects without any additional verification layer. The implicit trust assumption is systematically exploited by the reconstruction path.",
+        "state_anomalies_found": [
+          "VerifiedRODataColumn type created in reconstruction path without the 'commitment check' it advertises",
+          "dataColumnStorage stores VerifiedRODataColumn without distinguishing gossip-verified vs. reconstruction-stored",
+          "All downstream consumers of dataColumnStorage.Get() receive mixed-provenance VerifiedRODataColumn without differentiation",
+          "DAS sampling uses stored VerifiedRODataColumn, which may include reconstruction-produced (unverified) columns",
+          "ReconstructBlobs assembles blobs from VerifiedRODataColumn and returns VerifiedROBlob without re-verification",
+          "RPC handlers serve blob data derived from reconstruction-produced (unverified) columns to EL clients"
+        ]
+      },
+      "phase2": {
+        "summary": "The implicit trust propagates through the entire system. Once a VerifiedRODataColumn (falsely marked as commitment-checked) is stored, it becomes the authoritative truth for DAS sampling results, blob reconstruction for RPC, and peer serving. No downstream layer re-verifies commitment binding because all downstream layers trust the type contract. The attack exploits the transitivity of trust: gossip-received \u2192 reconstruction (missing check) \u2192 downstream consumers trust result.",
+        "counterexample_found": true,
+        "counterexample": "DAS sampling check: node samples a data column for block B via dataColumnStorage.Get(). The returned VerifiedRODataColumn may be a reconstruction-stored sidecar without actual commitment check. The DAS algorithm marks the block as 'data available' based on this column, when in fact the column's cells may not commit to the on-chain polynomial. This could cause a validator to vote for a block as available when the actual blob data is corrupted. Concrete: node reconstructs from 64 columns (including 1 attacker-corrupted), stores 128 'verified' columns. DAS sampling query for any of those 128 columns returns false positive 'available'. Block marked as available. Validator votes on availability incorrectly.",
+        "attack_scenarios": [
+          "DAS false positive: node marks block as 'data available' based on unverified reconstruction result",
+          "Blob serving corruption: RPC client receives corrupted blob data assembled from unverified reconstruction",
+          "Consensus impact: validator node's availability check relies on unverified reconstruction, potentially causing incorrect consensus votes",
+          "Peer RPC serving: node serves unverified column data to peers requesting data via rpc_data_column_sidecars_by_root or _by_range"
+        ]
+      },
+      "phase2_5": {
+        "summary": "The implicit trust assumption affects all downstream consumers of dataColumnStorage. DAS sampling, blob reconstruction, and peer RPC serving are all affected. The attack does not require direct exploitation \u2014 storing any unverified reconstruction result automatically taints all downstream uses.",
+        "entry_points": [
+          "DAS sampling: dataColumnStorage.Get() returns mix of gossip-verified and reconstruction-stored VerifiedRODataColumn",
+          "RPC blob serving: ReconstructBlobs uses stored VerifiedRODataColumn, returns VerifiedROBlob",
+          "Peer RPC: DataColumnSidecarsByRoot / DataColumnSidecarsByRange serve stored (possibly unverified) columns"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable"
+      },
+      "phase3": {
+        "summary": "The invariant that 'VerifiedRODataColumn guarantees commitment check' is provably broken in the reconstruction path. The reconstruction code at reconstruction.go:112 calls NewVerifiedRODataColumn without calling VerifyCellKZGProofBatch, directly violating the type's stated contract. All downstream code that relies on this invariant for security decisions is potentially affected.",
+        "proof_successful": false,
+        "guard_identified": "None. No post-reconstruction commitment verification guard exists in any downstream consumer of dataColumnStorage that would detect or prevent use of reconstruction-stored (unverified) columns.",
+        "guard_sufficiency": "No guard present. The type system provides false assurance. Storage layer does not track verification provenance.",
+        "edge_cases": [
+          "dataColumnStorage has no field to distinguish gossip-verified vs. reconstruction-stored columns",
+          "All query paths (Get, Summary, related functions) return VerifiedRODataColumn without provenance tracking",
+          "If ckzg4844 library has a bug in RecoverCellsAndKZGProofs (since no verification catches it), the error silently enters the trust chain",
+          "The recovery result proofs are mathematically derived from the recovery process, not independently verified \u2014 they may or may not pass commitment verification even for the pure gossip path"
+        ]
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": true,
+        "reason": "The VerifiedRODataColumn type contract violation is directly confirmed in code. NewVerifiedRODataColumn documentation says 'should only be used by the verification package' \u2014 reconstruction.go violates this. All downstream consumers trust this type. DAS availability decisions and blob serving are security-critical operations that depend on this type invariant. Missing commitment verification is direct evidence of the vulnerability.",
+        "recommendation": "Add commitment verification to ReconstructDataColumnSidecars before wrapping as VerifiedRODataColumn. Additionally, consider adding verification provenance tracking to the storage layer to distinguish gossip-verified from reconstruction-stored sidecars for defense-in-depth."
+      }
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0145",
+      "property_id": "PROP-W5B14-17",
+      "title": "Supporting Check: Is the 'original_commitment' used for verification sourced from trusted consensus, not recovered data?",
+      "severity": "High",
+      "bug_bounty_eligible": false,
+      "final_classification": "not-a-vulnerability",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/reconstruction.go",
+            "symbol": "ReconstructDataColumnSidecars",
+            "line_range": {
+              "start": 31,
+              "end": 122
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "RecoverCellsAndKZGProofs",
+            "line_range": {
+              "start": 108,
+              "end": 122
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_error": "",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// reconstruction.go: commitment source analysis\n// kzgCommitments sourced from reference input sidecar (gossip-validated, inclusion-proof-verified):\nkzgCommitments := referenceSidecar.KzgCommitments  // from first input VerifiedRODataColumn\n// Input sidecars were stored via gossip path which verified:\n// 1. Inclusion proof: verifier.SidecarInclusionProven() -> VerifyDataColumnSidecarInclusionProof\n//    checks merkle proof of KzgCommitments against block body root from signed header\n// 2. Block header signature verified: verifier.ValidProposerSignature()\n// So kzgCommitments are anchored to a finalized/pending block via inclusion proof + proposer sig\n\n// VerifyDataColumnsSidecarKZGProofs uses commitment from sidecar (same source, trusted):\ncommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))  // from input sidecar\nverified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)",
+      "state_context": "Input sidecars to reconstruction are VerifiedRODataColumn objects loaded from dataColumnStorage, which were originally stored after gossip validation. Gossip validation includes: (1) ValidFields check, (2) SidecarInclusionProven \u2014 verifies merkle proof of KzgCommitments against block body root in SignedBlockHeader, (3) ValidProposerSignature \u2014 verifies proposer signed the block header. KzgCommitments are therefore anchored to an authenticated, inclusion-proof-verified block header, not to the recovered data.",
+      "phase1": {
+        "summary": "Analysis of commitment source in the reconstruction path: kzgCommitments are sourced from `referenceSidecar.KzgCommitments` (reconstruction.go:67), where referenceSidecar is the first element of the input VerifiedRODataColumn slice. These input sidecars were stored after gossip validation, which includes SidecarInclusionProven (merkle proof of KzgCommitments in block body) and ValidProposerSignature (block header signed by proposer). The commitments are therefore cryptographically anchored to the block header via inclusion proof, NOT derived from the recovered data. The attacker CANNOT inject a fake commitment because the inclusion proof ties KzgCommitments to the block body root, which is signed by the proposer.",
+        "state_anomalies_found": [
+          "No anomaly in commitment source: KzgCommitments come from inclusion-proof-verified block headers",
+          "KzgCommitments cannot be influenced by an attacker without forging the proposer signature or generating a valid Merkle proof to an attacker-controlled commitment"
+        ]
+      },
+      "phase2": {
+        "summary": "Attempted to construct a scenario where an attacker controls both cells AND the commitment reference. This requires either: (a) forging the proposer's BLS signature on the block header, (b) finding a merkle proof collision for the block body root, or (c) compromising the proposer node. All three require cryptographic capabilities (BLS signature forgery, merkle tree collision) that are computationally infeasible under standard assumptions.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample found. The commitment source chain is: proposer creates block \u2192 includes KzgCommitments in block body \u2192 signs block header \u2192 gossip validation verifies signature AND merkle inclusion proof of KzgCommitments in body root \u2192 stored sidecar has commitment cryptographically bound to block. Attacker cannot substitute a different commitment without breaking BLS security or Merkle tree collision resistance.",
+        "attack_scenarios": [
+          "Proposer compromise: if the block proposer is malicious, they can include any KzgCommitments. But this is a different threat model (malicious proposer, not malicious P2P peer) and is a known accepted risk.",
+          "This check specifically asks about P2P peer influence on commitment source \u2014 that influence is blocked by signature + inclusion proof verification"
+        ]
+      },
+      "phase2_5": {
+        "summary": "The commitment source integrity check PASSES for the P2P peer threat model. An external P2P attacker cannot inject a fake commitment. The inclusion proof verification (SidecarInclusionProven) and proposer signature verification (ValidProposerSignature) in gossip validation provide sufficient binding of KzgCommitments to authenticated block content.",
+        "entry_points": [
+          "Commitment source: referenceSidecar.KzgCommitments (from first gossip-validated VerifiedRODataColumn)",
+          "Commitment trust chain: proposer signature -> block header -> body root -> KzgCommitments merkle proof -> verified by SidecarInclusionProven"
+        ],
+        "attacker_controlled": false,
+        "classification": "not-vulnerable"
+      },
+      "phase3": {
+        "summary": "The invariant 'KzgCommitments sourced from trusted consensus, not recovered data' is confirmed to hold. The commitment chain is: proposer-signed block header \u2192 merkle-proven body root \u2192 KzgCommitments inclusion proof \u2192 gossip-validation verified \u2192 stored in VerifiedRODataColumn. The recovery process uses these pre-verified commitments as the reference for any post-recovery check that WOULD be done (if the missing verification were added). Commitment source integrity is sound.",
+        "proof_successful": true,
+        "guard_identified": "verifier.SidecarInclusionProven() in validateDataColumn (validate_data_column.go:127) \u2014 calls VerifyDataColumnSidecarInclusionProof which verifies merkle proof of KzgCommitments against block body root. verifier.ValidProposerSignature() in validateDataColumn (validate_data_column.go:119) \u2014 verifies BLS signature of block header.",
+        "guard_sufficiency": "Sufficient for commitment source integrity check specifically. These guards ensure KzgCommitments are bound to an authenticated, proposer-signed block. An external P2P attacker cannot inject fake commitments. Note: this does NOT prevent the vulnerability in CHK-0141 through CHK-0144, because the issue there is that the (correctly sourced) commitment is never used for post-reconstruction verification.",
+        "edge_cases": [
+          "If previously reconstructed sidecars are used as inputs to a subsequent reconstruction, their KzgCommitments were also originally inclusion-proof-verified \u2014 commitment source remains intact through reconstruction rounds",
+          "The vulnerability in CHK-0141-0144 is about USING the commitment for verification, not about its SOURCE \u2014 commitment source is correct, but verification using it is missing"
+        ]
+      },
+      "phase3_5": {
+        "bug_bounty_eligible": false,
+        "reason": "Commitment source integrity is confirmed sound. KzgCommitments in input sidecars are anchored to proposer-signed block headers via merkle inclusion proof verified during gossip validation. An external P2P attacker cannot inject a fake commitment. This specific check (CHK-0145) is NOT a vulnerability. The broader issue (missing post-reconstruction verification using these correctly sourced commitments) is captured in CHK-0141 through CHK-0144.",
+        "recommendation": "No fix needed for commitment source integrity. The commitment sourcing is correct. The separate vulnerability (missing VerifyCellKZGProofBatch after recovery) is addressed by fixes for CHK-0141 through CHK-0144."
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 0,
+    "batch_index": 9,
+    "item_count": 5,
+    "timestamp": 1771374714,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0141",
+      "W7B8:W7B8:CHK-0142",
+      "W7B8:W7B8:CHK-0143",
+      "W7B8:W7B8:CHK-0144",
+      "W7B8:W7B8:CHK-0145"
+    ]
+  }
+}

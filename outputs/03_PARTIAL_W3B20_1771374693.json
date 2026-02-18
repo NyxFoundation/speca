@@ -1,0 +1,446 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-PROP-0038-001",
+      "property_id": "PROP-0038",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0038-001",
+        "property_id": "PROP-0038",
+        "title": "Verify Trust Boundary Integrity: Can an attacker cause unbounded state entry growth within a single block, causing root computation to exceed time limits?",
+        "severity": "High",
+        "bug_class": "Denial of Service",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (b *BeaconState) HashTreeRoot(ctx context.Context) ([32]byte, error) {\n\tb.lock.Lock(); defer b.lock.Unlock()\n\tif err := b.initializeMerkleLayers(ctx); err != nil { return [32]byte{}, err }\n\tif err := b.recomputeDirtyFields(ctx); err != nil { return [32]byte{}, err }\n\treturn bytesutil.ToBytes32(b.merkleLayers[len(b.merkleLayers)-1][0]), nil\n}\n\nfunc (b *BeaconState) initializeMerkleLayers(ctx context.Context) error {\n\tif len(b.merkleLayers) > 0 { return nil }\n\tfieldRoots, err := ComputeFieldRootsWithHasher(ctx, b)\n\tlayers := stateutil.Merkleize(fieldRoots)\n\tb.merkleLayers = layers\n\t// switch b.version { ... set dirtyFields size by version ... }\n}",
+      "state_context": "ComputeFieldRootsWithHasher iterates a FIXED set of fields (determined by b.version at construction time): 21 fields for Phase0, up to ~38 for Fulu. Field count is a compile-time constant from params.BeaconConfig(). stateutil.Merkleize pads to multiple of 32, then SHA-256 hashes up the tree.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-0038 asks about unbounded state entry growth causing root computation DoS. This property is framed around EL Patricia Merkle Trie semantics (SSTORE/CREATE, gas-limited state entries). Prysm's beacon state uses SSZ HashTreeRoot over a fixed compile-time set of fields. The field count is bounded at compile time: Phase0=21 fields, up to Fulu=~38 fields. No runtime growth of the field set is possible. ComputeFieldRootsWithHasher allocates fieldRoots based on the version-specific BeaconState*FieldCount config parameter, not on user-controlled input.",
+        "state_anomalies_found": [
+          "None. The number of Merkle leaves is fixed at compile time per beacon state version.",
+          "initializeMerkleLayers short-circuits if merkleLayers already initialized (early exit on b.merkleLayers > 0).",
+          "recomputeDirtyFields only recomputes fields explicitly marked dirty by setters - bounded by field count.",
+          "No unbounded data structure growth path reachable via external input in this code path."
+        ],
+        "cache_analysis": "merkleLayers is an in-memory cache of the Merkle tree layers. It is initialized once and then incrementally updated. No unbounded growth is possible.",
+        "concurrency_analysis": "b.lock.Lock() ensures mutual exclusion. No concurrency anomalies."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attempting to construct an attack vector: to cause DoS via root computation, an attacker would need to force unbounded leaves in the Merkle tree. The field list is a compile-time constant Go slice (phase0Fields, altairFields, etc.) of fixed length. ComputeFieldRootsWithHasher iterates over state struct fields, not over an attacker-controlled map. The largest variable-length computation is within individual field hashers (e.g., ValidatorRegistryRoot hashes up to 1,099,511,627,776 validators) - but this is bounded by the beacon chain validator registry limit (BeaconConfig().ValidatorRegistryLimit) and is not related to single-block growth. The SSZ Merkleize function pads to a multiple of 32, so the maximum leaf count is ceil(FieldCount/32)*32 which is constant.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "NOT applicable: The checklist item references EL execution client concepts (SSTORE, CREATE, block gas limit, state trie entries). These do not exist in Prysm's beacon chain state management. The EL state trie lives in go-ethereum, not in this codebase.",
+          "The maximum computation within a block for HashTreeRoot is bounded by: O(FieldCount * SHA256_cost + sum_of_field_sizes). All field sizes are bounded by protocol limits (max validators, max attestations, etc.)."
+        ],
+        "timing_dependencies": "None. Fixed-size computation."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The property about unbounded EL state entry growth is NOT reachable in this codebase. Prysm is the consensus layer client; the EL trie is in go-ethereum. The beacon state's Merkle tree has a fixed, compile-time number of leaves.",
+        "entry_points": [
+          "Transaction",
+          "P2P (claimed)"
+        ],
+        "attacker_controlled": false,
+        "classification": "out-of-scope",
+        "attack_surface": "EL state trie (not in this codebase). Beacon state field count is fixed."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant: len(fieldRoots) == BeaconStateFieldCount[version] is a compile-time constant. Proven: ComputeFieldRootsWithHasher allocates fieldRoots with exactly this length and populates each index exactly once. stateutil.Merkleize receives a fixed-length slice. No external input affects the length of the fieldRoots slice.",
+        "proof_successful": true,
+        "guard_identified": "params.BeaconConfig().BeaconState*FieldCount - compile-time constant field counts; version-specific field lists as Go slices",
+        "guard_sufficiency": "Sufficient. The leaf count is provably bounded.",
+        "edge_cases": [
+          "Individual field hashers (ValidatorRegistryRoot, etc.) have their own complexity, but are separately bounded by protocol limits enforced in state transitions."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The property references EL Patricia Trie concepts (SSTORE, CREATE, gas-limited state entries) that do not exist in Prysm. Beacon state field count is a compile-time constant. No unbounded growth is possible in HashTreeRoot. The DoS vector described in the property does not apply to this codebase.",
+        "recommendation": "Property should be re-targeted at go-ethereum (EL client) if the EL state trie is in scope.",
+        "severity_estimate": "N/A (out of scope for this codebase)"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "PROP-0038 describes unbounded EL state entry growth causing DoS in root computation. Prysm's beacon state uses SSZ HashTreeRoot over a fixed, compile-time set of beacon state fields (21-38 depending on version). No runtime growth of the field set is possible via external input. The EL Patricia Trie referenced in the property lives in go-ethereum, not in this codebase. No vulnerability in scope."
+    },
+    {
+      "check_id": "CHK-PROP-0040-001",
+      "property_id": "PROP-0040",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0040-001",
+        "property_id": "PROP-0040",
+        "title": "Verify Trust Boundary Integrity: Does root() correctly hash small root nodes whose RLP encoding is < 32 bytes?",
+        "severity": "Critical",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (b *BeaconState) HashTreeRoot(ctx context.Context) ([32]byte, error) {\n\tb.lock.Lock(); defer b.lock.Unlock()\n\tif err := b.initializeMerkleLayers(ctx); err != nil { return [32]byte{}, err }\n\tif err := b.recomputeDirtyFields(ctx); err != nil { return [32]byte{}, err }\n\treturn bytesutil.ToBytes32(b.merkleLayers[len(b.merkleLayers)-1][0]), nil\n}",
+      "state_context": "stateutil.Merkleize uses SHA-256 (not keccak256) on 32-byte leaves. No RLP encoding is used. All leaves are []byte of length 32 by construction. ComputeFieldRootsWithHasher produces [32]byte for each field root. The SSZ spec mandates SHA-256 for beacon state HTR.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-0040 asks about `root()` handling of small root nodes with RLP encoding < 32 bytes. This is an EL Patricia Merkle Trie concept: in Ethereum's MPT, if a node's RLP encoding is less than 32 bytes, it is embedded directly rather than hashed. Prysm does NOT use RLP encoding or Patricia Tries for beacon state. All field roots are exactly 32 bytes: ComputeFieldRootsWithHasher returns [][]byte where each element is `[32]byte`-coerced. stateutil.Merkleize receives [][]byte and the Merkleize loop pads to multiples of 32. The returned root is `bytesutil.ToBytes32(b.merkleLayers[len(b.merkleLayers)-1][0])` - exactly 32 bytes, always.",
+        "state_anomalies_found": [
+          "No RLP encoding exists in this code path.",
+          "No concept of 'small node' or 'embedded vs hashed' exists in SSZ Merkleization.",
+          "All leaf values in stateutil.Merkleize are exactly 32 bytes by type construction.",
+          "The SHA-256 hasher always produces exactly 32-byte outputs."
+        ],
+        "cache_analysis": "merkleLayers stores [][]byte where each inner element is 32 bytes (SHA-256 output). No variable-length storage.",
+        "concurrency_analysis": "Not relevant to this check."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Adversarially searching for a code path where a leaf < 32 bytes could enter the Merkle tree: ComputeFieldRootsWithHasher always produces fieldRoots[i] as slices derived from [32]byte arrays. The Go type system enforces this. stateutil.Merkleize pads with `make([]byte, 32)` zeroes if the leaf count is not a multiple of 32, so zero padding is always exactly 32 bytes. The hashFunc in stateutil.Merkleize calls SHA-256 which always returns [32]byte. No path exists where a leaf < 32 bytes enters the tree.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "NOT applicable: The RLP/MPT 'small node' concept is an EL execution client property (go-ethereum). Prysm uses SSZ/SHA-256 which has no such short-encoding optimization."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The property about RLP-encoded nodes < 32 bytes is not reachable in Prysm's beacon state. No RLP encoding exists in this code path. All leaves are enforced to be exactly 32 bytes by the Go type system and SHA-256 output size.",
+        "entry_points": [
+          "Transaction (claimed)"
+        ],
+        "attacker_controlled": false,
+        "classification": "out-of-scope",
+        "attack_surface": "EL Patricia Trie in go-ethereum (not this codebase)."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant: all Merkle tree leaves in stateutil.Merkleize are exactly 32 bytes. Proven: ComputeFieldRootsWithHasher derives all roots from [32]byte values; zero-padding uses make([]byte, 32); SHA-256 returns [32]byte; bytesutil.ToBytes32 truncates/pads to exactly 32. The invariant holds by construction.",
+        "proof_successful": true,
+        "guard_identified": "Go type system: [32]byte for all field roots; SHA-256 output size; bytesutil.ToBytes32 normalization",
+        "guard_sufficiency": "Sufficient. No leaf can be < 32 bytes.",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The property references EL MPT 'small root node RLP encoding < 32 bytes' which does not exist in Prysm. Beacon state uses SSZ/SHA-256 with 32-byte leaves enforced by the Go type system. No vulnerability possible for this property in this codebase.",
+        "recommendation": "Property should be targeted at go-ethereum's trie/trie.go root() function.",
+        "severity_estimate": "N/A (out of scope for this codebase)"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "PROP-0040 describes EL MPT behavior for small nodes with RLP encoding < 32 bytes. Prysm's beacon state uses SSZ HashTreeRoot with SHA-256, not RLP/keccak256/MPT. All leaves are exactly 32 bytes enforced by Go's type system. No vulnerability in scope."
+    },
+    {
+      "check_id": "CHK-PROP-0041-001",
+      "property_id": "PROP-0041",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0041-001",
+        "property_id": "PROP-0041",
+        "title": "Does _prepare_trie process all entries in trie._data without skipping any?",
+        "severity": "Critical",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (b *BeaconState) recomputeDirtyFields(ctx context.Context) error {\n\tfor field := range b.dirtyFields {\n\t\troot, err := b.rootSelector(ctx, field)\n\t\tif err != nil { return err }\n\t\tidx := field.RealPosition()\n\t\tb.merkleLayers[0][idx] = root[:]\n\t\tb.recomputeRoot(idx)\n\t\tdelete(b.dirtyFields, field)\n\t}\n\treturn nil\n}",
+      "state_context": "_prepare_trie is an EL Patricia Trie function (Python). Closest Prysm analog is recomputeDirtyFields which processes all marked-dirty beacon state fields. Also relevant: stateutil.Merkleize which processes all leaves in order.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-0041 asks whether `_prepare_trie` processes all entries in `trie._data`. This is a Python EL trie function (not present in Prysm). The analogous question in Prysm is: does `recomputeDirtyFields` process ALL dirty fields without skipping any? Analysis shows: `for field := range b.dirtyFields` iterates over the Go map. Go map iteration covers all entries (no skipping). Within the loop, `delete(b.dirtyFields, field)` removes the processed entry from the map being iterated. In Go, deleting map entries during range iteration is defined behavior: deleted entries will not be visited if not yet visited, but already-scheduled entries will still be visited. Since each field is deleted only AFTER being processed (`delete` is after all processing), each dirty field is processed exactly once.",
+        "state_anomalies_found": [
+          "Go map range + delete during iteration: in Go, it is safe to delete map entries during range iteration. The Go spec guarantees: 'The iteration order over maps is not specified and is not guaranteed to be the same from one iteration to the next. If a map entry that has not yet been reached is removed during iteration, the corresponding iteration value will not be produced.' This means if field A's processing somehow causes field B to be deleted from dirtyFields before B is iterated, B would be skipped.",
+          "CRITICAL INVESTIGATION: Does rootSelector or recomputeRoot modify b.dirtyFields? If any called function removes entries from b.dirtyFields, those entries could be skipped."
+        ],
+        "cache_analysis": "dirtyFields is a map[types.FieldIndex]bool. Modified by: markFieldAsDirty (adds entries), recomputeDirtyFields (deletes entries). Need to verify rootSelector/recomputeRoot do not modify dirtyFields.",
+        "concurrency_analysis": "b.lock.Lock() held throughout - no concurrent modification."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Adversarially checking if rootSelector or recomputeRoot modifies dirtyFields: rootSelector calls field-specific root selectors (blockRootsRootSelector, validatorsRootSelector, etc.) which call resetFieldTrie or recomputeFieldTrie. These functions do NOT modify b.dirtyFields. recomputeRoot (setters_misc.go:161) only modifies b.merkleLayers, not b.dirtyFields. Therefore, no skipping occurs. The only deletion from dirtyFields during the loop is the explicit `delete(b.dirtyFields, field)` AFTER processing. All dirty fields are processed exactly once.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "NOT applicable: _prepare_trie does not exist in Prysm. The analogous recomputeDirtyFields correctly processes all dirty fields without skipping.",
+          "Theoretical: if a future code change adds dirtyFields modification inside rootSelector, it could cause skipping. This is a code quality concern, not a current vulnerability."
+        ],
+        "timing_dependencies": "None. Full mutex held."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "_prepare_trie is an EL trie function not present in Prysm. The analogous beacon state operation (recomputeDirtyFields) correctly processes all dirty fields. No vulnerability found.",
+        "entry_points": [
+          "Transaction (claimed)"
+        ],
+        "attacker_controlled": false,
+        "classification": "out-of-scope",
+        "attack_surface": "EL trie _prepare_trie in go-ethereum (not this codebase). Prysm equivalent is safe."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant: after recomputeDirtyFields returns nil, b.dirtyFields is empty and all previously dirty fields have had their Merkle root recomputed. Proven: Go range over map processes all entries; rootSelector/recomputeRoot do not modify dirtyFields; delete after processing ensures no double processing; errors cause early return without loss (caller will retry or propagate error).",
+        "proof_successful": true,
+        "guard_identified": "Go map range semantics (all entries visited if not deleted before iteration reaches them); rootSelector/recomputeRoot non-modification of dirtyFields verified by code inspection",
+        "guard_sufficiency": "Sufficient for current code. Fragile to future modifications that might add dirtyFields changes inside rootSelector.",
+        "edge_cases": [
+          "Go spec: deletion of unvisited map entry during range - verified that no called function deletes unprocessed dirty fields."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "_prepare_trie does not exist in Prysm. The EL Patricia Trie is in go-ethereum. The analogous Prysm function (recomputeDirtyFields) correctly processes all dirty fields without skipping. No vulnerability in scope.",
+        "recommendation": "Property should be targeted at go-ethereum's trie package. As a code quality note: rootSelector's lack of dirtyFields modification is load-bearing for correctness; this implicit contract should be documented.",
+        "severity_estimate": "N/A (out of scope for this codebase)"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "PROP-0041 describes EL trie _prepare_trie function not present in Prysm. The analogous recomputeDirtyFields correctly processes all dirty beacon state fields using Go map range semantics. No field skipping occurs. No vulnerability in scope."
+    },
+    {
+      "check_id": "CHK-PROP-0042-001",
+      "property_id": "PROP-0042",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0042-001",
+        "property_id": "PROP-0042",
+        "title": "Verify Trust Boundary Integrity: Does secured trie key hashing prevent collisions that would overwrite state entries?",
+        "severity": "Critical",
+        "bug_class": "Cryptographic Error",
+        "risk_category": "Spoofing"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// recomputeDirtyFields uses field.RealPosition() as the index into merkleLayers[0]\n// Multiple FieldIndex values may alias the same RealPosition (version-exclusive fields)\nfunc (b *BeaconState) recomputeDirtyFields(ctx context.Context) error {\n\tfor field := range b.dirtyFields {\n\t\troot, err := b.rootSelector(ctx, field)\n\t\tidx := field.RealPosition()\n\t\tb.merkleLayers[0][idx] = root[:]\n\t\tb.recomputeRoot(idx)\n\t\tdelete(b.dirtyFields, field)\n\t}\n\treturn nil\n}\n\n// markFieldAsDirty (setters_misc.go:193) - NO version guard:\nfunc (b *BeaconState) markFieldAsDirty(field types.FieldIndex) {\n\tb.dirtyFields[field] = true\n}",
+      "state_context": "Prysm uses SSZ field indices as Merkle leaf indices, not keccak256-hashed keys. Version-aliased fields: PreviousEpochAttestations (enum 15) and PreviousEpochParticipationBits (enum 17) both map to RealPosition() 15. Similarly CurrentEpochAttestations (enum 16) and CurrentEpochParticipationBits (enum 18) both map to RealPosition() 16. LatestExecutionPayloadHeader variants (enum 24/27/30) map to RealPosition() 24. These are intentionally version-exclusive.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-0042 asks about keccak256 secured trie key hashing preventing collisions. This is an EL MPT concept (go-ethereum's SecureTrie uses keccak256 of the key as the actual trie key to prevent short-key attacks). In Prysm, the analogous question is: can two different FieldIndex values be used simultaneously and overwrite each other's Merkle position? Analysis reveals: multiple FieldIndex enum values intentionally share the same RealPosition() output for version-exclusive fields. If both aliased fields are dirty simultaneously, the second processing would overwrite the first's root in merkleLayers[0], producing an incorrect state root.",
+        "state_anomalies_found": [
+          "DESIGN-LEVEL FINDING: Multiple FieldIndex enum values share the same RealPosition() for version-exclusive fields (e.g., PreviousEpochAttestations RealPos=15 and PreviousEpochParticipationBits RealPos=15).",
+          "markFieldAsDirty (setters_misc.go:193-194) has NO version guard - any code could mark any FieldIndex dirty regardless of state version.",
+          "recomputeDirtyFields does NOT validate that the dirty field's FieldIndex is appropriate for b.version before processing.",
+          "If dirtyFields simultaneously contains both PreviousEpochAttestations and PreviousEpochParticipationBits, the second to be processed (non-deterministic Go map ordering) will overwrite the first's root at merkleLayers[0][15]."
+        ],
+        "cache_analysis": "merkleLayers[0][idx] is keyed by RealPosition(), not by FieldIndex enum value. Version-aliased fields write to the same position. Last writer wins - which is non-deterministically determined by Go map iteration order.",
+        "concurrency_analysis": "b.lock.Lock() held - no concurrent modification. The issue is sequential overwrite within the same recomputeDirtyFields call."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Attack scenario for version-aliased field collision: (1) A bug in state transition code marks PreviousEpochAttestations dirty on an Altair+ state (or vice versa for Phase0). (2) dirtyFields now contains both PreviousEpochAttestations (enum 15, RealPos 15) and PreviousEpochParticipationBits (enum 17, RealPos 15). (3) recomputeDirtyFields processes them in random order. (4) rootSelector for PreviousEpochAttestations reads state.previousEpochAttestations (which is nil/empty in Altair+ state). (5) rootSelector for PreviousEpochParticipationBits reads state.previousEpochParticipation. (6) The second to execute overwrites merkleLayers[0][15] with its (potentially wrong) value. (7) The resulting state root is incorrect. External exploitability: requires a pre-existing internal bug in state transition dispatch.",
+        "counterexample_found": true,
+        "counterexample": "Theoretical: On an Altair BeaconState, if both PreviousEpochAttestations (enum 15) and PreviousEpochParticipationBits (enum 17) are present in dirtyFields simultaneously, recomputeDirtyFields will compute roots for both and overwrite merkleLayers[0][15] twice. The final value depends on Go's non-deterministic map iteration order. If PreviousEpochAttestations is processed last on an Altair state, it would write a root of empty attestations to position 15, corrupting the state root. This requires a pre-existing internal bug to trigger.",
+        "attack_scenarios": [
+          "Requires pre-existing state transition bug that marks wrong-version fields dirty.",
+          "No external attacker path to directly trigger this via transaction or P2P message.",
+          "Severity if triggered: incorrect state root, potential consensus divergence between nodes."
+        ],
+        "timing_dependencies": "Go map iteration order randomization affects which aliased field's root 'wins'. This is non-deterministic but not externally controllable."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Keccak256 secured trie key hashing is an EL concept not present in Prysm. The discovered finding is a latent internal risk from version-aliased RealPosition values combined with an unguarded markFieldAsDirty function. Not externally reachable.",
+        "entry_points": [
+          "Transaction",
+          "P2P (claimed - not directly applicable)"
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "attack_surface": "Requires pre-existing internal bug in version dispatch logic. Not externally exploitable in isolation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that no two FieldIndex values in dirtyFields share the same RealPosition() is NOT enforced by code. It is only enforced by design-level exclusivity of version-specific setter calls. markFieldAsDirty has no runtime version assertion. recomputeDirtyFields has no validation that processed fields are version-appropriate. The invariant holds under correct operation but has no defense-in-depth enforcement.",
+        "proof_successful": false,
+        "guard_identified": "Design-level: version-specific field lists (phase0Fields vs altairFields) used at state initialization; setters are version-specific by convention",
+        "guard_sufficiency": "Insufficient for defense-in-depth. markFieldAsDirty accepts any FieldIndex without version validation. No runtime assertion prevents aliased fields from being simultaneously dirty.",
+        "edge_cases": [
+          "Go map iteration non-determinism: which aliased field 'wins' in recomputeDirtyFields is non-deterministic, making potential corruption non-reproducible.",
+          "The absence of a check in recomputeDirtyFields that `field` is in the version-appropriate field list is a latent code quality issue."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The keccak256 secured trie key hashing concept does not exist in Prysm (it's in go-ethereum). The discovered version-aliased RealPosition collision is a latent internal risk requiring a pre-existing bug to exploit - not directly externally exploitable. Not eligible as a standalone bug bounty finding but noted as informational.",
+        "recommendation": "Add a version assertion in recomputeDirtyFields: verify that each dirty FieldIndex is in the version-appropriate field set for b.version. Add defensive check in markFieldAsDirty. This prevents silent corruption if a future regression introduces wrong-version setter calls.",
+        "severity_estimate": "Low (informational - latent risk, requires pre-existing bug)"
+      },
+      "final_classification": "informational",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "PROP-0042 describes EL secured trie key hashing (keccak256) not present in Prysm. Adversarial analysis discovered that multiple FieldIndex enum values share the same RealPosition() for version-exclusive fields (e.g., PreviousEpochAttestations and PreviousEpochParticipationBits both at position 15). markFieldAsDirty has no version guard. If a pre-existing bug causes both aliased fields to be simultaneously dirty, recomputeDirtyFields would overwrite merkleLayers[0][15] twice in non-deterministic order, potentially corrupting the state root. Not directly externally exploitable; classified as informational. Recommend adding version assertions as defense-in-depth."
+    },
+    {
+      "check_id": "CHK-PROP-0044-001",
+      "property_id": "PROP-0044",
+      "checklist_item": {
+        "check_id": "CHK-PROP-0044-001",
+        "property_id": "PROP-0044",
+        "title": "Verify Trust Boundary Integrity: Is the trie root computation independent of trie._data.items() iteration order?",
+        "severity": "Critical",
+        "bug_class": "State Consistency",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (b *BeaconState) recomputeDirtyFields(ctx context.Context) error {\n\tfor field := range b.dirtyFields { // Go map: non-deterministic order\n\t\troot, err := b.rootSelector(ctx, field)\n\t\tidx := field.RealPosition()\n\t\tb.merkleLayers[0][idx] = root[:]\n\t\tb.recomputeRoot(idx) // updates all ancestors from leaf to root\n\t\tdelete(b.dirtyFields, field)\n\t}\n\treturn nil\n}\n\n// recomputeRoot walks from idx up to root, reading current sibling values\nfunc (b *BeaconState) recomputeRoot(idx int) {\n\thashFunc := hash.CustomSHA256Hasher()\n\tlayers := b.merkleLayers\n\tcurrentIndex := idx\n\troot := b.merkleLayers[0][idx]\n\tfor i := 0; i < len(layers)-1; i++ {\n\t\tisLeft := currentIndex%2 == 0\n\t\tneighborIdx := currentIndex ^ 1\n\t\tneighbor := make([]byte, 32)\n\t\tif layers[i] != nil && len(layers[i]) != 0 && neighborIdx < len(layers[i]) {\n\t\t\tneighbor = layers[i][neighborIdx]\n\t\t}\n\t\t// hash with neighbor, write to layers[i+1][parentIdx]\n\t}\n}",
+      "state_context": "trie._data.items() is a Python EL trie dict. The Prysm analog is the Go map dirtyFields iterated in non-deterministic order. recomputeRoot reads current sibling values from merkleLayers at each level and writes to parent level.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-0044 asks whether the trie root is independent of trie._data.items() iteration order. In Prysm's analog (recomputeDirtyFields), Go map iteration is non-deterministic. The question is: does the final Merkle root depend on the order dirty fields are processed? Analysis of recomputeRoot: it walks from the leaf at merkleLayers[0][idx] all the way up to the root, reading the current sibling value at each level and writing the new parent hash. For sibling fields A (idx=4) and B (idx=5) both dirty: processing A first writes new hash at parent P; processing B reads the newly written A value from merkleLayers[0][4] and computes hash(new_A, new_B) at P. Processing B first writes a temporary hash at P using old A; then processing A reads new B from merkleLayers[0][5] and overwrites P with hash(new_A, new_B). Both orderings yield hash(new_A, new_B) at P. Generalized: the LAST dirty field processed in any common ancestor subtree will produce the correct final hash for that ancestor, reading all already-updated leaf values.",
+        "state_anomalies_found": [
+          "Intermediate ancestor hashes may be transiently incorrect during processing (when a sibling is processed before its partner), but these are always overwritten by the partner's recomputeRoot call.",
+          "The correctness property holds: final root is identical regardless of processing order."
+        ],
+        "cache_analysis": "merkleLayers is updated in-place. Intermediate writes to ancestor nodes are transient. The final state after all dirty fields are processed is deterministic and correct regardless of processing order.",
+        "concurrency_analysis": "Full mutex held. No concurrent modification."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Systematic verification for 2-field case (A at idx 2k, B at idx 2k+1 = siblings): Order A then B: recomputeRoot(A) writes parent=hash(new_A, old_B). recomputeRoot(B) writes parent=hash(new_A, new_B). Order B then A: recomputeRoot(B) writes parent=hash(old_A, new_B). recomputeRoot(A) writes parent=hash(new_A, new_B). Both orders: final parent = hash(new_A, new_B). Correct. For non-sibling fields, their paths don't share intermediate nodes until near the root. At each shared ancestor, the last-processed field's recomputeRoot call will read the updated value from the other path. Inductive argument generalizes to N dirty fields.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "NOT applicable: trie._data.items() is an EL Python concept. The Prysm equivalent (Go map iteration) is provably order-independent for the final Merkle root."
+        ],
+        "timing_dependencies": "None. Order-independence is a structural mathematical property."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "trie._data.items() is an EL Python trie concept not present in Prysm. The equivalent Prysm property (Go map iteration order independence for recomputeDirtyFields) holds by mathematical proof. No vulnerability.",
+        "entry_points": [
+          "Transaction",
+          "P2P (claimed)"
+        ],
+        "attacker_controlled": false,
+        "classification": "not-applicable",
+        "attack_surface": "EL trie in go-ethereum. Prysm equivalent is provably correct."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant: the final Merkle root produced by recomputeDirtyFields is identical regardless of Go map iteration order of b.dirtyFields. Proven by induction: Base case (1 dirty field) trivially holds. Inductive step: for N dirty fields, the last dirty field processed in any shared ancestor path reads all previously-updated leaf values (stored in merkleLayers[0]) and produces the correct hash for that ancestor. The full mutex ensures no interleaving. The invariant holds.",
+        "proof_successful": true,
+        "guard_identified": "recomputeRoot reads current merkleLayers[0][neighborIdx] values (which reflect all previously-processed dirty fields); full mutex ensures sequential processing",
+        "guard_sufficiency": "Sufficient. The algorithm is provably order-independent for the final root.",
+        "edge_cases": [
+          "Non-deterministic Go map iteration: confirmed harmless - final root is identical for all orderings.",
+          "Version-aliased fields sharing RealPosition (documented in CHK-PROP-0042-001): if they are both dirty simultaneously, the second write to merkleLayers[0][idx] always produces the same final value regardless of order (last writer wins to the same position). This is a correctness concern for aliased fields but not an order-dependence issue."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "trie._data.items() iteration order is an EL Python trie concept not present in Prysm. The analogous Prysm computation (recomputeDirtyFields with non-deterministic Go map iteration) is proven to produce order-independent final Merkle roots. No vulnerability in scope.",
+        "recommendation": "No action needed for this property. Property should be targeted at go-ethereum's trie implementation.",
+        "severity_estimate": "N/A (out of scope for this codebase)"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning_summary": "PROP-0044 describes EL Patricia Trie dict iteration order dependence. Prysm's analogous recomputeDirtyFields uses non-deterministic Go map iteration over dirtyFields, but the final Merkle root is proven order-independent: recomputeRoot reads current merkleLayers[0] values (updated by previously-processed fields) and walks all the way to the root on each call, ensuring the last processor of any shared ancestor produces the correct hash. No vulnerability."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 20,
+    "item_count": 5,
+    "timestamp": 1771374693,
+    "processed_ids": [
+      "CHK-PROP-0038-001",
+      "CHK-PROP-0040-001",
+      "CHK-PROP-0041-001",
+      "CHK-PROP-0042-001",
+      "CHK-PROP-0044-001"
+    ]
+  }
+}

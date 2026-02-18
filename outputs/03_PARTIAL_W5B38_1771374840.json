@@ -1,0 +1,394 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0086",
+      "property_id": "PROP-W5B14-4",
+      "title": "Supporting Check: Do validators compute identical Fiat-Shamir challenges when verifying the same data column proofs?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func VerifyDataColumnsSidecarKZGProofs(sidecars []blocks.RODataColumn) error {\n\tcount := 0\n\tfor _, sidecar := range sidecars {\n\t\tcount += len(sidecar.Column)\n\t}\n\tcommitments := make([]kzg.Bytes48, 0, count)\n\tindices := make([]uint64, 0, count)\n\tcells := make([]kzg.Cell, 0, count)\n\tproofs := make([]kzg.Bytes48, 0, count)\n\tfor _, sidecar := range sidecars {\n\t\tfor i := range sidecar.Column {\n\t\t\tcommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n\t\t\tindices = append(indices, sidecar.Index)\n\t\t\tcells = append(cells, kzg.Cell(sidecar.Column[i]))\n\t\t\tproofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n\t\t}\n\t}\n\tverified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)\n\tif err != nil {\n\t\treturn errors.Wrap(err, \"verify cell KZG proof batch\")\n\t}\n\tif !verified {\n\t\treturn ErrInvalidKZGProof\n\t}\n\treturn nil\n}",
+      "state_context": "The c-kzg-4844 v2.1.1 library implements Fiat-Shamir via SHA-256 over: domain separator 'RCKZGCBATCH__V1_', FIELD_ELEMENTS_PER_CELL, num_commitments (post-dedup), num_cells, unique commitments array, then per-cell: commitment_index, cell_index, cell_bytes, proof_bytes. Input ordering is determined by sidecar slice ordering from P2P. All cryptographic logic is delegated to the C library.",
+      "phase1": {
+        "abstract_interpretation": "The Fiat-Shamir challenge r is computed in compute_r_powers_for_verify_cell_kzg_proof_batch (eip7594.c). The SHA-256 hash input includes: domain separator, FIELD_ELEMENTS_PER_CELL, num_commitments (post-deduplication), num_cells, unique commitments array, and per-cell: commitment_index, cell_index, cell_bytes, proof_bytes. The input ordering is determined by the sidecar slice ordering (P2P arrival order), which is non-deterministic across validators. Two validators verifying the same logical (commitment, cell, proof) tuples in different orderings will compute different SHA-256 values and thus different r challenges. However, this is by design in the Fiat-Shamir transform: each verifier independently derives r from the prover's submitted data.",
+        "state_anomalies": [
+          "Sidecar ordering from P2P is non-deterministic, leading to different r values across validators for the same logical data set.",
+          "In kzgVerifierRoutine, multiple goroutines' sidecars are drained in non-deterministic channel order before batch verification."
+        ],
+        "invariants_identified": [
+          "Each validator independently generates r from the prover's public inputs (commitments, cells, proofs).",
+          "Validators need not agree on r, only on the verification outcome.",
+          "Soundness is preserved for all r not known to the prover at proof generation time."
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Concrete scenario: Validator A has sidecars=[col_2, col_5]; Validator B has sidecars=[col_5, col_2]. Validator A's hash input has unique_commitments=[C_2, C_5]; Validator B has unique_commitments=[C_5, C_2]. They compute different SHA-256 digests and different r values. For honest sidecars, both validators independently verify the batch equation with their own r and both accept. For forged sidecars, the attacker cannot control what r the verifier will choose (since r is a hash of the attacker's own submitted data). Soundness is preserved under either ordering because the batch verification equation is binding for any r not known at proof generation time.",
+        "counterexamples_found": false,
+        "attack_vectors_tested": [
+          "Cross-validator r divergence due to sidecar ordering",
+          "P2P non-determinism in batch assembly",
+          "Attacker-controlled sidecar ordering to influence r"
+        ]
+      },
+      "phase2_5": {
+        "additional_analysis": "The non-interactive Fiat-Shamir paradigm assigns per-verifier r generation. Cross-validator r consensus is not required and is not part of the specification. Each validator verifies independently. The consensus-critical property is that each validator reaches the same accept/reject decision for a given set of honest proofs, which is guaranteed by the soundness of the batch verification scheme (not by agreeing on r)."
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: For any fixed (commitment, cell, proof) tuple submitted by a prover, the batch verification accept/reject decision is sound for any verifier-chosen r that was unknown to the prover at proof generation time. Proof: SHA-256 is modeled as a random oracle; the prover commits to (C, cell, pi) before r is chosen; the batch verification equation is degree-1 in r for each cell, so a false proof passes with probability at most (num_cells / field_prime) < 2^-240. This bound is negligible.",
+        "guards_sufficient": true,
+        "guard_analysis": "The Fiat-Shamir domain separator 'RCKZGCBATCH__V1_' prevents cross-context reuse. SHA-256 collision resistance ensures r is unpredictable to the prover. Both guards are sufficient and the invariant holds unconditionally given standard cryptographic assumptions."
+      },
+      "phase3_5": {
+        "scope_filtering": "Cross-validator non-determinism in Fiat-Shamir challenge is correct by design. Each verifier independently generates r from the prover's public inputs. The specification does not require cross-validator r agreement. Soundness is unconditionally preserved."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "Cross-validator non-determinism in Fiat-Shamir challenge is correct by design in the non-interactive setting. Each validator independently generates r from the prover's public inputs; they need not agree on r, only on the verification outcome. Soundness is preserved under any r not known to the prover at proof generation time. No exploit path exists.",
+      "recommendation": "No fix required. Add documentation noting that challenge determinism is per-verifier, not cross-verifier, to prevent future confusion."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0087",
+      "property_id": "PROP-W5B14-4",
+      "title": "Supporting Check: Are hash inputs canonicalized before feeding to compute_verify_cell_kzg_proof_batch_challenge?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// PRIMARY: beacon-chain/core/peerdas/p2p_interface.go:VerifyDataColumnsSidecarKZGProofs\n// Go wrapper passes raw bytes to C library with NO intermediate canonicalization\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n\tckzgCells := make([]ckzg4844.Cell, len(cells))\n\tfor i := range cells {\n\t\tckzgCells[i] = ckzg4844.Cell(cells[i])\n\t}\n\treturn ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}",
+      "state_context": "Three levels of canonicalization: (1) KZG commitments validated via blst_p1_uncompress+blst_p1_in_g1 (returns C_KZG_BADARGS for non-canonical); (2) Cell field elements validated via bytes_to_bls_field+blst_scalar_fr_check (enforces < prime p, returns C_KZG_BADARGS for non-canonical); (3) Proofs validated via validate_kzg_g1. However, cell bytes are hashed (SHA-256) BEFORE field element validation occurs in the C code. The batch verifier (batch_verifier.go) batches sidecars from multiple goroutines, and a single error propagates to all verifiers in the batch window.",
+      "phase1": {
+        "abstract_interpretation": "The Go wrapper performs no canonicalization before calling the C library. In the C library: commitments and proofs are validated via blst_p1_uncompress+blst_p1_in_g1 (non-canonical returns C_KZG_BADARGS); cell field elements are validated via bytes_to_bls_field+blst_scalar_fr_check after being memcpy'd into the Fiat-Shamir hash. Critically, cell bytes are hashed BEFORE field element validation. A sidecar with a non-canonical cell field element (>= scalar prime p) would (a) pass VerifyDataColumnSidecar length checks, (b) enter the batch, (c) have its raw bytes hashed into the Fiat-Shamir challenge, (d) fail during polynomial computation with C_KZG_BADARGS. This error propagates to all verifiers in the batch window in verifyKzgBatch (batch_verifier.go).",
+        "state_anomalies": [
+          "Non-canonical field elements in cells pass VerifyDataColumnSidecar but cause C_KZG_BADARGS in the batch verifier.",
+          "The batch error in verifyKzgBatch is broadcast to ALL verifiers in the batch window, not just the sender of the malicious sidecar.",
+          "Fallback path validateUnbatchedColumnsKzg is invoked for all sidecars in the poisoned batch, adding significant re-verification latency."
+        ],
+        "invariants_identified": [
+          "Only canonical field elements (<= prime p) can produce a successful verification (C_KZG_BADARGS prevents false positive).",
+          "A single non-canonical sidecar can poison the entire batch verification window.",
+          "The fallback path preserves correctness but not performance."
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario - Batch poisoning via non-canonical field element: (1) Attacker connects via P2P and gossips a data column sidecar where one 32-byte field element in a cell has value >= BLS12-381 scalar prime p (approximately 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001); (2) Sidecar passes VerifyDataColumnSidecar (only checks lengths and index bounds, not field element canonicality); (3) Sidecar enters kzgChan and gets batched with concurrent legitimate sidecars in kzgVerifierRoutine; (4) C library encounters non-canonical field element during polynomial computation, returns C_KZG_BADARGS; (5) Go wrapper returns (false, error); (6) verifyKzgBatch broadcasts the error to ALL verifiers in the batch; (7) All legitimate sidecars trigger validateUnbatchedColumnsKzg fallback path (O(batch_size) individual re-verifications); (8) Legitimate sidecars are correctly re-verified and accepted. DoS amplification: one malicious sidecar causes O(batch_size) extra verification operations with O(batch_size) extra latency per slot window.",
+        "counterexamples_found": false,
+        "attack_vectors_tested": [
+          "Non-canonical field element (>= prime p) in cell data",
+          "Point-at-infinity commitment/proof",
+          "Off-curve commitment point",
+          "Cross-batch poisoning via repeated injection"
+        ]
+      },
+      "phase2_5": {
+        "additional_analysis": "Point-at-infinity acceptance: validate_kzg_g1 explicitly accepts the G1 identity element for commitments and proofs. A commitment to infinity represents the zero polynomial; the pairing check handles this correctly. This is spec-compliant. The batch poisoning vector is real but the fallback path (validateUnbatchedColumnsKzg) preserves correctness - legitimate sidecars are eventually accepted. The DoS is a performance degradation, not a chain halt or false acceptance. The fix would be to add a field element canonicality check in VerifyDataColumnSidecar (Go layer) before sidecars enter the batch."
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: Non-canonical field elements in cells cannot cause false acceptance. Proof: bytes_to_bls_field calls blst_scalar_fr_check which enforces strict < p; if this fails, C_KZG_BADARGS is returned (not a passing verification). The invariant holds. Guard gap: VerifyDataColumnSidecar does not check field element canonicality within cells, allowing non-canonical sidecars to reach the batch verifier and poison the batch window.",
+        "guards_sufficient": false,
+        "guard_analysis": "The C library's internal field element validation is sufficient to prevent false acceptance. However, the pre-batch admission guard (VerifyDataColumnSidecar) does not check field element canonicality, allowing batch poisoning for DoS purposes. The guard is insufficient for performance security (DoS prevention), though sufficient for cryptographic soundness (false acceptance prevention)."
+      },
+      "phase3_5": {
+        "scope_filtering": "Informational: The batch poisoning DoS vector (non-canonical field element in one sidecar poisons entire batch, forcing fallback re-verification) is attacker-reachable via P2P. Severity is Low because the fallback path preserves correctness and there is no false acceptance or chain halt. The fix is a pre-validation canonicality check in VerifyDataColumnSidecar at the Go layer."
+      },
+      "final_classification": "informational",
+      "bug_bounty_eligible": true,
+      "confidence": "medium",
+      "reasoning": "Batch poisoning DoS vector confirmed: an attacker with a P2P connection can submit a sidecar with a non-canonical cell field element (>= BLS12-381 prime p) that passes VerifyDataColumnSidecar (which only checks lengths and index range) but causes C_KZG_BADARGS in the C library during batch verification. This error is broadcast to all verifiers in the batch window, triggering O(batch_size) fallback re-verifications. The fallback correctly accepts honest sidecars so there is no cryptographic bypass or consensus split, but the performance degradation is attacker-controllable. Impact: Low severity DoS - adds slot-level latency during high load; no false acceptance or chain halt.",
+      "recommendation": "Add field element canonicality validation in VerifyDataColumnSidecar (or in a separate pre-batch admission step) at the Go layer: for each sidecar.Column[i], verify each 32-byte field element is less than the BLS12-381 scalar prime p before allowing the sidecar into the KZG verification batch. This eliminates the batch poisoning vector at the admission boundary."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0088",
+      "property_id": "PROP-W5B14-5",
+      "title": "Verify Trust Boundary Integrity for tb-002: Is the universal verification equation e(LL, LR) == e(RL, [1]) correctly implemented in verify_cell_kzg_proof_batch_impl?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/data_column_sidecars.go",
+            "symbol": "verifyDataColumnSidecarsByPeer",
+            "line_range": {
+              "start": 942,
+              "end": 981
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// PRIMARY: beacon-chain/blockchain/kzg/kzg.go:VerifyCellKZGProofBatch\n// All cryptographic verification is delegated to c-kzg-4844 v2.1.1 via CGo\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n\tckzgCells := make([]ckzg4844.Cell, len(cells))\n\tfor i := range cells {\n\t\tckzgCells[i] = ckzg4844.Cell(cells[i])\n\t}\n\treturn ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}\n// C library implements: pairings_verify(final_g1_sum, g2_generator, proof_lincomb, power_of_s)\n// which computes: e(final_g1_sum, [1]) == e(proof_lincomb, [s^FIELD_ELEMENTS_PER_CELL])",
+      "state_context": "The pairing equation is implemented in c-kzg-4844 v2.1.1 eip7594.c. final_g1_sum = weighted_sum_of_commitments - interpolation_poly_commit + weighted_sum_of_proofs_times_coset_factor. proof_lincomb = sum_k(r^k * pi_k). power_of_s = g2_values_monomial[FIELD_ELEMENTS_PER_CELL=64]. The Go wrapper is a thin type-conversion pass-through with no cryptographic logic.",
+      "phase1": {
+        "abstract_interpretation": "The pairing equation verification is entirely in c-kzg-4844 v2.1.1 via pairings_verify(final_g1_sum, blst_p2_generator(), proof_lincomb, power_of_s). This implements e(final_g1_sum, [1]) == e(proof_lincomb, [s^n]). final_g1_sum = RLC - RLI + RLP where: RLC = sum_k(w_k * C_k) with commitment deduplication; RLI = commitment to sum of (r^k * interpolation_polynomial_k); RLP = sum_k(r^k * coset_factor_k * pi_k). The negation blst_p1_cneg(&interpolation_poly_commit, true) correctly implements the subtraction. power_of_s uses trusted setup g2_values_monomial[FIELD_ELEMENTS_PER_CELL=64].",
+        "state_anomalies": [
+          "Empty batch (num_cells=0) returns true unconditionally - this is vacuously correct.",
+          "Commitment deduplication (deduplicate_commitments) uses first-occurrence order which correctly maps cells to unique commitment indices.",
+          "Trusted setup G2 index [64] is compile-time constant matching FIELD_ELEMENTS_PER_CELL."
+        ],
+        "invariants_identified": [
+          "The pairing equation e(LL, [1]) == e(RL, [s^n]) correctly batches n individual cell KZG proof verifications.",
+          "blst_p1_cneg unconditional negation correctly implements subtraction of interpolation polynomial commitment.",
+          "Random linear combination with r ensures soundness with probability 1 - n/q over choice of r."
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario 1 - Incorrect deduplication: If two cells share the same commitment (same blob), deduplication creates one entry. Wrong weights would cause false negatives (valid proof fails), not false positives. Attack scenario 2 - Trusted setup index out of bounds: power_of_s = g2_values_monomial[FIELD_ELEMENTS_PER_CELL=64] is loaded at Start() and validated by blst_p2_uncompress+blst_p2_in_g2. Cannot be manipulated by attacker. Attack scenario 3 - Sign error: blst_p1_cneg takes a boolean (true=always negate), implementing C-I correctly. No sign error. Attack scenario 4 - Zero cells: returns ok=true, vacuously correct. No false positive path found.",
+        "counterexamples_found": false,
+        "attack_vectors_tested": [
+          "Commitment deduplication error leading to wrong weights",
+          "Trusted setup G2 index manipulation",
+          "Sign error in pairing equation terms",
+          "Empty batch false positive",
+          "Single cell batch edge case"
+        ]
+      },
+      "phase2_5": {
+        "additional_analysis": "The pairings_verify function in blst implements the Miller loop for both pairings and compares the final exponentiation results. This is a well-audited primitive. The Go wrapper performs only type conversion (Cell -> ckzg4844.Cell via unsafe cast of same underlying array type) and passes all data to c-kzg-4844. The c-kzg-4844 v2.1.1 library itself has undergone extensive auditing as part of the EIP-4844 and EIP-7594 specification process. The implementation matches the specification at the mathematical level."
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: The batch verification equation is sound - it accepts all valid (commitment, cell_index, cell, proof) tuples and rejects all invalid ones (except with negligible probability n/q over choice of r). Proof: The equation is the multilinear extension of individual Kate-Faller-Han cell proof verification via random linear combination. Soundness follows from the Schwartz-Zippel lemma applied to degree-1 polynomial in r, and the binding property of KZG commitments under the knowledge-of-exponent assumption.",
+        "guards_sufficient": true,
+        "guard_analysis": "The cell index bounds check (>= CELLS_PER_EXT_BLOB returns C_KZG_BADARGS) prevents out-of-bounds access to trusted setup and coset factor tables. Commitment and proof validation via validate_kzg_g1 prevents invalid curve points from entering the computation. Field element validation via bytes_to_bls_field prevents out-of-range scalars. All guards are sufficient for their respective invariants."
+      },
+      "phase3_5": {
+        "scope_filtering": "The pairing equation is correctly implemented in c-kzg-4844. The Go layer is a thin pass-through. No exploitable deviation from the specification found."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "The pairing equation e(LL, [1]) == e(RL, [s^n]) is correctly implemented in c-kzg-4844 v2.1.1 via pairings_verify(final_g1_sum, g2_generator, proof_lincomb, power_of_s). The commitment deduplication, weighted sum computation, interpolation polynomial commitment negation (blst_p1_cneg with true=unconditional), and weighted proof sum with coset factors all correctly implement the batch cell KZG proof verification algorithm. The Go wrapper performs only type conversion with no cryptographic logic. No exploitable deviation found.",
+      "recommendation": "No fix required. Ensure c-kzg-4844 dependency stays pinned to an audited version and library updates are carefully reviewed for correctness."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0089",
+      "property_id": "PROP-W5B14-5",
+      "title": "Supporting Check: Does the random challenge r in verify_cell_kzg_proof_batch_impl have sufficient entropy to prevent proof forgery?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// PRIMARY: beacon-chain/blockchain/kzg/kzg.go:VerifyCellKZGProofBatch\n// Challenge r generated by c-kzg library:\n// blst_sha256(r_bytes.bytes, bytes, input_size);\n// hash_to_bls_field(&r, &r_bytes); // SHA-256 -> BLS12-381 scalar\n// compute_powers(r_powers_out, &r, num_cells); // r^0, r^1, ..., r^(n-1)\n// Hash input: 'RCKZGCBATCH__V1_' || FIELD_ELEMENTS_PER_CELL || num_commitments || num_cells ||\n//             unique_commitments || per_cell(commitment_index || cell_index || cell_bytes || proof_bytes)",
+      "state_context": "The SHA-256 output (256 bits) is reduced modulo BLS12-381 scalar prime q (q = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001, approximately 2^255). Bias from reduction is approximately 1/q ~= 2^-255 (negligible). Hash input includes all prover-controlled data. Domain separator prevents cross-context attacks. c-kzg-4844 v2.1.1.",
+      "phase1": {
+        "abstract_interpretation": "Challenge r is computed as: SHA-256(domain_sep || FIELD_ELEMENTS_PER_CELL || num_commitments || num_cells || unique_commitments || per_cell(commitment_index || cell_index || cell_bytes || proof_bytes)) reduced modulo q. SHA-256 is a 256-bit output function. q \u2248 2^255. The statistical distance of the reduced value from uniform in Zq is at most (2^256 mod q)/2^256 \u2248 2^-255, which is negligible (a standard crypto parameter). The hash covers all prover-submitted data, binding the challenge to the prover's commitments. The domain separator 'RCKZGCBATCH__V1_' isolates this from other hash contexts.",
+        "state_anomalies": [
+          "Prover fully controls hash input (commitments, cells, proofs) but cannot predict r before committing since SHA-256 is a one-way function.",
+          "Single-cell batches (n=1) still provide full entropy - SHA-256 over ~4200 bytes of input gives 256-bit output.",
+          "No timing side-channel in SHA-256 computation (constant-time in blst)."
+        ],
+        "invariants_identified": [
+          "r is derived from all prover-controlled inputs via SHA-256, making it unpredictable to the prover at proof generation time.",
+          "The Fiat-Shamir binding ensures r cannot be biased toward values that allow proof forgery.",
+          "Grinding attacks require solving SHA-256 preimage, which is computationally infeasible."
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario 1 - Grinding attack: For a single false proof (C, cell_index, cell, pi), the batch verification equation is a degree-1 polynomial in r. Exactly one value r* makes it pass for a given invalid (C, cell, pi). The attacker must find (C, cell, pi) such that SHA-256(domain || C || cell || pi) = r* mod q. This is a preimage attack on SHA-256 requiring 2^256 work. Infeasible. Attack scenario 2 - Multi-target grinding: Targeting any of 2^k validators with 2^80 preimage attempts gives 2^(80-175) success probability. Still infeasible. Attack scenario 3 - Weak entropy for n=1: Even with minimal hash input (~4200 bytes for one cell), SHA-256 output is 256 bits of entropy. r has ~255 bits of effective entropy. Sufficient. Attack scenario 4 - r=0: hash_to_bls_field + blst_scalar_fr_check ensures r is in [1, q-1]; r=0 would produce r_powers=[1,0,0,...] and degenerate to single commitment check. The probability of SHA-256 producing exactly 0 mod q is 1/q \u2248 2^-255. Negligible.",
+        "counterexamples_found": false,
+        "attack_vectors_tested": [
+          "Grinding attack to find lucky r",
+          "Multi-target grinding across validators",
+          "Single-cell entropy analysis",
+          "r=0 degenerate case",
+          "Timing side-channel on r generation"
+        ]
+      },
+      "phase2_5": {
+        "additional_analysis": "The hash input length for a typical batch: ~16 (domain) + 8 (FEperCell) + 8 (num_commitments) + 8 (num_cells) + 48*num_unique_commitments + num_cells*(8+8+4096+48) bytes. For 128 cells with 2 unique commitments: ~16+8+8+8+96+128*4160 = ~533KB. SHA-256 over large inputs is perfectly sound. The domain separator 'RCKZGCBATCH__V1_' provides context separation from other SHA-256 uses in the codebase. The BLS12-381 scalar prime q \u2248 2^255 means the effective security is 255 bits against brute force."
+      },
+      "phase3": {
+        "invariant_proving": "Invariant: For any fixed false proof tuple, the probability that challenge r makes the batch verification equation pass is at most num_cells/q < 128/2^255 \u2248 2^-248. Proof: The batch verification equation is a degree-1 polynomial in r for each cell. For n cells, the union bound gives at most n values of r that could cause false positive. Since r is drawn uniformly from Zq (up to negligible bias), the false positive probability is n/q. For n=128 (max cells per call), this is 128/2^255 \u2248 2^-248. This is negligible and provides strong computational security.",
+        "guards_sufficient": true,
+        "guard_analysis": "SHA-256 with domain separator 'RCKZGCBATCH__V1_' provides 256-bit preimage resistance. The reduction modulo q introduces negligible bias (2^-255). The binding to all prover inputs prevents challenge manipulation. All guards are sufficient. The security reduction from proof forgery to SHA-256 preimage inversion is standard in the Fiat-Shamir paradigm."
+      },
+      "phase3_5": {
+        "scope_filtering": "Challenge r has sufficient entropy (~255 effective bits after SHA-256 modular reduction). Fiat-Shamir construction binds all prover inputs. No grinding attack path exists within feasible computation bounds."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "The random challenge r is derived from SHA-256 of all prover-controlled inputs with domain separator 'RCKZGCBATCH__V1_'. The 256-bit SHA-256 output is reduced modulo the BLS12-381 scalar prime q \u2248 2^255 with negligible bias (~2^-255). The effective entropy is ~255 bits. False positive probability per verification is at most n/q \u2248 128/2^255 \u2248 2^-248 (negligible). Grinding attacks require SHA-256 preimage inversion (2^256 work). The Fiat-Shamir construction is sound under the random oracle model.",
+      "recommendation": "No fix required. The entropy is sufficient. Document the security analysis in code comments for future auditors."
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0090",
+      "property_id": "PROP-W5B14-5",
+      "title": "Supporting Check: Are RLC, RLI, and RLP components in verify_cell_kzg_proof_batch_impl computed correctly from cells and commitments?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 98,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          },
+          {
+            "file": "beacon-chain/sync/data_column_sidecars.go",
+            "symbol": "verifyDataColumnSidecarsByPeer",
+            "line_range": {
+              "start": 942,
+              "end": 981
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// PRIMARY: beacon-chain/blockchain/kzg/kzg.go:VerifyCellKZGProofBatch\n// RLC: compute_weighted_sum_of_commitments(unique_commitments, r_powers, commitment_indices)\n//   = sum_k(w_k * C_k) where w_k = sum_{j: uses C_k} r^j\n// RLI: compute_commitment_to_aggregated_interpolation_poly(cells, cell_indices, r_powers, s)\n//   = commitment to sum_k(r^k * I_k(s)) for each cell's interpolation polynomial\n// RLP: compute_weighted_sum_of_proofs(proofs, r_powers, cell_indices)\n//   = sum_k(r^k * omega_k^n * pi_k) using CELL_INDICES_RBL bit-reversal table",
+      "state_context": "VerifyDataColumnsSidecarKZGProofs assembles flat arrays (commitments, indices, cells, proofs) by iterating sidecars then rows. Column index (sidecar.Index, 0..NUMBER_OF_COLUMNS-1) is used for cellIndices. The C library processes these via: (1) deduplicate_commitments for RLC weights; (2) aggregated coset IFFT for RLI via bytes_to_bls_field + bls_field_add; (3) CELL_INDICES_RBL coset factor table for RLP. Bounds check: cell_indices[i] >= CELLS_PER_EXT_BLOB returns C_KZG_BADARGS.",
+      "phase1": {
+        "abstract_interpretation": "RLC (compute_weighted_sum_of_commitments): Deduplicates commitments by first occurrence, computes per-unique-commitment weights w_k = sum of r^j for all cells j mapped to C_k, then does MSM. Correctly implements random linear combination with deduplication for efficiency. RLI (compute_commitment_to_aggregated_interpolation_poly): For each cell index, scales each of its 64 field elements by r^k and accumulates into an aggregated extended evaluation domain array. Then performs coset IFFT per column index to get polynomial coefficients, then MSM against trusted setup G1 monomial points to get the commitment to the aggregated interpolation polynomial. RLP (compute_weighted_sum_of_proofs): Scales each proof by r^k * omega_k^n where omega_k is looked up via CELL_INDICES_RBL[cell_indices[k]] (precomputed bit-reversal table mapping column index to coset shift root of unity).",
+        "state_anomalies": [
+          "Duplicate column index within a batch: if two sidecars in the same call to VerifyDataColumnsSidecarKZGProofs share the same sidecar.Index (same column), their cells would be accumulated into the same slot in aggregated_column_cells for RLI, producing incorrect interpolation. This causes false negatives (valid proofs fail) but NOT false positives.",
+          "Array sizing: aggregated_column_cells is sized CELLS_PER_EXT_BLOB * FIELD_ELEMENTS_PER_CELL; out-of-bounds access prevented by cell_indices bounds check.",
+          "Column index mapping: sidecar.Index is the column index (0..NUMBER_OF_COLUMNS-1=127), which is the correct value for cellIndices in the batch verification API."
+        ],
+        "invariants_identified": [
+          "RLC weights correctly implement sum_{j maps to C_k} r^j for each unique commitment.",
+          "RLI correctly aggregates cells by column for interpolation polynomial computation.",
+          "RLP coset factors omega_k^n are correctly looked up via CELL_INDICES_RBL using column index.",
+          "Bounds check prevents out-of-bounds access to CELL_INDICES_RBL and trusted setup arrays."
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario - Duplicate column index in batch: VerifyDataColumnsSidecarKZGProofs accepts []blocks.RODataColumn. If two RODataColumn entries have the same Index (column index), both contribute to the same slot in aggregated_column_cells during RLI computation. The cells from both sidecars are added together (bls_field_add) within the same column slot. This produces an incorrect interpolation polynomial for that column, causing the final pairing to fail even for honest proofs (false negative). To produce a false positive, the attacker would need the sum of two cells (each paired with their correct column commitment) to satisfy the pairing equation with combined proofs - this requires breaking KZG binding. No practical exploit path. Attack scenario - Index mismatch (sidecar.Index vs row i): In VerifyDataColumnsSidecarKZGProofs, indices = append(indices, sidecar.Index) adds the COLUMN index for each row. The c-kzg API expects cellIndices[k] = column index for cell k. This is correct - each cell in a data column sidecar belongs to the same column (sidecar.Index) but different blobs (rows). The column index correctly identifies which cell within a blob's erasure encoding is being proven.",
+        "counterexamples_found": false,
+        "attack_vectors_tested": [
+          "Duplicate column index causing RLI aggregation collision",
+          "Index mismatch (sidecar.Index vs row index)",
+          "Off-by-one in r_powers array indexing",
+          "CELL_INDICES_RBL out-of-bounds access",
+          "Overflow in intermediate G1 accumulations for large batches",
+          "Incorrect coset factor for edge column indices (0 and 127)"
+        ]
+      },
+      "phase2_5": {
+        "additional_analysis": "The duplicate column index case does not represent a practical attack because: (1) per-block, each column index should appear at most once in valid sidecar sets; (2) the verifier would reject such malformed batches via the false negative path, triggering fallback per-peer re-verification; (3) an attacker controlling two distinct sidecars for the same column index would need to have both accepted by P2P gossip topic routing, which routes each column index to specific custody subnets, making multi-sidecar injection harder. The r_powers array is correctly sized to num_cells and indexed by cell position in the flat array (not by commitment index), which is correct. For maximum batch sizes, intermediate G1 accumulations use projective coordinates (blst Jacobian) avoiding field overflow."
+      },
+      "phase3": {
+        "invariant_proving": "Invariant 1: r_powers[k] = r^k for k=0..num_cells-1. Proof: compute_powers iterates r^0, r^1, ..., multiplying by r each step. Correct. Invariant 2: commitment_indices[k] correctly maps cell k to its unique commitment's index in unique_commitments. Proof: deduplicate_commitments does an O(n^2) first-occurrence scan with 48-byte memcmp for each commitment. For same-commitment cells, they share one index; for different commitments, they have distinct indices. Correct. Invariant 3: CELL_INDICES_RBL[cell_indices[k]] gives the correct coset shift omega for column cell_indices[k]. Proof: CELL_INDICES_RBL is a precomputed lookup table initialized at Start() mapping 0..CELLS_PER_EXT_BLOB-1 to the corresponding bit-reversed roots of unity in the evaluation domain. Bounds check on cell_indices[k] < CELLS_PER_EXT_BLOB ensures valid table access. Correct.",
+        "guards_sufficient": true,
+        "guard_analysis": "Bounds check cell_indices[i] >= CELLS_PER_EXT_BLOB prevents out-of-bounds access to CELL_INDICES_RBL and trusted setup G1 points. Field element range check via bytes_to_bls_field prevents out-of-range scalars in RLI computation. Both guards are necessary and sufficient for their invariants. The only unguarded case is duplicate column indices causing RLI collision, which produces false negatives but not false positives."
+      },
+      "phase3_5": {
+        "scope_filtering": "The RLC, RLI, and RLP components are correctly computed per their mathematical specifications. The potential duplicate-column-index case leads to false negatives (honest proof rejected) which is a correctness/robustness concern but not a security vulnerability. No path to false proof acceptance (false positive) exists."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "The RLC (weighted commitment sum with deduplication), RLI (aggregated interpolation polynomial commitment via coset IFFT + MSM), and RLP (weighted proof sum with coset factors from CELL_INDICES_RBL bit-reversal table) are all correctly implemented. r_powers indexing is correct. Commitment deduplication via first-occurrence memcmp is correct. Coset factor lookup via CELL_INDICES_RBL is bounds-checked and correct. The only anomaly (duplicate column index causing RLI collision) produces false negatives not false positives. No cryptographic bypass or false acceptance path found.",
+      "recommendation": "Consider adding a duplicate-column-index validation check at the Go layer in VerifyDataColumnsSidecarKZGProofs before batching, to catch malformed sidecar inputs early and provide better error messages. This is a robustness improvement, not a security fix."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 38,
+    "item_count": 5,
+    "timestamp": 1771374840,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0086",
+      "W7B8:W7B8:CHK-0087",
+      "W7B8:W7B8:CHK-0088",
+      "W7B8:W7B8:CHK-0089",
+      "W7B8:W7B8:CHK-0090"
+    ]
+  }
+}

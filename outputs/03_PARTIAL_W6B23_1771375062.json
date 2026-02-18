@@ -1,0 +1,429 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-002",
+        "title": "Verify Block Proposer Handling: Does the block proposer correctly create blocks with zero blob commitments?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areBlobsAvailable",
+            "line_range": {
+              "start": 855,
+              "end": 930
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) areBlobsAvailable(ctx context.Context, root [fieldparams.RootLength]byte, block interfaces.ReadOnlyBeaconBlock) error {\n\tblockSlot := block.Slot()\n\tif !params.WithinDAPeriod(slots.ToEpoch(block.Slot()), slots.ToEpoch(s.CurrentSlot())) {\n\t\treturn nil\n\t}\n\tbody := block.Body()\n\tif body == nil {\n\t\treturn errors.New(\"invalid nil beacon block body\")\n\t}\n\tkzgCommitments, err := body.BlobKzgCommitments()\n\tif err != nil {\n\t\treturn errors.Wrap(err, \"could not get KZG commitments\")\n\t}\n\texpected := len(kzgCommitments)\n\tif expected == 0 {\n\t\treturn nil  // Zero blobs: pass DA check immediately\n\t}\n\tmissing, err := missingBlobIndices(s.blobStorage, root, kzgCommitments, block.Slot())\n\tif err != nil {\n\t\treturn errors.Wrap(err, \"missing indices\")\n\t}\n\tif len(missing) == 0 {\n\t\treturn nil\n\t}\n\tnc := s.blobNotifiers.forRoot(root, block.Slot())\n\tfor {\n\t\tselect {\n\t\tcase idx := <-nc:\n\t\t\tdelete(missing, idx)\n\t\t\tif len(missing) > 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\ts.blobNotifiers.delete(root)\n\t\t\treturn nil\n\t\tcase <-ctx.Done():\n\t\t\treturn errors.Wrapf(ctx.Err(), \"context deadline waiting for blob sidecars slot: %d, BlockRoot: %#x\", block.Slot(), root)\n\t\t}\n\t}\n}",
+      "state_context": "validateStateTransition (ExecuteStateTransitionNoVerifyAnySig) is always called before areBlobsAvailable. State root validation cryptographically commits to the body root which includes the empty KZG commitments list. verifyBlobCommitmentCount enforces upper bound (<=maxBlobsPerBlock) but no lower bound (spec-correct). blobNotifiers map is never touched for zero-blob blocks.",
+      "phase1_abstract_interpretation": {
+        "summary": "The areBlobsAvailable function contains an early return at len(kzgCommitments)==0, bypassing all storage queries and notifier interactions. The abstract domain of kzgCommitments has two values: empty list and non-empty list. In the empty case, the function has no side effects and returns nil correctly. The block object is read-only (interfaces.ReadOnlyBeaconBlock) and immutable, preventing TOCTOU issues. The blobNotifiers map is never touched for zero-blob blocks, eliminating race conditions.",
+        "state_anomalies_found": [
+          "Zero-blob early return bypasses missingBlobIndices(), blobNotifiers channel creation, and the entire wait loop \u2014 this is intended and correct per the Ethereum consensus specification (EIP-4844/Deneb)",
+          "No blobNotifiers entry is created for zero-blob blocks, so no cleanup is needed and no goroutine leak is possible",
+          "WithinDAPeriod check uses immutable BeaconConfig parameters \u2014 no concurrent modification risk",
+          "body == nil check at line 864 occurs before the empty-list check \u2014 nil body is correctly rejected"
+        ],
+        "cache_analysis": "No cache is read or written for zero-blob blocks. blobStorage.Summary() is never called. blobNotifiers map is not modified. All state remains consistent across the zero-blob fast path.",
+        "concurrency_analysis": "The zero-blob path has no shared mutable state interactions. The blobNotifiers channel is never opened, so no producer/consumer race is possible. The block.Body() and BlobKzgCommitments() calls are on read-only interfaces with no locking requirements."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution of the zero-blob path confirms that the early return cannot be exploited to bypass meaningful security checks. The critical invariant is that validateStateTransition (which includes state root validation via hash_tree_root) is always called before areBlobsAvailable. The state root cryptographically commits to the body root which commits to the empty KZG commitments list. An attacker cannot forge a zero-commitment claim while including blob data without invalidating the state root.",
+        "counterexample_found": false,
+        "counterexample": "No concrete exploitable counterexample found. The early return for zero KZG commitments is protected by upstream state root validation.",
+        "attack_scenarios": [
+          "Proposer claims zero KZG commitments but includes blobs in execution payload: prevented by state root validation (body.HashTreeRoot() committed in block header, validated by ExecuteStateTransitionNoVerifyAnySig)",
+          "Fork transition (Deneb\u2192Fulu) manipulation: version is committed in signed block header and validated during state transition \u2014 no version confusion possible",
+          "Race condition between zero-blob block processing and sidecar arrival: blobNotifiers is never touched for zero-blob blocks, so no race is possible"
+        ],
+        "timing_dependencies": "No timing dependencies exist in the zero-blob path. The early return occurs synchronously before any goroutine or channel interaction."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "areBlobsAvailable is reachable from gossip (ReceiveBlock \u2192 handleDA \u2192 isDataAvailable) with avs=nil, and from batch sync (onBlockBatch \u2192 areSidecarsAvailable). Both paths require a cryptographically valid Deneb/Electra block with zero KZG commitments. Any validator can propose such a block. The early return is reachable from attacker-controlled gossip.",
+        "entry_points": [
+          "P2P gossip: subscriber_beacon_blocks.go calls ReceiveBlock(ctx, signed, root, nil) \u2014 avs is nil, routing through isDataAvailable",
+          "Batch sync: onBlockBatch \u2192 areSidecarsAvailable \u2192 areDataColumnsAvailable or avs.IsDataAvailable"
+        ],
+        "attacker_controlled": true,
+        "classification": "internal-only",
+        "attack_surface": "Any validator with sufficient stake to propose a block can create a zero-blob Deneb/Electra block. The zero-blob path triggers immediately without exploitable side effects. While the entry point is attacker-accessible, the outcome (immediate DA success) is spec-compliant and non-exploitable."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant PROP-W2B3-27 holds: blocks with zero blob KZG commitments are valid and correctly handled. The proof relies on: (1) state root validation committing to the body root which includes the empty KZG list, (2) verifyBlobCommitmentCount enforcing only the upper bound (correct per spec), (3) the zero-blob early return being reached only after full structural and cryptographic validation of the block.",
+        "proof_successful": true,
+        "guard_identified": "State root validation in ExecuteStateTransitionNoVerifyAnySig cryptographically commits to the KZG commitments list via body.HashTreeRoot(). verifyBlobCommitmentCount enforces upper bound only (correct per spec). Pre-DA-check validateStateTransition call order ensures cryptographic validation precedes the DA shortcut.",
+        "guard_sufficiency": "Guards are sufficient. The zero-blob early return only bypasses the sidecar availability wait loop, not the block validity checks. An attacker cannot exploit this path to force acceptance of invalid data.",
+        "edge_cases": [
+          "Block outside DA period with zero blobs: both WithinDAPeriod and empty-list checks return nil \u2014 correct, older blocks are not DA-checked",
+          "body == nil with zero commitments: body nil check occurs before the empty-list check \u2014 nil body is correctly rejected",
+          "Zero-blob block from a disconnected peer via gossip: still subjected to full signature and state root validation before DA check"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The zero-blob early return in areBlobsAvailable is correct behavior mandated by the Ethereum consensus specification. EIP-4844 (Deneb) and PeerDAS (Fulu) explicitly permit zero blob KZG commitments. The property PROP-W2B3-27 holds: zero-blob blocks are valid, are accepted without DA waiting (correct), and the early return cannot be exploited because state root validation is always performed upstream. No security invariant is bypassed.",
+        "recommendation": "No fix required. Consider adding a code comment at the zero-blob early return site explicitly referencing the spec section that permits zero blobs, to prevent future reviewers from incorrectly flagging this as a bug.",
+        "severity_estimate": "Informational"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-27-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-27-003",
+        "title": "Verify Beacon Node Validation: Does the beacon node permit zero blob KZG commitments without enforcing a minimum?",
+        "severity": "Medium",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-27"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "areDataColumnsAvailable",
+            "line_range": {
+              "start": 689,
+              "end": 730
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) areDataColumnsAvailable(ctx context.Context, root [fieldparams.RootLength]byte, block interfaces.ReadOnlyBeaconBlock) error {\n\tsamplesPerSlot := params.BeaconConfig().SamplesPerSlot\n\tblockSlot, currentSlot := block.Slot(), s.CurrentSlot()\n\tblockEpoch, currentEpoch := slots.ToEpoch(blockSlot), slots.ToEpoch(currentSlot)\n\tif !params.WithinDAPeriod(blockEpoch, currentEpoch) {\n\t\treturn nil\n\t}\n\tbody := block.Body()\n\tif body == nil {\n\t\treturn errors.New(\"invalid nil beacon block body\")\n\t}\n\tkzgCommitments, err := body.BlobKzgCommitments()\n\tif err != nil {\n\t\treturn errors.Wrap(err, \"blob KZG commitments\")\n\t}\n\t// If block has not commitments there is nothing to wait for.\n\tif len(kzgCommitments) == 0 {\n\t\treturn nil  // Zero KZG commitments: pass DA check immediately\n\t}\n\t// ... sampling and wait loop for data columns ...\n}",
+      "state_context": "dataColumnStorage.Subscribe() is only called AFTER the zero-commitment early return, so no subscription leakage for zero-blob Fulu blocks. peerdas.Info() and P2P.CustodyGroupCount() are ephemeral computations with no persistent state. Data column sidecars are derived from blobs, so zero commitments implies zero columns and zero sampling required.",
+      "phase1_abstract_interpretation": {
+        "summary": "areDataColumnsAvailable for zero KZG commitments exits at the early return before any P2P, storage, or subscription operations. The function manages the state domains: (kzgCommitments: list, custodyColumns: set, storedCount: uint64, missingMap: map). With zero commitments, all these domains remain uninitialized. No subscription is created, no PeerDAS sampling configuration is computed, and no storage is consulted.",
+        "state_anomalies_found": [
+          "dataColumnStorage.Subscribe() is never called for zero-blob blocks \u2014 no subscription leak possible since defer unsubscribe is registered after the branch point",
+          "peerdas.Info() and P2P.CustodyGroupCount() are skipped \u2014 ephemeral computation only, no persistent state affected",
+          "storedDataColumnsCount threshold check is skipped \u2014 correct, no columns are expected for zero-blob blocks",
+          "The second return value of peerdas.Info() is discarded with _ \u2014 potential concern for non-zero blob cases but irrelevant for zero-blob path"
+        ],
+        "cache_analysis": "dataColumnStorage.Summary() is not called for zero-blob blocks. No cache is read or written. The storage state is unaffected.",
+        "concurrency_analysis": "The identsChan subscription is never established for zero-blob blocks. No goroutines are started and no channels are created. The zero-blob path is completely single-threaded and race-free."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic execution of zero-blob Fulu blocks through areDataColumnsAvailable confirms no exploitable path exists. The permitting of zero commitments is not a policy gap but a correct implementation of PeerDAS spec. Data column sidecars are derived from blobs, so without KZG commitments there are no blobs and no data columns to sample. The no-minimum policy is correct and cannot be exploited without invalidating the block's state root.",
+        "counterexample_found": false,
+        "counterexample": "No concrete exploitable counterexample found. The absence of a minimum commitment count is spec-compliant. Forging a non-zero commitment count while claiming zero is prevented by state root validation.",
+        "attack_scenarios": [
+          "Proposer claims zero commitments on Fulu block with actual blob data: prevented by state root validation via body.HashTreeRoot() in block header commitment chain",
+          "SamplesPerSlot=0 misconfiguration causing zero columns required for non-zero blob blocks: governance/config issue, not directly attacker-exploitable and does not affect zero-blob path",
+          "Pre-Fulu block reaching areDataColumnsAvailable: blocked by isDataAvailable version dispatch (blockVersion >= version.Fulu check) and state transition version validation"
+        ],
+        "timing_dependencies": "No timing dependencies. The zero-blob early return is unconditional and synchronous."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "areDataColumnsAvailable is reached for Fulu blocks from both gossip (ReceiveBlock \u2192 handleDA \u2192 isDataAvailable) and batch sync (onBlockBatch \u2192 areSidecarsAvailable). Any Fulu-era block proposer can create a zero-commitment block. The function is reachable from the gossip network with attacker-controlled input, but the zero-blob path produces only spec-correct behavior.",
+        "entry_points": [
+          "P2P gossip: subscriber_beacon_blocks.go ReceiveBlock(ctx, signed, root, nil) \u2192 handleDA \u2192 isDataAvailable \u2192 areDataColumnsAvailable (when blockVersion >= version.Fulu)",
+          "Batch sync: onBlockBatch \u2192 areSidecarsAvailable \u2192 areDataColumnsAvailable (when blockVersion >= version.Fulu)"
+        ],
+        "attacker_controlled": true,
+        "classification": "internal-only",
+        "attack_surface": "Any Fulu-era validator can propose a zero-blob block. The zero-blob path in areDataColumnsAvailable produces spec-correct immediate success without any exploitable side effects."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant holds: permitting zero KZG commitments without a minimum is correct per spec. The proof demonstrates: (1) data columns are derived from blobs, so zero commitments implies zero columns, so zero sampling is required; (2) state root validation prevents commitment count forgery; (3) the PeerDAS sampling logic is only relevant when commitments > 0. The absence of a lower-bound check is a correct protocol implementation.",
+        "proof_successful": true,
+        "guard_identified": "State root validation (ExecuteStateTransitionNoVerifyAnySig) commits to body root including empty KZG commitments. isDataAvailable version dispatch (version.Fulu check) ensures correct function is called. verifyBlobCommitmentCount enforces only MAX_BLOBS_PER_BLOCK upper bound (spec-correct).",
+        "guard_sufficiency": "Guards are sufficient for the zero-commitment case. The key insight is that the PeerDAS DA check is gated entirely on KZG commitments in the block body \u2014 if the body contains zero commitments (cryptographically committed via state root), there are no blobs and therefore no data columns to sample.",
+        "edge_cases": [
+          "Fulu block with zero commitments outside DA period: WithinDAPeriod check returns nil before the commitment count check \u2014 doubly safe",
+          "body == nil for Fulu block: caught before commitment count check",
+          "custodyGroupCount error from P2P layer: only reached after the zero-commitment early return guard \u2014 irrelevant for zero-blob blocks",
+          "peerdas.Info() returning error with zero commitments: only called after the zero-commitment early return guard \u2014 irrelevant for zero-blob blocks"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The absence of a minimum KZG commitment count in areDataColumnsAvailable is correct protocol behavior per the PeerDAS specification. Zero-blob Fulu blocks are explicitly valid. No security invariant is violated by permitting zero commitments. State root validation provides a cryptographic guarantee that the commitment count field cannot be misrepresented by an attacker. The PeerDAS sampling architecture is correctly skipped when there are no blobs to sample.",
+        "recommendation": "No fix required. Consider adding a comment at the early return site referencing the PeerDAS specification section that permits zero commitments.",
+        "severity_estimate": "Informational"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-001",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-001",
+        "title": "Verify Trust Boundary Integrity for tb-003: Are DataColumnSidecarsByRange response sizes properly bounded?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Resource Exhaustion",
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 26,
+              "end": 127
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "validateDataColumnsByRange",
+            "line_range": {
+              "start": 173,
+              "end": 218
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) dataColumnSidecarsByRangeRPCHandler(ctx context.Context, msg interface{}, stream libp2pcore.Stream) error {\n\t// ...\n\tbeaconConfig := params.BeaconConfig()\n\tmaxRequestDataColumnSidecars := beaconConfig.MaxRequestDataColumnSidecars  // 16384\n\t// rateLimitingAmount = 1 (const) \u2014 flat charge regardless of column count\n\tif err := s.rateLimiter.validateRequest(stream, rateLimitingAmount); err != nil {\n\t\treturn errors.Wrap(err, \"rate limiter validate request\")\n\t}\n\trangeParameters, err := validateDataColumnsByRange(request, s.cfg.clock.CurrentSlot())\n\t// ... creates batcher, wantedColumns ...\n\tfor batch, ok = batcher.next(ctx, stream); ok; batch, ok = batcher.next(ctx, stream) {\n\t\tmaxRequestDataColumnSidecars, err = s.streamDataColumnBatch(ctx, batch, maxRequestDataColumnSidecars, wantedColumns, stream)\n\t\tif maxRequestDataColumnSidecars == 0 {\n\t\t\tbreak  // Quota reached\n\t\t}\n\t}\n\t// ...\n}",
+      "state_context": "MaxRequestDataColumnSidecars=16384, NumberOfColumns=128, DataColumnBatchLimit=4096 (rate limiter bucket). rateLimitingAmount=1 is a flat constant regardless of columns requested. batcher.validateRequest uses slot count (bb.size), not sidecar count. No pre-flight check of request.Count * len(request.Columns) against MaxRequestDataColumnSidecars.",
+      "phase1_abstract_interpretation": {
+        "summary": "The quota variable maxRequestDataColumnSidecars=16384 correctly bounds the total sidecar count per request. The rate limiter uses a flat charge of 1 token per request entry (rateLimitingAmount=1) and 1 token retroactively per sidecar streamed. The block batcher validates rate limits in slot units (bb.size), not sidecar units. No concurrent sharing of the quota variable occurs; it is a per-goroutine local.",
+        "state_anomalies_found": [
+          "rateLimitingAmount=1 (flat per-request) regardless of number of columns requested creates up to 128x amplification in work per rate-limit token",
+          "batcher.validateRequest uses slot count (bb.size), not sidecar count, allowing column-multiplier amplification through the batcher rate check",
+          "No pre-flight check of request.Count * len(request.Columns) against MaxRequestDataColumnSidecars before streaming begins",
+          "len(request.Columns) is not validated against NumberOfColumns (128) in the range handler (unlike blob range handler which caps range size)"
+        ],
+        "cache_analysis": "dataColumnStorage.Get uses file-level read locks and a cache for block root summaries. Non-nil wantedColumns avoids the all-columns retrieval path. Cache behavior is correct; no state anomalies in storage layer.",
+        "concurrency_analysis": "No concurrency issue on quota variable \u2014 each request handler goroutine has its own local maxRequestDataColumnSidecars. The rate limiter itself is protected by RWMutex. No race condition identified across concurrent requests."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "A peer sending 128 columns over 128 slots forces the server to stream 16,384 sidecars while consuming only 1 rate-limit token upfront (plus 128 slot tokens from the batcher, not 16,384 sidecar tokens). The quota correctly terminates streaming at 16,384 but the rate limiter fails to prevent amplified I/O and CPU work per rate-limit token.",
+        "counterexample_found": true,
+        "counterexample": "request.Columns=[0..127] (128 columns), request.Count=128, startSlot=minValidSlot: server streams 16,384 sidecars; validateRequest consumed 1 token; batcher consumed 128 slot tokens; retroactive add() consumed 16,384 tokens (after-the-fact). Rate limiter charged 1/128th of expected tokens upfront. Concrete amplification factor: 128x work per rate-limit token at the initial validateRequest check.",
+        "attack_scenarios": [
+          "128-column request over 128 slots: maximum quota exhaustion in a single request; 128x amplification per rate-limit token at validateRequest boundary",
+          "Repeated burst requests: if burst=8192 tokens, a peer can sustain multiple max-column requests before being throttled by retroactive token depletion",
+          "Zero-column request with wantedColumns=[]: wantedColumns is non-nil empty slice, dataColumnStorage.Get returns nil for each block, no streaming occurs \u2014 correct behavior but rate-limit tokens are consumed"
+        ],
+        "timing_dependencies": "No specific timing required; exploit is deterministic for any request with large column count and valid slot range."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The handler is registered on the DataColumnSidecarsByRange P2P RPC topic. Any external peer with a valid libp2p connection can send a crafted DataColumnSidecarsByRangeRequest with maximized columns and slot range.",
+        "entry_points": [
+          "P2P network libp2p stream (RPCDataColumnSidecarsByRangeTopicV1)",
+          "Any peer with valid P2P connection \u2014 no authentication required beyond libp2p handshake"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "attack_surface": "Any external peer can send a crafted request with maximum columns (128) and a long slot range, forcing the server to perform 128x the expected I/O and network work per rate-limit token consumed."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The quota invariant (total sidecars <= 16,384) is correctly enforced. The rate-limiting invariant is structurally broken: the rate limiter measures in slots at the batcher level and uses a flat 1-token charge at the request entry level, both failing to account for the column multiplier. A peer can obtain 128x the intended server work per rate-limit token.",
+        "proof_successful": false,
+        "guard_identified": "Quota check: if quota==0 break/return; per-sidecar: quota-=1 with underflow guard; rateLimiter.validateRequest upfront (1 token) + rateLimiter.add per-sidecar (retroactive) + batcher validateRequest per-batch (slot count)",
+        "guard_sufficiency": "Quota guard: sufficient and correctly implemented. Rate-limit guard: insufficient \u2014 slot-granular batcher charging and flat upfront charge both underestimate actual work by up to NumberOfColumns (128x). Retroactive per-sidecar charging cannot prevent writes from occurring.",
+        "edge_cases": [
+          "request.Count=MaxUint64: SafeAdd prevents overflow; endSlot is clamped to currentSlot",
+          "quota starting at 0 (MaxRequestDataColumnSidecars=0): defensive check in streamDataColumnBatch returns immediately",
+          "Empty wantedColumns: dataColumnStorage.Get returns nil, no streaming \u2014 but rate-limit tokens still consumed"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "The rate-limiting scheme has a structural amplification flaw for the Fulu DataColumnSidecarsByRange handler. A peer can obtain 128x the expected server work per rate-limit token by including all 128 columns in a range request. rateLimitingAmount=1 (flat) for validateRequest and slot-based batcher charges both fail to account for the column multiplier. This is exploitable by any unauthenticated P2P peer and constitutes a resource exhaustion vulnerability in a new Fulu-era RPC handler.",
+        "recommendation": "Change the initial validateRequest charge to uint64(len(request.Columns)) tokens instead of the flat rateLimitingAmount=1. Change batcher.validateRequest charge to bb.size * len(wantedColumns) to properly account for the column multiplier. Additionally, add pre-flight validation that request.Count * len(request.Columns) <= MaxRequestDataColumnSidecars (analogous to the by-root handler check).",
+        "severity_estimate": "Medium"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-002",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-002",
+        "title": "Verify RPC Requester Input Validation for DataColumnSidecarsByRange",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "validateDataColumnsByRange",
+            "line_range": {
+              "start": 173,
+              "end": 218
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func validateDataColumnsByRange(request *pb.DataColumnSidecarsByRangeRequest, currentSlot primitives.Slot) (*rangeParams, error) {\n\tstartSlot, count := request.StartSlot, request.Count\n\tif count == 0 {\n\t\treturn nil, errors.Wrap(p2ptypes.ErrInvalidRequest, \"invalid request count parameter\")\n\t}\n\tendSlot, err := request.StartSlot.SafeAdd(count - 1)  // overflow-safe\n\tif err != nil {\n\t\treturn nil, errors.Wrap(p2ptypes.ErrInvalidRequest, \"overflow start + count -1\")\n\t}\n\tif startSlot > currentSlot {\n\t\treturn nil, nil  // no penalty for future-slot overshoot\n\t}\n\tminStartSlot, err := dataColumnsRPCMinValidSlot(currentSlot)\n\t// ...\n\tstartSlot = max(startSlot, minStartSlot)\n\tendSlot = min(endSlot, currentSlot)\n\tsizeMinusOne, err := endSlot.SafeSub(uint64(startSlot))  // overflow-safe\n\tsize, err := sizeMinusOne.SafeAdd(1)  // overflow-safe\n\trangeParameters := &rangeParams{start: startSlot, end: endSlot, size: uint64(size)}\n\treturn rangeParameters, nil\n}",
+      "state_context": "validateDataColumnsByRootRequest (by-root handler) checks: if total > params.BeaconConfig().MaxRequestDataColumnSidecars \u2014 this check is ABSENT from validateDataColumnsByRange. validateBlobsByRange caps range size to blobBatchLimit \u2014 no equivalent cap in validateDataColumnsByRange. proto ssz-max:128 limits deserialization of Columns field but server does not explicitly validate len(request.Columns) <= NumberOfColumns.",
+      "phase1_abstract_interpretation": {
+        "summary": "validateDataColumnsByRange correctly handles integer overflow (SafeAdd/SafeSub), slot range clamping, and zero-count rejection. However, it is entirely missing: (1) validation of len(request.Columns) against NumberOfColumns (128); (2) pre-flight check that request.Count * len(request.Columns) <= MaxRequestDataColumnSidecars; (3) range size cap analogous to blobBatchLimit. These checks are present in sibling handlers (by-root and blob) but absent here.",
+        "state_anomalies_found": [
+          "No validation of len(request.Columns) against NumberOfColumns (128) \u2014 proto ssz-max:128 limits deserialization but server adds no explicit check",
+          "No pre-flight total sidecar count check: request.Count * len(request.Columns) <= MaxRequestDataColumnSidecars \u2014 present in validateDataColumnsByRootRequest but absent here",
+          "validateBlobsByRange caps range size to blobBatchLimit; validateDataColumnsByRange has no equivalent cap \u2014 asymmetric validation",
+          "Duplicate column indices in request.Columns are not filtered \u2014 proto allows [0,0,...,0] (128 zeros) to pass ssz-max:128 validation"
+        ],
+        "cache_analysis": "No cache involved in validation \u2014 pure arithmetic on request fields.",
+        "concurrency_analysis": "No concurrency issues \u2014 pure function with no shared state."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "An attacker can send request.Count=128, Columns=[0..127], startSlot=minValidSlot and pass all validation checks. The server then streams up to 16,384 sidecars. The peer is NOT downscored for hitting the quota (downscoring only occurs on validation errors). This creates a sustained pressure attack: the attacker can repeatedly saturate the server without any automated blacklisting.",
+        "counterexample_found": true,
+        "counterexample": "request.Count=128, Columns=[0..127] (128 columns), startSlot=minValidSlot: validateDataColumnsByRange returns rangeParams{size=128}; no check that 128*128=16,384 <= MaxRequestDataColumnSidecars; peer streams full quota (16,384 sidecars) without penalty. Compare: validateDataColumnsByRootRequest would reject if total > MaxRequestDataColumnSidecars.",
+        "attack_scenarios": [
+          "Sustained quota-saturation: peer repeatedly sends max-column requests; not downscored since quota exhaustion is not a validation error; server repeatedly performs maximum work per request",
+          "Duplicate column indices: request.Columns=[0,0,...,0] (128 zeros) passes ssz-max validation; dataColumnStorage.Get may return the same sidecar repeatedly for each duplicated index, consuming quota without serving unique data"
+        ],
+        "timing_dependencies": "None \u2014 deterministic exploit."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Fully reachable from any P2P peer with a valid connection. The missing validation means any peer can craft requests that maximize server resource consumption per request without triggering the peer downscoring mechanism.",
+        "entry_points": [
+          "P2P network, DataColumnSidecarsByRange RPC topic"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "attack_surface": "No pre-authentication needed beyond valid P2P connection. The missing pre-flight sidecar count check means the server always performs maximum work for optimally crafted requests without penalizing the sending peer."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Overflow protection is complete and correct. Slot range validation is correct. The runtime quota prevents serving more than MaxRequestDataColumnSidecars sidecars. However, the pre-validation invariant (peer is penalized for requesting more than the limit) is violated because the quota is hit silently without peer downscoring.",
+        "proof_successful": false,
+        "guard_identified": "SafeAdd/SafeSub for overflow; slot clamping to [minStartSlot, currentSlot]; count==0 rejection",
+        "guard_sufficiency": "Guards are sufficient for overflow and slot range. Guards are insufficient for: (1) column count validation (len(request.Columns) against NumberOfColumns), (2) total sidecar count pre-validation (count * columns <= MaxRequestDataColumnSidecars), (3) request size cap analogous to blobBatchLimit.",
+        "edge_cases": [
+          "Duplicate column indices [0,0,...,0]: passes ssz-max:128 validation; behavior in dataColumnStorage.Get for duplicate indices depends on implementation (may return same sidecar multiple times, consuming quota without delivering unique data)",
+          "request.Columns=nil vs empty: nil would trigger all-columns retrieval in dataColumnStorage.Get; however the handler sets wantedColumns=make([]uint64, 0) (empty, not nil) when Columns is empty \u2014 this is a subtle correctness check"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "Missing pre-flight total sidecar count validation (present in by-root handler, absent in by-range handler) and missing column count validation allow maximum-load requests without peer penalty. A malicious peer can repeatedly exhaust the server's per-request quota without triggering any automated countermeasures. Duplicate column indices may additionally cause unexpected behavior in dataColumnStorage.Get.",
+        "recommendation": "Add validation in validateDataColumnsByRange: (1) reject if len(request.Columns) > NumberOfColumns, (2) reject or cap if request.Count * len(request.Columns) > MaxRequestDataColumnSidecars (matching by-root handler pattern), (3) deduplicate column indices before passing to dataColumnStorage.Get.",
+        "severity_estimate": "Medium"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    },
+    {
+      "check_id": "W3B4:W3B4:CHK-W2B3-28-003",
+      "checklist_item": {
+        "check_id": "W3B4:W3B4:CHK-W2B3-28-003",
+        "title": "Verify Beacon Node Response Construction Enforces Dual Limit",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": false,
+        "property_id": "PROP-W2B3-28"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "streamDataColumnBatch",
+            "line_range": {
+              "start": 128,
+              "end": 172
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/sync/rpc_data_column_sidecars_by_range.go",
+            "symbol": "dataColumnSidecarsByRangeRPCHandler",
+            "line_range": {
+              "start": 26,
+              "end": 127
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) streamDataColumnBatch(ctx context.Context, batch blockBatch, quota uint64, wantedDataColumnIndices []uint64, stream libp2pcore.Stream) (uint64, error) {\n\t// Defensive check to guard against underflow.\n\tif quota == 0 {\n\t\treturn 0, nil\n\t}\n\tfor _, block := range batch.canonical() {\n\t\tblockRoot := block.Root()\n\t\tverifiedRODataColumns, err := s.cfg.dataColumnStorage.Get(blockRoot, wantedDataColumnIndices)\n\t\tif err != nil {\n\t\t\ts.writeErrorResponseToStream(responseCodeServerError, p2ptypes.ErrGeneric.Error(), stream)\n\t\t\treturn quota, errors.Wrapf(err, \"get data column sidecars: block root %#x\", blockRoot)\n\t\t}\n\t\tfor _, verifiedRODataColumn := range verifiedRODataColumns {\n\t\t\tsidecar := verifiedRODataColumn.DataColumnSidecar\n\t\t\tSetStreamWriteDeadline(stream, defaultWriteDuration)\n\t\t\tif err := WriteDataColumnSidecarChunk(stream, s.cfg.clock, s.cfg.p2p.Encoding(), sidecar); err != nil {\n\t\t\t\ts.writeErrorResponseToStream(responseCodeServerError, p2ptypes.ErrGeneric.Error(), stream)\n\t\t\t\ttracing.AnnotateError(span, err)\n\t\t\t\treturn quota, errors.Wrap(err, \"write data column sidecar chunk\")\n\t\t\t}\n\t\t\ts.rateLimiter.add(stream, rateLimitingAmount)  // Retroactive: AFTER write\n\t\t\tquota -= 1\n\t\t\tif quota == 0 {\n\t\t\t\treturn 0, nil\n\t\t\t}\n\t\t}\n\t}\n\treturn quota, nil\n}",
+      "state_context": "The dual limit consists of: (1) quota=maxRequestDataColumnSidecars (16,384 per request), decremented per sidecar; (2) rate limiter with retroactive add() per sidecar. rateLimiter.add() is called AFTER WriteDataColumnSidecarChunk \u2014 retroactive, not preventive. batcher.validateRequest uses slot count (bb.size), not sidecar count. The quota variable is a local uint64 passed by value; no concurrent sharing.",
+      "phase1_abstract_interpretation": {
+        "summary": "streamDataColumnBatch correctly implements quota decrement with underflow protection (entry guard: if quota==0 return). The dual limit (quota + rate limiter) is structurally present but the rate limiter's effective granularity is in slots (at the batcher level), not sidecars, making it an amplified check. The retroactive rateLimiter.add per-sidecar is a corrective mechanism but applies post-write, not pre-write.",
+        "state_anomalies_found": [
+          "rateLimiter.add(stream, 1) is called AFTER WriteDataColumnSidecarChunk \u2014 rate limiting is retroactive, not preventive; writes occur before tokens are charged",
+          "batcher.validateRequest(stream, bb.size) uses slot count as the rate-limit unit; for 128 columns this is 128x undercharging relative to actual sidecar work performed",
+          "The quota variable (uint64) is correctly protected from underflow by the entry guard (if quota==0 return 0,nil)",
+          "No concurrent sharing of quota \u2014 per-request local variable correctly accumulated across batch calls via return value"
+        ],
+        "cache_analysis": "No caching in streamDataColumnBatch itself. dataColumnStorage.Get uses file-level locks and an in-memory cache for block summaries. Concurrent requests for different blocks use independent locks \u2014 no cross-request interference.",
+        "concurrency_analysis": "Quota variable is not shared between goroutines. rateLimiter uses RWMutex for thread safety across concurrent peer requests. No race conditions on quota or rate limiter state within a single request. Across concurrent requests from the same peer, the rate limiter leaky bucket is shared and mutex-protected."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The quota correctly terminates streaming at MaxRequestDataColumnSidecars. Quota underflow is impossible due to the entry guard. The rate-limiter amplification allows a peer to get up to 128x the intended work per rate-limit token. The retroactive add() means the leaky bucket is depleted after the writes, not before, so it cannot prevent any individual write within a batch.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample found for quota underflow \u2014 the implementation is correct and safe. Rate-limit amplification counterexample: see CHK-W2B3-28-001 for the concrete exploit scenario (128 columns \u00d7 128 slots = 16,384 sidecars per 128-slot-unit rate-limit charge).",
+        "attack_scenarios": [
+          "Column multiplier amplification: 128 columns per slot \u00d7 batch_size slots = 128x work per slot-unit rate-limit token at batcher.validateRequest boundary (confirmed exploitable from CHK-W2B3-28-001 analysis)",
+          "Retroactive rate-limit race: writes occur before tokens are charged; a peer whose bucket is exactly at 0 after validateRequest can still stream an entire batch before retroactive tokens are applied"
+        ],
+        "timing_dependencies": "No timing dependencies for quota correctness. Rate-limit amplification is deterministic and does not require precise timing."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "streamDataColumnBatch is called exclusively from dataColumnSidecarsByRangeRPCHandler which is directly exposed to the P2P network. Full external reachability from any peer with a valid P2P connection.",
+        "entry_points": [
+          "P2P DataColumnSidecarsByRange RPC handler \u2192 streamDataColumnBatch per batch iteration"
+        ],
+        "attacker_controlled": true,
+        "classification": "exploitable",
+        "attack_surface": "Any external peer can trigger streamDataColumnBatch with maximum quota consumption by sending 128-column range requests over the maximum valid slot range."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The quota invariant is proven to hold: quota never underflows (uint64 with entry guard), streaming halts at exactly quota==0, and the return value propagates correctly across batch iterations. The rate-limit dual-limit invariant is not sufficient: the rate limiter fails to account for the column multiplier, and retroactive charging cannot prevent writes from occurring.",
+        "proof_successful": false,
+        "guard_identified": "Entry guard: if quota==0 return (0,nil); per-sidecar: quota-=1; exit: if quota==0 return (0,nil); rate limiter: retroactive add per sidecar + blocking validateRequest per batch (in slots)",
+        "guard_sufficiency": "Quota guard: sufficient and correctly implemented. Rate-limit guard: insufficient \u2014 slot-granular charging underestimates actual work by up to NumberOfColumns (128x). Retroactive charging does not prevent writes from occurring when the bucket is non-empty at validateRequest time.",
+        "edge_cases": [
+          "quota=1 at entry with multiple sidecars in batch: correctly returns after writing exactly 1 sidecar",
+          "dataColumnStorage.Get returns more items than wantedDataColumnIndices: impossible by design \u2014 Get returns at most len(indices) items",
+          "batch.canonical() returns empty list: for loop does not execute; quota returned unchanged \u2014 correct",
+          "WriteDataColumnSidecarChunk error mid-batch: quota is NOT decremented (return quota, err), correct \u2014 failed writes don't consume quota"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "The dual-limit mechanism has a structural flaw: the rate limiter charges in slots at the batcher level but the actual work is in sidecars (slots \u00d7 columns). This allows column-multiplier amplification (up to 128x) by any external peer. The quota correctly bounds total output per request but does not bound per-unit-time throughput proportionally to column count. Combined with the missing pre-validation in validateDataColumnsByRange (CHK-W2B3-28-002), this creates a sustained resource exhaustion opportunity.",
+        "recommendation": "Change batcher.validateRequest(stream, bb.size) to batcher.validateRequest(stream, bb.size * uint64(len(wantedColumns))) to properly account for the column multiplier in the per-batch rate-limit check. Change the initial validateRequest(stream, rateLimitingAmount=1) to validateRequest(stream, uint64(max(1, len(request.Columns)))) to properly charge for the column multiplier upfront.",
+        "severity_estimate": "Medium"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 6,
+    "batch_index": 23,
+    "item_count": 5,
+    "timestamp": 1771375062,
+    "processed_ids": [
+      "W3B4:W3B4:CHK-W2B3-27-002",
+      "W3B4:W3B4:CHK-W2B3-27-003",
+      "W3B4:W3B4:CHK-W2B3-28-001",
+      "W3B4:W3B4:CHK-W2B3-28-002",
+      "W3B4:W3B4:CHK-W2B3-28-003"
+    ]
+  }
+}

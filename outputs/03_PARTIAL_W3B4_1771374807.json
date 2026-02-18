@@ -1,0 +1,405 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0116",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0116",
+        "property_id": "PROP-W5B14-11",
+        "title": "Supporting Check: Can a malicious P2P peer send proof_bytes with incorrect length to cause crash or memory corruption?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Buffer Overflow via Malformed Proof Length",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "proto/prysm/v1alpha1/fulu.ssz.go",
+            "symbol": "DataColumnSidecar.UnmarshalSSZ",
+            "line_range": {
+              "start": 2038,
+              "end": 2136
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// DataColumnSidecar.UnmarshalSSZ (fulu.ssz.go:2038)\nfunc (d *DataColumnSidecar) UnmarshalSSZ(buf []byte) error {\n    ...\n    // Field (3) 'KzgProofs'\n    {\n        buf = tail[o3:]\n        num, err := ssz.DivideInt2(len(buf), 48, 4096)  // ENFORCES 48-byte elements, max 4096\n        if err != nil {\n            return err  // REJECTS if len not divisible by 48\n        }\n        d.KzgProofs = make([][]byte, num)\n        for ii := 0; ii < num; ii++ {\n            d.KzgProofs[ii] = append(d.KzgProofs[ii], buf[ii*48:(ii+1)*48]...)\n        }\n    }\n}\n// VerifyDataColumnSidecar (p2p_interface.go:44)\nif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n    return ErrMismatchLength\n}",
+      "state_context": "SSZ protobuf definition: KzgProofs [][]byte ssz-max:\"4096\" ssz-size:\"?,48\". All elements are exactly 48 bytes enforced by SSZ deserialization. VerifyCellKZGProofBatch receives kzg.Bytes48 (fixed [48]byte arrays) via Go type system.",
+      "phase1": {
+        "abstract_interpretation": "The full data path is: snappy decompress (bounded by MaxPayloadSize) \u2192 DataColumnSidecar.UnmarshalSSZ \u2192 VerifyDataColumnSidecar \u2192 KZG verification. The SSZ unmarshal at fulu.ssz.go:2123 uses ssz.DivideInt2(len(buf), 48, 4096) which returns ErrBadDivision if the KzgProofs buffer is not exactly divisible by 48. Offsets o1, o2, o3 are validated to be monotonically increasing and within buffer bounds before any slice is constructed. All slice accesses are buf[ii*48:(ii+1)*48] \u2014 well-defined Go slice operations with runtime bounds checking. Go's memory safety model prevents buffer overflow; there is no unsafe pointer arithmetic in the SSZ generated code.",
+        "abstract_state": "At KZG verification boundary: all KzgProofs elements are exactly 48 bytes (enforced by SSZ), Column/KzgProofs/KzgCommitments have equal length (enforced by VerifyDataColumnSidecar). Adversarial input cannot reach KZG verification with malformed proof byte lengths."
+      },
+      "phase2": {
+        "symbolic_execution": "Attacker-controlled scenarios analyzed:\n1. proof_bytes length not divisible by 48: DivideInt2 returns ErrBadDivision \u2192 UnmarshalSSZ returns error \u2192 ValidationReject. No data reaches KZG.\n2. len(proof) < 48 (single element too short): SSZ fixed-size enforcement catches at DivideInt2 step.\n3. Mismatched Column/Proof counts (valid SSZ but inconsistent): VerifyDataColumnSidecar returns ErrMismatchLength before KZG.\n4. Oversized message: snappy size limit rejects at decodePubsubMessage.\n5. Out-of-bounds SSZ offsets: o3 > size guard catches it.\nNo counterexample found for crash or memory corruption.",
+        "counterexample": null,
+        "path_conditions": "All paths to KZG verification require: SSZ unmarshal success (enforces 48-byte proof elements) AND VerifyDataColumnSidecar success (enforces count consistency)."
+      },
+      "phase2_5": {
+        "adversarial_review": "Challenge: Is DivideInt2 the only enforcement? Could an attacker exploit a race condition between ValidFields() result caching and KZG verification? Answer: ValidFields() records result into dv.results; the cached check skips re-execution but uses the *cached result* (not a skip). An attacker cannot cause a cached PASS to be used for a previously-failed item because results are per-verifier-instance. No race condition found in the single-goroutine verification path per sidecar. The fallback validateUnbatchedColumnsKzg also calls VerifyDataColumnsSidecarKZGProofs which uses the same length-validated sidecars. Guards are sufficient for all attack scenarios.",
+        "guard_sufficiency": "SUFFICIENT \u2014 multiple independent enforcement layers with no bypass path identified"
+      },
+      "phase3": {
+        "invariant_analysis": "Invariant: All KzgProofs elements at KZG verification boundary are exactly 48 bytes. Proof: (1) SSZ generation code uses ssz-size:\"?,48\" which generates fixed 48-byte element slicing; (2) DivideInt2 enforces divisibility; (3) Go type conversion kzg.Bytes48(sidecar.KzgProofs[i]) is a [48]byte array assignment that Go's type system makes safe. The invariant is maintained by construction.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "scope_classification": "in-scope",
+        "final_reasoning": "While the severity is marked Critical in the checklist, the actual security posture is sound. All layers of defense are present and effective. The concern about buffer overflow is addressed by Go's memory safety model combined with SSZ fixed-size enforcement. No vulnerability exists.",
+        "residual_concern": "Theoretical DoS via crafting maximally-compressible snappy payloads that expand to maximum size near the limit, potentially causing CPU exhaustion during decompression. This is a separate DoS vector not related to proof byte length."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "SSZ deserialization enforces exactly 48-byte KzgProofs elements via DivideInt2 and fixed-size array indexing. VerifyDataColumnSidecar enforces count consistency. The Go type system and runtime bounds checking prevent any memory corruption. All possible malformed-length inputs are rejected before reaching KZG verification. The multi-layer defense is complete and sufficient.",
+      "phases_executed": [
+        "phase1",
+        "phase2",
+        "phase2_5",
+        "phase3",
+        "phase3_5"
+      ]
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0117",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0117",
+        "property_id": "PROP-W5B14-11",
+        "title": "Supporting Check: Does verify_cell_kzg_proof_batch validate that commitment_bytes[], cells[], and proof_bytes[] arrays have consistent lengths?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Array Length Consistency",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyCellKZGProofBatch (kzg.go:96)\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n    ckzgCells := make([]ckzg4844.Cell, len(cells))\n    for i := range cells {\n        ckzgCells[i] = ckzg4844.Cell(cells[i])\n    }\n    return ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}\n\n// c-kzg-4844 Go binding (main.go)\n// Guard: if len(commitmentsBytes) != len(cells) || len(cellIndices) != len(cells) || len(proofsBytes) != len(cells) {\n//     return false, ErrBadArgs\n// }",
+      "state_context": "VerifyDataColumnsSidecarKZGProofs builds all four arrays (commitments, indices, cells, proofs) in a single loop over sidecar.Column elements, guaranteeing by construction that all four arrays have identical length. The c-kzg-4844 Go binding adds a redundant explicit length check before calling C.",
+      "phase1": {
+        "abstract_interpretation": "Three independent consistency enforcement layers exist: (1) VerifyDataColumnSidecar pre-checks len(Column)==len(KzgCommitments)==len(KzgProofs) per sidecar. (2) VerifyDataColumnsSidecarKZGProofs builds all four arrays in a single 'for i := range sidecar.Column' loop \u2014 by construction, all four arrays grow by exactly one element per iteration. (3) The c-kzg-4844 Go binding (github.com/ethereum/c-kzg-4844/v2@v2.1.1/bindings/go/main.go) contains an explicit guard checking len(commitmentsBytes)==len(cells)==len(cellIndices)==len(proofsBytes) before calling the C function.",
+        "abstract_state": "Array length consistency is guaranteed by loop invariant: all four output arrays are appended to in the same loop iteration. Pre-condition: VerifyDataColumnSidecar establishes len(Column)==len(KzgProofs). Post-condition: All four KZG batch arrays have identical length."
+      },
+      "phase2": {
+        "symbolic_execution": "Attempting to find a path where arrays could have inconsistent lengths:\n1. Multi-sidecar batch: VerifyDataColumnsSidecarKZGProofs processes multiple sidecars in sequence. Each sidecar's 'for i := range sidecar.Column' adds equal elements to all four arrays. Total length remains consistent.\n2. Empty sidecar batch: VerifyDataColumnsSidecarKZGProofs with len(sidecars)==0 produces four empty arrays. ckzg4844.VerifyCellKZGProofBatch([],[],[],[]) \u2014 the c-kzg-4844 binding returns (true, nil) for empty batch (C library handles len=0 as vacuously true).\n3. Concurrency: kzgVerifierRoutine drains s.kzgChan and batches verifiers. The allDataColumns slice is built by appending dataColumns slices. All sidecars passed through VerifyDataColumnSidecar before reaching this point.\nNo counterexample found.",
+        "counterexample": null,
+        "path_conditions": "Length consistency is a loop invariant established at VerifyDataColumnsSidecarKZGProofs and cannot be violated through the standard code path."
+      },
+      "phase2_5": {
+        "adversarial_review": "Challenge: Is there any way for an attacker to inject additional elements into one array but not others? The only mutation path for the arrays is the loop in VerifyDataColumnsSidecarKZGProofs. There is no external access to these local variables. The function is not exported in a way that allows partial construction. Challenge resolved: no bypass path.",
+        "guard_sufficiency": "SUFFICIENT \u2014 loop-invariant construction is the strongest possible guarantee; redundant Go binding check provides defense-in-depth"
+      },
+      "phase3": {
+        "invariant_analysis": "Invariant: len(commitments) == len(indices) == len(cells) == len(proofs) at VerifyCellKZGProofBatch call site. Proof by loop invariant: Initialization: all four slices initialized to empty with capacity 'count'. Maintenance: each iteration appends exactly one element to each of the four slices. Termination: all four slices have the same length. This is a formal proof by induction; no exceptions exist within the function body.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "scope_classification": "in-scope",
+        "final_reasoning": "Array length consistency is guaranteed by three independent mechanisms. The concern in the checklist item is fully addressed. This is an informational finding confirming correct implementation.",
+        "residual_concern": "None"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "All four arrays passed to verify_cell_kzg_proof_batch are constructed in a single loop with identical iteration bounds, guaranteeing length consistency by construction. The c-kzg-4844 Go binding adds an explicit length equality check as defense-in-depth. No path exists for inconsistent array lengths to reach the C KZG library.",
+      "phases_executed": [
+        "phase1",
+        "phase2",
+        "phase2_5",
+        "phase3",
+        "phase3_5"
+      ]
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0118",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0118",
+        "property_id": "PROP-W5B14-11",
+        "title": "Supporting Check: Does the P2P gossip validation layer enforce byte length constraints before data reaches verify_cell_kzg_proof_batch?",
+        "severity": "High",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Validation Layer Bypass",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/verification/data_column.go",
+            "symbol": "GossipDataColumnSidecarRequirements",
+            "line_range": {
+              "start": 26,
+              "end": 39
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// GossipDataColumnSidecarRequirements (data_column.go:26)\nvar GossipDataColumnSidecarRequirements = []Requirement{\n    RequireValidFields,         // calls VerifyDataColumnSidecar (length checks)\n    RequireCorrectSubnet,\n    RequireNotFromFutureSlot,\n    RequireSlotAboveFinalized,\n    RequireValidProposerSignature,\n    RequireSidecarParentSeen,\n    RequireSidecarParentValid,\n    RequireSidecarParentSlotLower,\n    RequireSidecarDescendsFromFinalized,\n    RequireSidecarInclusionProven,\n    RequireSidecarKzgProofVerified,  // calls VerifyDataColumnsSidecarKZGProofs\n    RequireSidecarProposerExpected,\n}\n\n// validateDataColumn ordering:\n// 1. decodePubsubMessage (SSZ unmarshal with DivideInt2 enforcement)\n// 2. verifier.ValidFields() -> VerifyDataColumnSidecar (length consistency)\n// 3. ... other checks ...\n// 4. validateWithKzgBatchVerifier -> VerifyDataColumnsSidecarKZGProofs -> VerifyCellKZGProofBatch",
+      "state_context": "SSZ deserialization enforces element sizes (48 bytes for KzgCommitments/KzgProofs, 2048 bytes for Column). ValidFields() is first in GossipDataColumnSidecarRequirements and is executed before KZG check. The SatisfyRequirement mechanism is only used for RequireSidecarKzgProofVerified after successful KZG verification \u2014 it does not bypass RequireValidFields.",
+      "phase1": {
+        "abstract_interpretation": "The P2P validation pipeline enforces byte length constraints at two independent layers before KZG: (Layer 1) SSZ deserialization in decodePubsubMessage: DivideInt2(len(buf), 48, 4096) enforces 48-byte KzgProofs/KzgCommitments elements; DivideInt2(len(buf), 2048, 4096) enforces 2048-byte Column elements. (Layer 2) Application-layer check: ValidFields() calls VerifyDataColumnSidecar which checks len(Column)==len(KzgCommitments)==len(KzgProofs). Both layers execute before validateWithKzgBatchVerifier. The ordering in validateDataColumn is deterministic and cannot be bypassed.",
+        "abstract_state": "Pre-condition for KZG verification: SSZ enforces fixed element sizes; VerifyDataColumnSidecar enforces count consistency. These are necessary conditions established before any KZG operation."
+      },
+      "phase2": {
+        "symbolic_execution": "Attempting to find bypass paths:\n1. SatisfyRequirement bypass: SatisfyRequirement(RequireSidecarKzgProofVerified) is called AFTER validateWithKzgBatchVerifier returns ValidationAccept. It cannot be used to skip ValidFields check.\n2. Cache bypass: dv.results.cached(RequireValidFields) returns cached result. If ValidFields() previously returned error, cached result is the error \u2014 not a bypass.\n3. ByRange/ByRoot paths: verification.ByRangeRequestDataColumnSidecarRequirements and ByRootRequestDataColumnSidecarRequirements both include RequireValidFields \u2014 non-gossip paths are equally protected.\n4. Initial sync bypass: validateDataColumn returns ValidationIgnore (not Accept) during initial sync \u2014 KZG is never called.\nNo bypass path found.",
+        "counterexample": null,
+        "path_conditions": "validateDataColumn \u2192 decodePubsubMessage (SSZ) \u2192 ValidFields \u2192 [other checks] \u2192 KZG. No code path exists to reach KZG without passing both SSZ and ValidFields."
+      },
+      "phase2_5": {
+        "adversarial_review": "Critical challenge: Is there a way to cause ValidFields() to be skipped via the requirements cache? The results cache stores per-verifier-instance results. A new message creates a new verifier. A cached 'pass' from a different verifier cannot be reused. The results field is not shared between verifier instances. Challenge resolved: no cross-instance cache contamination possible.",
+        "guard_sufficiency": "SUFFICIENT \u2014 sequential ordering of validation steps is deterministic; SSZ enforcement is a deeper-layer guarantee that ValidFields cannot bypass"
+      },
+      "phase3": {
+        "invariant_analysis": "Invariant: Any data column reaching verify_cell_kzg_proof_batch has passed SSZ byte-length enforcement AND application-layer count consistency check. Proof: Code path in validateDataColumn is strictly sequential; ValidFields() is ordered before validateWithKzgBatchVerifier; SSZ deserialization is ordered before ValidFields() at the decodePubsubMessage step. The validation chain is complete and sound.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "scope_classification": "in-scope",
+        "final_reasoning": "Defense-in-depth is present and effective. SSZ provides the primary enforcement; ValidFields provides redundant application-layer enforcement. Both are required to pass before KZG verification. The validation pipeline correctly implements the spec requirement for byte length enforcement.",
+        "residual_concern": "The 'defense in depth' concern in the checklist notes is satisfied: both P2P deserialization layer AND the application validation layer independently enforce byte lengths."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "The P2P gossip validation enforces byte length constraints at two independent layers (SSZ deserialization + VerifyDataColumnSidecar) before any data reaches verify_cell_kzg_proof_batch. The ordering in validateDataColumn is deterministic and sequential. All non-gossip paths (ByRange, ByRoot) also include ValidFields in their requirement sets. No bypass path exists.",
+      "phases_executed": [
+        "phase1",
+        "phase2",
+        "phase2_5",
+        "phase3",
+        "phase3_5"
+      ]
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0119",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0119",
+        "property_id": "PROP-W5B14-12",
+        "title": "Verify Trust Boundary Integrity for tb-002: Does bytes_to_kzg_commitment perform BLS12-381 G1 subgroup check during deserialization?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Missing Subgroup Check",
+        "risk_category": "Spoofing"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// c-kzg-4844/v2@v2.1.1/src/common/bytes.c\nstatic C_KZG_RET validate_kzg_g1(g1_t *out, const Bytes48 *b) {\n    blst_p1_affine p1_affine;\n    // Step 1: curve check (uncompress verifies point is on BLS12-381 curve)\n    if (blst_p1_uncompress(&p1_affine, b->bytes) != BLST_SUCCESS)\n        return C_KZG_BADARGS;\n    blst_p1_from_affine(out, &p1_affine);\n    // Step 2: infinity exception (allowed per Ethereum spec)\n    if (blst_p1_is_inf(out)) return C_KZG_OK;\n    // Step 3: G1 subgroup check\n    if (!blst_p1_in_g1(out)) return C_KZG_BADARGS;\n    return C_KZG_OK;\n}\n\nC_KZG_RET bytes_to_kzg_commitment(g1_t *out, const Bytes48 *b) {\n    return validate_kzg_g1(out, b);\n}\n\n// verify_cell_kzg_proof_batch (eip7594.c:509)\n// bytes_to_kzg_commitment called for each unique commitment before pairing operations",
+      "state_context": "The c-kzg-4844 library (v2.1.1) used by Prysm implements validate_kzg_g1 which performs three-step validation: (1) blst_p1_uncompress (curve membership), (2) infinity point allowance, (3) blst_p1_in_g1 (G1 subgroup membership check). This is called from bytes_to_kzg_commitment which is invoked by verify_cell_kzg_proof_batch for each commitment before any pairing operations.",
+      "phase1": {
+        "abstract_interpretation": "The c-kzg-4844 library implements the required subgroup check in validate_kzg_g1. The blst_p1_in_g1 function from the blst library performs cofactor multiplication to verify G1 subgroup membership. This is the standard, correct approach for BLS12-381 subgroup checking. The check is invoked for every commitment in verify_cell_kzg_proof_batch before the linear combination computation begins. An attacker-supplied commitment in the cofactor group (on-curve but not in G1 subgroup) would fail blst_p1_in_g1 and cause C_KZG_BADARGS return, propagating as error through the Go binding \u2192 Prysm \u2192 ValidationReject.",
+        "abstract_state": "Pre-condition for pairing operations: all commitments pass validate_kzg_g1, including the G1 subgroup check. Points not in G1 subgroup are rejected before any cryptographic operations that depend on subgroup membership."
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario: Construct a point P on BLS12-381 curve that is NOT in the G1 subgroup (i.e., in the cofactor group but outside G1). Send as KzgCommitment in DataColumnSidecar via P2P gossip.\n\nExecution trace:\n1. SSZ deserialization: P is 48 bytes, passes length check \u2192 succeeds\n2. VerifyDataColumnSidecar: checks count consistency \u2192 passes (P is valid-length bytes)\n3. validateWithKzgBatchVerifier \u2192 VerifyDataColumnsSidecarKZGProofs \u2192 VerifyCellKZGProofBatch\n4. c-kzg-4844 Go binding: ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, ...)\n5. C library: verify_cell_kzg_proof_batch calls bytes_to_kzg_commitment(out, P)\n6. validate_kzg_g1: blst_p1_uncompress(P) \u2192 BLST_SUCCESS (P is on-curve)\n7. validate_kzg_g1: blst_p1_is_inf(P) \u2192 false\n8. validate_kzg_g1: blst_p1_in_g1(P) \u2192 FALSE (P not in G1 subgroup)\n9. Returns C_KZG_BADARGS \u2192 Go binding returns error \u2192 ValidationReject\n\nAttack is blocked at step 8. No pairing operations are performed with the non-subgroup point.",
+        "counterexample": null,
+        "path_conditions": "All non-subgroup commitments are rejected at the C library level before any pairing. The check happens at the correct point in the computation (before linear combination)."
+      },
+      "phase2_5": {
+        "adversarial_review": "Challenge: Is blst_p1_in_g1 the correct and complete subgroup check? blst_p1_in_g1 checks G1 subgroup membership using the standard cofactor approach (multiply by curve order and check for point at infinity). For BLS12-381, the G1 cofactor is small (76-bit value: 0xd201000000010001), making this check efficient. This is the same approach used by the Ethereum Foundation reference implementation (py_ecc). Challenge: Does the infinity exception create a vulnerability? The infinity point (identity element) has KZG protocol implications \u2014 a commitment of infinity would correspond to the zero polynomial. The pairing of infinity with any G2 point produces the neutral pairing element. Whether this creates a forgery depends on the full KZG protocol context. In verify_cell_kzg_proof_batch, the random linear combination still involves all cells; an all-zero polynomial would require all cell values to also be zero to pass. This is not a practical attack vector for forging arbitrary commitments. Challenge resolved.",
+        "guard_sufficiency": "SUFFICIENT \u2014 blst_p1_in_g1 correctly implements G1 subgroup check; the infinity exception is standard and does not create a forgery path"
+      },
+      "phase3": {
+        "invariant_analysis": "Invariant: All G1 points used in pairing operations within verify_cell_kzg_proof_batch are members of the G1 subgroup (or the point at infinity). Proof: Every point deserialization calls validate_kzg_g1, which calls blst_p1_in_g1 for non-infinity points. The function returns C_KZG_BADARGS for any non-subgroup point, which propagates as error. No pairing operation is reached for non-subgroup inputs.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "scope_classification": "in-scope",
+        "final_reasoning": "The G1 subgroup check for commitments is present, correctly placed (before pairings), and uses the standard blst_p1_in_g1 approach. The concern raised in the checklist (CVE-2019-11510 class) is fully addressed by the c-kzg-4844 library. This confirms correct implementation.",
+        "residual_concern": "The infinity commitment edge case (allowed by the library) should be verified at the protocol level: does an infinity commitment with valid zero-cell data correctly verify? This is a protocol correctness question, not a subgroup check bypass."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "The c-kzg-4844 library (v2.1.1) correctly implements BLS12-381 G1 subgroup checks in validate_kzg_g1 via blst_p1_in_g1. This is called by bytes_to_kzg_commitment for every commitment in verify_cell_kzg_proof_batch before any pairing operations. Non-subgroup commitment points are rejected with C_KZG_BADARGS, which propagates as a ValidationReject at the P2P gossip layer. The subgroup check vulnerability class is fully addressed.",
+      "phases_executed": [
+        "phase1",
+        "phase2",
+        "phase2_5",
+        "phase3",
+        "phase3_5"
+      ]
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0120",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0120",
+        "property_id": "PROP-W5B14-12",
+        "title": "Verify Trust Boundary Integrity for tb-002: Does bytes_to_kzg_proof perform BLS12-381 G1 subgroup check during deserialization?",
+        "severity": "Critical",
+        "mindset": "Boundary Guard",
+        "is_boundary_check": true,
+        "bug_class": "Missing Subgroup Check",
+        "risk_category": "Spoofing"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// c-kzg-4844/v2@v2.1.1/src/common/bytes.c\nC_KZG_RET bytes_to_kzg_proof(g1_t *out, const Bytes48 *b) {\n    return validate_kzg_g1(out, b);  // Same validate_kzg_g1 as bytes_to_kzg_commitment\n}\n\n// validate_kzg_g1 (same function as CHK-0119):\n// 1. blst_p1_uncompress (curve check)\n// 2. blst_p1_is_inf (infinity exception)\n// 3. blst_p1_in_g1 (G1 subgroup check) <- REQUIRED\n\n// verify_cell_kzg_proof_batch (eip7594.c:910)\n// for (size_t i = 0; i < num_cells; i++) {\n//     ret = bytes_to_kzg_proof(&proofs_g1[i], &proofs_bytes[i]);\n//     if (ret != C_KZG_OK) goto out;\n// }",
+      "state_context": "bytes_to_kzg_proof delegates identically to validate_kzg_g1, performing the same three-step check as bytes_to_kzg_commitment. In verify_cell_kzg_proof_batch (eip7594.c), bytes_to_kzg_proof is called for every proof in the cell loop BEFORE any pairing operations. The loop exits immediately on error (goto out pattern).",
+      "phase1": {
+        "abstract_interpretation": "bytes_to_kzg_proof is a direct wrapper for validate_kzg_g1, identical to bytes_to_kzg_commitment in implementation. The G1 subgroup check (blst_p1_in_g1) is applied to every proof point before pairing. The verify_cell_kzg_proof_batch function processes proofs in a loop before computing the linear combination, with immediate error propagation via goto out. An attacker-controlled proof point in the cofactor group (but not G1 subgroup) would fail blst_p1_in_g1 and return C_KZG_BADARGS.",
+        "abstract_state": "Pre-condition for pairing operations in verify_cell_kzg_proof_batch: all proof points pass validate_kzg_g1 (including G1 subgroup check). Non-subgroup proof points are rejected before any pairing computation."
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario: Construct a proof point P_proof on BLS12-381 curve but NOT in G1 subgroup. Send as KzgProof in DataColumnSidecar via P2P gossip.\n\nExecution trace:\n1. SSZ deserialization: P_proof is 48 bytes \u2192 passes\n2. VerifyDataColumnSidecar: count consistency \u2192 passes\n3. VerifyDataColumnsSidecarKZGProofs: proofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n4. VerifyCellKZGProofBatch \u2192 ckzg4844.VerifyCellKZGProofBatch\n5. C library: eip7594.c loop calls bytes_to_kzg_proof(out, P_proof)\n6. validate_kzg_g1: blst_p1_uncompress \u2192 BLST_SUCCESS (on-curve)\n7. validate_kzg_g1: blst_p1_is_inf \u2192 false\n8. validate_kzg_g1: blst_p1_in_g1(P_proof) \u2192 FALSE\n9. Returns C_KZG_BADARGS \u2192 goto out \u2192 C function returns error\n10. Go binding propagates error \u2192 ValidationReject\n\nAttack is blocked at step 8. Pairing operations that use the proof are never reached.\n\nEdge case: infinity proof (P_proof = identity element). blst_p1_is_inf \u2192 true \u2192 C_KZG_OK returned. Infinity proof passes the subgroup check. In the pairing computation, pairing(G2, infinity) = neutral element. The random linear combination with an infinity proof would require all corresponding cells to hash to zero, which is cryptographically infeasible for valid data. This is not a practical forgery vector.",
+        "counterexample": null,
+        "path_conditions": "All non-infinity, non-subgroup proof points are rejected by blst_p1_in_g1. Infinity proofs are allowed but do not create forgery opportunities in the KZG protocol."
+      },
+      "phase2_5": {
+        "adversarial_review": "Critical challenge: Could an attacker submit an infinity proof to cause incorrect verification acceptance? In verify_cell_kzg_proof_batch, a random linear combination is computed using Fiat-Shamir challenge scalars derived from the commitment and cell data. The linear combination includes proof terms. For an infinity proof, the proof contributes the neutral pairing element to the random linear combination. For the batch verification equation to hold with an invalid cell, the other terms must cancel exactly \u2014 which requires knowledge of the Fiat-Shamir challenge before generating the forged data. Since Fiat-Shamir challenges are derived from the data (commitment, cell index, cell data), a preimage attack would be required. This is cryptographically infeasible under ROM assumption. Challenge resolved: the infinity proof exception does not enable forgery.",
+        "guard_sufficiency": "SUFFICIENT \u2014 G1 subgroup check present for non-infinity proofs; infinity proof exception does not enable forgery under ROM assumption"
+      },
+      "phase3": {
+        "invariant_analysis": "Invariant: All proof points used in pairing operations within verify_cell_kzg_proof_batch are members of the G1 subgroup (or the point at infinity). Proof: bytes_to_kzg_proof calls validate_kzg_g1 which calls blst_p1_in_g1 for non-infinity points. The goto out pattern ensures no pairing is computed for any proof that fails validation. The loop over all num_cells proofs must complete without error before the pairing phase begins.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "scope_classification": "in-scope",
+        "final_reasoning": "The G1 subgroup check for proof points is present in bytes_to_kzg_proof via the shared validate_kzg_g1 function. The check is correctly placed (before pairings) and uses the standard blst_p1_in_g1 approach. The infinity proof exception (allowed) does not create a forgery path due to the Fiat-Shamir random linear combination making preimage attacks infeasible. This confirms correct implementation.",
+        "residual_concern": "PROTOCOL-LEVEL NOTE: Both bytes_to_kzg_commitment and bytes_to_kzg_proof allow the point at infinity. A DataColumnSidecar with an infinity commitment AND infinity proof for a column of all-zero cells might warrant protocol-level analysis. However, this is not a subgroup check bypass and is outside the scope of this specific security check."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "confidence": "high",
+      "reasoning": "bytes_to_kzg_proof delegates to validate_kzg_g1 which performs the blst_p1_in_g1 G1 subgroup check for all non-infinity proof points. The check is correctly placed before pairing operations in verify_cell_kzg_proof_batch. Non-subgroup proof points are rejected with C_KZG_BADARGS propagating as ValidationReject at the gossip layer. The subgroup check vulnerability class (CVE-2019-11510 type) is fully addressed for both commitment and proof deserialization.",
+      "phases_executed": [
+        "phase1",
+        "phase2",
+        "phase2_5",
+        "phase3",
+        "phase3_5"
+      ]
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 4,
+    "item_count": 5,
+    "timestamp": 1771374807,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0116",
+      "W7B8:W7B8:CHK-0117",
+      "W7B8:W7B8:CHK-0118",
+      "W7B8:W7B8:CHK-0119",
+      "W7B8:W7B8:CHK-0120"
+    ]
+  }
+}
