@@ -1,12 +1,12 @@
 
 ---
-Description: [WORKER] Pre-resolve code locations for checklist items
+Description: [WORKER] Pre-resolve code locations for checklist items (OPTIMIZED: metadata only, no code excerpts)
 Usage: `/02c_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
 Language: English only.
 ---
 
 <task>
-  <goal>For each checklist item in the batch, find the relevant code locations in the target repository and extract code excerpts.</goal>
+  <goal>For each checklist item in the batch, find the relevant code locations in the target repository. Return ONLY file paths, function names, and line ranges — do NOT extract code excerpts.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
@@ -14,6 +14,7 @@ Language: English only.
     1. Process ALL items in the batch — do not skip or truncate
     2. Write output JSON even if some items fail resolution
     3. Handle errors per item gracefully and continue
+    4. **DO NOT extract or include code excerpts** — only metadata (file path, symbol name, line range)
   </critical_requirements>
 
   <instructions>
@@ -35,12 +36,12 @@ Language: English only.
     ## Step 3: Code Resolution (per in-scope item)
 
     **Primary — Tree-sitter MCP call graph:**
-    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `test_procedure`. Extract file path, symbol name, and line range for the top matches.
+    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `test_procedure`. Extract **ONLY** file path, symbol name, and line range for the top matches.
 
     **Fallback — Glob + Grep:**
     If MCP fails or returns no results, use the standard Glob and Grep tools to search `target_workspace/` directly. Extract keywords (identifiers, constants, domain terms) from `test_procedure`, then search for matching function/type definitions. Use `reachability.entry_points` as a hint to narrow the search directory (e.g. an entry point named "P2P" likely maps to directories like `p2p/`, `sync/`, `network/`; "Transaction" to `txpool/`, `core/`; infer from the codebase structure if uncertain).
 
-    Read the matched file sections with the Read tool to extract code excerpts (max 50 lines per location).
+    **DO NOT read the matched files or extract code excerpts.** Only record the metadata (file path, symbol, line range).
 
     If both MCP and Grep find nothing → mark as `not_found`.
 
@@ -66,8 +67,7 @@ Language: English only.
               "resolution_status": "resolved" | "out_of_scope" | "not_found" | "error",
               "resolution_error": "",   // empty string unless status is "error"
               "resolution_method": "mcp_callgraph" | "mcp_simple" | "grep_fallback"  // only when resolved
-            },
-            "code_excerpt": "// PRIMARY: path/to/file.go:FunctionName (lines 42-78)\n..."
+            }
           }
         ]
       }

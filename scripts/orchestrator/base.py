@@ -763,9 +763,13 @@ class Phase02Orchestrator(BaseOrchestrator):
                 early_exit_results.append(self._build_skip_result(item, "missing property id"))
                 continue
             
-            # Skip out-of-scope properties
+            # Skip ONLY out-of-scope properties
+            # Keep all other items (in-scope, conditional, unknown) for Phase 03 verification
+            # This ensures we don't miss potential vulnerabilities due to overly strict filtering
             reachability = prop.get("reachability", {})
-            if reachability.get("bug_bounty_scope") == "out-of-scope":
+            bug_bounty_scope = reachability.get("bug_bounty_scope", "unknown")
+            
+            if bug_bounty_scope == "out-of-scope":
                 early_exit_results.append(self._build_skip_result(item, "out-of-scope"))
                 continue
             
@@ -998,26 +1002,24 @@ class Phase03Orchestrator(BaseOrchestrator):
         self,
         items: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Apply early exit for items without property_id."""
+        """Apply early exit for out-of-scope items only."""
         early_exit_results = []
         items_to_process = []
         
         for item in items:
-            property_id = item.get("property_id")
-            if not property_id:
-                checklist_item = item.get("checklist_item", {})
-                if isinstance(checklist_item, dict):
-                    property_id = checklist_item.get("property_id")
-            
-            if not property_id:
-                early_exit_results.append(self._build_early_exit_result(item))
-            else:
-                items_to_process.append(item)
+            checklist_item = item.get("checklist_item", {})
+            code_scope = item.get("code_scope") or checklist_item.get("code_scope", {})
+
+            if isinstance(code_scope, dict) and code_scope.get("resolution_status") == "out_of_scope":
+                early_exit_results.append(self._build_early_exit_result(item, "out-of-scope"))
+                continue
+
+            items_to_process.append(item)
         
         return early_exit_results, items_to_process
     
-    def _build_early_exit_result(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Build early exit result for items without required metadata."""
+    def _build_early_exit_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
+        """Build early exit result for out-of-scope items."""
         check_id = item.get("check_id")
         checklist_item = item.get("checklist_item", {})
         code_scope = item.get("code_scope") or checklist_item.get("code_scope", {})
@@ -1028,10 +1030,10 @@ class Phase03Orchestrator(BaseOrchestrator):
             "code_scope": code_scope,
             "final_classification": "out-of-scope",
             "bug_bounty_eligible": False,
-            "summary": "Early exit: insufficient item metadata.",
+            "summary": f"Early exit: {reason}.",
             "audit_trail": {
                 "phase1_abstract_interpretation": {
-                    "summary": "Early exit: missing required identifiers.",
+                    "summary": f"Early exit: {reason}.",
                     "state_anomalies_found": [],
                 },
                 "phase2_symbolic_execution": {
