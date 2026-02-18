@@ -133,7 +133,7 @@ class TestPhaseConfig:
     def test_phase03_config_values(self):
         cfg = PHASE_CONFIGS["03"]
         assert cfg.batch_strategy == "count"
-        assert cfg.max_batch_size == 15  # Optimized: increased from 10 due to unified skill
+        assert cfg.max_batch_size == 5  # Reduced to prevent timeout and improve completion rate
         assert cfg.result_key == "audit_items"
         assert cfg.output_pattern == "outputs/03_PARTIAL_*.json"
 
