@@ -1,0 +1,420 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W0B1:W0B1:CHK-0006",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0006",
+        "property_id": "PROP-W0B17-7",
+        "title": "Verify Trust Boundary Integrity: Is keccak256 collision-resistant and correctly implemented?",
+        "severity": "Critical",
+        "bug_class": "Cryptographic Verification",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/header.go",
+            "symbol": "ProcessBlockHeader",
+            "line_range": {
+              "start": 42,
+              "end": 67
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/blocks/header.go",
+            "symbol": "ProcessBlockHeaderNoVerify",
+            "line_range": {
+              "start": 98,
+              "end": 147
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func ProcessBlockHeader(ctx, beaconState, block) (BeaconState, error) {\n    bodyRoot, err := block.Block().Body().HashTreeRoot()  // SSZ SHA-256\n    parentRoot := block.Block().ParentRoot()\n    beaconState, err = ProcessBlockHeaderNoVerify(...)\n    if err := VerifyBlockSignature(beaconState, block.Block().ProposerIndex(), sig[:], block.Block().HashTreeRoot); ...}\nfunc ProcessBlockHeaderNoVerify(...) {\n    parentHeaderRoot, err := parentHeader.HashTreeRoot()  // SSZ SHA-256\n    if !bytes.Equal(parentRoot, parentHeaderRoot[:]) { return nil, fmt.Errorf(...) }\n    // checks slot, proposer index, slashing status\n}",
+      "state_context": "Block header state: beaconState.LatestBlockHeader() read atomically; updated via SetLatestBlockHeader only after all checks pass.",
+      "phase1_abstract_interpretation": {
+        "summary": "Block header hashing in ProcessBlockHeader and ProcessBlockHeaderNoVerify uses SSZ HashTreeRoot (SHA-256 Merkle tree), NOT keccak256. No keccak256 is used anywhere in the beacon chain block header processing pipeline. The hash function applied is appropriate and collision-resistant for the consensus domain. All parent root linkage uses SHA-256 SSZ roots.",
+        "state_anomalies_found": [],
+        "cache_analysis": "State.LatestBlockHeader is read atomically and updated only after all validations pass. No caching inconsistency possible.",
+        "concurrency_analysis": "BeaconState is passed by value (interface wrapping a pointer); no concurrent mutation within this function."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Because keccak256 is not used, the property as stated cannot be violated. The SHA-256-based SSZ root check at header.go line 123 is a proper collision-resistant guard. No counterexample exists for the stated property.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "None"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "This function is called during block processing for every received block. Entry from P2P gossip and RPC block submission. The hash verification is a prerequisite before state modification. Attacker can submit blocks with arbitrary parentRoot values, but these are rejected unless the SHA-256 SSZ root matches.",
+        "entry_points": [
+          "P2P gossip block receipt",
+          "RPC block submission"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "No exploitable surface; SHA-256 SSZ root prevents block forgery"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that parent_root must match hash_tree_root(state.latest_block_header) is correctly enforced using bytes.Equal comparison of SHA-256 SSZ roots. The guard is both necessary and sufficient.",
+        "proof_successful": true,
+        "guard_identified": "bytes.Equal(parentRoot, parentHeaderRoot[:]) at header.go line 123",
+        "guard_sufficiency": "Sufficient. SHA-256 based SSZ root provides 128-bit collision resistance. No gaps found.",
+        "edge_cases": [
+          "Nil parentRoot would propagate through ProcessBlockHeaderNoVerify's []byte parameter; however BeaconBlockIsNil check in ProcessBlockHeader prevents nil blocks from reaching this point"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The property check is based on a false premise: keccak256 is not used in block header hashing. The actual SHA-256 SSZ hash usage is correct and collision-resistant. No vulnerability exists.",
+        "recommendation": "No code change needed. Clarify documentation: beacon chain uses SSZ HashTreeRoot (SHA-256) not keccak256 for consensus-layer block header hashing.",
+        "severity_estimate": "N/A - not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "keccak256 is not used for block header hashing in Prysm. The codebase uses SSZ HashTreeRoot (SHA-256 Merkle trees) which provides 128-bit collision resistance. The parent root linkage check is correctly implemented and sufficient."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0007",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0007",
+        "property_id": "PROP-W0B17-8",
+        "title": "Verify Trust Boundary Integrity: Is withdrawal amount scaled correctly by 10^9 (Gwei to Wei)?",
+        "severity": "Critical",
+        "bug_class": "Arithmetic",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/withdrawals.go",
+            "symbol": "ProcessWithdrawals",
+            "line_range": {
+              "start": 154,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/helpers/rewards_penalties.go",
+            "symbol": "DecreaseBalance",
+            "line_range": {
+              "start": 140,
+              "end": 158
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// ProcessWithdrawals\nfor _, withdrawal := range expectedWithdrawals {\n    err := helpers.DecreaseBalance(st, withdrawal.ValidatorIndex, withdrawal.Amount)\n    // withdrawal.Amount is already in Gwei; beacon state balances in Gwei\n}\n// DecreaseBalance\nfunc DecreaseBalance(state, idx, delta uint64) error {\n    balAtIdx, err := state.BalanceAtIndex(idx)\n    return state.UpdateBalancesAtIndex(idx, DecreaseBalanceWithVal(balAtIdx, delta))\n}\n// DecreaseBalanceWithVal\nfunc DecreaseBalanceWithVal(currBalance, delta uint64) uint64 {\n    if delta > currBalance { return 0 }\n    return currBalance - delta\n}",
+      "state_context": "Beacon state balances stored in Gwei. Withdrawal.Amount from enginev1.Withdrawal is in Gwei. The execution layer handles Gwei-to-Wei conversion independently when crediting the withdrawal address.",
+      "phase1_abstract_interpretation": {
+        "summary": "ProcessWithdrawals correctly passes withdrawal.Amount (in Gwei) to DecreaseBalance without any unit conversion. Both beacon state balances and withdrawal amounts are denominated in Gwei throughout the consensus layer. The execution layer handles Gwei-to-Wei conversion independently. This is correct per the Ethereum consensus spec.",
+        "state_anomalies_found": [],
+        "cache_analysis": "No caching involved in balance updates. UpdateBalancesAtIndex writes directly to state.",
+        "concurrency_analysis": "Single-threaded state transition; no concurrent balance modification."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic analysis confirms withdrawal amounts flow through ProcessWithdrawals to DecreaseBalance unchanged in denomination. No scaling transformation is applied at any point in the consensus layer. This is correct per the Ethereum consensus spec. The withdrawal.Amount field in the enginev1.Withdrawal proto is defined as Gwei (uint64) and is consistently used as such.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "None"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Withdrawal amounts originate from ExpectedWithdrawals(), which computes them from validator state in Gwei. The execution payload withdrawals are verified to match expected via SSZ root comparison before any balance decreases occur. Attacker cannot inject arbitrary withdrawal amounts.",
+        "entry_points": [
+          "Execution payload withdrawals (verified against expected via SSZ root)"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "No exploitable surface; withdrawal amounts constrained by beacon state computation and verified via SSZ root"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that balances decrease by the exact Gwei amount specified in the withdrawal is maintained. DecreaseBalanceWithVal implements the spec's underflow-protected subtraction. No scaling errors present. Consistent Gwei denomination throughout.",
+        "proof_successful": true,
+        "guard_identified": "SSZ root comparison at withdrawals.go lines 183-189 ensures only expected withdrawals are processed; DecreaseBalanceWithVal underflow protection at rewards_penalties.go lines 159-163",
+        "guard_sufficiency": "Sufficient. Withdrawals verified before application; amount unit consistency maintained throughout.",
+        "edge_cases": [
+          "Underflow case: if withdrawal.Amount > currentBalance, balance is set to 0 (correct per spec)"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No scaling confusion exists. The code correctly handles Gwei-denominated amounts consistent with the Ethereum consensus spec. Both consensus and execution layers maintain consistent Gwei/Wei denomination respectively.",
+        "recommendation": "No change needed. The implementation is correct.",
+        "severity_estimate": "N/A - not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "Withdrawal amounts are correctly handled in Gwei throughout the consensus layer. There is no 10^9 scaling confusion because both the beacon state balances and withdrawal amounts use the same unit (Gwei). The execution layer independently handles Wei conversion when crediting the withdrawal address."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0008",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0008",
+        "property_id": "PROP-W0B17-9",
+        "title": "Verify Trust Boundary Integrity: Does withdrawal processing only increase balances, never decrease?",
+        "severity": "Critical",
+        "bug_class": "Arithmetic",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/withdrawals.go",
+            "symbol": "ProcessWithdrawals",
+            "line_range": {
+              "start": 154,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/helpers/rewards_penalties.go",
+            "symbol": "DecreaseBalance",
+            "line_range": {
+              "start": 140,
+              "end": 158
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/helpers/rewards_penalties.go",
+            "symbol": "DecreaseBalanceWithVal",
+            "line_range": {
+              "start": 159,
+              "end": 175
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// ProcessWithdrawals applies expected withdrawals\nfor _, withdrawal := range expectedWithdrawals {\n    err := helpers.DecreaseBalance(st, withdrawal.ValidatorIndex, withdrawal.Amount)\n    // DecreaseBalance is CORRECT here: withdrawals remove ETH from beacon state\n}\n// Spec: decrease_balance(state, withdrawal.validator_index, withdrawal.amount)\n// DecreaseBalanceWithVal implements underflow protection:\nfunc DecreaseBalanceWithVal(currBalance, delta uint64) uint64 {\n    if delta > currBalance { return 0 }\n    return currBalance - delta\n}",
+      "state_context": "A 'withdrawal' in Ethereum consensus semantics means ETH moving from the beacon state to the execution layer. From the beacon state perspective, this is a balance decrease. The execution layer credits the withdrawal address separately. Using DecreaseBalance is semantically correct.",
+      "phase1_abstract_interpretation": {
+        "summary": "ProcessWithdrawals correctly calls DecreaseBalance for each withdrawal, reducing the validator's beacon state balance by the withdrawal amount in Gwei. This is the correct behavior: withdrawals transfer ETH from the beacon state to the execution layer, so the beacon state balance must decrease. The code matches the Ethereum consensus spec precisely. The check's assumption that 'withdrawals should only increase balances' reflects a misunderstanding of withdrawal semantics.",
+        "state_anomalies_found": [],
+        "cache_analysis": "Balance state is updated atomically via UpdateBalancesAtIndex. No caching layer between read and write.",
+        "concurrency_analysis": "State transitions are serial; no concurrency concern."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The use of DecreaseBalance is semantically correct. A withdrawal event removes ETH from the beacon state; this must decrease balances. Using IncreaseBalance would be the bug (would allow infinite ETH inflation by triggering withdrawals). DecreaseBalanceWithVal includes underflow protection (clamps to 0). No exploitable scenario from this design.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "None"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Balance decreases only occur after SSZ root verification confirms the withdrawals match expected values. Execution payload cannot inject unexpected withdrawals. No attacker control over which withdrawals are applied.",
+        "entry_points": [
+          "Execution payload (SSZ-root-verified against ExpectedWithdrawals)"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "No exploitable surface; withdrawals constrained by validator state and verified before application"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that ProcessWithdrawals only decreases validator balances is proven. Only DecreaseBalance is called in the withdrawal application loop. The underflow protection in DecreaseBalanceWithVal prevents negative balances. The invariant holds unconditionally. The property as stated ('should only increase') is incorrect; it should state 'should only decrease' \u2014 which is what the code does correctly.",
+        "proof_successful": true,
+        "guard_identified": "DecreaseBalance with DecreaseBalanceWithVal underflow protection at rewards_penalties.go lines 159-163",
+        "guard_sufficiency": "Fully sufficient. The function can only decrease balances (or leave at 0 if amount > balance due to underflow protection). No IncreaseBalance calls exist in withdrawal processing.",
+        "edge_cases": [
+          "If withdrawal.Amount exceeds current balance, balance is set to 0 (correct per spec behavior)"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The use of DecreaseBalance is correct and matches the Ethereum consensus spec. Withdrawals semantically remove ETH from the beacon state, so balances must decrease. The checklist item appears to be based on a misunderstanding of withdrawal semantics \u2014 the invariant should be 'withdrawals decrease balances' not 'withdrawals increase balances'.",
+        "recommendation": "No code change needed. The implementation correctly matches the spec.",
+        "severity_estimate": "N/A - not a vulnerability"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "ProcessWithdrawals correctly uses DecreaseBalance because withdrawals transfer ETH from the beacon state to the execution layer \u2014 a balance decrease from the beacon state's perspective. The Ethereum consensus spec explicitly calls decrease_balance() for withdrawals. The checklist item's premise ('should only increase balances') is based on a misunderstanding of withdrawal semantics."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0009",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0009",
+        "property_id": "PROP-W0B17-10",
+        "title": "Verify Trust Boundary Integrity: Do system contracts contain code before checked system transactions execute?",
+        "severity": "Medium",
+        "bug_class": "State Validation",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/execution/engine_client.go",
+            "symbol": "Service.NewPayload",
+            "line_range": {
+              "start": 144,
+              "end": 204
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (s *Service) NewPayload(ctx, payload, versionedHashes, parentBlockRoot, executionRequests) ([]byte, error) {\n    // dispatches to engine_newPayloadV1/V2/V3/V4 based on payload type\n    // V4 for Electra (includes executionRequests for system contracts)\n    case *pb.ExecutionPayloadDeneb:\n        if executionRequests != nil {\n            flattenedRequests, err := pb.EncodeExecutionRequests(executionRequests)\n            err = s.rpcClient.CallContext(ctx, result, NewPayloadMethodV4, payloadPb, versionedHashes, parentBlockRoot, flattenedRequests)\n        }\n    // Result handling: EL validates system contracts have code\n    switch result.Status {\n    case pb.PayloadStatus_INVALID_BLOCK_HASH: return nil, ErrInvalidBlockHashPayloadStatus\n    case pb.PayloadStatus_INVALID: return result.LatestValidHash, ErrInvalidPayloadStatus\n    case pb.PayloadStatus_VALID: return result.LatestValidHash, nil\n    }\n}",
+      "state_context": "System contract code existence check is delegated to the execution layer client (EL) via engine_newPayloadV4. The EL validates EIP-7002, EIP-7251, EIP-6110 system contract deployments. Prysm (CL) trusts the EL VALID/INVALID response.",
+      "phase1_abstract_interpretation": {
+        "summary": "The system contract code existence check is entirely delegated to the execution layer client via the Engine API (engine_newPayloadV4). Prysm does not independently verify that system contracts (EIP-7002, EIP-7251, EIP-6110) contain code before execution. The CL trusts the EL's VALID/INVALID response. No independent code existence checks are performed in engine_client.go or anywhere in beacon-chain code.",
+        "state_anomalies_found": [
+          "CL fully trusts EL validation of system contract code existence; no independent CL-side verification"
+        ],
+        "cache_analysis": "No caching of system contract state in the CL.",
+        "concurrency_analysis": "Not applicable; Engine API calls are synchronous."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The vulnerability scenario requires a compromised or buggy EL client that accepts blocks where system contracts lack code. The CL would accept such blocks because it relies solely on the EL's VALID response. However, this is within the execution layer trust boundary \u2014 the CL correctly trusts the connected EL for EVM execution validation.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "If an EL bug causes it to return VALID for blocks with undeployed system contracts, the CL would accept such blocks \u2014 but this requires a separate EL vulnerability"
+        ],
+        "timing_dependencies": "None for the CL; EL processing is synchronous."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The system contract code check is an execution layer concern. In the Engine API model, the CL trusts the EL for all EVM state validation. Independent verification by the CL would be architectural overreach. This check is correctly delegated.",
+        "entry_points": [
+          "engine_newPayloadV4 response from EL"
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "attack_surface": "Would require a compromised EL client \u2014 outside the scope of CL (Prysm) security"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that system contracts contain code is enforced at the EL layer. The CL's invariant is weaker: it only checks that the EL returned VALID. This is correct architectural delegation in the Engine API model. No gap within Prysm's responsibility.",
+        "proof_successful": true,
+        "guard_identified": "engine_newPayloadV4 VALID/INVALID response from EL client (EL-side check)",
+        "guard_sufficiency": "Sufficient within CL responsibility boundaries. The EL is the ground truth for EVM execution validity.",
+        "edge_cases": [
+          "A compromised EL could return VALID for invalid payloads \u2014 this is an EL concern, not a CL/Prysm concern"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "System contract code existence verification is an execution layer (EL) responsibility, not a consensus layer (CL) responsibility. Prysm correctly delegates this to the EL via the Engine API. The CL verifying this independently would violate architectural separation of concerns in the Engine API model.",
+        "recommendation": "No change needed in Prysm. The execution layer (e.g., Geth) should be audited for correct system contract deployment verification in engine_newPayloadV4.",
+        "severity_estimate": "N/A - out of scope for Prysm"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning": "System contract code existence verification is entirely the execution layer's responsibility in the Engine API architecture. Prysm (CL) correctly delegates this to the EL via engine_newPayloadV4. An independent CL-side check would be architectural overreach and is not required."
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0010",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0010",
+        "property_id": "PROP-W0B17-11",
+        "title": "Verify Trust Boundary Integrity: Are checked system transaction errors propagated as InvalidBlock?",
+        "severity": "Critical",
+        "bug_class": "Error Handling",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/execution/engine_client.go",
+            "symbol": "Service.NewPayload",
+            "line_range": {
+              "start": 144,
+              "end": 204
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/process_block.go",
+            "symbol": "Service.onBlockBatch",
+            "line_range": {
+              "start": 136,
+              "end": 311
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// execution_engine.go: notifyNewPayload error handling\nlastValidHash, err = s.cfg.ExecutionEngineCaller.NewPayload(ctx, payload, versionedHashes, parentRoot, requests)\nswitch {\ncase err == nil:\n    return true, nil  // VALID\ncase errors.Is(err, execution.ErrAcceptedSyncingPayloadStatus):\n    return false, nil  // optimistic\ncase errors.Is(err, execution.ErrInvalidPayloadStatus):\n    return false, invalidBlock{error: ErrInvalidPayload, lastValidHash: lvh}  // correctly wrapped as invalidBlock\ndefault:\n    // BUG: execution.ErrInvalidBlockHashPayloadStatus falls here!\n    return false, errors.WithMessage(ErrUndefinedExecutionEngineError, err.Error())  // NOT invalidBlock\n}\n\n// engine_client.go: NewPayload returns\ncase pb.PayloadStatus_INVALID_BLOCK_HASH: return nil, ErrInvalidBlockHashPayloadStatus  // plain error\ncase pb.PayloadStatus_INVALID: return result.LatestValidHash, ErrInvalidPayloadStatus\n\n// process_block.go: handleInvalidExecutionError\nfunc (s *Service) handleInvalidExecutionError(ctx, err, root, parentRoot) error {\n    if IsInvalidBlock(err) && InvalidBlockLVH(err) != [32]byte{} {\n        return s.pruneInvalidBlock(ctx, root, parentRoot, InvalidBlockLVH(err))\n    }\n    // BUG: INVALID_BLOCK_HASH path never calls pruneInvalidBlock because IsInvalidBlock returns false\n    return err\n}",
+      "state_context": "beacon-chain/blockchain/execution_engine.go notifyNewPayload switch statement does not handle execution.ErrInvalidBlockHashPayloadStatus explicitly. blockchain.ErrInvalidBlockHashPayloadStatus (an invalidBlock type) exists in error.go but is unreachable from the notifyNewPayload default case. ForkChoiceStore retains blocks that are not explicitly pruned.",
+      "phase1_abstract_interpretation": {
+        "summary": "Critical error handling gap found: execution.ErrInvalidBlockHashPayloadStatus from the EL (returned by engine_client.go when EL responds INVALID_BLOCK_HASH) is not explicitly handled in notifyNewPayload's switch statement. It falls to the default case and becomes errors.WithMessage(ErrUndefinedExecutionEngineError, ...) \u2014 a plain error, NOT an invalidBlock. Consequently, handleInvalidExecutionError cannot call pruneInvalidBlock for INVALID_BLOCK_HASH responses because IsInvalidBlock() returns false. A blockchain-layer ErrInvalidBlockHashPayloadStatus of type invalidBlock is defined in error.go but is dead code in this path.",
+        "state_anomalies_found": [
+          "execution.ErrInvalidBlockHashPayloadStatus falls to default case in notifyNewPayload switch \u2014 not converted to invalidBlock",
+          "handleInvalidExecutionError skips pruneInvalidBlock for INVALID_BLOCK_HASH responses because IsInvalidBlock returns false",
+          "blockchain.ErrInvalidBlockHashPayloadStatus (invalidBlock type in error.go) is dead code; never returned from notifyNewPayload for INVALID_BLOCK_HASH EL responses",
+          "Fork choice store retains blocks that received INVALID_BLOCK_HASH without explicitly marking them as invalid"
+        ],
+        "cache_analysis": "Fork choice store retains blocks without invalid marking when INVALID_BLOCK_HASH occurs, as pruneInvalidBlock is not called. This may affect fork choice weight calculations over time.",
+        "concurrency_analysis": "ForkChoiceStore operations are mutex-protected; the issue is the absence of pruneInvalidBlock call, not concurrent access."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Concrete exploit path: (1) Attacker submits block with invalid block hash (EL returns INVALID_BLOCK_HASH). (2) engine_client.go returns execution.ErrInvalidBlockHashPayloadStatus. (3) notifyNewPayload default case wraps as ErrUndefinedExecutionEngineError (plain error). (4) handleInvalidExecutionError: IsInvalidBlock(err) == false, pruneInvalidBlock NOT called. (5) Block is rejected from processing but NOT explicitly marked invalid in fork choice store. Contrast with INVALID response: execution.ErrInvalidPayloadStatus IS explicitly handled, converted to invalidBlock, and triggers pruneInvalidBlock correctly.",
+        "counterexample_found": true,
+        "counterexample": "Submit a block where the execution payload block_hash does not match the actual payload content. EL returns PayloadStatus_INVALID_BLOCK_HASH. This flows through engine_client.go as execution.ErrInvalidBlockHashPayloadStatus, which is not handled explicitly in notifyNewPayload's switch, causing it to bypass pruneInvalidBlock. The block is not marked invalid in fork choice.",
+        "attack_scenarios": [
+          "Block with crafted invalid block hash (hash != hash(payload)) submitted via P2P gossip; EL returns INVALID_BLOCK_HASH; block not pruned from fork choice as invalid; fork choice state inconsistency",
+          "Sustained submission of INVALID_BLOCK_HASH blocks could leave fork choice store populated with blocks in undefined state (neither valid nor explicitly invalid)"
+        ],
+        "timing_dependencies": "None required; deterministic error path. Race-free reproduction."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Any P2P peer can submit a block where the execution payload block_hash doesn't match the content. This is externally reachable. The EL will return INVALID_BLOCK_HASH, which triggers the buggy error handling path. The bug is deterministically reachable from P2P block submission.",
+        "entry_points": [
+          "P2P gossip block receipt (onBlockBatch)",
+          "RPC block submission (validateExecutionOnBlock)"
+        ],
+        "attacker_controlled": true,
+        "classification": "external-reachable",
+        "attack_surface": "Any peer on the P2P network can trigger this by sending a block with a mismatched execution payload hash"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that all EL-rejected blocks are properly marked as invalidBlock and pruned from fork choice is NOT fully maintained. It holds for INVALID responses (execution.ErrInvalidPayloadStatus \u2192 invalidBlock \u2192 pruneInvalidBlock) but FAILS for INVALID_BLOCK_HASH responses (execution.ErrInvalidBlockHashPayloadStatus \u2192 ErrUndefinedExecutionEngineError \u2192 IsInvalidBlock returns false \u2192 pruneInvalidBlock NOT called). The blockchain.ErrInvalidBlockHashPayloadStatus invalidBlock type in error.go is unreachable dead code in this path.",
+        "proof_successful": false,
+        "guard_identified": "handleInvalidExecutionError \u2192 pruneInvalidBlock, reachable only for invalidBlock-typed errors; not reached for execution.ErrInvalidBlockHashPayloadStatus",
+        "guard_sufficiency": "INSUFFICIENT. The switch in notifyNewPayload handles execution.ErrInvalidPayloadStatus \u2192 invalidBlock but omits execution.ErrInvalidBlockHashPayloadStatus \u2192 invalidBlock. The default case loses the InvalidBlock semantic, breaking the invariant for INVALID_BLOCK_HASH responses.",
+        "edge_cases": [
+          "execution.ErrInvalidBlockHashPayloadStatus not wrapped as invalidBlock \u2014 falls to default",
+          "blockchain.ErrInvalidBlockHashPayloadStatus (invalidBlock type) defined but unreachable/dead code in this error flow",
+          "ErrUnknownPayloadStatus from EL also falls to default \u2014 same behavior as INVALID_BLOCK_HASH",
+          "The bug exists in both onBlockBatch path and potentially validateExecutionOnBlock path (similar notifyNewPayload call)"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "INVALID_BLOCK_HASH responses from the EL are not treated as invalidBlock in notifyNewPayload, causing them to bypass pruneInvalidBlock in handleInvalidExecutionError. This is inconsistent with how INVALID responses are handled and violates the invariant that all EL-rejected blocks should be pruned from fork choice. While the block is still rejected (error returned and block not finalized as head), it is not explicitly marked invalid in the fork choice store, which can affect chain health, fork choice weight calculations, and may create inconsistent state under adversarial conditions. The blockchain.ErrInvalidBlockHashPayloadStatus (invalidBlock type) already exists in error.go but is dead code \u2014 it should be used in this path. The fix is straightforward: add an explicit case for execution.ErrInvalidBlockHashPayloadStatus in notifyNewPayload's switch.",
+        "recommendation": "In beacon-chain/blockchain/execution_engine.go, add an explicit case for execution.ErrInvalidBlockHashPayloadStatus in notifyNewPayload's switch statement, converting it to an invalidBlock similar to ErrInvalidPayloadStatus handling. Example fix:\n  case errors.Is(err, execution.ErrInvalidBlockHashPayloadStatus):\n    return false, invalidBlock{error: ErrInvalidBlockHashPayloadStatus}\nThis ensures pruneInvalidBlock is called for INVALID_BLOCK_HASH responses, consistent with INVALID handling.",
+        "severity_estimate": "Medium \u2014 inconsistent invalid block handling; INVALID_BLOCK_HASH bypasses fork choice pruning, potentially impacting fork choice health and correctness under adversarial block submission. Externally reachable by any P2P peer."
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true,
+      "reasoning": "The execution.ErrInvalidBlockHashPayloadStatus error (returned by engine_client.go when EL responds with INVALID_BLOCK_HASH) is not explicitly handled in notifyNewPayload's switch statement in execution_engine.go. It falls to the default case, becoming a plain ErrUndefinedExecutionEngineError that is not an invalidBlock type. As a result, handleInvalidExecutionError (process_block.go) cannot call pruneInvalidBlock because IsInvalidBlock() returns false. This is inconsistent with how INVALID responses are handled (explicitly converted to invalidBlock, which triggers pruneInvalidBlock). The blockchain.ErrInvalidBlockHashPayloadStatus invalidBlock type exists in error.go but is dead code in this error flow. Any P2P peer can trigger this path by submitting a block with a mismatched execution payload hash, causing INVALID_BLOCK_HASH blocks to remain in the fork choice store without being explicitly marked invalid."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 3,
+    "batch_index": 12,
+    "item_count": 5,
+    "timestamp": 1771388083,
+    "processed_ids": [
+      "W0B1:W0B1:CHK-0006",
+      "W0B1:W0B1:CHK-0007",
+      "W0B1:W0B1:CHK-0008",
+      "W0B1:W0B1:CHK-0009",
+      "W0B1:W0B1:CHK-0010"
+    ]
+  }
+}

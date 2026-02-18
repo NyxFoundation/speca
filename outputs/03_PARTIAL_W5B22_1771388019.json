@@ -1,0 +1,536 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0106",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0106",
+        "property_id": "PROP-W5B14-9",
+        "title": "Supporting Check: Can a malicious P2P peer crash a validator node by sending batch KZG verification request with mismatched array lengths?",
+        "severity": "Critical",
+        "bug_bounty_scope": "in-scope"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 191
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/core/peerdas/p2p_interface.go:34-52\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns // = 128\n\tif sidecar.Index >= numberOfColumns {\n\t\treturn ErrIndexTooLarge\n\t}\n\tif len(sidecar.KzgCommitments) == 0 {\n\t\treturn ErrNoKzgCommitments\n\t}\n\tif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n\t\treturn ErrMismatchLength\n\t}\n\treturn nil\n}\n\n// beacon-chain/core/peerdas/p2p_interface.go:61-93\nfunc VerifyDataColumnsSidecarKZGProofs(sidecars []blocks.RODataColumn) error {\n\tcount := 0\n\tfor _, sidecar := range sidecars { count += len(sidecar.Column) }\n\tcommitments := make([]kzg.Bytes48, 0, count)\n\tindices := make([]uint64, 0, count)\n\tcells := make([]kzg.Cell, 0, count)\n\tproofs := make([]kzg.Bytes48, 0, count)\n\tfor _, sidecar := range sidecars {\n\t\tfor i := range sidecar.Column { // loop driven by Column length\n\t\t\tcommitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n\t\t\tindices = append(indices, sidecar.Index)\n\t\t\tcells = append(cells, kzg.Cell(sidecar.Column[i]))\n\t\t\tproofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n\t\t}\n\t}\n\tverified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)\n\t...\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "VerifyDataColumnSidecar (p2p_interface.go:47) enforces len(Column)==len(KzgCommitments)==len(KzgProofs) before the KZG path is reached. The inner loop in VerifyDataColumnsSidecarKZGProofs drives all four output slice appends from the same range index, so the slices built for VerifyCellKZGProofBatch are always equal in length. The C binding (ckzg4844) independently checks lengths and returns ErrBadArgs (not a panic) for mismatches.",
+        "state_anomalies_found": [],
+        "cache_analysis": "No caching of array lengths or per-column data across the validation call; all state is local to the call stack.",
+        "concurrency_analysis": "The kzgVerifierRoutine batches multiple sidecars from the channel into a single VerifyDataColumnsSidecarKZGProofs call. Each sidecar was individually validated by ValidFields before being placed in the channel, so no concurrency window exists between the length check and the KZG call."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No counterexample was found. A P2P message with mismatched Column/KzgCommitments/KzgProofs lengths is rejected at ValidFields before reaching the KZG loop. No exploit construction succeeded.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Attacker sends sidecar with len(Column)=3, len(KzgCommitments)=2 -> rejected at VerifyDataColumnSidecar with ErrMismatchLength before any KZG call"
+        ],
+        "timing_dependencies": "None. The ValidFields check is synchronous and runs before the KZG channel send."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The code is P2P reachable, but the attack vector (mismatched array lengths) is blocked prior to the KZG path. No valid P2P-reachable code path delivers mismatched slices to VerifyDataColumnsSidecarKZGProofs.",
+        "entry_points": [
+          "P2P gossip data_column_sidecar_<subnet_id>"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker can send arbitrary DataColumnSidecar messages on gossip subnets, but mismatched-length fields are rejected by ValidFields at the first verification step."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'all four slice arguments to VerifyCellKZGProofBatch are equal length' is provably maintained: ValidFields enforces Column==KzgCommitments==KzgProofs, and the loop construction ensures all four output slices receive exactly one entry per iteration. The C binding's secondary length check provides defense-in-depth.",
+        "proof_successful": true,
+        "guard_identified": "VerifyDataColumnSidecar len equality check at beacon-chain/core/peerdas/p2p_interface.go:47",
+        "guard_sufficiency": "Sufficient. Covers all code paths to VerifyDataColumnsSidecarKZGProofs from gossip, by-range, and by-root ingestion paths (all require RequireValidFields).",
+        "edge_cases": [
+          "Empty Column (len=0) is separately rejected by ErrNoKzgCommitments check, so the KZG call is never made with empty slices."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The length-mismatch precondition is fully blocked before the KZG path. No crash, panic, or misbehavior is achievable via P2P-controlled input. The C binding returns an error (not a panic) as a secondary guard.",
+        "recommendation": "No fix required. The existing ValidFields guard is both necessary and sufficient.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0107",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0107",
+        "property_id": "PROP-W5B14-9",
+        "title": "Supporting Check: Does verify_cell_kzg_proof_batch validate array lengths BEFORE performing any cryptographic operations or array access?",
+        "severity": "High",
+        "bug_bounty_scope": "in-scope"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 191
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// beacon-chain/blockchain/kzg/kzg.go:96-106\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n\tckzgCells := make([]ckzg4844.Cell, len(cells))\n\tfor i := range cells {\n\t\tckzgCells[i] = ckzg4844.Cell(cells[i])\n\t}\n\treturn ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n}\n// The ckzg4844 Go binding performs length equality check (ErrBadArgs) before any C invocation.",
+      "phase1_abstract_interpretation": {
+        "summary": "Two independent length validation layers exist before any cryptographic operation: (1) Go application layer via VerifyDataColumnSidecar at validate_data_column.go:81; (2) ckzg4844 Go binding with an ErrBadArgs check verifying all four slice lengths are equal before calling C.verify_cell_kzg_proof_batch. Ordering is correct: structural checks precede crypto.",
+        "state_anomalies_found": [],
+        "cache_analysis": "No stale cached lengths; slice arguments are freshly constructed in VerifyDataColumnsSidecarKZGProofs per call.",
+        "concurrency_analysis": "No shared mutable state between the length check and the C call within the Go binding function."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No ordering inversion scenario was identified. The Go binding's length check is before the C call in the static control flow. There is no branch between them that could skip the check. The function is not re-entrant in a way that could cause a TOCTOU on slice lengths.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [],
+        "timing_dependencies": "None relevant; length check and C call are sequential within one goroutine."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The Go binding is reachable from P2P gossip via the KZG verification chain, but the length-before-crypto ordering is enforced at the binding layer unconditionally, not as a P2P filter.",
+        "entry_points": [
+          "VerifyCellKZGProofBatch in beacon-chain/blockchain/kzg/kzg.go:98"
+        ],
+        "attacker_controlled": false,
+        "classification": "internal-only",
+        "attack_surface": "The check ordering is an internal library invariant; attackers cannot influence whether the check runs before or after crypto."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'length checks precede crypto' is proven by the static control flow of the Go binding: ErrBadArgs return before C.verify_cell_kzg_proof_batch call. This is a structural property of the code with no conditional bypass.",
+        "proof_successful": true,
+        "guard_identified": "ckzg4844.VerifyCellKZGProofBatch length check in the Go c-kzg-4844 binding",
+        "guard_sufficiency": "Sufficient for the stated property. Validates all four lengths (commitments, indices, cells, proofs) before any C invocation.",
+        "edge_cases": [
+          "Empty slices (all len=0): the ErrBadArgs check passes (0==0==0==0), and C.verify_cell_kzg_proof_batch is called with num_cells=0. The C library handles empty batch verification correctly."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The validation order property holds at two independent layers. Array length checks provably run before any cryptographic operation.",
+        "recommendation": "No fix required. The existing ordering is correct.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0108",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0108",
+        "property_id": "PROP-W5B14-10",
+        "title": "Verify Trust Boundary Integrity for tb-002: Is each cell_index validated to be strictly less than CELLS_PER_EXT_BLOB before use in coset_for_cell or coset_shift_for_cell?",
+        "severity": "Critical",
+        "bug_bounty_scope": "in-scope"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 191
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// Constant identity (critical for this check):\n// config/fieldparams/mainnet.go: NumberOfColumns = 128\n// CELLS_PER_EXT_BLOB = FIELD_ELEMENTS_PER_EXT_BLOB / FIELD_ELEMENTS_PER_CELL = (4096<<1)/64 = 128\n\n// beacon-chain/core/peerdas/p2p_interface.go:37\nif sidecar.Index >= numberOfColumns { // numberOfColumns = 128 = CELLS_PER_EXT_BLOB\n    return ErrIndexTooLarge\n}\n\n// beacon-chain/core/peerdas/p2p_interface.go:76\nindices = append(indices, sidecar.Index) // sidecar.Index is bounded to [0,127] at this point",
+      "phase1_abstract_interpretation": {
+        "summary": "The critical domain identity: NumberOfColumns (Prysm config) = 128, CELLS_PER_EXT_BLOB (c-kzg C library) = (4096<<1)/64 = 128. VerifyDataColumnSidecar checks sidecar.Index >= 128 and rejects before any KZG path. VerifyDataColumnsSidecarKZGProofs appends sidecar.Index (bounded [0,127]) as the cell_index. The C library's coset_for_cell receives indices strictly less than 128=CELLS_PER_EXT_BLOB.",
+        "state_anomalies_found": [],
+        "cache_analysis": "No caching of index values across calls; sidecar.Index is read directly from the validated sidecar struct.",
+        "concurrency_analysis": "No concurrent mutation of sidecar.Index; RODataColumn is a read-only value type after creation."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Adversarial scenario sidecar.Index=128: caught at p2p_interface.go:37 (128 >= 128 true), returns ErrIndexTooLarge, message rejected with pubsub.ValidationReject before KZG path. No bypass scenario found. The constant identity NumberOfColumns==CELLS_PER_EXT_BLOB==128 closes the gap between Go-level and C-level checks.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "sidecar.Index=128 -> 128 >= 128 -> ErrIndexTooLarge -> ValidationReject before KZG path",
+          "sidecar.Index=0xFFFFFFFF -> 0xFFFFFFFF >= 128 -> ErrIndexTooLarge -> ValidationReject"
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Cell index out-of-bounds (>=128) is unreachable at the C library layer from any externally controlled message because ValidFields rejects the sidecar first.",
+        "entry_points": [
+          "P2P gossip",
+          "by-range RPC",
+          "by-root RPC"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker controls sidecar.Index but is limited to [0,127] by ValidFields rejection."
+      },
+      "phase3_invariant_proving": {
+        "summary": "Invariant cell_index < CELLS_PER_EXT_BLOB holds for all inputs reaching the C library. Proof depends on constant equality NumberOfColumns==CELLS_PER_EXT_BLOB==128. The Go wrapper kzg.go:98-106 does NOT add per-index range check before C call \u2014 relies on application-layer ValidFields. This is an implicit coupling assumption.",
+        "proof_successful": true,
+        "guard_identified": "VerifyDataColumnSidecar index check at beacon-chain/core/peerdas/p2p_interface.go:37",
+        "guard_sufficiency": "Sufficient given current constant values. Dependent on implicit assumption NumberOfColumns==CELLS_PER_EXT_BLOB holding across config and C library versions.",
+        "edge_cases": [
+          "If NumberOfColumns were changed without updating the C library (or vice versa), the bound check would be incorrect. This is a configuration coupling risk \u2014 currently no vulnerability, but an implicit assumption.",
+          "The kzg.go wrapper has no per-index cell_index range check before the C call \u2014 defense-in-depth gap not currently exploitable."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No exploitable out-of-bounds cell index is achievable. The constant identity between Prysm config and c-kzg library makes the guard sufficient for current code.",
+        "recommendation": "Add compile-time or init-time assertion: `if fieldparams.NumberOfColumns != ckzg4844.CellsPerExtBlob { panic(\"constant mismatch\") }` to make implicit coupling explicit and catch future divergence. Optionally add per-index range check in kzg.go:VerifyCellKZGProofBatch for defense-in-depth.",
+        "severity_estimate": "N/A (no current vulnerability; informational coupling assumption)"
+      },
+      "final_classification": "informational"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0109",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0109",
+        "property_id": "PROP-W5B14-10",
+        "title": "Supporting Check: Does P2P gossip validation layer reject data column sidecars with cell_index >= CELLS_PER_EXT_BLOB before reaching verify_cell_kzg_proof_batch?",
+        "severity": "Critical",
+        "bug_bounty_scope": "in-scope"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 191
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// validate_data_column.go order of checks:\n// Line 81: verifier.ValidFields() -> VerifyDataColumnSidecar -> sidecar.Index >= 128 -> [REJECT]\n// ...\n// Line 148: s.validateWithKzgBatchVerifier() -> verifyKzgBatch -> VerifyDataColumnsSidecarKZGProofs -> VerifyCellKZGProofBatch\n//\n// validateWithKzgBatchVerifier fallback (batch_verifier.go:177):\n// if err != nil { return s.validateUnbatchedColumnsKzg(ctx, dataColumns) }\n// -> VerifyDataColumnsSidecarKZGProofs (same sidecars, already ValidFields-checked)\n//\n// kzgVerifierRoutine (batch_verifier.go:59-79): drains kzgChan, batches sidecars\n// -> verifyKzgBatch -> VerifyDataColumnsSidecarKZGProofs\n// Sidecars enter kzgChan only AFTER ValidFields passes in validateDataColumn",
+      "phase1_abstract_interpretation": {
+        "summary": "The P2P gossip layer rejects cell_index >= CELLS_PER_EXT_BLOB (=128) via VerifyDataColumnSidecar checking sidecar.Index >= NumberOfColumns at validate_data_column.go:81, which is the FIRST substantive verification step. This is tagged [REJECT], causing immediate return before line 148 (KZG call). Both the batch verifier path and the unbatched fallback path operate on sidecars that have already passed ValidFields.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A; the index is checked per-message, not from cache.",
+        "concurrency_analysis": "The batch KZG verifier routine processes sidecars from kzgChan that have already passed ValidFields in their original message context. Sidecars are only enqueued after ValidFields passes. The ordering guarantee holds across the goroutine boundary."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "A P2P sidecar with Index=128 is rejected at ValidFields (pubsub.ValidationReject) before the KZG path at line 148 is entered. The fallback unbatched path also operates on pre-validated sidecars. No code path from P2P input bypasses this.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Index=128 sidecar -> ErrIndexTooLarge at ValidFields -> ValidationReject at line 82 -> KZG path at line 148 never reached"
+        ],
+        "timing_dependencies": "None. ValidFields is synchronous and completes before any channel send to kzgChan."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The property 'P2P gossip rejects cell_index >= CELLS_PER_EXT_BLOB before KZG ops' is satisfied. No reachable code path from P2P input bypasses this.",
+        "entry_points": [
+          "P2P gossip data_column_sidecar subnet topic"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker controls the full DataColumnSidecar message but Index is bounded by ValidFields before any KZG path."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant is proven by sequential control flow: ValidFields runs and returns error (causing immediate return) before the KZG verification call. The only way to reach the KZG call (line 148) is if ValidFields returned nil error, which requires sidecar.Index < 128.",
+        "proof_successful": true,
+        "guard_identified": "ValidFields / VerifyDataColumnSidecar index check called at beacon-chain/sync/validate_data_column.go:81",
+        "guard_sufficiency": "Sufficient. Covers all external entry points (gossip, by-range, by-root) through GossipDataColumnSidecarRequirements and related requirement sets.",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The P2P gossip layer correctly and completely rejects out-of-bounds cell indices before any KZG operation. The property is fully satisfied.",
+        "recommendation": "No fix required.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "not-a-vulnerability"
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0110",
+      "checklist_item": {
+        "check_id": "W7B8:W7B8:CHK-0110",
+        "property_id": "PROP-W5B14-10",
+        "title": "Supporting Check: Can a malicious P2P peer crash a validator node by sending data column sidecar with out-of-bounds cell_index?",
+        "severity": "Critical",
+        "bug_bounty_scope": "in-scope"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/sync/batch_verifier.go",
+            "symbol": "validateWithKzgBatchVerifier",
+            "line_range": {
+              "start": 157,
+              "end": 191
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// Three potential crash vectors analyzed:\n// 1. Go panic from slice OOB: blocked by ValidFields len check (ErrMismatchLength)\n// 2. C library memory error from out-of-bounds cell_index: blocked by ValidFields index check (ErrIndexTooLarge)\n// 3. nil/empty slice panic: blocked by ErrNoKzgCommitments check\n//\n// Attack scenario: Index=128 sidecar\n// decodePubsubMessage -> succeeds (valid uint64)\n// blocks.NewRODataColumn -> wraps struct (no bounds check)\n// verifier.ValidFields() -> VerifyDataColumnSidecar -> 128 >= 128 -> ErrIndexTooLarge\n// validateDataColumn returns (pubsub.ValidationReject, err) at line 82\n// KZG path at line 148 NEVER reached\n//\n// Note: kzg.go wrapper has NO per-index cell_index range check before C call:\nfunc VerifyCellKZGProofBatch(commitmentsBytes []Bytes48, cellIndices []uint64, cells []Cell, proofsBytes []Bytes48) (bool, error) {\n    ckzgCells := make([]ckzg4844.Cell, len(cells))\n    for i := range cells { ckzgCells[i] = ckzg4844.Cell(cells[i]) }\n    return ckzg4844.VerifyCellKZGProofBatch(commitmentsBytes, cellIndices, ckzgCells, proofsBytes)\n    // No per-index bounds check here -- relies on application-layer ValidFields\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "Three potential crash vectors from out-of-bounds cell_index examined: (1) Go slice panic from mismatched lengths \u2014 blocked by ValidFields length check (ErrMismatchLength); (2) C library memory error from out-of-bounds index \u2014 blocked by ValidFields index bound check (ErrIndexTooLarge); (3) nil/empty slice panic \u2014 blocked by ErrNoKzgCommitments check. All three are pre-filtered before any KZG operation.",
+        "state_anomalies_found": [
+          "The Go wrapper kzg.go:98-106 does not explicitly check per-index cell_index < CellsPerExtBlob before the C call, relying on the application layer's ValidFields check. This is an implicit coupling assumption between the Prysm NumberOfColumns config constant and the c-kzg-4844 CELLS_PER_EXT_BLOB constant."
+        ],
+        "cache_analysis": "No cached state relevant to crash vectors.",
+        "concurrency_analysis": "The kzgVerifierRoutine drains the channel and processes batches. All sidecars in the batch have already passed ValidFields in their individual message processing goroutines. No race condition exists that could bypass the ValidFields check \u2014 sidecars are only added to kzgChan after ValidFields passes synchronously."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No crash-triggering input constructable from P2P. The out-of-bounds index is intercepted at ValidFields. The C library is never called with cell_index >= 128 from any P2P-controlled input. Most aggressive adversarial construction attempts blocked at line 82.",
+        "counterexample_found": false,
+        "counterexample": null,
+        "attack_scenarios": [
+          "Index=128, valid column data -> ErrIndexTooLarge at ValidFields -> ValidationReject, KZG path never entered",
+          "Index=0, mismatched Column/KzgCommitments lengths -> ErrMismatchLength at ValidFields -> ValidationReject",
+          "Index=0, zero commitments -> ErrNoKzgCommitments at ValidFields -> ValidationReject",
+          "Index=0xFFFFFFFF -> ErrIndexTooLarge at ValidFields -> ValidationReject"
+        ],
+        "timing_dependencies": "No timing-dependent exploit found. ValidFields is synchronous and deterministic."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The crash condition (out-of-bounds cell_index reaching C library) is unreachable from P2P input. All external entry points (gossip, by-range, by-root) require RequireValidFields which bounds sidecar.Index to [0,127].",
+        "entry_points": [
+          "P2P gossip",
+          "by-range RPC",
+          "by-root RPC"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "Attacker can send arbitrary DataColumnSidecar via P2P but all crash vectors are pre-filtered by ValidFields at line 81 of validate_data_column.go."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'no P2P input can crash the node via out-of-bounds cell_index' is proven by: (a) ValidFields is required before KZG verification in all ingestion paths; (b) ValidFields bounds sidecar.Index to [0,127]; (c) only sidecar.Index is used as cell_index in VerifyDataColumnsSidecarKZGProofs; (d) [0,127] is within CELLS_PER_EXT_BLOB=128. The implicit coupling (NumberOfColumns==CELLS_PER_EXT_BLOB==128) is the foundation of this proof.",
+        "proof_successful": true,
+        "guard_identified": "RequireValidFields / VerifyDataColumnSidecar index and length checks at beacon-chain/sync/validate_data_column.go:81",
+        "guard_sufficiency": "Sufficient for all current P2P and RPC ingestion paths. The implicit assumption NumberOfColumns==CELLS_PER_EXT_BLOB should be made explicit.",
+        "edge_cases": [
+          "The kzg.go wrapper has no per-index cell_index range check \u2014 defense-in-depth gap, not a reachable vulnerability in current code.",
+          "Future code paths that construct indices slices without going through VerifyDataColumnsSidecarKZGProofs could bypass the application-layer check if they also bypass ValidFields."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "No crash is achievable via P2P-controlled input. All out-of-bounds cell_index vectors are blocked at ValidFields before the KZG layer. The informational notes about the missing per-index check in kzg.go and the missing compile-time assertion for NumberOfColumns==CELLS_PER_EXT_BLOB are defense-in-depth improvements, not exploitable vulnerabilities in the current codebase.",
+        "recommendation": "1) Add compile-time or init-time assertion that fieldparams.NumberOfColumns == ckzg4844.CellsPerExtBlob to make the implicit constant coupling explicit and guard against future divergence. 2) Optionally add per-index range check in kzg.go VerifyCellKZGProofBatch for defensive correctness against future internal callers.",
+        "severity_estimate": "N/A (no current vulnerability)"
+      },
+      "final_classification": "not-a-vulnerability"
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 22,
+    "item_count": 5,
+    "timestamp": 1771388019,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0106",
+      "W7B8:W7B8:CHK-0107",
+      "W7B8:W7B8:CHK-0108",
+      "W7B8:W7B8:CHK-0109",
+      "W7B8:W7B8:CHK-0110"
+    ]
+  }
+}

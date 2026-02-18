@@ -1,0 +1,454 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W0B1:W0B1:CHK-0036",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0036",
+        "property_id": "PROP-W0B17-40",
+        "title": "Are request types appended in correct order (deposits, withdrawals, consolidations)?",
+        "severity": "High",
+        "bug_class": "Ordering",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/execution/engine_client.go",
+            "symbol": "Service.NewPayload",
+            "line_range": {
+              "start": 144,
+              "end": 204
+            },
+            "role": "primary"
+          },
+          {
+            "file": "proto/engine/v1/electra.go",
+            "symbol": "EncodeExecutionRequests",
+            "line_range": {
+              "start": 110,
+              "end": 175
+            },
+            "role": "related"
+          },
+          {
+            "file": "proto/engine/v1/electra.go",
+            "symbol": "GetDecodedExecutionRequests",
+            "line_range": {
+              "start": 32,
+              "end": 68
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// EncodeExecutionRequests (proto/engine/v1/electra.go)\nfunc EncodeExecutionRequests(requests *ExecutionRequests) ([]hexutil.Bytes, error) {\n    requestsData := make([]hexutil.Bytes, 0)\n    // request types MUST be in sorted order starting from 0\n    if len(requests.Deposits) > 0 {\n        requestData := []byte{DepositRequestType}  // 0\n        requestsData = append(requestsData, requestData)\n    }\n    if len(requests.Withdrawals) > 0 {\n        requestData := []byte{WithdrawalRequestType}  // 1\n        requestsData = append(requestsData, requestData)\n    }\n    if len(requests.Consolidations) > 0 {\n        requestData := []byte{ConsolidationRequestType}  // 2\n        requestsData = append(requestsData, requestData)\n    }\n    return requestsData, nil\n}\n\n// GetDecodedExecutionRequests enforces order on decode\nif prevTypeNum != nil && *prevTypeNum >= requestType {\n    return nil, errors.New(\"invalid execution request type order or duplicate requests\")\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "EncodeExecutionRequests in proto/engine/v1/electra.go appends deposits (type 0), then withdrawals (type 1), then consolidations (type 2) in fixed sequential if-blocks, preserving the required sorted order. GetDecodedExecutionRequests enforces order on decode by rejecting any prevTypeNum >= requestType. The two functions form a coherent encode/decode pair.",
+        "state_anomalies_found": [
+          "Empty request types are skipped (not appended) \u2014 an empty deposits list means type 0 is absent; decoder allows type 1 to appear first in this case. No anomaly.",
+          "Constants DepositRequestType=0, WithdrawalRequestType=1, ConsolidationRequestType=2 are compile-time iota constants matching EIP-7685 and cannot be reordered at runtime.",
+          "Unrecognized request types (type 3+) cause error return in GetDecodedExecutionRequests \u2014 safe-fail behavior for future request types."
+        ],
+        "cache_analysis": "No caching. EncodeExecutionRequests is a pure function over in-memory struct fields.",
+        "concurrency_analysis": "EncodeExecutionRequests has no shared mutable state. No concurrency hazard."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The attacker-controlled surface is the raw execution payload from the Engine API. GetDecodedExecutionRequests enforces strictly increasing types (prevTypeNum >= requestType triggers rejection). The encoder always emits in order 0\u21921\u21922. No path produces an out-of-order list.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample. Encoding is deterministic; decoding enforces order.",
+        "attack_scenarios": [
+          "EL sends requests with type 1 before type 0: GetDecodedExecutionRequests returns error, block processing halts.",
+          "EL sends duplicate type 0: GetDecodedExecutionRequests returns error (prevTypeNum == requestType).",
+          "EL sends unknown type 3+: GetDecodedExecutionRequests returns error."
+        ],
+        "timing_dependencies": "None. Synchronous and deterministic."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The encoding path is triggered when the beacon node calls NewPayload to submit a locally produced payload. The decoding path is triggered on receipt of a payload from EL via GetPayload. Both paths correctly enforce ordering. Decoding errors halt processing safely.",
+        "entry_points": [
+          "Engine API GetPayload response",
+          "Engine API NewPayload submission"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "Only the trusted EL controls raw bytes passed to GetDecodedExecutionRequests."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'deposits precede withdrawals precede consolidations' is structurally enforced in EncodeExecutionRequests by sequential if-blocks and in GetDecodedExecutionRequests by prevTypeNum comparison. Both guards are necessary and sufficient.",
+        "proof_successful": true,
+        "guard_identified": "Sequential if-blocks in EncodeExecutionRequests; prevTypeNum >= requestType check in GetDecodedExecutionRequests",
+        "guard_sufficiency": "Sufficient. Encoder cannot produce out-of-order output; decoder rejects any out-of-order input.",
+        "edge_cases": [
+          "Empty requests of one type do not affect ordering \u2014 absent types are simply skipped.",
+          "Future EIP request types (type 3+) cause decoder error, safe-fail behavior."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The ordering invariant is correctly enforced at both encode and decode time. The encoder is deterministic and the decoder strictly validates order. No exploit path exists.",
+        "recommendation": "No fix required. Existing tests in electra_test.go cover out-of-order input scenarios.",
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0037",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0037",
+        "property_id": "PROP-W0B17-41",
+        "title": "Are deposit requests parsed from block output logs (not system transactions)?",
+        "severity": "High",
+        "bug_class": "Input Validation",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/electra/deposits.go",
+            "symbol": "ProcessDepositRequests",
+            "line_range": {
+              "start": 543,
+              "end": 575
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/electra/deposits.go",
+            "symbol": "processDepositRequest",
+            "line_range": {
+              "start": 576,
+              "end": 650
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func ProcessDepositRequests(ctx context.Context, beaconState state.BeaconState, requests []*enginev1.DepositRequest) (state.BeaconState, error) {\n    if len(requests) == 0 { return beaconState, nil }\n    for _, receipt := range requests {\n        beaconState, err = processDepositRequest(beaconState, receipt)\n        if err != nil { return nil, errors.Wrap(err, \"could not apply deposit request\") }\n    }\n    return beaconState, nil\n}\n\nfunc processDepositRequest(beaconState state.BeaconState, request *enginev1.DepositRequest) (state.BeaconState, error) {\n    // Sets DepositRequestsStartIndex and appends PendingDeposit with current slot\n    if requestsStartIndex == params.BeaconConfig().UnsetDepositRequestsStartIndex {\n        if err := beaconState.SetDepositRequestsStartIndex(request.Index); err != nil { ... }\n    }\n    if err := beaconState.AppendPendingDeposit(&ethpb.PendingDeposit{\n        PublicKey:             bytesutil.SafeCopyBytes(request.Pubkey),\n        WithdrawalCredentials: bytesutil.SafeCopyBytes(request.WithdrawalCredentials),\n        Amount:                request.Amount,\n        Signature:             bytesutil.SafeCopyBytes(request.Signature),\n        Slot:                  beaconState.Slot(),\n    }); err != nil { ... }\n    return beaconState, nil\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "ProcessDepositRequests takes a []*enginev1.DepositRequest slice from the EL-provided execution_requests field. The CL (Prysm) never directly reads Ethereum transaction data or system transactions for deposits. Per EIP-6110, deposit requests appear as type 0 in execution_requests, which the EL extracts from deposit contract logs and provides via the Engine API GetPayload response.",
+        "state_anomalies_found": [
+          "processDepositRequest has a nil check AFTER the DepositRequestsStartIndex read \u2014 nil request causes error before nil check, but ProcessDepositRequests pre-validates for nil. Handled correctly.",
+          "The deposit request data comes entirely from the EL via the Engine API. The CL does not independently parse transaction logs or receipts.",
+          "DepositRequestsStartIndex is only set once (when UnsetDepositRequestsStartIndex); subsequent deposits use the existing start index."
+        ],
+        "cache_analysis": "processDepositRequest reads DepositRequestsStartIndex directly from beacon state (no caching). AppendPendingDeposit modifies state.",
+        "concurrency_analysis": "State processing is single-threaded per block. No concurrency issue."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Data flow: EL extracts deposits from contract logs \u2192 encodes as type 0 in execution_requests \u2192 CL calls GetDecodedExecutionRequests \u2192 DepositRequest structs \u2192 ProcessDepositRequests appends to pending_deposits with current slot. The CL never reads raw transaction data. There is no code path where the CL reads system transactions for deposit requests.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample. The CL correctly consumes deposit requests from EL-provided execution_requests (EIP-6110), not from raw transactions.",
+        "attack_scenarios": [
+          "A malicious EL could fabricate deposit requests not derived from actual logs. Since EL is trusted and consensus computes HashTreeRoot over ExecutionRequests, this is a cross-client consistency issue, not a Prysm-specific parsing bug."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Deposit requests arrive from EL via Engine API. The CL processes whatever ExecutionRequests the EL provides. The CL never independently parses system transactions for deposits \u2014 this was the pre-EIP-6110 model. The code correctly implements EIP-6110 semantics.",
+        "entry_points": [
+          "Engine API GetPayload response (deposit requests as type 0 in execution_requests)"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "EL is trusted to correctly extract deposit events from logs."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant that deposit requests come from execution layer logs is enforced at the architectural level. The CL's role is to consume them from the EL-provided execution_requests field (EIP-6110). No direct transaction parsing occurs in the CL.",
+        "proof_successful": true,
+        "guard_identified": "Architectural separation: CL consumes EL-provided ExecutionRequests; no raw transaction parsing in CL.",
+        "guard_sufficiency": "Sufficient within the trust model. EL is responsible for extracting deposits from logs.",
+        "edge_cases": [
+          "If EL implements deposit extraction incorrectly, CL would process wrong deposits \u2014 this is an EL bug, not a CL parsing bug."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "ProcessDepositRequests correctly processes deposits from EL-provided execution_requests per EIP-6110. The CL does not read system transactions for this purpose. Property is correctly implemented.",
+        "recommendation": "No fix required.",
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0038",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0038",
+        "property_id": "PROP-W0B17-42",
+        "title": "Are withdrawal and consolidation requests from checked system transactions?",
+        "severity": "Critical",
+        "bug_class": "Error Handling",
+        "risk_category": "Denial of Service"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/electra/withdrawals.go",
+            "symbol": "ProcessWithdrawalRequests",
+            "line_range": {
+              "start": 90,
+              "end": 150
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/electra/consolidations.go",
+            "symbol": "ProcessConsolidationRequests",
+            "line_range": {
+              "start": 178,
+              "end": 350
+            },
+            "role": "related"
+          },
+          {
+            "file": "beacon-chain/execution/engine_client.go",
+            "symbol": "Service.NewPayload",
+            "line_range": {
+              "start": 144,
+              "end": 204
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "// ProcessConsolidationRequests (beacon-chain/core/electra/consolidations.go)\nif IsValidSwitchToCompoundingRequest(st, cr) {\n    srcIdx, ok := st.ValidatorIndexByPubkey(bytesutil.ToBytes48(cr.SourcePubkey))\n    if !ok {\n        log.Error(\"Failed to find source validator index\")\n        continue\n    }\n    if err := SwitchToCompoundingValidator(st, srcIdx); err != nil {\n        log.WithError(err).Error(\"Failed to switch to compounding validator\")\n        // ERROR IS SWALLOWED \u2014 no return, no state rollback\n    }\n    continue\n}\n\n// SwitchToCompoundingValidator performs TWO state mutations:\n// 1. UpdateValidatorAtIndex (sets withdrawal credential prefix to 0x02)\n// 2. QueueExcessActiveBalance (drains balance + AppendPendingDeposit)\n// If mutation 2 fails, mutation 1 is NOT rolled back.",
+      "phase1_abstract_interpretation": {
+        "summary": "ProcessWithdrawalRequests and ProcessConsolidationRequests receive input from EL-provided execution_requests. Both use 'continue' for most validation failures \u2014 spec-correct behavior. However, there is a critical anomaly in ProcessConsolidationRequests: when SwitchToCompoundingValidator fails, the error is only logged and execution continues. SwitchToCompoundingValidator performs two sequential state mutations (credential update + balance queue), and failure of the second is silently swallowed, leaving state partially mutated.",
+        "state_anomalies_found": [
+          "CRITICAL: In ProcessConsolidationRequests (consolidations.go ~line 200-203), when SwitchToCompoundingValidator(st, srcIdx) returns an error, the error is only logged (log.WithError(err).Error(...)) and processing continues. SwitchToCompoundingValidator performs: (1) UpdateValidatorAtIndex sets withdrawal credential prefix to 0x02, and (2) QueueExcessActiveBalance drains excess balance and appends PendingDeposit. If step 2 fails (e.g., AppendPendingDeposit fails when pending_deposits is at its SSZ list limit), the state has credential=0x02 but the excess balance entry was neither queued nor preserved.",
+          "SwitchToCompoundingValidator's two mutations are not atomic. A failure between them leaves state inconsistent.",
+          "ProcessWithdrawalRequests: when PendingPartialWithdrawalsLimit is reached for a partial withdrawal, it silently continues. Spec-correct but means user's EL gas is consumed for a no-op.",
+          "ProcessConsolidationRequests returns nil (not error) after the loop \u2014 SwitchToCompoundingValidator errors never propagate to caller."
+        ],
+        "cache_analysis": "Both functions use ValidatorIndexByPubkey which reads from state's internal pubkey cache. Cache is updated during block processing and is consistent.",
+        "concurrency_analysis": "State processing is single-threaded per block transition. No concurrency issue in the processing functions."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Critical exploit scenario: a validator sends a switch-to-compounding consolidation request (source==target pubkey). IsValidSwitchToCompoundingRequest returns true. SwitchToCompoundingValidator calls UpdateValidatorAtIndex (succeeds, sets credential[0]=0x02), then QueueExcessActiveBalance which calls UpdateBalancesAtIndex then AppendPendingDeposit. If pending_deposits is at its SSZ list capacity, AppendPendingDeposit returns an error. QueueExcessActiveBalance returns the error. SwitchToCompoundingValidator returns the error. ProcessConsolidationRequests logs the error and continues \u2014 the block is accepted. The validator now has compounding credentials (0x02 prefix) but the excess balance was not queued as a pending deposit. The validator permanently loses excess balance.",
+        "counterexample_found": true,
+        "counterexample": "1. pending_deposits list is at/near SSZ capacity. 2. Validator V has ETH1 withdrawal credential (0x01) and balance > MIN_ACTIVATION_BALANCE. 3. Switch-to-compounding consolidation request (source==target==V.pubkey) arrives from EL. 4. IsValidSwitchToCompoundingRequest returns true. 5. SwitchToCompoundingValidator: UpdateValidatorAtIndex sets V.withdrawal_credentials[0]=0x02 (success). 6. QueueExcessActiveBalance: UpdateBalancesAtIndex sets V.balance=MIN_ACTIVATION_BALANCE (success, excess drained). 7. AppendPendingDeposit fails (list at capacity). 8. QueueExcessActiveBalance returns error. 9. SwitchToCompoundingValidator returns error. 10. ProcessConsolidationRequests logs error, continues. Block accepted. V has compounding credentials but lost (excess_balance) in funds with no pending deposit queued.",
+        "attack_scenarios": [
+          "Normal operation: if pending_deposits fills to capacity in the same block as a switch-to-compounding request, the validator suffers silent fund loss.",
+          "Adversarial: a malicious EL can time consolidation requests to coincide with a full pending_deposits queue, causing targeted validator fund loss while appearing to process the block normally."
+        ],
+        "timing_dependencies": "Requires pending_deposits to be at its SSZ limit when the switch-to-compounding consolidation request is processed in the same block."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Consolidation requests arrive from the EL via execution_requests (type 2). The state condition (pending_deposits at limit) is achievable through normal operation during high-deposit-activity periods or adversarially. The error-swallowing path in SwitchToCompoundingValidator is reachable from the EL-supplied execution_requests processing path.",
+        "entry_points": [
+          "Engine API execution_requests (type 2, consolidation requests)",
+          "EIP-7251 consolidation request processing"
+        ],
+        "attacker_controlled": true,
+        "classification": "defense-in-depth",
+        "attack_surface": "Requires either a malicious EL or a specific system state (pending_deposits at SSZ capacity) to trigger. An attacker controlling EL timing could exploit this."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The spec requires switch_to_compounding_validator to be atomic \u2014 both credential update and excess balance queue must succeed atomically. The implementation violates atomicity: UpdateValidatorAtIndex and QueueExcessActiveBalance are separate state mutations, and failure of the second is silently swallowed. The guard (error logging) is insufficient \u2014 it does not roll back the first mutation or return an error to prevent block acceptance.",
+        "proof_successful": false,
+        "guard_identified": "log.WithError(err).Error() on SwitchToCompoundingValidator failure in ProcessConsolidationRequests",
+        "guard_sufficiency": "INSUFFICIENT. The guard only logs; it does not propagate the error or roll back state. The block is accepted with a partially mutated validator state.",
+        "edge_cases": [
+          "If pending_deposits is exactly at the SSZ limit, the credential change is permanent but the balance queue entry is lost \u2014 a guaranteed fund loss scenario.",
+          "The spec pseudocode for switch_to_compounding_validator calls queue_excess_active_balance \u2014 both must succeed or neither should apply. The implementation violates this contract."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": true,
+        "reason": "The error from SwitchToCompoundingValidator is silently swallowed in ProcessConsolidationRequests. If SwitchToCompoundingValidator partially mutates state (credential prefix set to 0x02, but excess balance not queued due to pending_deposits being at SSZ capacity), the block is accepted with an inconsistent validator state. The validator permanently has compounding credentials but the excess balance was drained from the balance without being queued as a PendingDeposit \u2014 a silent validator fund loss. This constitutes a consensus-level state inconsistency that may cause divergence between CL clients and results in permanent fund loss without the possibility of recovery.",
+        "recommendation": "When SwitchToCompoundingValidator returns an error, either: (1) return the error to halt block processing (breaking change \u2014 may cause sync issues if other clients accept the block), or (2) implement a transactional/snapshot pattern: save state before SwitchToCompoundingValidator, restore on error. Option 2 is preferred as it matches spec atomicity requirements without causing consensus divergence. Additionally, SwitchToCompoundingValidator itself should be made atomic: UpdateValidatorAtIndex should only be called after QueueExcessActiveBalance succeeds, or the credential update should be staged until both operations succeed.",
+        "severity_estimate": "High"
+      },
+      "final_classification": "vulnerability",
+      "bug_bounty_eligible": true
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0039",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0039",
+        "property_id": "PROP-W0B17-43",
+        "title": "Are blocks with number < 1 rejected?",
+        "severity": "Medium",
+        "bug_class": "Input Validation",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/header.go",
+            "symbol": "ProcessBlockHeader",
+            "line_range": {
+              "start": 42,
+              "end": 67
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/blocks/header.go",
+            "symbol": "ProcessBlockHeaderNoVerify",
+            "line_range": {
+              "start": 80,
+              "end": 145
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func ProcessBlockHeaderNoVerify(ctx context.Context, beaconState state.BeaconState, slot primitives.Slot, ...) (state.BeaconState, error) {\n    // Check 1: state slot == block slot\n    if beaconState.Slot() != slot {\n        return nil, fmt.Errorf(\"state slot: %d is different than block slot: %d\", beaconState.Slot(), slot)\n    }\n    // Check 2: proposer index correct\n    idx, err := helpers.BeaconProposerIndex(ctx, beaconState)\n    if proposerIndex != idx { return nil, fmt.Errorf(...) }\n    // Check 3: parent header slot < block slot\n    parentHeader := beaconState.LatestBlockHeader()\n    if parentHeader.Slot >= slot {\n        return nil, fmt.Errorf(\"block.Slot %d must be greater than state.LatestBlockHeader.Slot %d\", slot, parentHeader.Slot)\n    }\n    // Check 4: parent root matches\n    // Check 5: proposer not slashed\n    // NOTE: No explicit check for slot > 0\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "ProcessBlockHeaderNoVerify checks: (1) beaconState.Slot() == block.Slot, (2) correct proposer index, (3) parentHeader.Slot < block.Slot, (4) parentRoot matches, (5) proposer not slashed. No explicit check for slot > 0. However, for any post-genesis state, beaconState.Slot() >= 1, so the slot equality check implicitly prevents slot-0 blocks from being accepted.",
+        "state_anomalies_found": [
+          "No explicit check for block.Slot > 0. However, for any post-genesis state, beaconState.Slot() >= 1, and the equality check beaconState.Slot() == slot means slot >= 1 implicitly.",
+          "At genesis, slot-0 block processing is handled by special genesis initialization code, not ProcessBlockHeaderNoVerify.",
+          "primitives.Slot is uint64 \u2014 negative values are type-system-impossible. The minimum valid value is 0."
+        ],
+        "cache_analysis": "LatestBlockHeader is read from state, updated at each block. No caching anomaly.",
+        "concurrency_analysis": "Block validation is sequential. No concurrency issue."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolic analysis: if slot = 0, the check beaconState.Slot() != slot would fail for any post-genesis state (beaconState.Slot() >= 1). For genesis-time, slot-0 processing is handled by special genesis initialization. The parentHeader.Slot >= slot check provides an additional implicit guard. No exploitable path for slot < 1 in normal operation.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample. The beaconState.Slot() == slot check prevents any block with slot != current state slot from being accepted, and state slot monotonically increases from 1 onward after genesis.",
+        "attack_scenarios": [
+          "Attacker sends slot-0 block to a synced node: rejected by beaconState.Slot() != slot check (state slot >= 1).",
+          "Attacker sends block where parentHeader.Slot >= slot: rejected by parentHeader check.",
+          "Attacker sends slot-0 block at genesis: genesis block processing is separate and handles slot 0 correctly."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Blocks arrive over P2P pubsub. validateBeaconBlockPubSub performs initial validation before calling ProcessBlockHeader. The first check in ProcessBlockHeaderNoVerify compares state slot to block slot \u2014 since state slot is always >= 1 post-genesis, any slot-0 block is immediately rejected.",
+        "entry_points": [
+          "P2P pubsub block gossip",
+          "BeaconAPI block submission"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "An attacker could submit a slot-0 block, but it would be rejected immediately at the slot equality check."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'block.Slot > 0' is implicitly enforced by: (1) genesis initialization ensures post-genesis states have slot >= 1, and (2) beaconState.Slot() == block.Slot check ensures block slot matches current state slot. No explicit slot > 0 check, but implicit guards are sufficient.",
+        "proof_successful": true,
+        "guard_identified": "beaconState.Slot() == slot check in ProcessBlockHeaderNoVerify; parentHeader.Slot >= slot check as secondary guard",
+        "guard_sufficiency": "Sufficient. State slot monotonically increases and is always >= 1 post-genesis. The equality check prevents slot-0 blocks from being accepted after genesis.",
+        "edge_cases": [
+          "Genesis slot (0) is handled by special genesis initialization code, not this function.",
+          "uint64 overflow is not possible for slot arithmetic in practice (requires >300,000 years of 12-second slots)."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The implicit guards are sufficient. A slot-0 block cannot be processed by a post-genesis node because beaconState.Slot() >= 1 != 0. No explicit check is needed given the type system (uint64 cannot go negative) and state invariants.",
+        "recommendation": "No fix required. An explicit assert block.Slot > 0 could be added for defensive clarity but is not security-critical.",
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W0B1:W0B1:CHK-0040",
+      "checklist_item": {
+        "check_id": "W0B1:W0B1:CHK-0040",
+        "property_id": "PROP-W0B17-44",
+        "title": "Are block timestamps strictly increasing?",
+        "severity": "Medium",
+        "bug_class": "Input Validation",
+        "risk_category": "Tampering"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/payload.go",
+            "symbol": "ValidatePayload",
+            "line_range": {
+              "start": 156,
+              "end": 173
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/blocks/payload.go",
+            "symbol": "ProcessPayload",
+            "line_range": {
+              "start": 185,
+              "end": 215
+            },
+            "role": "caller"
+          }
+        ],
+        "resolution_status": "resolved"
+      },
+      "code_snippet": "func ValidatePayload(st state.BeaconState, payload interfaces.ExecutionData) error {\n    random, err := helpers.RandaoMix(st, time.CurrentEpoch(st))\n    if !bytes.Equal(payload.PrevRandao(), random) {\n        return ErrInvalidPayloadPrevRandao\n    }\n    t, err := slots.StartTime(st.GenesisTime(), st.Slot())\n    if err != nil { return err }\n    // Exact equality with canonical slot start time\n    if payload.Timestamp() != uint64(t.Unix()) {\n        return ErrInvalidPayloadTimeStamp\n    }\n    return nil\n}",
+      "phase1_abstract_interpretation": {
+        "summary": "ValidatePayload checks payload.Timestamp() == uint64(t.Unix()), where t = slots.StartTime(st.GenesisTime(), st.Slot()). This enforces exact equality with the slot's canonical start time, which is stronger than 'strictly increasing' \u2014 it requires the exact slot start time. Since slot times are strictly increasing (each slot adds a fixed duration), the check effectively enforces monotonicity as a consequence.",
+        "state_anomalies_found": [
+          "The check enforces exact timestamp equality, not merely strict increase. This is stronger than required \u2014 a block cannot have a timestamp in the future or past relative to the slot start.",
+          "If slots.StartTime overflows (genesisTime + slot*slotDuration > MaxUint64), the computed time would wrap around. In practice, with ~1.7B current UNIX timestamp and 12-second slots, overflow requires ~300,000 years.",
+          "The payload.Timestamp() is a uint64 supplied by the EL/block producer. If the EL provides a timestamp that differs from the expected slot start time, validation fails.",
+          "If genesisTime is 0 (malformed state), slot 0 timestamp would be 0. However, genesis time is set during chain initialization and validated at genesis."
+        ],
+        "cache_analysis": "RandaoMix and StartTime are computed from state \u2014 no caching involved in this validation path.",
+        "concurrency_analysis": "ValidatePayload is called within sequential block state transition. No concurrency issue."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The timestamp invariant is enforced by exact equality with the slot's canonical start time. An attacker submitting a block with any timestamp other than genesisTime + slot*slotDuration would fail validation. Two consecutive blocks at slots N and N+1 have timestamps genesisTime+N*12 and genesisTime+(N+1)*12, strictly increasing by construction.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample. The check enforces exact slot start time, which is monotonically increasing and deterministically computable from genesisTime and slot number.",
+        "attack_scenarios": [
+          "Attacker submits payload with timestamp = expected - 1: rejected (not equal).",
+          "Attacker submits payload with timestamp = expected + 1: rejected (not equal).",
+          "Attacker submits payload with timestamp = expected: accepted \u2014 this is the only valid scenario.",
+          "Two consecutive blocks at slots N and N+1 have timestamps genesisTime+N*12 and genesisTime+(N+1)*12, strictly increasing."
+        ],
+        "timing_dependencies": "None. The expected timestamp is deterministically computable from state."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "ValidatePayload is called during block state transition processing. Block payload arrives from the proposer (local) or P2P (remote). The timestamp check is applied to all post-merge payloads. The attacker has no ability to craft a valid timestamp that is not the exact slot start time \u2014 genesisTime and slot are state-derived and not attacker-controllable.",
+        "entry_points": [
+          "P2P block gossip",
+          "Local block proposal"
+        ],
+        "attacker_controlled": true,
+        "classification": "unreachable",
+        "attack_surface": "An attacker could submit a payload with any timestamp, but only the exact slot start time passes validation."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'timestamps are strictly increasing' is enforced more strongly than required: exact equality with the slot start time. Since slots are strictly ordered and each has a unique start time, the check guarantees strict increase as a consequence. The guard is a pure function with no edge cases under normal operation.",
+        "proof_successful": true,
+        "guard_identified": "payload.Timestamp() != uint64(t.Unix()) check in ValidatePayload, where t = slots.StartTime(st.GenesisTime(), st.Slot())",
+        "guard_sufficiency": "Sufficient. Exact equality with slot start time implies strict monotonicity across slots. The canonical slot start time is deterministic and not attacker-controllable.",
+        "edge_cases": [
+          "uint64 overflow of slot start time \u2014 theoretically possible but practically unreachable (~300,000 years).",
+          "If genesisTime is 0 (malformed genesis), slot 0 timestamp would be 0 \u2014 but genesis initialization validates genesisTime."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "The timestamp check enforces exact equality with the canonical slot start time, which is strictly monotone by construction. The property 'strictly increasing timestamps' holds as a consequence of exact slot-time enforcement. No vulnerability exists.",
+        "recommendation": "No fix required. The exact equality check is correct and sufficient.",
+        "severity_estimate": "Low"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 1,
+    "batch_index": 18,
+    "item_count": 5,
+    "timestamp": 1771388020,
+    "processed_ids": [
+      "W0B1:W0B1:CHK-0036",
+      "W0B1:W0B1:CHK-0037",
+      "W0B1:W0B1:CHK-0038",
+      "W0B1:W0B1:CHK-0039",
+      "W0B1:W0B1:CHK-0040"
+    ]
+  }
+}

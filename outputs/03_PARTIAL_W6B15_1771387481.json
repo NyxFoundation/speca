@@ -1,0 +1,359 @@
+[
+  {
+    "check_id": "W0B1:W0B1:CHK-0021",
+    "checklist_item": {
+      "check_id": "W0B1:W0B1:CHK-0021",
+      "property_id": "PROP-W0B17-25",
+      "title": "Verify Trust Boundary Integrity: Do blob transactions have between 1 and BLOB_COUNT_LIMIT blobs?",
+      "severity": "Medium",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering"
+    },
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/blocks/payload.go",
+          "symbol": "verifyBlobCommitmentCount",
+          "line_range": { "start": 228, "end": 244 },
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/verification/blob.go",
+          "symbol": "BlobVerifier",
+          "line_range": { "start": 1, "end": 50 },
+          "role": "related"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "grep_fallback"
+    },
+    "code_snippet": "func verifyBlobCommitmentCount(slot primitives.Slot, body interfaces.ReadOnlyBeaconBlockBody) error {\n\tif body.Version() < version.Deneb {\n\t\treturn nil\n\t}\n\n\tkzgs, err := body.BlobKzgCommitments()\n\tif err != nil {\n\t\treturn err\n\t}\n\n\tcommitmentCount, maxBlobsPerBlock := len(kzgs), params.BeaconConfig().MaxBlobsPerBlock(slot)\n\tif commitmentCount > maxBlobsPerBlock {\n\t\treturn fmt.Errorf(\"too many kzg commitments in block: actual count %d - max allowed %d\", commitmentCount, maxBlobsPerBlock)\n\t}\n\n\treturn nil\n}",
+    "state_context": "MaxBlobsPerBlock(slot) reads BlobSchedule config; sorts in-place if unsorted (potential data race if shared config). BlobSchedule comparator uses int(a.Epoch - b.Epoch) where Epoch is uint64 — unsafe unsigned subtraction pattern.",
+    "phase1_abstract_interpretation": {
+      "summary": "verifyBlobCommitmentCount at payload.go:228-244 enforces only the upper bound (commitmentCount > maxBlobsPerBlock). The lower bound check (commitmentCount >= 1) is entirely absent. A beacon block with blob_kzg_commitments = [] passes CL validation without error. Additionally, the BlobSchedule sorting comparator uses uint64 subtraction cast to int (int(a.Epoch - b.Epoch)), which is semantically unsafe — on 32-bit platforms or with epoch values close to uint64 max, this could corrupt the BlobSchedule sort order, causing MaxBlobsPerBlock to return an incorrect value. In-place mutation of shared config (slices.SortFunc on b.BlobSchedule) on every call to MaxBlobsPerBlock if the schedule is unsorted is a potential data race.",
+      "state_anomalies_found": [
+        "commitmentCount == 0 passes CL validation — no minimum blob count check at CL layer",
+        "BlobSchedule comparator int(a.Epoch - b.Epoch) where Epoch=uint64 is unsigned subtraction pattern; incorrect on 32-bit platforms or with extreme epoch values",
+        "MaxBlobsPerBlock mutates shared BeaconChainConfig.BlobSchedule in-place if unsorted — potential data race under concurrent access"
+      ],
+      "cache_analysis": "MaxBlobsPerBlock is evaluated fresh per call with no caching. BlobSchedule may be re-sorted on each call if it arrives unsorted, creating repeated mutation of shared config state.",
+      "concurrency_analysis": "slices.SortFunc modifies b.BlobSchedule in-place. If BeaconChainConfig is accessed concurrently (e.g., by multiple goroutines validating blocks), this is a data race. Typical usage initializes config once, but the in-place sort is a latent concurrency hazard."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Attacker who is a block proposer crafts a beacon block with body.blob_kzg_commitments = [] (empty slice). verifyBlobCommitmentCount computes commitmentCount=0, maxBlobsPerBlock=N. Check: 0 > N → false → returns nil. Block proceeds to ProcessPayload success, then forwarded to EL via engine_newPayloadV3/V4. EL enforces minimum blob count per EIP-4844; if EL correctly rejects, CL marks block invalid. If EL has a bug accepting zero-blob blob transactions, the invariant is violated end-to-end.",
+      "counterexample_found": true,
+      "counterexample": "Block body with blob_kzg_commitments=[] (zero KZG commitments): verifyBlobCommitmentCount returns nil (no error), ProcessPayload completes successfully at CL level. The EL must then enforce the minimum independently.",
+      "attack_scenarios": [
+        "Propose beacon block with blob_kzg_commitments=[] containing a blob-type execution transaction: CL accepts, forwards to EL; EL backstop prevents end-to-end exploitation if EL is correct",
+        "BlobSchedule sort corruption via uint64 underflow in comparator on platforms where int is 32-bit: could return wrong maxBlobsPerBlock, e.g., allowing more than intended KZG commitments"
+      ],
+      "timing_dependencies": "No timing dependency for the minimum count bypass. BlobSchedule race requires concurrent config access which is an unusual scenario."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The code is reachable by any block proposer via normal block production and by any node relaying blocks over P2P gossip. ProcessPayload and verifyBlobCommitmentCount are invoked in the block processing pipeline for every Deneb+ beacon block. The missing minimum check is consistently absent across all calling paths found.",
+      "entry_points": ["beacon block processing pipeline via ProcessPayload", "P2P gossip block reception"],
+      "attacker_controlled": true,
+      "classification": "defense-in-depth",
+      "attack_surface": "Block proposer role required; EL provides the actual enforcement backstop. If EL is correct, the CL missing check is defense-in-depth, not an exploitable standalone vulnerability."
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'blob transactions have between 1 and BLOB_COUNT_LIMIT blobs' is only half-enforced at the CL. The upper bound guard (commitmentCount > maxBlobsPerBlock) is correct. The lower bound guard (commitmentCount >= 1) is entirely absent in the CL. The invariant cannot be proven to hold at the CL layer alone. The CL delegates minimum enforcement to the EL, which is a trust assumption rather than a verified invariant.",
+      "proof_successful": false,
+      "guard_identified": "commitmentCount > maxBlobsPerBlock check in verifyBlobCommitmentCount",
+      "guard_sufficiency": "Insufficient: covers only upper bound. Lower bound (minimum 1 blob) is not enforced at the CL.",
+      "edge_cases": [
+        "commitmentCount == 0 bypasses all CL checks",
+        "BlobSchedule comparator underflow with uint64 epoch values could yield incorrect maxBlobsPerBlock",
+        "BlobSchedule in-place sort is a data race hazard under concurrent config access"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "The CL is missing the lower bound check (commitmentCount >= 1) required by EIP-4844. This is a spec non-compliance at the CL trust boundary. While the EL backstop exists, the CL should independently verify this constraint. Additionally, the BlobSchedule comparator uses an unsafe uint64 subtraction pattern that could misbehave on 32-bit platforms or with maliciously crafted configs.",
+      "recommendation": "Add lower bound check in verifyBlobCommitmentCount: 'if commitmentCount == 0 { return fmt.Errorf(\"blob block must have at least 1 kzg commitment\") }'. Fix BlobSchedule comparator to use safe signed comparison: 'if a.Epoch < b.Epoch { return -1 } else if a.Epoch > b.Epoch { return 1 } return 0'.",
+      "severity_estimate": "Medium"
+    },
+    "final_classification": "informational",
+    "bug_bounty_eligible": true,
+    "reasoning": "The CL missing lower bound check on blob KZG commitment count (zero blobs passes CL validation) is a spec non-compliance. The EL provides a backstop, making this informational rather than critical, but the CL should enforce the full [1, MAX] range independently. The BlobSchedule uint64 comparator is a secondary unsafe pattern worth fixing.",
+    "severity": "Medium",
+    "vulnerability_details": {
+      "location": "beacon-chain/core/blocks/payload.go:239",
+      "cwe": "CWE-20",
+      "attack_vector": "Block proposer crafts beacon block with blob_kzg_commitments=[] (zero commitments); CL verifyBlobCommitmentCount returns nil (no error) since 0 > maxBlobsPerBlock is false",
+      "impact": "CL does not enforce minimum blob count; full enforcement delegated to EL; EL provides backstop",
+      "fix": "Add: if commitmentCount == 0 { return fmt.Errorf(\"blob block must have at least 1 kzg commitment\") } before the upper bound check"
+    }
+  },
+  {
+    "check_id": "W0B1:W0B1:CHK-0022",
+    "checklist_item": {
+      "check_id": "W0B1:W0B1:CHK-0022",
+      "property_id": "PROP-W0B17-26",
+      "title": "Verify Trust Boundary Integrity: Are blob and SetCode transactions prevented from creating contracts?",
+      "severity": "Medium",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering"
+    },
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/execution/engine_client.go",
+          "symbol": "Service.NewPayload",
+          "line_range": { "start": 144, "end": 204 },
+          "role": "primary"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "grep_fallback"
+    },
+    "code_snippet": "func (s *Service) NewPayload(ctx context.Context, payload interfaces.ExecutionData, versionedHashes []common.Hash, parentBlockRoot *common.Hash, executionRequests *pb.ExecutionRequests) ([]byte, error) {\n\t// ...\n\tswitch payloadPb := payload.Proto().(type) {\n\tcase *pb.ExecutionPayloadDeneb:\n\t\tif executionRequests == nil {\n\t\t\terr := s.rpcClient.CallContext(ctx, result, NewPayloadMethodV3, payloadPb, versionedHashes, parentBlockRoot)\n\t\t} else {\n\t\t\tflattenedRequests, err := pb.EncodeExecutionRequests(executionRequests)\n\t\t\terr = s.rpcClient.CallContext(ctx, result, NewPayloadMethodV4, payloadPb, versionedHashes, parentBlockRoot, flattenedRequests)\n\t\t}\n\t// ...\n\t}\n\t// Returns VALID/INVALID based on EL response\n}",
+    "state_context": "CL treats execution payload transactions as opaque bytes (transactions_root hash is validated by SSZ, but individual transaction RLP content is not parsed at the CL layer). All transaction-level semantic validation is delegated to the EL via engine_newPayloadVX.",
+    "phase1_abstract_interpretation": {
+      "summary": "Prysm's CL contains no code to inspect individual transaction destinations (tx.to field) for any transaction type. The execution payload is treated as an opaque structure; transactions are included as raw bytes whose root hash is verified via SSZ but whose contents are not parsed at the CL level. Contract creation prevention for blob transactions (EIP-4844, type 3) and SetCode transactions (EIP-7702, type 4) is entirely an EL responsibility enforced during engine_newPayloadV3/V4 execution. This is intentional CL/EL separation of concerns.",
+      "state_anomalies_found": [
+        "CL has zero transaction-level semantic validation for blob or SetCode transactions — by architectural design",
+        "Contract creation prevention (tx.to check) is not a CL responsibility"
+      ],
+      "cache_analysis": "Not applicable — no CL-side transaction parsing.",
+      "concurrency_analysis": "Not applicable — no per-transaction inspection at CL."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "No CL code path exists to check tx.to for any transaction type. A blob transaction with tx.to=null would be forwarded to the EL via engine_newPayloadV3 which would reject it per EIP-4844. The CL receives INVALID status and marks the block invalid. The CL cannot independently detect or prevent this.",
+      "counterexample_found": false,
+      "counterexample": "None — no CL code path inspects tx.to for any transaction type",
+      "attack_scenarios": [
+        "Propose block with blob tx having tx.to=null: EL rejects with INVALID; CL marks block invalid"
+      ],
+      "timing_dependencies": "None"
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "Contract creation prevention for typed transactions is architecturally an EL-only concern. The CL has no code path, data structures, or capability to inspect transaction destinations.",
+      "entry_points": ["engine_newPayloadV3/V4 at EL (enforced during EL transaction processing)"],
+      "attacker_controlled": false,
+      "classification": "internal-only",
+      "attack_surface": "Only exploitable via EL compromise or EL implementation bug; not a CL vulnerability"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The CL does not enforce this invariant. The guard exists solely at the EL. The CL trust model explicitly and architecturally delegates per-transaction semantic validation to the EL. The invariant is maintained at the EL level per EIP-4844 and EIP-7702 specifications.",
+      "proof_successful": true,
+      "guard_identified": "EL-side transaction validation in engine_newPayloadV3/V4",
+      "guard_sufficiency": "Sufficient at EL level by architectural design",
+      "edge_cases": ["EL bug accepting contract-creation blob/SetCode tx would bypass this; CL cannot detect or prevent"]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "CL delegation of per-transaction semantics (tx.to check) to EL is intentional architecture. The CL is not designed to inspect individual transaction fields. This is correctly an EL responsibility.",
+      "recommendation": "No CL change required. Verify EL client (geth/reth) correctly enforces EIP-4844 (no contract creation for blob txs) and EIP-7702 (no contract creation for SetCode txs).",
+      "severity_estimate": "Low"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "reasoning": "Contract creation prevention for blob and SetCode transactions is an EL-level concern. The CL treats execution payload transactions as opaque bytes. This is intentional architectural separation. No CL vulnerability exists.",
+    "severity": "Low"
+  },
+  {
+    "check_id": "W0B1:W0B1:CHK-0023",
+    "checklist_item": {
+      "check_id": "W0B1:W0B1:CHK-0023",
+      "property_id": "PROP-W0B17-27",
+      "title": "Verify Trust Boundary Integrity: Do SetCode transactions require non-empty authorization lists?",
+      "severity": "Medium",
+      "bug_class": "Input Validation",
+      "risk_category": "Tampering"
+    },
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/execution/engine_client.go",
+          "symbol": "Service.NewPayload",
+          "line_range": { "start": 144, "end": 204 },
+          "role": "primary"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "grep_fallback"
+    },
+    "code_snippet": "// In NewPayload: for Deneb payloads with executionRequests (Electra+), encodes execution requests\n// and calls engine_newPayloadV4. Individual transaction internals (authorization lists) are not\n// inspected at the CL layer. All EIP-7702 SetCode transaction validation is delegated to EL.",
+    "state_context": "EIP-7702 SetCode transactions are type 4 transactions in the execution payload. The CL's EncodeExecutionRequests handles beacon chain execution requests (deposits, withdrawals, consolidations) which are distinct from per-transaction authorization lists. The CL does not parse RLP-encoded transactions.",
+    "phase1_abstract_interpretation": {
+      "summary": "No code in Prysm's CL parses SetCode transaction (EIP-7702, type 4) authorization lists. The execution payload transactions field is treated as opaque RLP-encoded bytes at the CL level. Authorization list non-empty validation is an EL responsibility enforced during engine_newPayloadV4 processing. There is no CL-side inspection of per-transaction authorization list contents anywhere in the beacon-chain directory.",
+      "state_anomalies_found": [
+        "Zero CL-side validation of SetCode transaction authorization list contents — by design",
+        "EIP-7702 enforcement entirely delegated to EL"
+      ],
+      "cache_analysis": "Not applicable.",
+      "concurrency_analysis": "Not applicable."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "No CL code path exists to check authorization list length. A SetCode transaction with empty authorization_list would be rejected by the EL's EIP-7702 transaction validation during engine_newPayloadV4 processing. The CL receives INVALID and marks the block invalid.",
+      "counterexample_found": false,
+      "counterexample": "None — CL does not inspect SetCode transaction internals",
+      "attack_scenarios": [
+        "Propose block with SetCode tx having empty authorization_list: EL rejects with INVALID status"
+      ],
+      "timing_dependencies": "None"
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "EL-only enforcement. CL has no code path, data structures, or capability to validate SetCode transaction authorization list contents.",
+      "entry_points": ["engine_newPayloadV4 at EL (EIP-7702 validation)"],
+      "attacker_controlled": false,
+      "classification": "internal-only",
+      "attack_surface": "EL-level enforcement only; CL has no attack surface for this check"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Not enforced at CL. Guard exists only at EL via EIP-7702 implementation. CL trust model explicitly delegates this to EL.",
+      "proof_successful": true,
+      "guard_identified": "EL-side EIP-7702 transaction validation (authorization list non-empty check)",
+      "guard_sufficiency": "Sufficient at EL level by architectural design",
+      "edge_cases": ["EL bug accepting empty authorization_list SetCode tx would bypass; CL cannot detect"]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "Deliberate CL/EL separation of concerns. The CL does not inspect per-transaction fields. EL is the correct and only enforcement point for EIP-7702 authorization list requirements.",
+      "recommendation": "No CL change required. Verify EL client EIP-7702 implementation correctly rejects SetCode transactions with empty authorization lists.",
+      "severity_estimate": "Low"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "reasoning": "SetCode transaction authorization list validation is an EL-level concern per EIP-7702. The CL does not and cannot inspect per-transaction RLP fields. This is intentional architectural delegation.",
+    "severity": "Low"
+  },
+  {
+    "check_id": "W0B1:W0B1:CHK-0024",
+    "checklist_item": {
+      "check_id": "W0B1:W0B1:CHK-0024",
+      "property_id": "PROP-W0B17-28",
+      "title": "Verify Trust Boundary Integrity: Does sender nonce match transaction nonce exactly?",
+      "severity": "High",
+      "bug_class": "Replay Protection",
+      "risk_category": "Tampering"
+    },
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/execution/engine_client.go",
+          "symbol": "Service.NewPayload",
+          "line_range": { "start": 144, "end": 204 },
+          "role": "primary"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "grep_fallback"
+    },
+    "code_snippet": "// Service.NewPayload forwards the execution payload to the EL via engine_newPayloadVX.\n// The CL has no access to EVM account state (nonces, balances).\n// All nonce validation occurs at the EL during EVM state transition.",
+    "state_context": "Nonce validation requires access to EVM world state (account nonces). The CL maintains no EVM state, no account model, and no nonce tracking. The CL only maintains beacon chain state (validators, balances in Gwei, attestations, etc.). EVM account nonces are exclusively maintained by the EL.",
+    "phase1_abstract_interpretation": {
+      "summary": "Sender nonce matching is an EVM state machine operation requiring access to the account state trie. The CL has no world state, no account model, and no nonce tracking for individual Ethereum accounts. ProcessPayload validates only consensus-layer invariants (randao mix, timestamp, parent hash, blob commitment count). Nonce validation is categorically an EL responsibility and cannot be performed at the CL layer without fundamentally changing the CL/EL architecture.",
+      "state_anomalies_found": [
+        "CL has no nonce validation capability — by architectural necessity and design"
+      ],
+      "cache_analysis": "Not applicable — CL has no EVM account state or nonce cache.",
+      "concurrency_analysis": "Not applicable — no CL-side EVM state management."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "No CL code path for nonce validation. A transaction with a mismatched nonce (nonce < account_nonce or nonce > account_nonce) is rejected at EL level during engine_newPayloadVX EVM execution. The CL receives INVALID status and marks the block invalid.",
+      "counterexample_found": false,
+      "counterexample": "None — CL has no code path to inspect transaction nonces",
+      "attack_scenarios": [
+        "Transaction with nonce+1 not matching account nonce: EL rejects during EVM state transition, CL receives INVALID"
+      ],
+      "timing_dependencies": "None"
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "Nonce validation is architecturally outside CL scope. CL has no data structures, APIs, or code paths to perform nonce checking.",
+      "entry_points": ["engine_newPayloadVX at EL (EVM state transition)"],
+      "attacker_controlled": false,
+      "classification": "unreachable",
+      "attack_surface": "No CL attack surface; entirely EL responsibility"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The nonce invariant is enforced at the EL via EVM state transition. The CL has no guard for this and cannot enforce it. The trust model is: CL forwards payload to EL, EL validates all transaction-level semantics including nonces, returns VALID or INVALID.",
+      "proof_successful": true,
+      "guard_identified": "EL EVM transaction nonce validation during state transition",
+      "guard_sufficiency": "Sufficient at EL level; CL trust in EL VALID/INVALID response is the enforcement mechanism",
+      "edge_cases": ["EL nonce validation bug would bypass this; CL has no independent fallback check"]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "CL does not and cannot enforce EVM account-level nonce matching. This requires world state access that only the EL has. No CL code change is appropriate or architecturally possible.",
+      "recommendation": "No CL change. Verify EL nonce validation correctness, particularly for edge cases around nonce gaps and transaction ordering.",
+      "severity_estimate": "Low"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "reasoning": "Sender nonce validation is an EVM state machine concern requiring world state access. The CL has no EVM state and cannot perform this check. This is architecturally an EL responsibility. The CL correctly trusts EL's VALID/INVALID response.",
+    "severity": "Low"
+  },
+  {
+    "check_id": "W0B1:W0B1:CHK-0025",
+    "checklist_item": {
+      "check_id": "W0B1:W0B1:CHK-0025",
+      "property_id": "PROP-W0B17-29",
+      "title": "Verify Trust Boundary Integrity: Is sender balance sufficient for maximum possible transaction cost?",
+      "severity": "Critical",
+      "bug_class": "Arithmetic",
+      "risk_category": "Tampering"
+    },
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/execution/engine_client.go",
+          "symbol": "Service.NewPayload",
+          "line_range": { "start": 144, "end": 204 },
+          "role": "primary"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "grep_fallback"
+    },
+    "code_snippet": "// Service.NewPayload forwards execution payload to EL via engine_newPayloadVX.\n// CL only sees aggregate payload-level fields (base_fee_per_gas, gas_limit, gas_used)\n// not per-sender account balances. Balance sufficiency requires EVM world state access\n// which is exclusively maintained by the EL.",
+    "state_context": "Balance sufficiency for maximum transaction cost (base_fee_per_gas * gas_limit + value + blob_fee_per_gas * blob_gas_used) requires access to EVM world state (account balances). The CL's beacon state tracks validator balances in Gwei for consensus purposes but has no access to EVM execution layer account balances. All EVM state is in the EL.",
+    "phase1_abstract_interpretation": {
+      "summary": "Sender balance validation for maximum transaction cost requires access to the Ethereum execution layer world state (account balances, current gas prices, blob fee market). The CL maintains no EVM state and has no account model. The CL sees only block-level fee fields in the payload header (base_fee_per_gas, gas_used, gas_limit) but cannot derive per-sender balances or maximum transaction costs from these aggregates. Balance sufficiency enforcement is categorically an EL responsibility enforced during engine_newPayloadVX EVM state transition.",
+      "state_anomalies_found": [
+        "CL has no sender balance data — by architectural design and necessity",
+        "CL only sees aggregate block-level fee fields, not per-sender account balances or per-transaction cost breakdowns"
+      ],
+      "cache_analysis": "Not applicable — CL has no EVM world state cache.",
+      "concurrency_analysis": "Not applicable — no per-sender balance tracking at CL."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "No CL code path for per-sender balance validation exists. A transaction from an underfunded sender would be rejected by the EL during EVM state transition in engine_newPayloadVX. The CL receives INVALID status and marks the block invalid. This is correct behavior by design.",
+      "counterexample_found": false,
+      "counterexample": "None — CL has no code path to inspect sender balances or transaction costs",
+      "attack_scenarios": [
+        "Transaction from sender with insufficient balance: EL rejects during EVM state transition",
+        "Blob transaction where sender cannot cover blob_gas * max_fee_per_blob_gas: EL rejects"
+      ],
+      "timing_dependencies": "None at CL level"
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "Balance validation is architecturally outside CL scope. The CL has no data structures, world state, or APIs to perform per-sender balance sufficiency checks.",
+      "entry_points": ["engine_newPayloadVX at EL (EVM state transition balance deduction)"],
+      "attacker_controlled": false,
+      "classification": "unreachable",
+      "attack_surface": "No CL attack surface; entirely EL responsibility"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The balance sufficiency invariant is enforced at the EL via EVM state transition (balance deduction for gas + value + blob gas). The CL cannot enforce this invariant without access to EVM world state. The CL trust model relies on EL's VALID/INVALID response as the enforcement signal.",
+      "proof_successful": true,
+      "guard_identified": "EL EVM state transition balance deduction and upfront cost check",
+      "guard_sufficiency": "Sufficient at EL level; the EL's VALID response is the CL's enforcement signal",
+      "edge_cases": [
+        "EL balance validation bug for new transaction types (blob gas, SetCode costs) would bypass; CL cannot detect",
+        "Integer overflow in max cost calculation (tx.gas * max_fee_per_gas + tx.value + blob_gas * max_fee_per_blob_gas) at EL level would allow underfunded transactions; CL has no fallback"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "CL cannot enforce EVM account balance sufficiency. This requires world state access that only the EL possesses. No CL code change is appropriate or architecturally possible. The EL is the correct and only enforcement point.",
+      "recommendation": "No CL change. Verify EL client balance validation correctness for all transaction types, particularly: (1) blob gas cost accounting (max_fee_per_blob_gas * blob_gas_used), (2) SetCode upfront cost calculation, (3) overflow safety in maximum cost arithmetic.",
+      "severity_estimate": "Low (at CL scope)"
+    },
+    "final_classification": "out-of-scope",
+    "bug_bounty_eligible": false,
+    "reasoning": "Sender balance sufficiency for maximum transaction cost is an EVM state machine concern requiring world state access. The CL has no EVM state and cannot perform this check. This is architecturally an EL responsibility. The severity marking as Critical in the checklist reflects the impact if exploited, but the CL audit scope reveals no CL-side vulnerability.",
+    "severity": "Low"
+  }
+]

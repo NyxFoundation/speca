@@ -1,0 +1,416 @@
+[
+  {
+    "check_id": "W7B8:W7B8:CHK-0146",
+    "property_id": "PROP-W5B14-18",
+    "title": "Verify Trust Boundary Integrity for tb-003: Is the recovered polynomial degree validated before truncation in recover_polynomialcoeff?",
+    "severity": "Medium",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 31, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "MinimumColumnCountToReconstruct",
+          "line_range": {"start": 22, "end": 26},
+          "role": "related"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 108, "end": 122},
+          "role": "callee"
+        },
+        {
+          "file": "beacon-chain/sync/data_columns_reconstruct.go",
+          "symbol": "reconstructDataColumns",
+          "line_range": {"start": 1, "end": 80},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "mcp_callgraph"
+    },
+    "code_snippet": "func ReconstructDataColumnSidecars(verifiedRoSidecars []blocks.VerifiedRODataColumn) ([]blocks.VerifiedRODataColumn, error) {\n\t// ...\n\tcellsAndProofsForBlob, err := kzg.RecoverCellsAndKZGProofs(cellsIndices, cells)\n\t// ...\n}\n\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n\t// ...\n\tckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n\t// ...\n}",
+    "state_context": "ReconstructDataColumnSidecars delegates 100% to ckzg4844.RecoverCellsAndKZGProofs (c-kzg-4844 C library). No Go-layer polynomial degree check or truncation exists. The C library's recover_cells function handles polynomial degree management internally via poly_lagrange_to_monomial + compute_fk20_cell_proofs using only the first FIELD_ELEMENTS_PER_BLOB coefficients.",
+    "phase1_abstract_interpretation": {
+      "summary": "The checklist item assumes Prysm contains a Go-layer function recover_polynomialcoeff that performs polynomial recovery with an explicit degree-truncation step (poly_coeff[:FIELD_ELEMENTS_PER_BLOB]). This function does not exist in the Prysm Go codebase. Instead, ReconstructDataColumnSidecars (reconstruction.go:31-122) delegates entirely to kzg.RecoverCellsAndKZGProofs, which in turn delegates 100% to the C library ckzg4844.RecoverCellsAndKZGProofs. The polynomial degree management and truncation are performed inside the C library's recover_cells function. The C library internally operates on reconstructed_poly_coeff of size FIELD_ELEMENTS_PER_EXT_BLOB but only uses the first FIELD_ELEMENTS_PER_BLOB coefficients for proof generation in compute_fk20_cell_proofs.",
+      "state_anomalies_found": [
+        "No explicit polynomial degree check in Go layer — the C library handles this implicitly through its algorithm",
+        "The reconstructed sidecars are marked VerifiedRODataColumn without any Go-layer polynomial degree assertion after the C library returns",
+        "The comment in reconstruction.go ('Input sidecars are verified, and we reconstructed ourselves the missing sidecars. As a consequence, reconstructed sidecars are also verified.') asserts correctness by delegation of trust — unchecked transitivity in Go"
+      ],
+      "cache_analysis": "No polynomial cache. Results returned directly from C library and immediately assembled into sidecars. No stale cache attack possible.",
+      "concurrency_analysis": "ReconstructDataColumnSidecars spawns one goroutine per blob index using errgroup. Each goroutine writes to cellsAndProofs[blobIndex] — different array slot per goroutine. No data race in the Go layer."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "There is no code path in Prysm's Go layer that could be exploited via a 'polynomial degree not truncated' attack. The C library recover_cells in recovery.c operates on FIELD_ELEMENTS_PER_EXT_BLOB coefficients throughout and only uses the first FIELD_ELEMENTS_PER_BLOB for proof computation — this is exactly the truncation that the spec's poly_coeff[:FIELD_ELEMENTS_PER_BLOB] performs. The algorithmic correctness is embedded in the C library.",
+      "counterexample_found": false,
+      "counterexample": "No counterexample found in the Go layer. A potential attack would require a bug in the c-kzg-4844 v2.1.1 C library itself, which is an external dependency with its own security review.",
+      "attack_scenarios": [
+        "Attacker provides crafted cells with bytes >= BLS_MODULUS: rejected at bytes_to_bls_field with C_KZG_BADARGS before any polynomial arithmetic",
+        "Attacker provides duplicate cell indices: mitigated by duplicate detection in eip7594.c:237-243 which returns C_KZG_BADARGS",
+        "Attacker provides cell_indices >= CELLS_PER_EXT_BLOB: mitigated by bounds check at eip7594.c:212-217"
+      ]
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The reconstruction path is triggered after a node has received enough verified data column sidecars. The input sidecars have already passed VerifyDataColumnsSidecarKZGProofs (KZG proof verification) via the verification pipeline before being stored. Therefore, cells fed into recovery were already KZG-verified at ingestion time.",
+      "entry_points": ["P2P gossip data_column_sidecar_subnet_id topic", "By-root and by-range RPC requests from peers"],
+      "attacker_controlled": false,
+      "classification": "defense-in-depth"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'recovered polynomial has degree < FIELD_ELEMENTS_PER_BLOB' is maintained inside the C library by architectural constraint: the library only passes the first FIELD_ELEMENTS_PER_BLOB coefficients to compute_fk20_cell_proofs (eip7594.c:284). The Go layer does not need to perform this truncation because the C library's output is already a complete, correctly-handled polynomial evaluation. The guard is the C library's internal algorithm, not a Go-layer check.",
+      "proof_successful": true,
+      "guard_identified": "c-kzg-4844 v2.1.1 recover_cells C implementation with poly_lagrange_to_monomial + compute_fk20_cell_proofs using only first FIELD_ELEMENTS_PER_BLOB coefficients",
+      "guard_sufficiency": "Sufficient for Prysm's use case. The truncation is an implementation detail of the C library's algorithm. The Go layer cannot and does not need to perform this truncation.",
+      "edge_cases": [
+        "If c-kzg-4844 has a bug in its polynomial degree handling, Prysm would inherit that vulnerability — but that is a C library bug, not a Prysm Go bug",
+        "The Go layer has no way to independently verify that the C library correctly handled the polynomial degree"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "The check premise (Prysm has a Go-layer recover_polynomialcoeff with explicit degree truncation) is factually incorrect. Prysm delegates entirely to the c-kzg-4844 C library which handles polynomial degree management internally. There is no missing truncation check in Prysm's Go code.",
+      "recommendation": "No code change required. Document that polynomial degree management is delegated to c-kzg-4844 and is an implicit library contract.",
+      "severity_estimate": "Low (informational)"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false,
+    "summary": "The property premises do not apply to Prysm's Go codebase. Polynomial degree truncation is handled entirely by the c-kzg-4844 C library internally. There is no Go-layer vulnerability."
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0147",
+    "property_id": "PROP-W5B14-18",
+    "title": "Supporting Check: Does the validator node detect and reject incorrect polynomials from recovery?",
+    "severity": "Medium",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 31, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "MinimumColumnCountToReconstruct",
+          "line_range": {"start": 22, "end": 26},
+          "role": "related"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 108, "end": 122},
+          "role": "callee"
+        },
+        {
+          "file": "beacon-chain/sync/data_columns_reconstruct.go",
+          "symbol": "reconstructDataColumns",
+          "line_range": {"start": 1, "end": 80},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "mcp_callgraph"
+    },
+    "code_snippet": "// reconstruction.go:108-118 (key segment)\n// Input sidecars are verified, and we reconstructed ourselves the missing sidecars.\n// As a consequence, reconstructed sidecars are also verified.\nreconstructedVerifiedRoSidecars := make([]blocks.VerifiedRODataColumn, 0, len(reconstructedSidecars))\nfor _, sidecar := range reconstructedSidecars {\n    roSidecar, err := blocks.NewRODataColumnWithRoot(sidecar, blockRoot)\n    if err != nil {\n        return nil, errors.Wrap(err, \"new RO data column with root\")\n    }\n    verifiedRoSidecar := blocks.NewVerifiedRODataColumn(roSidecar)\n    reconstructedVerifiedRoSidecars = append(reconstructedVerifiedRoSidecars, verifiedRoSidecar)\n}",
+    "state_context": "After reconstruction, sidecars are wrapped as VerifiedRODataColumn WITHOUT calling VerifyDataColumnsSidecarKZGProofs. Comment justifies this by transitivity: input sidecars were verified, so output is also 'verified'. NewVerifiedRODataColumn is documented 'should only be used by the verification package' but is called directly in reconstruction.go.",
+    "phase1_abstract_interpretation": {
+      "summary": "After reconstruction in ReconstructDataColumnSidecars, the resulting sidecars are wrapped as VerifiedRODataColumn via blocks.NewVerifiedRODataColumn (reconstruction.go:117) WITHOUT running VerifyDataColumnsSidecarKZGProofs on them. The code comment explicitly states: 'Input sidecars are verified, and we reconstructed ourselves the missing sidecars. As a consequence, reconstructed sidecars are also verified.' This is a correctness-by-delegation argument. The C library RecoverCellsAndKZGProofs DOES compute fresh KZG proofs (recovered_proofs is non-null in eip7594.c:273), meaning the output proofs are freshly computed by the library, not inherited from input — which is a stronger guarantee.",
+      "state_anomalies_found": [
+        "Reconstructed sidecars bypass VerifyDataColumnsSidecarKZGProofs — they inherit 'verified' status by Go type system promotion without explicit proof re-verification",
+        "The trust chain relies entirely on the correctness of ckzg4844.RecoverCellsAndKZGProofs — if the C library returns incorrect data without an error, Go has no fallback check",
+        "NewVerifiedRODataColumn (rodatacolumn.go:85) is documented 'should only be used by the verification package' but is called directly in reconstruction.go:117 — this violates the intended API contract"
+      ],
+      "cache_analysis": "No caching of reconstructed polynomial data. Fresh reconstruction each time. No stale cache attack possible.",
+      "concurrency_analysis": "reconstructionLock prevents concurrent reconstructions for the same block root. No double-reconstruction race condition."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "The question is: can an attacker cause the C library to return incorrect (but non-error) reconstruction results? For this, the C library would need to accept malicious input cells without detecting them and produce incorrect output field elements. Cell input validation path: (1) each field element must pass blst_scalar_fr_check, (2) cell indices in [0, CELLS_PER_EXT_BLOB), (3) no duplicate indices. If all pass, reconstruction is deterministic algebraic (Berlekamp-Welch). The only way to get incorrect output without error is if input cells represent corrupted blob data — but this is blocked by upstream KZG proof verification.",
+      "counterexample_found": true,
+      "counterexample": "Hypothetical: If an adversary could store KZG-invalid cells into the local node's dataColumnStorage (bypassing verification pipeline), reconstruction would produce a 'verified' sidecar with incorrect data. However, there is no code path to store unverified cells — all stored cells must pass VerifyDataColumnsSidecarKZGProofs (via GossipDataColumnSidecarRequirements or ByRootRequestDataColumnSidecarRequirements).",
+      "attack_scenarios": [
+        "Storage bypass: If an attacker can directly write to the dataColumnStorage filesystem bypassing the verification layer (local compromise scenario), corrupted cells would pass through reconstruction and produce 'verified' sidecars with wrong data",
+        "C library bug: If c-kzg-4844 v2.1.1 has a bug where valid field elements produce incorrect reconstruction output without an error return, Prysm's Go layer would not detect this"
+      ]
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The reconstruction path is reachable from P2P received data via reconstructSaveBroadcastDataColumnSidecars. Input sidecars passed to ReconstructDataColumnSidecars must already be VerifiedRODataColumn, which requires passing through the verification pipeline (KZG proof check). Post-reconstruction sidecars carry this type without re-verification, which is an API contract violation (NewVerifiedRODataColumn is documented for verification package use only).",
+      "entry_points": ["P2P gossip validated sidecars stored in dataColumnStorage", "Fetched and verified sidecars from peers via FetchDataColumnSidecars"],
+      "attacker_controlled": false,
+      "classification": "defense-in-depth"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'reconstructed sidecars are cryptographically valid' depends on: (A) input cells are KZG-verified before entering reconstruction, and (B) C library reconstruction is correct. Property (A) is enforced by the verification pipeline upstream of storage. Property (B) is delegated to c-kzg-4844 and is not independently checked in Go after reconstruction. Critically, the C library RecoverCellsAndKZGProofs computes fresh KZG proofs (eip7594.c:273-295), making this safe in practice.",
+      "proof_successful": true,
+      "guard_identified": "Upstream VerifyDataColumnsSidecarKZGProofs required before storage; RecoverCellsAndKZGProofs computes fresh KZG proofs for all recovered cells as part of recovery",
+      "guard_sufficiency": "Sufficient under the assumption of C library correctness. However, the Go API contract violation (NewVerifiedRODataColumn called outside verification package) creates a defense-in-depth gap.",
+      "edge_cases": [
+        "NewVerifiedRODataColumn is called from outside the verification package (reconstruction.go) — violating its documented API contract",
+        "If the C library is upgraded and introduces a regression in proof generation, Prysm's Go layer would produce 'verified' sidecars with invalid proofs with no detection mechanism"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "There is a meaningful architectural concern: (1) NewVerifiedRODataColumn is called directly from reconstruction.go outside the verification package, violating its documented API contract. (2) Reconstructed sidecars receive the VerifiedRODataColumn type without explicit post-reconstruction KZG proof validation in Go. While the C library computes fresh KZG proofs during recovery (making this safe in practice), the absence of a Go-layer post-check creates an implicit dependency on C library correctness with no fallback. The API contract violation and implicit trust create a defense-in-depth gap worth reporting.",
+      "recommendation": "Add a post-reconstruction call to VerifyDataColumnsSidecarKZGProofs on reconstructed sidecars, or document explicitly why this is safe to omit. Move the VerifiedRODataColumn promotion to the verification package. Add a test that verifies reconstructed sidecars pass KZG verification.",
+      "severity_estimate": "Low (defense-in-depth gap, not directly exploitable given upstream verification)"
+    },
+    "final_classification": "informational",
+    "bug_bounty_eligible": true,
+    "summary": "Reconstructed sidecars receive VerifiedRODataColumn type without explicit post-reconstruction KZG proof verification in Go. NewVerifiedRODataColumn is called outside the verification package (reconstruction.go:117), violating its documented API contract. Safe in practice since the C library computes fresh proofs, but creates a defense-in-depth gap. Severity: Low informational."
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0148",
+    "property_id": "PROP-W5B14-18",
+    "title": "Supporting Check: Can a P2P peer craft cell data to force polynomial degree >= FIELD_ELEMENTS_PER_BLOB?",
+    "severity": "Medium",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 31, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "MinimumColumnCountToReconstruct",
+          "line_range": {"start": 22, "end": 26},
+          "role": "related"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 108, "end": 122},
+          "role": "callee"
+        },
+        {
+          "file": "beacon-chain/sync/data_columns_reconstruct.go",
+          "symbol": "reconstructDataColumns",
+          "line_range": {"start": 1, "end": 80},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "mcp_callgraph"
+    },
+    "code_snippet": "// p2p_interface.go:83-89 (critical gate)\n// Batch verify that the cells match the corresponding commitments and proofs.\nverified, err := kzg.VerifyCellKZGProofBatch(commitments, indices, cells, proofs)\nif err != nil {\n    return errors.Wrap(err, \"verify cell KZG proof batch\")\n}\nif !verified {\n    return ErrInvalidKZGProof\n}",
+    "state_context": "The KZG proof verification (VerifyDataColumnsSidecarKZGProofs via VerifyCellKZGProofBatch) is a hard cryptographic gate on all P2P-received data before it reaches the reconstruction path. A cell that is NOT an evaluation of a degree-(FIELD_ELEMENTS_PER_BLOB-1) polynomial cannot produce a valid KZG proof under the BLS12-381 trusted setup.",
+    "phase1_abstract_interpretation": {
+      "summary": "The question is whether a P2P attacker can craft malicious cell data that causes reconstruction to produce a polynomial with degree >= FIELD_ELEMENTS_PER_BLOB. The full data flow is: P2P received sidecar -> VerifyDataColumnsSidecarKZGProofs (KZG proof check) -> storage -> ReconstructDataColumnSidecars -> ckzg4844.RecoverCellsAndKZGProofs. The KZG proof check mathematically ensures that each cell is an evaluation of a degree-(FIELD_ELEMENTS_PER_BLOB-1) polynomial committed to by the KZG commitment in the sidecar. A cell that is NOT an evaluation of such a polynomial will fail KZG proof verification.",
+      "state_anomalies_found": [
+        "If a peer sends cells with valid-range field elements but not corresponding to a degree-(FIELD_ELEMENTS_PER_BLOB-1) polynomial, those cells CANNOT produce a valid KZG proof — rejected at VerifyDataColumnsSidecarKZGProofs",
+        "GossipDataColumnSidecarRequirements includes RequireSidecarKzgProofVerified — P2P gossip sidecars must pass before storage",
+        "ByRootRequestDataColumnSidecarRequirements also includes RequireSidecarKzgProofVerified — RPC-fetched sidecars also must pass"
+      ],
+      "cache_analysis": "The inclusion proof cache in data_column.go could theoretically allow replay of a previously-cached inclusion proof. However, inclusion proofs and KZG proofs are separate checks; the KZG proof verification cannot be bypassed via cache.",
+      "concurrency_analysis": "No concurrency issue. KZG verification is per-sidecar and stateless with respect to concurrency."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Symbolic execution of the P2P data path shows the attack is blocked at the KZG proof verification gate. Mathematical basis: a KZG proof for a cell is valid if and only if the cell data are evaluations of a polynomial of degree < FIELD_ELEMENTS_PER_BLOB committed to by the given KZG commitment. An attacker crafting cells encoding a higher-degree polynomial cannot produce a valid KZG proof under the trusted setup. No attacker-controlled P2P input can pass VerifyDataColumnsSidecarKZGProofs with cell data encoding a polynomial of degree >= FIELD_ELEMENTS_PER_BLOB.",
+      "counterexample_found": false,
+      "counterexample": "Not found. The KZG binding between commitment and cell proof is computationally binding under the discrete log assumption in BLS12-381. Breaking this requires solving the discrete log problem.",
+      "attack_scenarios": [
+        "Attacker crafts cells with bytes >= BLS_MODULUS: rejected at bytes_to_bls_field with C_KZG_BADARGS before any polynomial arithmetic",
+        "Attacker crafts cells with valid field elements but fake KZG proofs: rejected at VerifyCellKZGProofBatch",
+        "Attacker provides cells from a different blob (commitment mismatch): rejected at VerifyCellKZGProofBatch since commitment would not match",
+        "DoS via causing C_KZG_BADARGS during reconstruction: impossible since all stored cells were KZG-verified"
+      ]
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "ReconstructDataColumnSidecars only accepts []blocks.VerifiedRODataColumn — the Go type system enforces that only previously verified sidecars reach this function. Unverified P2P data cannot be passed as VerifiedRODataColumn without going through the verification package. The only pathway from P2P data to VerifiedRODataColumn is through verifyByRootDataColumnSidecars which calls RequireSidecarKzgProofVerified.",
+      "entry_points": ["P2P gossip via validateDataColumnSidecar -> GossipDataColumnSidecarRequirements", "By-root RPC via verifyByRootDataColumnSidecars -> ByRootRequestDataColumnSidecarRequirements", "By-range RPC via ByRangeRequestDataColumnSidecarRequirements"],
+      "attacker_controlled": false,
+      "classification": "unreachable"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'all cells fed to RecoverCellsAndKZGProofs represent evaluations of a degree-(FIELD_ELEMENTS_PER_BLOB-1) polynomial' is enforced by upstream KZG proof verification for all P2P-sourced data. The proof holds unconditionally for externally received data. The KZG commitment scheme (backed by BLS12-381 trusted setup) is the cryptographic anchor for this invariant.",
+      "proof_successful": true,
+      "guard_identified": "VerifyDataColumnsSidecarKZGProofs -> VerifyCellKZGProofBatch -> ckzg4844.VerifyCellKZGProofBatch",
+      "guard_sufficiency": "Sufficient. The KZG proof is a cryptographic guarantee that cells represent evaluations of a bounded-degree polynomial.",
+      "edge_cases": [
+        "Locally constructed data (ConstructDataColumnSidecars from execution layer) bypasses KZG verification — but this is trusted data from the execution client, not P2P attacker-controlled"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "A P2P peer cannot craft cell data to force a polynomial of degree >= FIELD_ELEMENTS_PER_BLOB into the reconstruction pipeline. The KZG proof verification gate is a hard cryptographic barrier. The attack is unreachable.",
+      "recommendation": "No code change required. Document the KZG proof check as the guard against this attack class.",
+      "severity_estimate": "Low (informational, attack is unreachable)"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false,
+    "summary": "Attack is cryptographically unreachable. P2P-received cells must pass KZG proof verification (VerifyDataColumnsSidecarKZGProofs) before reaching reconstruction. A cell encoding a degree >= FIELD_ELEMENTS_PER_BLOB polynomial cannot produce a valid KZG proof under the BLS12-381 trusted setup."
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0149",
+    "property_id": "PROP-W5B14-19",
+    "title": "Verify Trust Boundary Integrity for tb-003: Is division by zero prevented in recover_polynomialcoeff when computing reconstructed[i] = ez_over_coset[i] / zp_over_coset[i]?",
+    "severity": "High",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 31, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "MinimumColumnCountToReconstruct",
+          "line_range": {"start": 22, "end": 26},
+          "role": "related"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 108, "end": 122},
+          "role": "callee"
+        },
+        {
+          "file": "beacon-chain/sync/data_columns_reconstruct.go",
+          "symbol": "reconstructDataColumns",
+          "line_range": {"start": 1, "end": 80},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "mcp_callgraph"
+    },
+    "code_snippet": "// kzg.go:108-122 (delegation to C library)\nfunc RecoverCellsAndKZGProofs(cellIndices []uint64, partialCells []Cell) (CellsAndProofs, error) {\n    ckzgPartialCells := make([]ckzg4844.Cell, len(partialCells))\n    for i := range partialCells {\n        ckzgPartialCells[i] = ckzg4844.Cell(partialCells[i])\n    }\n    ckzgCells, ckzgProofs, err := ckzg4844.RecoverCellsAndKZGProofs(cellIndices, ckzgPartialCells)\n    if err != nil {\n        return CellsAndProofs{}, errors.Wrap(err, \"recover cells and KZG proofs\")\n    }\n    return makeCellsAndProofs(ckzgCells[:], ckzgProofs[:])\n}\n\n// C library fr.c:72-79 (relevant C code)\n// Divides fr_t `a` by `b`.\n// NOTE: behavior for b == 0 is unspecified.\nstatic void fr_div(fr_t *out, const fr_t *a, const fr_t *b) {\n    fr_t tmp;\n    blst_fr_eucl_inverse(&tmp, b);\n    blst_fr_mul(out, a, &tmp);\n}",
+    "state_context": "Division in polynomial recovery is: P(x) = (P*Z)(x) / Z(x) in coset-evaluation form. The coset is generated by PRIMITIVE_ROOT_OF_UNITY = 7, ensuring Z(x) has no roots on the coset. The c-kzg-4844 C library's fr_div has 'behavior for b == 0 is unspecified' — blst_fr_eucl_inverse(0) computes 0^(p-2) = 0 by Fermat's little theorem, resulting in silent wrong results (0) rather than a crash.",
+    "phase1_abstract_interpretation": {
+      "summary": "The division operation in recover_polynomialcoeff is performed by fr_div in recovery.c:334. The critical property is: the coset is chosen specifically such that Z(x) — the vanishing polynomial over missing cells — is NEVER zero on the coset. The coset is generated by PRIMITIVE_ROOT_OF_UNITY = 7 (a generator of the BLS12-381 multiplicative group), which is separate from the domain roots of unity, ensuring the evaluation domain and the coset are disjoint. The fr_div 'unspecified behavior for b==0' is a latent C-level concern: blst_fr_eucl_inverse(0) returns 0 (by Fermat's little theorem: 0^(p-2) = 0), so division-by-zero would produce silent wrong results (0 * a = 0) rather than a crash or error.",
+      "state_anomalies_found": [
+        "fr_div (fr.c:75) has 'behavior for b == 0 is unspecified' — blst_fr_eucl_inverse(0) returns 0, causing silent wrong polynomial recovery rather than a detectable error",
+        "The coset construction (coset_fft using PRIMITIVE_ROOT_OF_UNITY = 7) is a hardcoded constant (setup.c:81). If this constant were wrong, Z(x) could be zero on the coset",
+        "If fewer cells are available than CELLS_PER_BLOB, the function returns C_KZG_BADARGS before reaching the division (eip7594.c:206-209) — prevents degenerate case"
+      ],
+      "cache_analysis": "No caching of division results. Each reconstruction is independent.",
+      "concurrency_analysis": "Division is performed within the C library's single-threaded execution per goroutine. No concurrency issue within a single reconstruction call."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "The division-by-zero question reduces to: can vanishing_poly_over_coset[i] be zero for any coset evaluation point? Mathematically, Z(x) = prod(x - omega^j for missing j) has roots exactly at the missing cell evaluation points (roots of unity). The coset evaluation domain is { PRIMITIVE_ROOT_OF_UNITY * omega^k } for k in [0, FIELD_ELEMENTS_PER_EXT_BLOB). If PRIMITIVE_ROOT_OF_UNITY is not a root of unity in the order-FIELD_ELEMENTS_PER_EXT_BLOB subgroup, then the coset contains no roots of unity, and Z(x) has no zero on the coset. PRIMITIVE_ROOT_OF_UNITY = 7 satisfies this property. The trusted setup initialization validates the primitive root via expand_root_of_unity.",
+      "counterexample_found": false,
+      "counterexample": "No division-by-zero counterexample found. The mathematical construction guarantees Z(x) != 0 on the coset. PRIMITIVE_ROOT_OF_UNITY = 7 is verified by expand_root_of_unity during trusted setup initialization.",
+      "attack_scenarios": [
+        "Attacker provides cells such that Z(x) has a zero on the coset: impossible by construction (coset is disjoint from FFT domain)",
+        "Attacker sends exactly CELLS_PER_BLOB cells (minimum threshold): Z(x) has at most CELLS_PER_BLOB roots; coset has FIELD_ELEMENTS_PER_EXT_BLOB = 8192 points; non-zero on all coset points as needed",
+        "Trusted setup corruption: if ROOT_OF_UNITY is incorrect, expand_root_of_unity validation returns C_KZG_BADARGS, causing trusted setup load to fail",
+        "Silent wrong results risk: if fr_div is called with zero divisor (which mathematically cannot happen currently), blst_fr_eucl_inverse(0) = 0, causing reconstucted[i] = 0 for that term — wrong results without any error signal in Go"
+      ]
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "The fr_div operation is reachable from any call to RecoverCellsAndKZGProofs with valid (non-error) input. The 'b == 0 behavior is unspecified' note is a latent risk if the coset construction invariant ever fails. The mathematical invariant is guaranteed by the algorithm design, but there is no defensive zero check before fr_div.",
+      "entry_points": ["ReconstructDataColumnSidecars (reconstruction.go:86) -> kzg.RecoverCellsAndKZGProofs -> ckzg4844.RecoverCellsAndKZGProofs -> recover_cells -> fr_div"],
+      "attacker_controlled": false,
+      "classification": "unreachable"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'vanishing_poly_over_coset[i] != 0 for all i' is guaranteed by the mathematical property that the coset {7 * omega^k} is disjoint from the FFT domain {omega^k}. The trusted setup initialization validates the primitive root via expand_root_of_unity. The fr_div 'unspecified behavior for b==0' is a latent C-level concern — silent wrong results (0) rather than a crash if ever reached. The guard is the mathematical coset construction, not an explicit zero-check.",
+      "proof_successful": true,
+      "guard_identified": "Coset FFT domain disjoint from vanishing polynomial roots, enforced by PRIMITIVE_ROOT_OF_UNITY = 7; trusted setup validation via expand_root_of_unity at node startup",
+      "guard_sufficiency": "Mathematically sufficient. However, the lack of an explicit zero-check for the divisor in fr_div means that if the coset invariant ever failed (e.g., due to a future algorithmic change), the result would be silently wrong rather than an error — a defense-in-depth gap in the C library.",
+      "edge_cases": [
+        "blst_fr_eucl_inverse(0) returns 0 via Fermat's little theorem, so division by zero produces silent wrong results (0) rather than a crash — this is worse than a panic because it is undetectable at the Go layer",
+        "The 'behavior for b == 0 is unspecified' comment is a C-level API contract weakness that could be exploitable if any future change makes the coset-domain disjointness assumption fail"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "While division-by-zero is mathematically unreachable in the current algorithm, the C library's explicit documentation that 'behavior for b == 0 is unspecified' and the fact that blst_fr_eucl_inverse(0) returns 0 (producing silently wrong reconstruction results rather than an error) creates a latent defense-in-depth gap. If any future algorithmic change made the coset-domain disjointness assumption fail, the fr_div silent wrong result (rather than error) would cause incorrect polynomial reconstruction without any detectable error signal propagating to Prysm's Go layer. This is worth documenting as an informational finding in the c-kzg-4844 library context.",
+      "recommendation": "At the C library level: add an assertion or error check for zero divisor in fr_div, or add a comment documenting why zero is mathematically impossible here. At the Go layer: no change needed since the Go code has no visibility into the polynomial arithmetic. Consider adding a test that validates reconstruction produces correct results and fails gracefully on bad inputs.",
+      "severity_estimate": "Low (latent risk in C library, mathematically unreachable from current code)"
+    },
+    "final_classification": "informational",
+    "bug_bounty_eligible": true,
+    "summary": "Division by zero is mathematically unreachable due to coset-domain disjointness (PRIMITIVE_ROOT_OF_UNITY = 7 ensures the coset {7*omega^k} is disjoint from FFT domain {omega^k}). However, the C library fr_div has 'behavior for b == 0 is unspecified' and blst_fr_eucl_inverse(0) = 0, meaning a hypothetical zero divisor would produce silently wrong results (0) rather than a detectable error in Go. Informational finding: defense-in-depth gap in c-kzg-4844 C library. Severity: Low."
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0150",
+    "property_id": "PROP-W5B14-19",
+    "title": "Supporting Check: Is PRIMITIVE_ROOT_OF_UNITY correctly defined and verified as a primitive root?",
+    "severity": "High",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 31, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "MinimumColumnCountToReconstruct",
+          "line_range": {"start": 22, "end": 26},
+          "role": "related"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 108, "end": 122},
+          "role": "callee"
+        },
+        {
+          "file": "beacon-chain/sync/data_columns_reconstruct.go",
+          "symbol": "reconstructDataColumns",
+          "line_range": {"start": 1, "end": 80},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved",
+      "resolution_method": "mcp_callgraph"
+    },
+    "code_snippet": "// PRIMITIVE_ROOT_OF_UNITY is not defined anywhere in Prysm's Go codebase.\n// In c-kzg-4844 (setup.c:58):\n// /* The primitive root of unity for BLS12-381 is 7 */\n// #define PRIMITIVE_ROOT_OF_UNITY 7\n//\n// ROOT_OF_UNITY is hardcoded in setup.c:81:\n// static const fr_t ROOT_OF_UNITY = {0xa33d279ff0ccffc9L, ...};\n//\n// Validation in expand_root_of_unity (setup.c:99-123):\n// Verifies that ROOT_OF_UNITY generates exactly the required subgroup order\n// Returns C_KZG_BADARGS if validation fails.",
+    "state_context": "PRIMITIVE_ROOT_OF_UNITY is entirely a c-kzg-4844 C library concern. The constant 7 is a primitive root of the BLS12-381 multiplicative group (mathematical fact). ROOT_OF_UNITY (derived from 7) is hardcoded and validated by expand_root_of_unity at trusted setup load time. If incorrect, the trusted setup load fails with C_KZG_BADARGS, preventing node startup.",
+    "phase1_abstract_interpretation": {
+      "summary": "PRIMITIVE_ROOT_OF_UNITY is NOT defined anywhere in Prysm's Go codebase. It is defined in the c-kzg-4844 C library as the constant 7 (setup.c:58) and is used during trusted setup initialization to derive ROOT_OF_UNITY (hardcoded at setup.c:81 as a pre-computed BLS12-381 field element). The ROOT_OF_UNITY constant is not dynamically computed from 7 at runtime — it is hardcoded. The expand_root_of_unity function (setup.c:99-123) validates that ROOT_OF_UNITY generates a subgroup of exactly the correct order during trusted setup loading.",
+      "state_anomalies_found": [
+        "ROOT_OF_UNITY is a hardcoded constant — if it were wrong, it would cause incorrect reconstruction for ALL blobs, not just adversarial ones; would be detected quickly in practice",
+        "PRIMITIVE_ROOT_OF_UNITY = 7 is used only as a comment/documentation in setup.c — the actual constant used is the hardcoded ROOT_OF_UNITY; no Go code references PRIMITIVE_ROOT_OF_UNITY",
+        "Prysm has no independent verification of PRIMITIVE_ROOT_OF_UNITY being a primitive root — entirely delegated to c-kzg-4844"
+      ],
+      "cache_analysis": "KZGSettings is loaded once at initialization via kzg.Start(). ROOT_OF_UNITY is embedded in precomputed tables within KZGSettings. No runtime modification.",
+      "concurrency_analysis": "KZGSettings is read-only after initialization. No concurrency issues."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "If ROOT_OF_UNITY were incorrect (not a primitive 8192nd root of unity in BLS12-381), expand_root_of_unity (setup.c:99-123) would detect this: it generates powers of the root and checks that exactly after `width` iterations the result equals one. This check returns C_KZG_BADARGS if validation fails, causing trusted setup loading to fail, preventing any reconstruction. Therefore, an incorrect ROOT_OF_UNITY would cause a startup failure, not silent incorrect behavior.",
+      "counterexample_found": false,
+      "counterexample": "No counterexample found. The ROOT_OF_UNITY constant is validated during trusted setup loading via expand_root_of_unity. An incorrect value would fail validation and prevent node startup.",
+      "attack_scenarios": [
+        "Supply chain attack: if an attacker modified the ROOT_OF_UNITY constant in c-kzg-4844 before compilation, reconstruction would fail at startup (detected by expand_root_of_unity) rather than producing silent wrong results",
+        "Trusted setup JSON corruption: if the trusted setup file is corrupted, the validation may catch it depending on which part is corrupted — points are validated against each other but not against a known reference ROOT_OF_UNITY"
+      ]
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "PRIMITIVE_ROOT_OF_UNITY = 7 is a mathematical constant of BLS12-381. Its correctness is established by the Ethereum consensus specification (EIP-7594 / Fulu) and the BLS12-381 field specification. The value 7 is a well-known primitive root of the BLS12-381 multiplicative group. Its correctness is not a runtime concern — it is a mathematical fact verified when the constant was chosen for the specification.",
+      "entry_points": ["c-kzg-4844 trusted setup load at node initialization"],
+      "attacker_controlled": false,
+      "classification": "unreachable"
+    },
+    "phase3_invariant_proving": {
+      "summary": "The invariant 'ROOT_OF_UNITY is a valid primitive 8192nd root of unity in BLS12-381' is verified by expand_root_of_unity during trusted setup loading. The invariant 'PRIMITIVE_ROOT_OF_UNITY = 7 is a primitive root of BLS12-381' is a mathematical fact established by the field specification. Prysm's Go layer has no code related to PRIMITIVE_ROOT_OF_UNITY and is not responsible for this invariant — it is entirely within the c-kzg-4844 C library's domain.",
+      "proof_successful": true,
+      "guard_identified": "expand_root_of_unity (setup.c:99-123) validates ROOT_OF_UNITY generates exactly the required subgroup order during trusted setup initialization at node startup",
+      "guard_sufficiency": "Sufficient. The runtime validation in expand_root_of_unity catches any incorrect ROOT_OF_UNITY constant and fails the trusted setup load, preventing incorrect reconstruction.",
+      "edge_cases": [
+        "If the trusted setup JSON file is corrupted (not just the hardcoded constant), validation may not catch all corruption scenarios",
+        "Trusted setup loading is a one-time operation at startup — after successful load, no further validation of ROOT_OF_UNITY occurs during operation"
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "PRIMITIVE_ROOT_OF_UNITY = 7 is not defined in Prysm's Go codebase. It is a mathematical constant in c-kzg-4844 that is: (1) a mathematical fact about BLS12-381, (2) validated during trusted setup initialization via expand_root_of_unity, and (3) entirely outside Prysm's Go code responsibility. The question of whether this constant is 'correctly defined and verified' is answered: yes, by the c-kzg-4844 library's own trusted setup validation.",
+      "recommendation": "No code change required in Prysm's Go codebase. Document that PRIMITIVE_ROOT_OF_UNITY is a c-kzg-4844 library constant validated at trusted setup load time.",
+      "severity_estimate": "Low (informational, no Prysm Go-layer responsibility)"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false,
+    "summary": "PRIMITIVE_ROOT_OF_UNITY = 7 is not present in Prysm's Go codebase. It is defined in c-kzg-4844 (setup.c:58) as a mathematical constant of BLS12-381 and validated at trusted setup load time by expand_root_of_unity. An incorrect value would fail validation at startup, not produce silent wrong results. No Prysm Go-layer vulnerability."
+  }
+]

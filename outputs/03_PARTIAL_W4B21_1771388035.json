@@ -1,0 +1,481 @@
+{
+  "audit_items": [
+    {
+      "check_id": "W7B8:W7B8:CHK-0101",
+      "property_id": "PROP-W5B14-8",
+      "title": "Supporting Check: Does the P2P gossip validation layer validate commitment_indices bounds before passing to verify_cell_kzg_proof_batch_impl?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar (p2p_interface.go:34-52)\nfunc VerifyDataColumnSidecar(sidecar blocks.RODataColumn) error {\n\tnumberOfColumns := params.BeaconConfig().NumberOfColumns\n\tif sidecar.Index >= numberOfColumns {\n\t\treturn ErrIndexTooLarge\n\t}\n\tif len(sidecar.KzgCommitments) == 0 {\n\t\treturn ErrNoKzgCommitments\n\t}\n\tif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n\t\treturn ErrMismatchLength\n\t}\n\treturn nil\n}",
+      "state_context": "The P2P gossip path calls verifier.ValidFields() which invokes VerifyDataColumnSidecar before any KZG operation. The sidecar.Index is the only 'cell index' in the Prysm implementation - it is a single uint64 per sidecar (not a separate array). The spec's commitment_indices array concept does not map to a separate attacker-controlled field.",
+      "phase1": {
+        "description": "Abstract Interpretation: commitment_indices analysis",
+        "findings": "The 'commitment_indices' in this codebase are not a separate attacker-supplied array. The sidecar.Index field (a single uint64 per sidecar, ranging 0-127) is the sole source of cell indices passed to VerifyCellKZGProofBatch. In VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:73-80), the loop 'for i := range sidecar.Column' appends sidecar.Index once per row to the indices slice. There is no separate commitment_indices array in the sidecar message. State flow: P2P message -> decode -> blocks.NewRODataColumn -> verifier.ValidFields() -> VerifyDataColumnSidecar (validates sidecar.Index < 128 AND len equality) -> validateWithKzgBatchVerifier -> VerifyDataColumnsSidecarKZGProofs -> kzg.VerifyCellKZGProofBatch -> ckzg4844.VerifyCellKZGProofBatch (C).",
+        "state_transitions": [
+          "P2P receive",
+          "SSZ decode",
+          "RODataColumn wrap",
+          "VerifyDataColumnSidecar guard (Index<128, len equality)",
+          "KZG batch verify"
+        ],
+        "anomalies": []
+      },
+      "phase2": {
+        "description": "Symbolic Execution: out-of-bounds commitment_indices path",
+        "findings": "Treating sidecar.Index as attacker-controlled: VerifyDataColumnSidecar at p2p_interface.go:37-39 checks sidecar.Index >= numberOfColumns (128) and returns ErrIndexTooLarge. This is called unconditionally before any KZG operation. No counterexample found for out-of-bounds index: the Go guard at VerifyDataColumnSidecar rejects before any array construction. There is no path from a crafted sidecar with Index >= 128 to VerifyCellKZGProofBatch. The spec's commitment_indices array concept (a separate per-proof array pointing into a deduplicated commitment list) does not exist in this implementation - it is an internal C library implementation detail.",
+        "counterexamples": [],
+        "execution_paths": [
+          "sidecar.Index=MAX_UINT64 -> VerifyDataColumnSidecar -> ErrIndexTooLarge -> pubsub.ValidationReject (blocked, no crash)"
+        ]
+      },
+      "phase2_5": {
+        "reachability_assessment": "internal-only",
+        "entry_points": [
+          "P2P gossip /data_column_sidecar_{subnet_id}"
+        ],
+        "attacker_controlled_fields": [
+          "sidecar.Index (uint64)",
+          "sidecar.Column",
+          "sidecar.KzgCommitments",
+          "sidecar.KzgProofs"
+        ],
+        "blocked_at": "VerifyDataColumnSidecar (p2p_interface.go:37) before any KZG operation"
+      },
+      "phase3": {
+        "description": "Invariant Analysis: commitment_indices bounds invariant",
+        "findings": "The invariant 'commitment indices must be in-bounds' is satisfied by VerifyDataColumnSidecar (check: sidecar.Index < 128). Guard is complete for the attacker model. The C library (ckzg4844) also independently validates cell_indices[i] >= CELLS_PER_EXT_BLOB (128) at eip7594.c:856-859 returning C_KZG_BADARGS gracefully. Edge cases: batch verifier aggregates multiple sidecars - each was pre-validated, so the aggregated indices slice contains only values in [0, 127]. The internal commitment_indices inside the C library post-deduplication is bounded by num_commitments <= num_cells.",
+        "guards_challenged": "VerifyDataColumnSidecar is the primary guard. It is invoked unconditionally before any KZG operation in all paths (gossip, by-range, by-root). The guard correctly uses NumberOfColumns=128 matching CELLS_PER_EXT_BLOB=128 in the C library.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "final_classification": "not-a-vulnerability",
+        "bug_bounty_eligible": false,
+        "severity": "N/A",
+        "reasoning": "The 'commitment_indices bounds' attack scenario does not apply to this codebase. There is no separate attacker-supplied commitment_indices array. sidecar.Index is validated against 128 at the Go layer (VerifyDataColumnSidecar, p2p_interface.go:37) before any cryptographic operation or array indexing. No exploitable path exists. The spec's pseudocode concept of a deduplicated commitment_indices array is an internal C library detail, never attacker-reachable."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0102",
+      "property_id": "PROP-W5B14-8",
+      "title": "Supporting Check: Can a malicious P2P peer cause validator node crash by sending crafted commitment_indices exceeding array bounds?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyDataColumnSidecar (p2p_interface.go:34-52) - validates Index, non-empty commitments, length equality\n// VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:61-93) - builds 4 equal-length arrays via single loop\n// kzg.VerifyCellKZGProofBatch (kzg.go:96-106) - delegates to ckzg4844.VerifyCellKZGProofBatch\n// ckzg4844.VerifyCellKZGProofBatch (main.go:504-526) - explicit length equality check before C call",
+      "state_context": "The batch verifier (batch_verifier.go:194-213) aggregates multiple sidecars from different peers and sends shared result. On batch error, falls back to validateUnbatchedColumnsKzg which calls VerifyDataColumnsSidecarKZGProofs directly. No crash path in either code path.",
+      "phase1": {
+        "description": "Abstract Interpretation: crash analysis via crafted P2P input",
+        "findings": "VerifyDataColumnSidecar validates sidecar.Index < 128 before any indexing. If this check passes, VerifyDataColumnsSidecarKZGProofs iterates 'for i := range sidecar.Column' and indexes sidecar.KzgCommitments[i], sidecar.Column[i], sidecar.KzgProofs[i] - safe because ValidFields already verified len equality. The Go binding ckzg4844.VerifyCellKZGProofBatch checks len(commitmentsBytes) != len(cells) || len(cellIndices) != len(cells) || len(proofsBytes) != len(cells) before calling C. In C: verify_cell_kzg_proof_batch validates cell_indices[i] >= CELLS_PER_EXT_BLOB and returns C_KZG_BADARGS (not a crash). Empty Column with len==0: ValidFields catches len(KzgCommitments)==0 via ErrNoKzgCommitments. Shared batch error causes fallback to individual verification, not crash.",
+        "state_transitions": [
+          "P2P receive",
+          "decode",
+          "ValidFields/VerifyDataColumnSidecar",
+          "KZG batch via channel",
+          "fallback on error"
+        ],
+        "anomalies": []
+      },
+      "phase2": {
+        "description": "Symbolic Execution: crash-inducing input scenarios",
+        "findings": "Scenario 1: sidecar.Index = 0xFFFFFFFFFFFFFFFF -> VerifyDataColumnSidecar: Index >= 128 -> ErrIndexTooLarge -> pubsub.ValidationReject. No crash. Scenario 2: len(Column)=5, len(KzgCommitments)=3 -> ErrMismatchLength -> rejected before any indexing. No crash. Scenario 3: empty sidecar len(KzgCommitments)=0 -> ErrNoKzgCommitments. No crash. Scenario 4: valid sidecar passes all Go checks, C library returns C_KZG_BADARGS (graceful error return, not a panic). Scenario 5: batch verifier shared error -> all waiters receive error -> fallback to unbatched verification. No crash.",
+        "counterexamples": [],
+        "execution_paths": [
+          "malformed Index -> ValidationReject (blocked at VerifyDataColumnSidecar)",
+          "length mismatch -> ValidationReject (blocked at VerifyDataColumnSidecar)",
+          "empty commitments -> ValidationReject (blocked at VerifyDataColumnSidecar)",
+          "valid format -> C library -> C_KZG_BADARGS or false (graceful, not crash)"
+        ]
+      },
+      "phase2_5": {
+        "reachability_assessment": "unreachable for crash scenarios",
+        "entry_points": [
+          "P2P gossip /data_column_sidecar_{subnet_id}"
+        ],
+        "attacker_controlled_fields": [
+          "sidecar.Index",
+          "sidecar.Column",
+          "sidecar.KzgCommitments",
+          "sidecar.KzgProofs"
+        ],
+        "blocked_at": "VerifyDataColumnSidecar rejects all malformed inputs before any array access"
+      },
+      "phase3": {
+        "description": "Invariant Analysis: crash prevention invariant",
+        "findings": "Guards: (1) VerifyDataColumnSidecar - catches index out-of-bounds, zero commitments, length mismatch. (2) Go binding ckzg4844.VerifyCellKZGProofBatch - catches array length inequality before C call. (3) C library - independent bounds check returning C_KZG_BADARGS (graceful error). All three are independently sufficient for preventing crashes. Defense-in-depth is robust. The batch verifier aggregation in verifyKzgBatch does not bypass any guard - it aggregates pre-validated sidecars.",
+        "guards_challenged": "VerifyDataColumnSidecar is the primary guard at P2P layer. The Go binding provides second check. C library provides third check. Each guard independently handles all crash-inducing scenarios.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "final_classification": "not-a-vulnerability",
+        "bug_bounty_eligible": false,
+        "severity": "N/A",
+        "reasoning": "No crash path exists from attacker-controlled P2P input. All array access operations are guarded by pre-validated length equality before any indexing occurs. Three independent validation layers (Go p2p_interface.go:47-49, Go binding main.go:508, C eip7594.c:856) form a complete defense. The C library returns error codes (C_KZG_BADARGS), not panics. No remote crash vulnerability exists."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0103",
+      "property_id": "PROP-W5B14-8",
+      "title": "Supporting Check: What is the memory safety impact of out-of-bounds commitment_indices access in verify_cell_kzg_proof_batch_impl?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// C library: verify_cell_kzg_proof_batch (eip7594.c:856-859)\n// for (size_t i = 0; i < num_cells; i++) {\n//     if (cell_indices[i] >= CELLS_PER_EXT_BLOB) return C_KZG_BADARGS;\n// }\n// CELLS_PER_EXT_BLOB = 128 = NumberOfColumns in Go\n// Go binding (main.go:508): checks len equality before C call\n// Go p2p layer: checks Index < numberOfColumns and len equality before reaching C",
+      "state_context": "Implementation language analysis: Primary Go code (memory-safe), CGO boundary to C library (c-kzg-4844). The C library is called via CGO. C_KZG_BADARGS is a graceful error return from C, not a panic. The commitment_indices array inside C (created by deduplicate_commitments) is an internal C library structure, never directly attacker-supplied.",
+      "phase1": {
+        "description": "Abstract Interpretation: C-level memory safety analysis",
+        "findings": "Language: Go + CGO to C library. Go arrays are bounds-checked (panic on out-of-bounds, not memory corruption). CGO boundary: Go calls C via ckzg4844.VerifyCellKZGProofBatch which passes C pointers to arrays. The C function (eip7594.c) checks every cell_indices element: 'for (size_t i = 0; i < num_cells; i++) { if (cell_indices[i] >= CELLS_PER_EXT_BLOB) return C_KZG_BADARGS; }'. This is a graceful return, not memory access. After this check, cell_indices[i] is used within compute_r_powers_for_verify_cell_kzg_proof_batch and related functions - always within [0, 127]. The commitment_indices array created by deduplicate_commitments is bounded to num_commitments <= num_cells elements, indexed by values from 0 to num_commitments-1.",
+        "state_transitions": [
+          "Go layer (bounds-safe)",
+          "CGO boundary",
+          "C library (c-kzg-4844)",
+          "internal deduplicate_commitments",
+          "C_KZG_BADARGS on invalid input"
+        ],
+        "anomalies": []
+      },
+      "phase2": {
+        "description": "Symbolic Execution: memory corruption path analysis",
+        "findings": "For out-of-bounds access in C to occur: (1) cell_indices[i] must be >= CELLS_PER_EXT_BLOB (128): blocked by C-level loop at line 856-859 with graceful C_KZG_BADARGS return. (2) A length mismatch must exist: blocked at Go binding level (main.go:508) returning ErrBadArgs before any C call. (3) The commitment_indices (internal, created by deduplicate_commitments) must exceed unique_commitments array size: unique_commitments is allocated as num_cells elements (line 865), and num_commitments after deduplication is <= num_cells. The array access pattern uses commitment_indices[i] ranging [0, num_commitments-1], and unique_commitments has num_cells slots - safe. No out-of-bounds memory access path found.",
+        "counterexamples": [],
+        "execution_paths": [
+          "cell_index >= 128 -> C check at eip7594.c:856 -> C_KZG_BADARGS (graceful return, no memory access)",
+          "length mismatch -> Go binding (main.go:508) -> ErrBadArgs (before C call)",
+          "internal commitment_indices access -> bounded by deduplication result <= num_cells"
+        ]
+      },
+      "phase2_5": {
+        "reachability_assessment": "internal-only - by the time data reaches C function, all out-of-bounds conditions are excluded",
+        "entry_points": [
+          "P2P gossip -> Go validation -> Go binding -> C library"
+        ],
+        "attacker_controlled_fields": [
+          "sidecar fields validated before C call"
+        ],
+        "blocked_at": "Multiple layers before C library invocation"
+      },
+      "phase3": {
+        "description": "Invariant Analysis: memory safety invariant in C library",
+        "findings": "Memory safety invariant: All array accesses in the C function are bounded. The explicit cell_indices >= CELLS_PER_EXT_BLOB check provides O(n) bounds validation before any problematic use. The deduplicate_commitments function produces commitment_indices values that are indices into unique_commitments, bounded by num_commitments which is always <= num_cells (the allocation size). No malloc/buffer overflow risk identified in this path. The CGO boundary is properly managed: Go arrays are passed as C slices with explicit length parameters. The C function does not perform unbounded memory accesses.",
+        "guards_challenged": "C library's own bounds check at eip7594.c:856-859. Go binding's length equality check at main.go:508. Both are unconditional and comprehensive.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "final_classification": "not-a-vulnerability",
+        "bug_bounty_eligible": false,
+        "severity": "N/A",
+        "reasoning": "The C library performs its own bounds validation before any array access (eip7594.c:856-859: cell_indices[i] >= CELLS_PER_EXT_BLOB -> C_KZG_BADARGS). Combined with the Go-level validation guards (VerifyDataColumnSidecar checks Index < 128 before C is reached; Go binding checks length equality), no attacker path to out-of-bounds memory access exists. Memory safety is maintained by both the Go runtime (bounds checking) and the C library's explicit input validation. No memory corruption, RCE, or information disclosure risk identified."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0104",
+      "property_id": "PROP-W5B14-9",
+      "title": "Verify Trust Boundary Integrity for tb-002: Are all four input arrays validated for equal length in verify_cell_kzg_proof_batch?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:68-80)\ncommitments := make([]kzg.Bytes48, 0, count)\nindices := make([]uint64, 0, count)\ncells := make([]kzg.Cell, 0, count)\nproofs := make([]kzg.Bytes48, 0, count)\nfor _, sidecar := range sidecars {\n    for i := range sidecar.Column {\n        commitments = append(commitments, kzg.Bytes48(sidecar.KzgCommitments[i]))\n        indices = append(indices, sidecar.Index)\n        cells = append(cells, kzg.Cell(sidecar.Column[i]))\n        proofs = append(proofs, kzg.Bytes48(sidecar.KzgProofs[i]))\n    }\n}\n// Go binding: if len(commitmentsBytes) != len(cells) || len(cellIndices) != len(cells) || len(proofsBytes) != len(cells) { return false, ErrBadArgs }",
+      "state_context": "The verifyKzgBatch function (batch_verifier.go:194-213) aggregates multiple kzgVerifier.dataColumns slices before calling VerifyDataColumnsSidecarKZGProofs. Each sub-slice was individually validated for length equality before entering the batch. The flattening does not affect the length equality property since each RODataColumn carries pre-validated arrays.",
+      "phase1": {
+        "description": "Abstract Interpretation: four-array length equality analysis",
+        "findings": "The four arrays passed to VerifyCellKZGProofBatch are built in VerifyDataColumnsSidecarKZGProofs in a single 'for i := range sidecar.Column' loop. Because all four slices are appended once per loop iteration (co-located in the same inner loop body), they are structurally guaranteed equal in length. No separate length check is needed for correctness, but the Go binding provides an additional explicit equality check: 'if len(commitmentsBytes) != len(cells) || len(cellIndices) != len(cells) || len(proofsBytes) != len(cells) { return false, ErrBadArgs }'. This is a redundant-but-correct safety net.",
+        "state_transitions": [
+          "per-sidecar loop",
+          "per-column inner loop",
+          "4 simultaneous appends",
+          "VerifyCellKZGProofBatch call",
+          "Go binding length check",
+          "C library call"
+        ],
+        "anomalies": []
+      },
+      "phase2": {
+        "description": "Symbolic Execution: mismatched array length path analysis",
+        "findings": "For mismatched arrays to reach VerifyCellKZGProofBatch: the four slices in VerifyDataColumnsSidecarKZGProofs are populated via a single loop. The loop body: 'commitments = append(...) / indices = append(...) / cells = append(...) / proofs = append(...)' - all four in same inner loop body. No control flow divergence (no if/else, no continue, no break) between the four appends. No way to make them different lengths without a code bug. Even if a code bug caused a divergence, the Go binding would catch it before the C call. The C library receives num_cells and uses it as the length for all four arrays (provided by Go binding based on len(cells)).",
+        "counterexamples": [],
+        "execution_paths": [
+          "All 4 arrays populated in same loop body -> structurally equal length -> Go binding check passes -> C call with consistent lengths"
+        ]
+      },
+      "phase2_5": {
+        "reachability_assessment": "unreachable for length mismatch from external input",
+        "entry_points": [
+          "P2P gossip -> validateDataColumn -> validateWithKzgBatchVerifier -> verifyKzgBatch -> VerifyDataColumnsSidecarKZGProofs"
+        ],
+        "attacker_controlled_fields": [
+          "sidecar fields (all pre-validated for length equality by VerifyDataColumnSidecar)"
+        ],
+        "blocked_at": "Structural: loop construction ensures equal length. Redundant: Go binding checks before C call."
+      },
+      "phase3": {
+        "description": "Invariant Analysis: four-array length equality invariant",
+        "findings": "Invariant 'len(commitments) == len(indices) == len(cells) == len(proofs)': proven by structural analysis of the loop. The appends are co-located in the same loop body with no early exits or conditional paths between them. Additionally, the Go binding provides an explicit check before C invocation. Edge case: verifyKzgBatch aggregates multiple sidecars before calling VerifyDataColumnsSidecarKZGProofs. The pre-validation of each sidecar (len(Column)==len(KzgCommitments)==len(KzgProofs) via VerifyDataColumnSidecar) ensures the inner loop for each sidecar accesses valid indices into KzgCommitments and KzgProofs.",
+        "guards_challenged": "No guard needed for structural correctness; the loop design is self-enforcing. The Go binding redundantly checks. Both are sufficient.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "final_classification": "not-a-vulnerability",
+        "bug_bounty_eligible": false,
+        "severity": "N/A",
+        "reasoning": "The four arrays (commitment_bytes, cell_indices, cells, proofs_bytes) passed to VerifyCellKZGProofBatch are structurally guaranteed equal-length by the single co-located loop construction in VerifyDataColumnsSidecarKZGProofs (p2p_interface.go:68-80). The Go binding ckzg4844.VerifyCellKZGProofBatch provides an additional explicit equality check (ErrBadArgs if mismatched) before any C invocation. There is no exploitable path for length mismatch from P2P input. The invariant 'len(commitment_bytes) == len(cell_indices) == len(cells) == len(proofs_bytes)' is provably maintained."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "W7B8:W7B8:CHK-0105",
+      "property_id": "PROP-W5B14-9",
+      "title": "Supporting Check: Does P2P gossip validation enforce equal-length constraint on batch KZG proof verification inputs before reaching verify_cell_kzg_proof_batch?",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/sync/validate_data_column.go",
+            "symbol": "validateDataColumn",
+            "line_range": {
+              "start": 30,
+              "end": 227
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnSidecar",
+            "line_range": {
+              "start": 34,
+              "end": 52
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/core/peerdas/p2p_interface.go",
+            "symbol": "VerifyDataColumnsSidecarKZGProofs",
+            "line_range": {
+              "start": 61,
+              "end": 93
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/blockchain/kzg/kzg.go",
+            "symbol": "VerifyCellKZGProofBatch",
+            "line_range": {
+              "start": 96,
+              "end": 106
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "mcp_callgraph"
+      },
+      "code_snippet": "// P2P layer validation: VerifyDataColumnSidecar (p2p_interface.go:47-49)\nif len(sidecar.Column) != len(sidecar.KzgCommitments) || len(sidecar.Column) != len(sidecar.KzgProofs) {\n    return ErrMismatchLength\n}\n// Called from: verifier.ValidFields() in validateDataColumn BEFORE any KZG operation\n// Defense-in-depth: loop construction + Go binding also enforce length equality",
+      "state_context": "The P2P layer calls verifier.ValidFields() which calls VerifyDataColumnSidecar. This validates len(Column)==len(KzgCommitments)==len(KzgProofs) as the first validation checkpoint at the P2P border. Both gossip and non-gossip paths (by-range, by-root) also include RequireValidFields which invokes the same check. SSZ deserialization can produce mismatched List lengths since Column, KzgCommitments, KzgProofs are all separate List fields in the SSZ schema.",
+      "phase1": {
+        "description": "Abstract Interpretation: P2P layer vs KZG function length enforcement",
+        "findings": "The P2P layer enforces: len(Column) == len(KzgCommitments) == len(KzgProofs) via VerifyDataColumnSidecar (p2p_interface.go:47-49). This is called from verifier.ValidFields() in validateDataColumn BEFORE validateWithKzgBatchVerifier is invoked. This is the first validation checkpoint at the P2P border. The KZG function layer provides additional enforcement via loop construction (structurally equal by design). The Go binding provides a third check. The C library validates cell indices. Layer-by-layer: (1) P2P gossip validates sidecar field length equality, (2) VerifyDataColumnsSidecarKZGProofs loop ensures output array equality by construction, (3) ckzg4844 binding checks before C, (4) C library checks indices.",
+        "state_transitions": [
+          "P2P receive",
+          "ValidFields -> VerifyDataColumnSidecar (len equality)",
+          "validateWithKzgBatchVerifier",
+          "VerifyDataColumnsSidecarKZGProofs (structural equality)",
+          "ckzg4844 binding (explicit check)",
+          "C library"
+        ],
+        "anomalies": []
+      },
+      "phase2": {
+        "description": "Symbolic Execution: P2P layer bypass and single-point-of-validation analysis",
+        "findings": "Bypass attempt: can a malicious peer send raw bytes that deserialize into mismatched arrays? SSZ decoding of DataColumnSidecar: Column, KzgCommitments, KzgProofs are all List types with explicit length prefixes in SSZ encoding. An attacker could send a SSZ-valid message with mismatched lengths (e.g., Column.len=5, KzgCommitments.len=3). After deserialization, VerifyDataColumnSidecar at p2p_interface.go:47-49 would catch this: len(Column)=5 != len(KzgCommitments)=3 -> ErrMismatchLength -> ValidationReject. No bypass identified. Defense-in-depth question: P2P validates (good) AND KZG function layer validates structurally (good). Not a single-point-of-failure.",
+        "counterexamples": [],
+        "execution_paths": [
+          "SSZ decode with mismatched List lengths -> VerifyDataColumnSidecar -> ErrMismatchLength -> ValidationReject (blocked at P2P layer)",
+          "All lengths equal -> pass P2P check -> loop construction ensures output equality -> Go binding check passes"
+        ]
+      },
+      "phase2_5": {
+        "reachability_assessment": "P2P layer provides first enforcement; KZG layer provides defense-in-depth; no single-point-of-failure",
+        "entry_points": [
+          "P2P gossip /data_column_sidecar_{subnet_id}",
+          "by-range sync",
+          "by-root sync"
+        ],
+        "attacker_controlled_fields": [
+          "DataColumnSidecar SSZ fields including Column, KzgCommitments, KzgProofs (separate List fields)"
+        ],
+        "blocked_at": "VerifyDataColumnSidecar (p2p_interface.go:47-49) for all paths including gossip"
+      },
+      "phase3": {
+        "description": "Invariant Analysis: defense-in-depth length equality enforcement",
+        "findings": "Invariant: 'KZG batch inputs must have equal-length arrays.' Maintained at multiple layers: (1) P2P gossip: VerifyDataColumnSidecar checks len(Column)==len(KzgCommitments)==len(KzgProofs). (2) Loop construction: all four output arrays built identically. (3) Go binding: explicit equality check before C call. (4) C library: bounds validation on cell_indices. The PROP-W5B14-9 invariant is satisfied with defense-in-depth. No single-point-of-failure exists. Additional paths (by-range, by-root) also call RequireValidFields which invokes VerifyDataColumnSidecar, so coverage is not limited to gossip.",
+        "guards_challenged": "VerifyDataColumnSidecar is comprehensive: covers Index bounds, non-empty commitments, and length equality for the three sidecar array fields. The four-array equality for the KZG call is a derived property guaranteed by loop construction.",
+        "invariant_holds": true
+      },
+      "phase3_5": {
+        "final_classification": "not-a-vulnerability",
+        "bug_bounty_eligible": false,
+        "severity": "N/A",
+        "reasoning": "P2P gossip validation explicitly enforces length equality (len(Column)==len(KzgCommitments)==len(KzgProofs)) via VerifyDataColumnSidecar (p2p_interface.go:47-49) as the first checkpoint before any KZG verification path is invoked. This correctly handles the case where SSZ deserialization produces mismatched List lengths from malicious P2P input. Proper defense-in-depth layering exists: P2P layer validates sidecar fields, loop construction guarantees output array equality, Go binding provides explicit check, C library validates independently. No validation gap or exploitable path exists."
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 4,
+    "batch_index": 21,
+    "item_count": 5,
+    "timestamp": 1771388035,
+    "processed_ids": [
+      "W7B8:W7B8:CHK-0101",
+      "W7B8:W7B8:CHK-0102",
+      "W7B8:W7B8:CHK-0103",
+      "W7B8:W7B8:CHK-0104",
+      "W7B8:W7B8:CHK-0105"
+    ]
+  }
+}

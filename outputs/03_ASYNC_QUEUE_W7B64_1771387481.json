@@ -1,0 +1,293 @@
+{
+  "results": [
+    {
+      "check_id": "CHK-0039",
+      "checklist_item": {
+        "property_id": "CHK-0039",
+        "description": "Cross-client state root consensus for Osaka/Fulu state transitions",
+        "graph_element_under_test": "beacon-chain state transition, Fulu fork state root computation"
+      },
+      "code_scope": {
+        "file": "beacon-chain/core/transition/transition_no_verify_sig.go",
+        "function": "ExecuteStateTransitionNoVerifyAnySig",
+        "line_range": "46-80"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Prysm computes beacon state roots via st.HashTreeRoot(ctx) immediately after executing the state transition, then validates the computed root against the block's signed state_root field. This forms the primary consensus invariant: every client that applies the same beacon state transition to the same pre-state and block must produce the same post-state root. The Fulu fork is defined in config but mainnetFuluForkEpoch = math.MaxUint64, meaning Fulu transitions are never activated on mainnet in this codebase. The state machine covers: Phase0 → Altair → Bellatrix → Capella → Deneb → Electra → Fulu, each processed by version-specific handlers gated by block.Version() == st.Version() checks.",
+        "state_anomalies_found": [
+          "Version mismatch guard: 'if st.Version() != signed.Block().Version()' in ProcessBlockNoVerifyAnySig prevents cross-version state transitions, but depends on the caller having correctly advanced state version via ProcessSlotsUsingNextSlotCache before calling ProcessBlockNoVerifyAnySig",
+          "Fulu fork epoch is math.MaxUint64 on mainnet — Fulu state transition code paths (areSidecarsAvailable, areDataColumnsAvailable) are present and compiled but never reachable in production mainnet deployment",
+          "No Fulu-specific beacon state body processing logic was found in the Prysm codebase that differs from Electra — Fulu introduces PeerDAS data columns but the beacon state transitions in block body processing route to electra.ProcessOperations for versions >= Electra",
+          "Cache coherence: ProcessSlotsUsingNextSlotCache uses a cached intermediate state; if cache is stale/incorrect, the pre-block state will diverge from other clients, causing a state root mismatch that will be caught by the HashTreeRoot comparison"
+        ],
+        "cache_analysis": "The next-slot cache (UpdateNextSlotCache / LastCachedState) stores per-slot intermediary states. If a cached state is used for slot advancement but the cache was populated from a different chain branch, the resulting state root will differ from other clients. The cache is invalidated on rollback (rollbackBlock calls DeleteStateFromCaches). Divergence would be detected at HashTreeRoot comparison and surface as invalidBlock errors, not as silent state corruption.",
+        "concurrency_analysis": "validateExecutionAndConsensus runs consensus state transition and execution payload validation concurrently via errgroup. The state transition goroutine writes postState; the execution goroutine writes isValidPayload. These operate on disjoint data. No race condition on state root computation. The ForkChoiceStore.Lock() is acquired after both goroutines complete before saving post-state, preventing concurrent state modifications."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "An attacker seeking to cause state root divergence between Prysm and another client would need to induce a difference in how the beacon state is processed. Since EIP-7825 is an execution-layer concern and not a beacon state field, it cannot affect Prysm's HashTreeRoot output. The most realistic divergence scenario involves the Fulu fork transition logic: if another client implements Fulu beacon state changes that Prysm does not, and Fulu were activated, the two clients would diverge. However, with FuluForkEpoch = math.MaxUint64, this attack surface is unreachable on mainnet.",
+        "counterexample_found": false,
+        "counterexample": "No concrete exploit found. The state root check (bytes.Equal(postStateRoot[:], stateRoot[:])) is structurally sound: it computes the root from the actual post-state and compares against the proposer's committed root. Any difference causes block rejection.",
+        "attack_scenarios": [
+          "Scenario 1 (Inactive): Fulu fork activation inconsistency — if FuluForkEpoch were set to a concrete value, and Prysm's Fulu state transition differs from the spec or another client, all Prysm nodes would produce a different state root from non-Prysm clients, causing network split. This requires Fulu activation which is currently disabled (math.MaxUint64).",
+          "Scenario 2 (Theoretical): Cache poisoning attack — if an attacker could manipulate the next-slot cache (ProcessSlotsUsingNextSlotCache) to insert an adversarially crafted intermediate state, then Prysm would produce an incorrect post-state root. However, the cache is keyed by parent root and slot, and populated only from verified states. No external attack surface exists.",
+          "Scenario 3 (Not applicable): EIP-7825 gas cap enforcement — EIP-7825 operates at the execution layer. Prysm's beacon state HashTreeRoot does not include any per-transaction gas limit field. A discrepancy in transaction gas cap enforcement by the execution client would not affect the beacon state root computed by Prysm."
+        ],
+        "timing_dependencies": "No timing-dependent exploit found. State root computation is deterministic given identical pre-state and block inputs."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The state root consensus property is enforced passively by the consensus protocol: any node that disagrees on the state root will reject the block. The ReceiveBlock → validateStateTransition → ExecuteStateTransition path is reachable from P2P gossip (any peer can submit a block). However, for an attacker to exploit state root divergence, they would need to construct a valid beacon block that causes different clients to compute different state roots — which requires finding an implementation bug in Prysm's state transition relative to the spec or another client.",
+        "entry_points": [
+          "P2P gossip: ReceiveBlock (beacon-chain/blockchain/receive_block.go)",
+          "Init sync batch: ReceiveBlockBatch → onBlockBatch",
+          "RPC: block proposal via builder/local block production"
+        ],
+        "attacker_controlled": true,
+        "classification": "internal-only",
+        "attack_surface": "An attacker can submit arbitrary blocks via P2P. However, exploiting state root divergence requires an implementation bug, not just malicious input. With Fulu disabled, this check is not actionable against the current codebase."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'all clients agree on state root after each block' is enforced by the consensus protocol itself: Prysm rejects any block where the computed HashTreeRoot does not match the signed state_root. The guard is in ExecuteStateTransitionNoVerifyAnySig at lines 70-76. For Fulu-specific transitions: FuluForkEpoch = math.MaxUint64 means no Fulu state transition code is reached. The Fulu code paths present (areDataColumnsAvailable, data column custody) do not modify beacon state fields included in the state root.",
+        "proof_successful": true,
+        "guard_identified": "bytes.Equal(postStateRoot[:], stateRoot[:]) comparison after st.HashTreeRoot(ctx) in ExecuteStateTransitionNoVerifyAnySig, and version parity check (st.Version() != signed.Block().Version()) in ProcessBlockNoVerifyAnySig",
+        "guard_sufficiency": "The guard is sufficient for the current codebase. State root is computed from the actual post-state after applying all operations; any deviation causes block rejection. The Fulu-specific state transition is currently gated behind FuluForkEpoch = math.MaxUint64, eliminating any divergence risk for that fork.",
+        "edge_cases": [
+          "If Fulu is activated in a future config update, Prysm's Fulu state transition must be spec-compliant relative to all other clients, or divergence will occur",
+          "ProcessSlotsUsingNextSlotCache: if the cache returns an incorrect state for a given parent root, the resulting state root will be wrong; this would cause the node to reject valid blocks and is a liveness concern, not a safety concern",
+          "The version check (st.Version() != signed.Block().Version()) assumes state version advancement logic is correct; a bug there could cause a different fork version mismatch"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "CHK-0039 checks for cross-client state root consensus for Osaka/Fulu transitions. The code under audit (Prysm) has FuluForkEpoch = math.MaxUint64, making Fulu state transitions unreachable on mainnet. The existing state root validation guard (HashTreeRoot comparison) is structurally sound and correctly enforces consensus. No vulnerability or deviation from spec was found for currently-activated forks. This is an informational finding confirming the property holds.",
+        "recommendation": "No fix required for existing code. When Fulu is activated, a cross-client spec compliance test suite should verify state root agreement across all clients for Fulu-specific state transitions, particularly data column custody changes.",
+        "severity_estimate": "Low — informational; no active vulnerability"
+      },
+      "final_classification": "not-a-vulnerability"
+    },
+    {
+      "check_id": "CHK-0001#19",
+      "checklist_item": {
+        "property_id": "CHK-0001#19",
+        "description": "Transaction gasLimit > 16777216 rejected at txpool admission",
+        "graph_element_under_test": "txpool admission control for EIP-7825 gas cap"
+      },
+      "code_scope": {
+        "file": "not_found",
+        "function": "not_found",
+        "line_range": "not_found"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Prysm is a consensus layer (beacon chain) client. It does not implement a transaction pool (txpool), transaction admission, or per-transaction gas limit validation. EIP-7825 specifies a transaction gas cap of 16777216 (2^24) enforced at the execution layer — specifically at the txpool admission layer of execution clients (go-ethereum, Reth, Nethermind, etc.). The value 16777216 does appear in Prysm's codebase as HISTORICAL_ROOTS_LIMIT in config/fieldparams/mainnet.go, but this is a beacon state field for the historical roots SSZ list limit, completely unrelated to transaction gas caps.",
+        "state_anomalies_found": [
+          "No txpool implementation exists in Prysm — no admission control for transactions is present",
+          "The constant 16777216 in config/fieldparams/mainnet.go is HISTORICAL_ROOTS_LIMIT (beacon state parameter), not GAS_CAP",
+          "No EIP-7825 code, references, or gas cap validation were found in the Prysm codebase (confirmed by grep: no '7825', no 'GAS_CAP', no per-transaction gas limit checks)"
+        ],
+        "cache_analysis": "Not applicable. No transaction cache or txpool state exists in Prysm.",
+        "concurrency_analysis": "Not applicable. No txpool concurrency considerations exist in Prysm."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No code path exists in Prysm that admits or rejects individual transactions based on gas limit. Prysm receives execution payloads (already-assembled blocks containing transactions) via the Engine API from the execution client. The execution client is solely responsible for transaction admission and gas cap enforcement. Prysm forwards the full payload to the execution client via engine_newPayloadV* calls and trusts the execution client's VALID/INVALID/SYNCING response.",
+        "counterexample_found": false,
+        "counterexample": "Not applicable. No txpool exists in Prysm to violate.",
+        "attack_scenarios": [
+          "No attack scenario applicable to Prysm for this check. The execution client (not Prysm) must enforce EIP-7825 transaction gas cap at txpool admission."
+        ],
+        "timing_dependencies": "Not applicable."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "CHK-0001#19 is entirely outside Prysm's scope. Prysm does not interact with transactions at the individual gas limit level. The only transaction-related code in Prysm is the SSZ encoding/decoding of transaction bytes within execution payloads, and the forwarding of those payloads to the execution client. No admission control path exists.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "None within Prysm. This check must be evaluated against execution layer clients."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'txpool rejects tx.gasLimit > 16777216' cannot be proven or disproven in Prysm because Prysm has no txpool. The responsibility for this invariant lies entirely with the paired execution client. Prysm's Engine API integration (notifyNewPayload) trusts the execution client's validation result; if the execution client fails to enforce EIP-7825, Prysm will accept the payload.",
+        "proof_successful": false,
+        "guard_identified": "None in Prysm for EIP-7825 gas cap",
+        "guard_sufficiency": "Not applicable — no guard exists in Prysm for this property",
+        "edge_cases": [
+          "If the execution client paired with Prysm does not enforce EIP-7825, and a proposer includes a transaction with gasLimit > 16777216, Prysm will accept the resulting beacon block since it trusts the execution client's VALID response",
+          "Prysm performs no independent verification of individual transaction gas limits in beacon block validation"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "CHK-0001#19 requires txpool admission control for EIP-7825 gas cap. Prysm is a consensus layer client with no txpool. This check is entirely out of scope for Prysm. The property must be evaluated against execution layer clients. No code exists in Prysm to audit for this check.",
+        "recommendation": "Evaluate CHK-0001#19 against the paired execution client (e.g., go-ethereum/geth, Reth, Nethermind). Prysm is not the appropriate audit target for this property.",
+        "severity_estimate": "Low — out of scope for Prysm"
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "CHK-0002#18",
+      "checklist_item": {
+        "property_id": "CHK-0002#18",
+        "description": "GAS_CAP constant exactly 16777216 in source code",
+        "graph_element_under_test": "EIP-7825 GAS_CAP constant definition"
+      },
+      "code_scope": {
+        "file": "not_found",
+        "function": "not_found",
+        "line_range": "not_found"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "No GAS_CAP constant exists in the Prysm codebase. The only occurrence of the value 16777216 is as HISTORICAL_ROOTS_LIMIT = 16777216 in config/fieldparams/mainnet.go (and its minimal/test equivalents). This constant represents the beacon state's SSZ list length limit for historical roots, which is a consensus specification parameter unrelated to EIP-7825. EIP-7825 GAS_CAP is an execution layer concept that would be defined in an execution client's transaction validation code.",
+        "state_anomalies_found": [
+          "HISTORICAL_ROOTS_LIMIT = 16777216 in config/fieldparams/mainnet.go is coincidentally the same numeric value as the EIP-7825 GAS_CAP but serves an entirely different purpose and domain",
+          "No EIP-7825 GAS_CAP constant, type, or reference exists in Prysm"
+        ],
+        "cache_analysis": "Not applicable.",
+        "concurrency_analysis": "Not applicable."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No code path in Prysm uses any constant for EIP-7825 gas cap purposes. HISTORICAL_ROOTS_LIMIT = 16777216 is used for beacon state SSZ list bounds checking (historical_roots field length limit). An auditor cannot verify EIP-7825 GAS_CAP = 16777216 in Prysm because no such constant exists.",
+        "counterexample_found": false,
+        "counterexample": "Not applicable.",
+        "attack_scenarios": [
+          "No attack scenario applicable to Prysm for this check."
+        ],
+        "timing_dependencies": "Not applicable."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "CHK-0002#18 is entirely out of scope for Prysm. The GAS_CAP constant for EIP-7825 is an execution layer artifact.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "None within Prysm."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'GAS_CAP constant equals 16777216' cannot be verified in Prysm because no such constant exists. The presence of HISTORICAL_ROOTS_LIMIT = 16777216 is a coincidence of numeric value with no semantic relation to EIP-7825.",
+        "proof_successful": false,
+        "guard_identified": "None in Prysm for EIP-7825 GAS_CAP",
+        "guard_sufficiency": "Not applicable",
+        "edge_cases": [
+          "Auditors reviewing Prysm should be aware that 16777216 = 2^24 = HISTORICAL_ROOTS_LIMIT is not EIP-7825 GAS_CAP; they are semantically different constants that happen to share the same value"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "CHK-0002#18 requires verification that GAS_CAP == 16777216 in source code. Prysm has no EIP-7825 GAS_CAP constant. This check is entirely out of scope for a consensus layer client. The constant must be verified in execution layer clients.",
+        "recommendation": "Evaluate CHK-0002#18 against the paired execution client. No action required in Prysm.",
+        "severity_estimate": "Low — out of scope for Prysm"
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "CHK-0003#14",
+      "checklist_item": {
+        "property_id": "CHK-0003#14",
+        "description": "Transaction gas cap independent from block gas limit",
+        "graph_element_under_test": "EIP-7825 per-transaction gas cap independence from block gas limit"
+      },
+      "code_scope": {
+        "file": "not_found",
+        "function": "not_found",
+        "line_range": "not_found"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Prysm does not validate per-transaction gas limits, maintain a block gas limit, or implement any gas-related admission control. The concept of 'transaction gas cap independent from block gas limit' is an execution layer property — it pertains to how execution clients implement EIP-7825 constraints in transaction validation. Prysm's interaction with block gas limits is limited to accepting the execution payload's gas_limit field (a beacon block body field in ExecutionPayload) as reported by the execution client via Engine API.",
+        "state_anomalies_found": [
+          "Prysm's beacon block body contains an execution payload with a gas_limit field, but Prysm does not validate this field against per-transaction gas limits",
+          "Prysm's ProcessPayload (beacon-chain/core/blocks) updates beacon state with the execution payload header but does not inspect individual transaction gas limits",
+          "No relationship between execution payload gas_limit and any per-transaction validation exists in Prysm's codebase"
+        ],
+        "cache_analysis": "Not applicable for gas cap independence check.",
+        "concurrency_analysis": "Not applicable."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No code path in Prysm could cause per-transaction gas cap to depend on block gas limit, because Prysm performs no per-transaction gas validation at all. The property under test is architecturally outside Prysm's responsibility.",
+        "counterexample_found": false,
+        "counterexample": "Not applicable.",
+        "attack_scenarios": [
+          "No attack scenario applicable to Prysm for this check. The execution client must ensure per-tx gas cap is a fixed constant (16777216) independent of the dynamic block gas limit."
+        ],
+        "timing_dependencies": "Not applicable."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "CHK-0003#14 is entirely out of scope for Prysm. Gas limit independence is an execution client invariant.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "None within Prysm."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'per-tx gas cap is independent of block gas limit' cannot be evaluated in Prysm because Prysm performs no per-transaction gas validation. The execution payload's gas_limit field is forwarded to the execution client as-is; the execution client is responsible for enforcing that individual transactions do not exceed the fixed 16777216 cap regardless of the block's gas_limit.",
+        "proof_successful": false,
+        "guard_identified": "None in Prysm for EIP-7825 gas cap independence",
+        "guard_sufficiency": "Not applicable",
+        "edge_cases": [
+          "If an execution client incorrectly derives the per-transaction gas cap from the block gas limit (e.g., min(block_gas_limit, 16777216)), Prysm would accept any resulting block since it trusts the execution client's VALID response"
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "CHK-0003#14 requires verification that per-transaction gas cap is independent of block gas limit. Prysm is a consensus layer client with no per-transaction gas validation. This check is entirely out of scope for Prysm. Must be evaluated against execution layer clients.",
+        "recommendation": "Evaluate CHK-0003#14 against the paired execution client. No action required in Prysm.",
+        "severity_estimate": "Low — out of scope for Prysm"
+      },
+      "final_classification": "out-of-scope"
+    },
+    {
+      "check_id": "CHK-0004#3",
+      "checklist_item": {
+        "property_id": "CHK-0004#3",
+        "description": "Block validation iterates ALL transactions for gas cap",
+        "graph_element_under_test": "EIP-7825 per-transaction gas cap enforcement in block validation"
+      },
+      "code_scope": {
+        "file": "not_found",
+        "function": "not_found",
+        "line_range": "not_found"
+      },
+      "phase1_abstract_interpretation": {
+        "summary": "Prysm's block validation pipeline processes beacon blocks, not execution blocks. For execution payload validation, Prysm calls engine_newPayloadV* (notifyNewPayload in beacon-chain/blockchain/execution_engine.go) to forward the full execution payload to the paired execution client and receives a VALID/INVALID/SYNCING response. Prysm does not iterate over individual transactions in the payload for any validation purpose, including gas cap checks. The execution client is solely responsible for iterating all transactions and enforcing the EIP-7825 gas cap.",
+        "state_anomalies_found": [
+          "Prysm's notifyNewPayload forwards the entire execution payload to the execution client and trusts the VALID/INVALID response without independent transaction-level validation",
+          "No transaction iteration, gas limit inspection, or gas cap enforcement loop exists anywhere in Prysm's block validation code",
+          "The execution payload body (transactions bytes) is treated as an opaque list by Prysm — it is SSZ-encoded/decoded but individual transaction fields are not parsed or validated by Prysm"
+        ],
+        "cache_analysis": "Not applicable. Prysm does not cache per-transaction gas information.",
+        "concurrency_analysis": "Not applicable for this check. The concurrent execution in validateExecutionAndConsensus is between beacon state transition and execution payload notification, not between individual transaction validations."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "If an execution client fails to iterate ALL transactions for the gas cap check (e.g., short-circuits early, skips the last transaction, or only checks the first N transactions), Prysm would accept any resulting beacon block that the execution client marks as VALID. Prysm provides no independent safety net for EIP-7825 enforcement. An attacker who can exploit an incomplete transaction iteration bug in the execution client could include transactions with gasLimit > 16777216 in a block, and Prysm would accept it.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample found within Prysm's codebase. The vulnerability (if any) lies in the execution client.",
+        "attack_scenarios": [
+          "Execution client bypass: If the execution client has an off-by-one or incomplete iteration bug in its EIP-7825 enforcement, an attacker could craft a transaction at a specific position in the block that bypasses the gas cap check. Prysm would accept the block since it trusts the execution client's VALID response.",
+          "Optimistic sync path: During optimistic sync, Prysm may process blocks marked as SYNCING before the execution client has validated them. However, the block is marked optimistic and full finalization requires the execution client's VALID response."
+        ],
+        "timing_dependencies": "No timing dependency in Prysm. The execution client validation is synchronous from Prysm's perspective (awaits VALID/INVALID response)."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "CHK-0004#3 requires block validation to iterate ALL transactions for gas cap. In Prysm, there is no such iteration — the execution client performs this check. Prysm's attack surface for this check is limited to its trust relationship with the execution client: if the execution client returns VALID for a block containing out-of-spec transactions, Prysm accepts it.",
+        "entry_points": [
+          "P2P gossip: ReceiveBlock → validateExecutionAndConsensus → validateExecutionOnBlock → notifyNewPayload (engine_newPayloadV*)",
+          "Init sync: ReceiveBlockBatch → onBlockBatch → notifyNewPayload"
+        ],
+        "attacker_controlled": false,
+        "classification": "unreachable",
+        "attack_surface": "The attack surface for EIP-7825 enforcement in Prysm is zero — Prysm does not perform this check. Any vulnerability must be in the execution client."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'block validation checks every transaction against the gas cap' is not implemented in Prysm. Prysm delegates all transaction-level validation to the execution client. The only relevant guard is the trust in the Engine API VALID/INVALID response. If the execution client returns VALID for a non-compliant block, Prysm has no independent defense.",
+        "proof_successful": false,
+        "guard_identified": "engine_newPayloadV* response trust in notifyNewPayload (beacon-chain/blockchain/execution_engine.go:219-240)",
+        "guard_sufficiency": "The Engine API trust model is by design — Prysm is not supposed to independently validate execution payload transactions. However, this means EIP-7825 enforcement correctness is entirely dependent on the execution client. There is no defense in depth at the consensus layer.",
+        "edge_cases": [
+          "During optimistic sync, blocks may be imported as optimistic (isValidPayload=false) before the execution client has completed validation. A block that later receives INVALID from the execution client would trigger the invalid block handling path (handleInvalidExecutionError → pruneInvalidBlock), which is the correct handling.",
+          "If the execution client crashes or returns an unexpected response, Prysm may misclassify a block's validity — but this is a reliability concern, not an EIP-7825 enforcement issue."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "CHK-0004#3 requires block validation to iterate all transactions for the EIP-7825 gas cap. Prysm performs no such iteration — it is architecturally delegated to the execution client via the Engine API. This check is entirely out of scope for Prysm as a consensus layer client. The property must be evaluated against execution layer clients (go-ethereum, Reth, Nethermind, etc.) that implement block validation including transaction gas limit checks.",
+        "recommendation": "Evaluate CHK-0004#3 against the paired execution client. Specifically, verify that the execution client's block validation (not just txpool admission) also enforces the EIP-7825 gas cap for every transaction in a block. No action required in Prysm.",
+        "severity_estimate": "Low — out of scope for Prysm"
+      },
+      "final_classification": "out-of-scope"
+    }
+  ]
+}

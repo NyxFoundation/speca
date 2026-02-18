@@ -1,0 +1,383 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-PROP-0044-001",
+      "property_id": "PROP-0044",
+      "title": "Verify Trust Boundary Integrity: Is the trie root computation independent of trie._data.items() iteration order?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "HashTreeRoot",
+            "line_range": {
+              "start": 897,
+              "end": 910
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/state/state-native/state_trie.go",
+            "symbol": "initializeMerkleLayers",
+            "line_range": {
+              "start": 915,
+              "end": 944
+            },
+            "role": "callee"
+          },
+          {
+            "file": "beacon-chain/state/state-native/hasher.go",
+            "symbol": "ComputeFieldRootsWithHasher",
+            "line_range": {
+              "start": 1,
+              "end": 290
+            },
+            "role": "callee"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "func (b *BeaconState) HashTreeRoot(ctx context.Context) ([32]byte, error) {\n\tb.lock.Lock()\n\tdefer b.lock.Unlock()\n\tif err := b.initializeMerkleLayers(ctx); err != nil {\n\t\treturn [32]byte{}, err\n\t}\n\tif err := b.recomputeDirtyFields(ctx); err != nil {\n\t\treturn [32]byte{}, err\n\t}\n\treturn bytesutil.ToBytes32(b.merkleLayers[len(b.merkleLayers)-1][0]), nil\n}\n\nfunc (b *BeaconState) recomputeDirtyFields(ctx context.Context) error {\n\tfor field := range b.dirtyFields {\n\t\troot, err := b.rootSelector(ctx, field)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\tidx := field.RealPosition()\n\t\tb.merkleLayers[0][idx] = root[:]\n\t\tb.recomputeRoot(idx)\n\t\tdelete(b.dirtyFields, field)\n\t}\n\treturn nil\n}\n\n// ComputeFieldRootsWithHasher assigns each field to a fixed index position:\n// fieldRoots[types.GenesisTime.RealPosition()] = genesisRoot[:]\n// fieldRoots[types.Slot.RealPosition()] = slotRoot[:]\n// ... (all positions are fixed, not iteration-order-dependent)",
+      "state_context": "dirtyFields is a map[types.FieldIndex]bool. recomputeDirtyFields iterates over this map (non-deterministic order in Go). However, each field writes to merkleLayers[0][field.RealPosition()] using a unique, fixed leaf index. The Merkle tree recomputation (recomputeRoot) is independent for each leaf position. Final root is always deterministic.",
+      "phase1": {
+        "abstract_interpretation": "The beacon state HashTreeRoot implementation uses SSZ Merkleization over a fixed-length ordered slice (fieldRoots[position]). ComputeFieldRootsWithHasher assigns each field root to a specific index via types.X.RealPosition(), not through any dict/map iteration. The initial Merkle tree computation is deterministic. The incremental dirty-field recomputation uses Go map iteration (non-deterministic order) but writes to fixed leaf positions in the pre-allocated merkleLayers array. The final Merkle root is independent of dirty-field processing order because each leaf is independently positioned.",
+        "invariants_identified": [
+          "Each state field maps to a unique, fixed position via RealPosition()",
+          "fieldRoots is an ordered [][]byte slice, not a map",
+          "Merkle tree is computed bottom-up from fixed-position leaves",
+          "dirty field recomputation only touches its own leaf index",
+          "delete(b.dirtyFields, field) ensures no double-processing"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Symbolic attack: Two observers compute HashTreeRoot on identical states with different Go runtime map iteration orders for dirtyFields. Observer A processes field X then Y; Observer B processes Y then X. Both write to merkleLayers[0][X.RealPosition()] and merkleLayers[0][Y.RealPosition()] respectively. After both iterations complete, both merkleLayers[0] arrays are identical. recomputeRoot for X updates ancestors from X's leaf; recomputeRoot for Y updates ancestors from Y's leaf. Final root = same. Ordering does not matter because each field writes to a distinct, non-overlapping leaf position.",
+        "attack_scenarios": [
+          "Scenario: Different Go runtime map iteration order \u2192 same final root (confirmed not exploitable)",
+          "Scenario: Concurrent HashTreeRoot calls (lock prevents this: b.lock.Lock() at top)",
+          "Scenario: Python spec trie._data.items() ordering \u2014 inapplicable to Go SSZ implementation"
+        ],
+        "counterexample": "None found. The property is satisfied by design: field positions are statically assigned, not dynamically ordered."
+      },
+      "phase2_5": {
+        "guard_sufficiency": "The mutex lock (b.lock.Lock()) prevents concurrent modification. The use of RealPosition() for fixed slot assignment is architecturally sound. Go map iteration non-determinism for dirtyFields does not affect correctness because leaf positions are unique per field. Guards are sufficient for all identified attack scenarios.",
+        "edge_cases_tested": [
+          "All fields dirty (fresh state): ComputeFieldRootsWithHasher runs fully deterministically",
+          "Single dirty field: recomputeRoot updates only that leaf's Merkle path",
+          "Multiple dirty fields sharing Merkle path ancestors: each recomputeRoot call propagates from leaf to root; processing order does not change final root",
+          "Fulu version with ProposerLookahead: handled at correct index position"
+        ]
+      },
+      "phase3": {
+        "invariant_proving": "PROVED SAFE. The SSZ Merkleization in ComputeFieldRootsWithHasher is a pure function over fixed-position field roots. The beacon state HashTreeRoot is iteration-order-independent by construction. The Python-style trie._data.items() concern referenced in the property does not apply to this Go implementation which uses index-based array assignment, not dict iteration for Merkle computation.",
+        "proof_sketch": "ComputeFieldRootsWithHasher: fieldRoots[i] = f(state_field_i) for all i. stateutil.Merkleize(fieldRoots) = pure function of ordered slice. Result is identical for any execution order of field root computations. QED."
+      },
+      "phase3_5": {
+        "final_assessment": "NOT A VULNERABILITY. The beacon state root computation is deterministic and iteration-order-independent in Prysm's Go implementation. The SSZ-based approach with fixed field position assignments ensures correctness regardless of map iteration order in the dirty-field recomputation. The Python trie concern in the property description does not map to this codebase.",
+        "confidence": "high"
+      },
+      "final_classification": "not-a-vulnerability",
+      "bug_bounty_eligible": false,
+      "reasoning": "The HashTreeRoot computation uses fixed-position SSZ Merkleization (ComputeFieldRootsWithHasher assigns each field to fieldRoots[types.X.RealPosition()]). The incremental dirty-field recomputation iterates over a Go map (non-deterministic order) but writes to fixed, unique leaf positions in the Merkle tree. The final root is always identical regardless of processing order. The mutex lock prevents concurrent races. The Python trie iteration order concern referenced in the property is inapplicable to this Go SSZ implementation."
+    },
+    {
+      "check_id": "CHK-W1B18-1-PROP-0001-001",
+      "property_id": "PROP-0001",
+      "title": "Can trie root computation be made non-deterministic by transaction ordering?",
+      "severity": "Critical",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/blocks/payload.go",
+            "symbol": "ProcessPayload",
+            "line_range": {
+              "start": 208,
+              "end": 226
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/execution_engine.go",
+            "symbol": "notifyNewPayload",
+            "line_range": {
+              "start": 221,
+              "end": 310
+            },
+            "role": "caller"
+          },
+          {
+            "file": "consensus-types/blocks/execution.go",
+            "symbol": "executionPayload.StateRoot",
+            "line_range": {
+              "start": 116,
+              "end": 119
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// ProcessPayload (payload.go:208-226)\nfunc ProcessPayload(st state.BeaconState, body interfaces.ReadOnlyBeaconBlockBody) error {\n\tpayload, err := body.Execution()\n\t// ... validates parent_hash, prevRandao, timestamp ...\n\tif err := st.SetLatestExecutionPayloadHeader(payload); err != nil {\n\t\treturn err\n\t}\n\treturn nil\n}\n\n// notifyNewPayload (execution_engine.go:221-310)\nfunc (s *Service) notifyNewPayload(...) (bool, error) {\n\t// ...\n\tlastValidHash, err = s.cfg.ExecutionEngineCaller.NewPayload(ctx, payload, versionedHashes, parentRoot, requests)\n\t// Returns true only on EL VALID response\n}",
+      "state_context": "Prysm (CL) delegates EL state root computation to the execution engine via engine_newPayloadVX API. The CL treats EL state root as an opaque value from a trusted oracle. Transaction ordering and MPT trie computation are entirely EL responsibilities.",
+      "phase1": {
+        "abstract_interpretation": "The property asks whether transaction ordering can make trie root computation non-deterministic. In Prysm's CL implementation, ProcessPayload validates three CL-level properties (parent hash, prevRandao, timestamp) and caches the execution payload header. It does NOT compute any EL state root \u2014 it accepts the state_root as given in the payload. notifyNewPayload forwards the full payload to the EL via engine_newPayload and trusts the VALID/INVALID/SYNCING response. The EL is responsible for all MPT trie computations.",
+        "invariants_identified": [
+          "Prysm CL does not implement MPT trie computation",
+          "state_root is received from the EL as an opaque 32-byte value",
+          "Transaction ordering is an EL concern, not CL",
+          "CL-EL trust boundary: CL trusts EL's state root computation"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack path: Can an attacker cause non-deterministic trie roots via Prysm? (1) Submit transactions in different orders via P2P \u2192 EL handles ordering, CL receives execution payload with pre-computed state_root \u2192 CL cannot affect MPT non-determinism. (2) Send a crafted execution payload with a manipulated state_root \u2192 EL would reject the block (INVALID response from engine_newPayload). (3) Exploit Prysm to bypass EL validation \u2192 notifyNewPayload only returns true on VALID response; false/error on SYNCING/INVALID. No bypass exists in the examined code.",
+        "attack_scenarios": [
+          "Transaction reordering to cause MPT non-determinism: EL concern, not Prysm's code",
+          "Forged state_root in execution payload: EL validates and returns INVALID",
+          "Race condition in notifyNewPayload: function holds no shared state mutation during EL call; payload is read-only"
+        ],
+        "counterexample": "No attack path found in Prysm CL code for this property."
+      },
+      "phase2_5": {
+        "guard_sufficiency": "The EL engine API call (engine_newPayload) is the authorization boundary. Prysm correctly delegates state root validation to the EL. The CL-level validations (parent hash, prevRandao, timestamp) in ProcessPayload are correctly scoped to CL-verifiable properties. Guards are sufficient for the CL scope.",
+        "edge_cases_tested": [
+          "Pre-Bellatrix blocks: notifyNewPayload returns true immediately (execution not enabled)",
+          "Nil execution requests in Electra+: explicit nil check present",
+          "EL returning SYNCING: block treated as optimistic (not invalid)",
+          "EL returning INVALID: block pruned via SetOptimisticToInvalid"
+        ]
+      },
+      "phase3": {
+        "invariant_proving": "OUT OF SCOPE FOR PRYSM CL. The property tests EL-level MPT trie non-determinism from transaction ordering. Prysm's code does not implement MPT trie computation; it delegates this entirely to the EL. The mapped code (notifyNewPayload, ProcessPayload, StateRoot accessor) does not contain the property's target logic.",
+        "proof_sketch": "Prysm CL: state_root = payload.StateRoot (opaque bytes). Trie computation responsibility: EL. EL validation: engine_newPayload returns VALID iff EL accepts the block and state root. Prysm cannot cause MPT non-determinism."
+      },
+      "phase3_5": {
+        "final_assessment": "OUT OF SCOPE for Prysm CL. The property concerns EL-level MPT trie behavior (transaction ordering \u2192 state root determinism). Prysm CL receives the execution state root as an opaque value and validates it via the EL engine API. There is no trie computation code in the mapped Prysm files to audit for this property.",
+        "confidence": "high"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning": "PROP-0001 tests whether transaction ordering can make MPT trie root computation non-deterministic. This is an EL-layer concern. Prysm CL (the audited codebase) does not implement MPT trie computation \u2014 it delegates state root validation entirely to the execution engine via engine_newPayloadVX. The code mapped in code_scope (notifyNewPayload, ProcessPayload) contains CL-level validations only and does not implement the MPT trie logic the property tests. This property is out of scope for the Prysm CL codebase."
+    },
+    {
+      "check_id": "CHK-W1B18-1-PROP-0003-001",
+      "property_id": "PROP-0003",
+      "title": "Is the 32-byte RLP encoding threshold for trie nodes handled correctly?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/execution_engine.go",
+            "symbol": "notifyNewPayload",
+            "line_range": {
+              "start": 221,
+              "end": 310
+            },
+            "role": "primary"
+          },
+          {
+            "file": "consensus-types/blocks/execution.go",
+            "symbol": "executionPayload.StateRoot",
+            "line_range": {
+              "start": 116,
+              "end": 119
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// notifyNewPayload: delegates to EL engine API\nlastValidHash, err = s.cfg.ExecutionEngineCaller.NewPayload(ctx, payload, versionedHashes, parentRoot, requests)\n\n// executionPayload.StateRoot (execution.go:116-119)\nfunc (e executionPayload) StateRoot() []byte {\n\treturn e.p.StateRoot\n}",
+      "state_context": "RLP encoding threshold is an EL (go-ethereum/MPT) concept. Prysm CL does not implement RLP or MPT trie node encoding. The 32-byte threshold (inline vs hash) is handled entirely by the EL.",
+      "phase1": {
+        "abstract_interpretation": "PROP-0003 requires verifying that nodes with RLP encoding < 32 bytes return unencoded tuple form, and nodes >= 32 bytes return keccak256 hash. This is pure EL MPT logic. Prysm CL contains no RLP encoding code. The StateRoot() accessor simply returns the raw bytes from the proto payload. notifyNewPayload forwards the payload opaquely to the EL.",
+        "invariants_identified": [
+          "Prysm CL has no RLP encoding implementation",
+          "StateRoot() is a trivial field accessor: return e.p.StateRoot",
+          "32-byte threshold is an EL MPT concern",
+          "Prysm treats trie node encoding as EL responsibility"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No execution path in Prysm CL that touches RLP encoding thresholds. StateRoot() returns opaque bytes. notifyNewPayload sends payload to EL. EL performs all MPT operations. No attack surface in Prysm for this property.",
+        "attack_scenarios": [
+          "RLP threshold boundary miscoding: EL responsibility, not testable via Prysm CL code"
+        ],
+        "counterexample": "Property is structurally inapplicable to Prysm CL. No code to audit."
+      },
+      "phase2_5": {
+        "guard_sufficiency": "Not applicable. The property's target logic does not exist in Prysm CL.",
+        "edge_cases_tested": []
+      },
+      "phase3": {
+        "invariant_proving": "OUT OF SCOPE. RLP encoding for MPT trie nodes is exclusively an EL concern. Prysm CL code examined (notifyNewPayload, StateRoot accessor) contains no MPT or RLP logic.",
+        "proof_sketch": "No RLP-related code exists in beacon-chain/blockchain/execution_engine.go or consensus-types/blocks/execution.go. Property cannot be evaluated against Prysm CL."
+      },
+      "phase3_5": {
+        "final_assessment": "OUT OF SCOPE for Prysm CL. The property tests the 32-byte RLP encoding threshold for MPT trie nodes \u2014 an EL-specific implementation detail. Prysm CL does not implement MPT, RLP encoding, or trie node hashing. The mapped code files are the CL-EL API boundary, not EL trie implementation.",
+        "confidence": "high"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning": "PROP-0003 tests 32-byte RLP encoding threshold behavior in MPT trie nodes. This is an Ethereum execution layer concept implemented in go-ethereum, not in Prysm's consensus layer. The mapped Prysm files (execution_engine.go, blocks/execution.go) contain the CL-EL engine API boundary code and a trivial StateRoot() field accessor \u2014 neither implements MPT trie node encoding. This property is out of scope for the Prysm CL codebase."
+    },
+    {
+      "check_id": "CHK-W1B18-1-PROP-0004-001",
+      "property_id": "PROP-0004",
+      "title": "Does encode_node assert non-None storage_root for Account nodes?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/blockchain/execution_engine.go",
+            "symbol": "notifyNewPayload",
+            "line_range": {
+              "start": 221,
+              "end": 310
+            },
+            "role": "primary"
+          },
+          {
+            "file": "consensus-types/blocks/execution.go",
+            "symbol": "executionPayload.StateRoot",
+            "line_range": {
+              "start": 116,
+              "end": 119
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// notifyNewPayload: CL-EL interface, no EL trie logic\n// StateRoot accessor: return e.p.StateRoot (trivial field access)",
+      "state_context": "encode_node and storage_root for Account nodes are EL MPT (Merkle Patricia Trie) concepts, specifically for the Ethereum world state trie. These are implemented in go-ethereum, not in Prysm CL.",
+      "phase1": {
+        "abstract_interpretation": "PROP-0004 tests whether encode_node asserts non-None storage_root for Account nodes. encode_node is an EL MPT function. Prysm CL has no Account node, no storage_root, and no encode_node function. The mapped code scope is incorrect for this property \u2014 notifyNewPayload is the CL-EL boundary, not EL trie logic. This property cannot be evaluated against the mapped Prysm code.",
+        "invariants_identified": [
+          "encode_node does not exist in Prysm CL",
+          "storage_root is an EL world state concept",
+          "Account nodes are EL MPT data structures",
+          "Prysm CL has no implementation of EL world state trie"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "No relevant execution path in Prysm CL for encode_node or storage_root. The CL submits execution payloads to the EL via engine_newPayload. The EL processes contract creation with storage, computes storage_root, encodes Account nodes, and computes the world state root. Prysm CL cannot affect this internal EL computation.",
+        "attack_scenarios": [
+          "Race condition where encode_node is called before storage_root is computed: EL-internal concern, not Prysm CL",
+          "Contract creation with code and initial storage: EL handles entirely"
+        ],
+        "counterexample": "Property is structurally inapplicable to Prysm CL."
+      },
+      "phase2_5": {
+        "guard_sufficiency": "Not applicable. The property's target code does not exist in the audited codebase.",
+        "edge_cases_tested": []
+      },
+      "phase3": {
+        "invariant_proving": "OUT OF SCOPE. encode_node and storage_root assertions are EL MPT concepts not implemented in Prysm CL. The mapped code files contain no Account node or storage_root logic.",
+        "proof_sketch": "Search for 'encode_node', 'storage_root', 'Account node' in Prysm CL returns no results. Property cannot be evaluated."
+      },
+      "phase3_5": {
+        "final_assessment": "OUT OF SCOPE for Prysm CL. The property tests encode_node's handling of Account node storage_root \u2014 an EL MPT implementation detail. Prysm CL does not implement the EL world state trie, Account node encoding, or storage root computation. The mapped code (notifyNewPayload) is the CL-EL API boundary only.",
+        "confidence": "high"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning": "PROP-0004 tests whether encode_node asserts non-None storage_root for Account nodes \u2014 an EL MPT implementation concern. Prysm is a consensus layer client and does not implement the EL world state trie, Account node encoding, or storage_root computation. The mapped Prysm files contain only the CL-EL engine API boundary. This property is out of scope for the Prysm CL codebase and should be evaluated against go-ethereum or equivalent EL implementations."
+    },
+    {
+      "check_id": "CHK-W1B18-1-PROP-0005-001",
+      "property_id": "PROP-0005",
+      "title": "Are all Fusaka-specific types explicitly handled in encode_node without fallback?",
+      "severity": "High",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon-chain/core/fulu/upgrade.go",
+            "symbol": "UpgradeToFulu",
+            "line_range": {
+              "start": 1,
+              "end": 80
+            },
+            "role": "primary"
+          },
+          {
+            "file": "beacon-chain/blockchain/execution_engine.go",
+            "symbol": "notifyNewPayload",
+            "line_range": {
+              "start": 221,
+              "end": 310
+            },
+            "role": "related"
+          },
+          {
+            "file": "consensus-types/blocks/execution.go",
+            "symbol": "NewWrappedExecutionData",
+            "line_range": {
+              "start": 23,
+              "end": 55
+            },
+            "role": "related"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// UpgradeToFulu (fulu/upgrade.go): migrates beacon state from Electra to Fulu\n// Copies all Electra fields, adds proposerLookahead\n// NO encode_node logic - this is beacon state migration only\n\n// NewWrappedExecutionData (execution.go:23-55):\ncase *enginev1.ExecutionBundleElectra:\n    // note: no payload changes in electra so using deneb\n    return WrappedExecutionPayloadDeneb(pbStruct.Payload)\ncase *enginev1.ExecutionBundleFulu:\n    return WrappedExecutionPayloadDeneb(pbStruct.Payload)\n\n// The ExecutionBundleFulu wraps using Deneb payload format:\n// ExecutionBundleFulu{Payload: &ExecutionPayloadDeneb{}}",
+      "state_context": "Fusaka/Fulu in Prysm adds ProposerLookahead to the beacon state. At the EL level, Fulu execution bundles use the same payload format as Deneb (no structural changes to ExecutionPayloadDeneb). The encode_node concern for Fusaka-specific types (new transaction types, receipts) is an EL concern.",
+      "phase1": {
+        "abstract_interpretation": "PROP-0005 asks whether Fusaka-specific types (transactions, receipts) have explicit handling in encode_node. encode_node is an EL MPT function. UpgradeToFulu is a CL beacon state migration that adds ProposerLookahead and copies all Electra fields. It contains no encode_node logic. However, there is an important observation in NewWrappedExecutionData: ExecutionBundleFulu is handled by wrapping with WrappedExecutionPayloadDeneb \u2014 reusing Deneb payload format. This is the CL's representation of Fulu EL payloads.\n\nAdditional finding: The ExecutionBundleFulu wrapping in NewWrappedExecutionData uses WrappedExecutionPayloadDeneb. If Fulu introduces new transaction types at the EL level that require new CL-side handling (e.g., new versioned hash computation), this could be a gap. However, based on current Fulu spec, no CL-visible payload format changes exist.",
+        "invariants_identified": [
+          "UpgradeToFulu: CL beacon state migration only, no EL trie logic",
+          "ExecutionBundleFulu wraps using WrappedExecutionPayloadDeneb (same as Electra pattern)",
+          "encode_node is an EL MPT function not present in Prysm CL",
+          "Fulu adds only ProposerLookahead to beacon state at CL level"
+        ]
+      },
+      "phase2": {
+        "symbolic_execution": "Attack scenario: Can Fulu-specific transaction types bypass CL-level handling and reach the EL with incorrect wrapping?\n\nNewWrappedExecutionData receives ExecutionBundleFulu and wraps it as WrappedExecutionPayloadDeneb. The inner payload is already an *ExecutionPayloadDeneb. If Fulu actually introduces new transaction format fields not captured in ExecutionPayloadDeneb, those would be silently dropped during wrapping.\n\nChecking ExecutionBundleFulu proto definition: ExecutionBundleFulu{Payload: *ExecutionPayloadDeneb, ...}. The Fulu bundle uses the Deneb payload format \u2014 confirmed by the UnmarshalJSON: ExecutionBundleFulu{Payload: &ExecutionPayloadDeneb{}}.\n\nThe 'fallback to Deneb' behavior is intentional and correct per current Fulu spec (Fulu/Fusaka doesn't change EL payload format at CL level in this implementation).",
+        "attack_scenarios": [
+          "Fulu new tx types silently dropped in Deneb wrapping: Not applicable \u2014 Fulu uses same EL payload format as Deneb",
+          "encode_node fallback for Fulu types: EL concern, not CL",
+          "UpgradeToFulu missing field migration: ProposerLookahead is correctly initialized; other fields copied from Electra state"
+        ],
+        "counterexample": "No attack path found. ExecutionBundleFulu uses Deneb payload format by design. encode_node fallback is an EL concern."
+      },
+      "phase2_5": {
+        "guard_sufficiency": "The ExecutionBundleFulu \u2192 WrappedExecutionPayloadDeneb wrapping is guarded by the type switch in NewWrappedExecutionData. The explicit case for *enginev1.ExecutionBundleFulu prevents fallthrough to the default error case. UpgradeToFulu handles all necessary field migrations for the Fulu beacon state transition.",
+        "edge_cases_tested": [
+          "ExecutionBundleFulu default case: explicit case exists, returns WrappedExecutionPayloadDeneb",
+          "UpgradeToFulu with nil fields: error propagation via err != nil checks",
+          "ProposerLookahead initialization: computed correctly from Electra state",
+          "Unknown future Fulu EL types: NewWrappedExecutionData returns ErrUnsupportedVersion for unknown types"
+        ]
+      },
+      "phase3": {
+        "invariant_proving": "OUT OF SCOPE FOR encode_node PROPERTY. The encode_node function and Fusaka-specific type handling in the EL MPT are not implemented in Prysm CL. UpgradeToFulu is a correct CL beacon state migration. The ExecutionBundleFulu wrapping is intentionally the same as Deneb per the current Fulu spec. No CL-level vulnerability exists for this property.",
+        "proof_sketch": "encode_node exists in EL only. UpgradeToFulu: migrates beacon state correctly. ExecutionBundleFulu: intentionally uses Deneb payload format. All Fulu-visible EL types have explicit handling in NewWrappedExecutionData type switch."
+      },
+      "phase3_5": {
+        "final_assessment": "OUT OF SCOPE for Prysm CL (encode_node concern). The property tests EL-level Fusaka type handling in encode_node \u2014 not present in Prysm CL. The closest relevant CL code (NewWrappedExecutionData) does have explicit handling for ExecutionBundleFulu using WrappedExecutionPayloadDeneb, consistent with Fulu not changing EL payload format. UpgradeToFulu correctly migrates all beacon state fields. No vulnerability found in the CL code.",
+        "confidence": "high"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false,
+      "reasoning": "PROP-0005 tests whether Fusaka-specific EL types are explicitly handled in encode_node. This is an EL MPT concern. The Prysm CL code examined (UpgradeToFulu: beacon state migration; NewWrappedExecutionData: ExecutionBundleFulu type switch) does not implement encode_node. The CL-side Fulu type handling is correct: ExecutionBundleFulu explicitly maps to WrappedExecutionPayloadDeneb (same format per Fulu spec, no EL payload format changes). UpgradeToFulu correctly migrates beacon state. This property is out of scope for the Prysm CL codebase."
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 5,
+    "batch_index": 70,
+    "item_count": 5,
+    "timestamp": 1771388093,
+    "processed_ids": [
+      "CHK-PROP-0044-001",
+      "CHK-W1B18-1-PROP-0001-001",
+      "CHK-W1B18-1-PROP-0003-001",
+      "CHK-W1B18-1-PROP-0004-001",
+      "CHK-W1B18-1-PROP-0005-001"
+    ]
+  }
+}

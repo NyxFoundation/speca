@@ -1,0 +1,332 @@
+[
+  {
+    "check_id": "W7B8:W7B8:CHK-0155",
+    "title": "Can division by zero polynomial be triggered via crafted missing cell indices in divide_polynomialcoeff?",
+    "property_id": "PROP-W5B14-22",
+    "severity": "High",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 109, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ReconstructDataColumnSidecars",
+          "line_range": {"start": 59, "end": 101},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved"
+    },
+    "phase1_abstract_interpretation": {
+      "summary": "The Go wrapper RecoverCellsAndKZGProofs passes cellIndices directly to the C KZG library (c-kzg-4844) after simple type conversion. The vanishing polynomial computation in the C recovery code involves dividing (P*Z)(x) by Z(x). Division by zero could only occur with duplicate xs (duplicate cell indices causing the vanishing polynomial to have double roots). At the Go layer, deduplication occurs via a map in ReconstructDataColumnSidecars: sidecarByIndex uses sidecar.Index as key, guaranteeing unique column indices before RecoverCellsAndKZGProofs is called. The C library also independently validates for duplicates via FR_NULL sentinel check.",
+      "state_anomalies_found": [
+        "Concurrent goroutines in ReconstructDataColumnSidecars iterate over sidecarByIndex map with non-deterministic order, but map keys are unique so no duplicates arise.",
+        "No explicit Go-layer bounds check on cellIndices before passing to C; bounds check is delegated entirely to the C library.",
+        "Minimum threshold check (MinimumColumnCountToReconstruct = (NumberOfColumns+1)/2) is enforced at Go layer before calling RecoverCellsAndKZGProofs."
+      ],
+      "cache_analysis": "No cache involved in this operation. Stateless per invocation.",
+      "concurrency_analysis": "Multiple goroutines iterate over sidecarByIndex simultaneously but each goroutine writes to distinct cellsAndProofs[blobIndex] element. Map is read-only after construction. No race condition in deduplication."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "An attacker would need to supply duplicate sidecar indices to reach polynomial division with duplicate xs. Two attack vectors: (1) submitting duplicate sidecars hoping map deduplication is bypassed, (2) exploiting goroutine map iteration. Both are blocked: sidecarByIndex map key collision means later-arriving duplicates silently overwrite earlier ones, and C library detects duplicates via FR_NULL sentinel returning C_KZG_BADARGS (propagated as Go error, not panic).",
+      "counterexample_found": false,
+      "counterexample": "No viable counterexample found. Attacker cannot bypass both Go-layer map deduplication and C-library FR_NULL sentinel duplicate detection.",
+      "attack_scenarios": [
+        "Submit two sidecars with same Index via gossip: sidecarByIndex map keeps only the last one, deduplication preserved.",
+        "All-zeros cellIndices vector: C library FR_NULL sentinel detects duplicate index 0 and returns C_KZG_BADARGS.",
+        "Overflow of uint64 column index: Bounded by uint64 type; C library checks >= CELLS_PER_EXT_BLOB (128)."
+      ],
+      "timing_dependencies": "No timing-based exploit path. Deduplication occurs before any concurrent processing."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "ReconstructDataColumnSidecars is called from the sync layer with VerifiedRODataColumn inputs that have already passed full verification pipeline including ValidFields (VerifyDataColumnSidecar - index bounds), VerifyDataColumnSidecarInclusionProof, and VerifyDataColumnsSidecarKZGProofs. An attacker cannot supply crafted missing cell indices without passing these checks.",
+      "entry_points": ["P2P gossip validateDataColumn", "RPC reconstruction path", "Sync service data_columns_reconstruct.go"],
+      "attacker_controlled": true,
+      "classification": "internal-only"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Invariant: cell indices are unique and within [0, CELLS_PER_EXT_BLOB) before reaching C polynomial division. Maintained by dual guards: Go map-based deduplication in sidecarByIndex + C library's explicit validation in recover_cells_and_kzg_proofs: (1) num_cells <= CELLS_PER_EXT_BLOB, (2) num_cells >= CELLS_PER_BLOB, (3) all cell_indices[i] < CELLS_PER_EXT_BLOB, (4) FR_NULL sentinel duplicate detection. If any fail, C_KZG_BADARGS is returned, wrapped as Go error, fails gracefully without panic.",
+      "proof_successful": true,
+      "guard_identified": "Go-layer map deduplication in ReconstructDataColumnSidecars + C library bounds and duplicate checks in recover_cells_and_kzg_proofs",
+      "guard_sufficiency": "Guards are sufficient. Division by zero in vanishing polynomial cannot be triggered: Go map ensures unique indices; C library independently validates; both error gracefully."
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "Invariant protected by redundant guards at both Go application layer and C library layer. No exploit path exists to trigger division by zero in divide_polynomialcoeff. C library returns C_KZG_BADARGS (not undefined behavior) on any precondition violation. Go wrapper propagates as error.",
+      "recommendation": "No fix required. Documentation could clarify that the deduplication map is first line of defense and C library is second.",
+      "severity_estimate": "Informational"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0156",
+    "title": "Verify Trust Boundary Integrity for tb-002/tb-003: Are all xs values validated to be distinct before Lagrange interpolation in interpolate_polynomialcoeff?",
+    "property_id": "PROP-W5B14-23",
+    "severity": "Critical",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 109, "end": 122},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/p2p_interface.go",
+          "symbol": "VerifyDataColumnSidecar",
+          "line_range": {"start": 34, "end": 52},
+          "role": "related"
+        }
+      ],
+      "resolution_status": "resolved"
+    },
+    "phase1_abstract_interpretation": {
+      "summary": "Lagrange interpolation requires distinct evaluation points (xs). Duplicate cell_indices would map to duplicate coset evaluation points, triggering division-by-zero in interpolation. The Go layer's sidecarByIndex map uses sidecar.Index as key providing deduplication. The state question is whether the sidecarByIndex map can be bypassed or different sidecars with same logical index can reach RecoverCellsAndKZGProofs.",
+      "state_anomalies_found": [
+        "sidecarByIndex map is built fresh per call to ReconstructDataColumnSidecars - no stale state persists between calls.",
+        "C library's FR_NULL sentinel check independently detects any duplicate that slips through.",
+        "VerifiedRODataColumn objects must pass full verification pipeline before being used - crafted data cannot be injected without forging KZG proofs."
+      ],
+      "cache_analysis": "No persistent cache involved. Deduplication map is ephemeral and local to each ReconstructDataColumnSidecars invocation.",
+      "concurrency_analysis": "sidecarByIndex map is written sequentially before goroutines are launched. Goroutines only read from the map. No data race on deduplication state."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "For duplicate xs to reach interpolate_polynomialcoeff, an attacker must supply two VerifiedRODataColumn objects with the same Index that both pass VerifyDataColumnSidecar, or bypass sidecarByIndex map deduplication. Path (a) is impossible because VerifiedRODataColumn requires full verification pipeline; hasSeenDataColumnIndex deduplication ensures only one sidecar per (slot, proposer, index) tuple is processed. Path (b) impossible because map key collision always overwrites.",
+      "counterexample_found": false,
+      "counterexample": "No viable counterexample found. Two-layer protection (Go map + C FR_NULL sentinel) prevents duplicate xs from ever reaching interpolate_polynomialcoeff.",
+      "attack_scenarios": [
+        "P2P attacker sends two gossip messages for same (slot, proposer, index) tuple: hasSeenDataColumnIndex deduplication ensures only one processed.",
+        "Race condition between goroutines building cellsIndices: Not possible since goroutines read pre-built read-only map.",
+        "Attacker exploits sync path to inject duplicate columns: Requires bypassing full KZG proof verification (computationally infeasible)."
+      ],
+      "timing_dependencies": "No timing-based duplicate injection path exists."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "interpolate_polynomialcoeff is called deep inside C library during Reed-Solomon recovery. Only reached after Go-layer deduplication via sidecarByIndex map AND C library's own bounds/duplicate detection in recover_cells_and_kzg_proofs. C library validates for duplicates before initiating recovery and returns C_KZG_BADARGS for any precondition violation.",
+      "entry_points": ["P2P gossip (validateDataColumn)", "sync reconstruct (data_columns_reconstruct.go)", "RPC ReconstructDataColumnSidecars"],
+      "attacker_controlled": false,
+      "classification": "internal-only"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Invariant: all cell_indices passed to RecoverCellsAndKZGProofs are unique. Proof: (1) sidecarByIndex map uses sidecar.Index as unique key, guaranteeing at most one entry per column index. (2) C library FR_NULL sentinel provides redundant check. (3) VerifiedRODataColumn types produced only after full validation. Invariant holds in all reachable execution paths.",
+      "proof_successful": true,
+      "guard_identified": "Map-based deduplication in sidecarByIndex (Go) + FR_NULL sentinel duplicate detection in recover_cells_and_kzg_proofs (C)",
+      "guard_sufficiency": "Guards are jointly sufficient. No gap exists between them that an attacker could exploit."
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "Dual-layer validation (Go map deduplication + C FR_NULL sentinel) prevents duplicate xs from ever reaching Lagrange interpolation. No path for external attacker to trigger interpolation with duplicate xs without forging KZG proofs (computationally infeasible).",
+      "recommendation": "No fix required. Consider adding documentation comment to ReconstructDataColumnSidecars explaining that sidecarByIndex map provides primary deduplication and C library provides secondary validation.",
+      "severity_estimate": "Informational"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0157",
+    "title": "Verify Trust Boundary Integrity for tb-001/tb-003: Is len(a) + len(b) <= FIELD_ELEMENTS_PER_EXT_BLOB validated before polynomial multiplication in multiply_polynomialcoeff?",
+    "property_id": "PROP-W5B14-24",
+    "severity": "High",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "ComputeCellsAndKZGProofs",
+          "line_range": {"start": 84, "end": 94},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/reconstruction.go",
+          "symbol": "ConstructDataColumnSidecars",
+          "line_range": {"start": 131, "end": 175},
+          "role": "caller"
+        }
+      ],
+      "resolution_status": "resolved"
+    },
+    "phase1_abstract_interpretation": {
+      "summary": "ComputeCellsAndKZGProofs takes a fixed-size Blob type ([BytesPerBlob]byte where BytesPerBlob=131072 bytes). The multiply_polynomialcoeff concern is an internal C library concern arising during extended polynomial computation. The input is always a single blob of fixed size, not arbitrary polynomial coefficients. Polynomial multiplication product size is determined by the fixed structure of KZG: a blob of FIELD_ELEMENTS_PER_BLOB (4096) elements, extended to FIELD_ELEMENTS_PER_EXT_BLOB (8192) elements - compile-time constants in the C library, not runtime-variable inputs.",
+      "state_anomalies_found": [
+        "The copy check in ConstructDataColumnSidecars (copy(kzgBlob[:], blob) != len(kzgBlob)) ensures exact blob size before passing to ComputeCells.",
+        "ComputeCellsAndKZGProofs receives pointer to fixed-size ckzg4844.Blob array - no length parameter is passed; C function always processes exactly BytesPerBlob bytes.",
+        "No externally-controlled polynomial length inputs exist at Go layer."
+      ],
+      "cache_analysis": "No cache involved. Stateless computation from fixed-size input.",
+      "concurrency_analysis": "ComputeCellsAndKZGProofs is called per-blob in ConstructDataColumnSidecars sequentially. No concurrency concern."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "multiply_polynomialcoeff in C library is called during internal polynomial arithmetic in compute_cells_and_kzg_proofs. Polynomial degrees are determined by FIELD_ELEMENTS_PER_BLOB (4096) and FIELD_ELEMENTS_PER_CELL (64), both compile-time constants. An attacker cannot provide arbitrary polynomial inputs from Go layer. The only attacker-controlled input is blob content (131072 bytes), which affects field element values but not polynomial degree (always 4096-1 for the blob polynomial). Maximally crafted blob cannot cause len(a) + len(b) > FIELD_ELEMENTS_PER_EXT_BLOB because these lengths are structural constants.",
+      "counterexample_found": false,
+      "counterexample": "No viable counterexample found. Polynomial lengths are compile-time constants, not runtime inputs.",
+      "attack_scenarios": [
+        "Craft blob with all max field elements to force overflow in multiply_polynomialcoeff: Field element values do not affect polynomial degree. No overflow possible.",
+        "Provide oversized blob: Fixed-size Blob type prevents this. The copy() check additionally guards against wrong-size blobs."
+      ],
+      "timing_dependencies": "Not applicable."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "multiply_polynomialcoeff is an internal C library function called during FFT-based polynomial arithmetic with fixed degree parameters. Not reachable with variable-length polynomial inputs from Go layer. The entire computation is length-bounded by compile-time constants in C library.",
+      "entry_points": ["ComputeCellsAndKZGProofs (local block production path)", "ConstructDataColumnSidecars (execution client API)"],
+      "attacker_controlled": false,
+      "classification": "unreachable"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Invariant: len(a) + len(b) <= FIELD_ELEMENTS_PER_EXT_BLOB is always satisfied in multiply_polynomialcoeff because polynomial degrees are compile-time constants (4096 elements per blob, 8192 elements for extended blob). The Blob type enforces fixed input size at Go/C boundary. No runtime validation needed because invariant is structural.",
+      "proof_successful": true,
+      "guard_identified": "Fixed-size Blob type enforcing BytesPerBlob=131072 bytes + compile-time polynomial size constants in C library",
+      "guard_sufficiency": "Guards are structurally sufficient. Polynomial multiplication bounds cannot be exceeded because both polynomials have fixed, compile-time-determined maximum degrees that sum to exactly FIELD_ELEMENTS_PER_EXT_BLOB."
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "multiply_polynomialcoeff overflow concern is not applicable from Go layer. All polynomial lengths are compile-time constants in C library. Blob type at Go/C boundary is fixed-size. No attacker-controlled length inputs exist. This concern does not apply to this specific Go codebase.",
+      "recommendation": "No fix required. Informational finding noting that C library's internal invariants are structural rather than runtime-validated.",
+      "severity_estimate": "Informational"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0158",
+    "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) before array access in coset_shift_for_cell?",
+    "property_id": "PROP-W5B14-25",
+    "severity": "Critical",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/p2p_interface.go",
+          "symbol": "VerifyDataColumnSidecar",
+          "line_range": {"start": 34, "end": 52},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/blockchain/kzg/kzg.go",
+          "symbol": "RecoverCellsAndKZGProofs",
+          "line_range": {"start": 109, "end": 122},
+          "role": "callee"
+        }
+      ],
+      "resolution_status": "resolved"
+    },
+    "phase1_abstract_interpretation": {
+      "summary": "The Go-level check uses sidecar.Index >= numberOfColumns where numberOfColumns = params.BeaconConfig().NumberOfColumns = 128 (runtime config). C library uses cell_indices[i] >= CELLS_PER_EXT_BLOB where CELLS_PER_EXT_BLOB = 128 (compile-time constant). Both bounds are identical: valid cell index in [0, 127]. Key risk is whether these bounds can diverge: if NumberOfColumns were set lower than CELLS_PER_EXT_BLOB, Go validation is more restrictive (safe). If NumberOfColumns were set higher, Go validation less restrictive and cells with indices [128, NumberOfColumns-1] would reach C library and fail with C_KZG_BADARGS.",
+      "state_anomalies_found": [
+        "NumberOfColumns is a runtime configuration parameter while CELLS_PER_EXT_BLOB is a compile-time constant - a misconfiguration (NumberOfColumns > 128) would not be caught by Go-layer validation alone.",
+        "VerifyDataColumnSidecar uses params.BeaconConfig().NumberOfColumns which could be overridden in tests with incorrect value.",
+        "The minimal.go preset also defines NumberOfColumns = 128, matching the C constant. No known preset creates a mismatch."
+      ],
+      "cache_analysis": "No cache involved. Check is stateless comparison.",
+      "concurrency_analysis": "BeaconConfig() returns pointer to global config struct set once at startup. Concurrent mutation not possible in production."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "The only scenario where cell_index could reach coset_shift_for_cell with out-of-bounds value is if NumberOfColumns is misconfigured to be greater than CELLS_PER_EXT_BLOB=128. In that case, VerifyDataColumnSidecar would permit index values up to NumberOfColumns-1, which would reach C library. The C library would detect this at its own bounds check (line 213 in eip7594.c: cell_indices[i] >= CELLS_PER_EXT_BLOB → C_KZG_BADARGS) before reaching coset_shift_for_cell. So even in the misconfiguration scenario, the C library prevents the array access.",
+      "counterexample_found": false,
+      "counterexample": "No viable counterexample found. Even with misconfigured NumberOfColumns, C library independently validates bounds before coset_shift_for_cell is called.",
+      "attack_scenarios": [
+        "Craft sidecar with Index=128: VerifyDataColumnSidecar rejects with ErrIndexTooLarge (128 >= 128). Does not reach C library.",
+        "Craft sidecar with Index=127: Valid Go check (127 < 128). C library: 127 < 128, valid. coset_shift_for_cell receives valid index.",
+        "Misconfiguration scenario (NumberOfColumns=256, C constant=128): VerifyDataColumnSidecar allows Index=200. C library rejects at bounds check before coset_shift_for_cell."
+      ],
+      "timing_dependencies": "Not applicable."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "coset_shift_for_cell function is only reached after Go-level bounds check AND C library's own bounds validation. C library validates each cell index against CELLS_PER_EXT_BLOB=128 before any array access. Double-layer protection is present.",
+      "entry_points": ["P2P gossip validateDataColumn (goes through VerifyDataColumnSidecar first)", "Sync request paths (ByRange, ByRoot) which use RequireValidFields"],
+      "attacker_controlled": true,
+      "classification": "defense-in-depth"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Invariant: cell_index is always in [0, CELLS_PER_EXT_BLOB) when coset_shift_for_cell is called. Proof: (1) Go-level VerifyDataColumnSidecar checks Index < NumberOfColumns=128. (2) C library at line 213 in eip7594.c explicitly checks cell_indices[i] >= CELLS_PER_EXT_BLOB and returns C_KZG_BADARGS before any array access. Invariant is doubly enforced and holds in all reachable code paths.",
+      "proof_successful": true,
+      "guard_identified": "VerifyDataColumnSidecar (Go, Index < NumberOfColumns=128) + eip7594.c line 213 (C, cell_indices[i] < CELLS_PER_EXT_BLOB=128)",
+      "guard_sufficiency": "Guards are sufficient for current configuration where NumberOfColumns == CELLS_PER_EXT_BLOB == 128. A configuration mismatch (NumberOfColumns > 128) would create a gap at Go layer, but C library would still prevent the array access.",
+      "edge_cases": [
+        "NumberOfColumns misconfigured > 128: Go guard becomes insufficient, but C guard remains effective.",
+        "NumberOfColumns misconfigured < 128: Go guard is more restrictive than necessary, harmless.",
+        "Fulu upgrade changes CELLS_PER_EXT_BLOB: Would require both Go config update AND C library recompilation to remain consistent."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": false,
+      "reason": "Invariant is enforced by both Go layer and C library independently. Even a misconfigured NumberOfColumns cannot cause out-of-bounds array access in coset_shift_for_cell because C library validates bounds before calling that function. Current configuration has NumberOfColumns == CELLS_PER_EXT_BLOB == 128, creating exact parity.",
+      "recommendation": "Consider adding a startup assertion that verifies params.BeaconConfig().NumberOfColumns == ckzg4844.CellsPerExtBlob to prevent configuration drift from creating a gap in Go-level validation. This is a hardening measure, not a security fix.",
+      "severity_estimate": "Informational"
+    },
+    "final_classification": "not-a-vulnerability",
+    "bug_bounty_eligible": false
+  },
+  {
+    "check_id": "W7B8:W7B8:CHK-0159",
+    "title": "Verify Trust Boundary Integrity for tb-002: Is cell_index validated to be in [0, CELLS_PER_EXT_BLOB) and slice bounds checked in coset_for_cell?",
+    "property_id": "PROP-W5B14-26",
+    "severity": "Critical",
+    "code_scope": {
+      "locations": [
+        {
+          "file": "beacon-chain/core/peerdas/p2p_interface.go",
+          "symbol": "VerifyDataColumnSidecar",
+          "line_range": {"start": 34, "end": 52},
+          "role": "primary"
+        },
+        {
+          "file": "beacon-chain/core/peerdas/p2p_interface.go",
+          "symbol": "VerifyDataColumnsSidecarKZGProofs",
+          "line_range": {"start": 61, "end": 93},
+          "role": "callee"
+        }
+      ],
+      "resolution_status": "resolved"
+    },
+    "phase1_abstract_interpretation": {
+      "summary": "VerifyDataColumnsSidecarKZGProofs is called from two distinct call sites: (1) via the verification pipeline in data_column.go (SidecarKzgProofVerified method), always preceded by ValidFields() → VerifyDataColumnSidecar; and (2) directly in batch_verifier.go (verifyKzgBatch and validateUnbatchedColumnsKzg), which receives RODataColumn values from the kzgChan. The kzgChan is populated from validateWithKzgBatchVerifier, called in validateDataColumn AFTER ValidFields() has already been called. However, VerifyDataColumnsSidecarKZGProofs itself has NO internal index bounds check at the Go layer, and the inner loop accesses KzgCommitments[i] and KzgProofs[i] by index which would panic if len(Column) > len(KzgCommitments).",
+      "state_anomalies_found": [
+        "Architectural separation between VerifyDataColumnSidecar and VerifyDataColumnsSidecarKZGProofs: the KZG proof function has NO internal length validation at Go layer and relies entirely on callers having pre-validated length equality.",
+        "verifyKzgBatch in batch_verifier.go aggregates data columns from multiple kzgVerifier entries before calling VerifyDataColumnsSidecarKZGProofs without re-validation.",
+        "validateUnbatchedColumnsKzg is called as fallback when batch verification fails; does not re-call VerifyDataColumnSidecar but columns were validated before batch submission.",
+        "The inner loop for i := range sidecar.Column accesses sidecar.KzgCommitments[i] (line 75) and sidecar.KzgProofs[i] (line 78) - if len(Column) > len(KzgCommitments) or len(Column) > len(KzgProofs), this causes an index-out-of-bounds PANIC."
+      ],
+      "cache_analysis": "No cache involved in index validation. The kzgChan is a channel, not a cache.",
+      "concurrency_analysis": "The kzgVerifierRoutine drains the kzgChan and batches multiple kzgVerifier entries. Each entry was submitted by a goroutine that had already called ValidFields(). RODataColumn values passed through channels are immutable copies in Go (passed by value). No TOCTOU exists for the validated fields."
+    },
+    "phase2_symbolic_execution": {
+      "summary": "Can an attacker submit a sidecar with invalid Index or mismatched lengths that bypasses VerifyDataColumnSidecar but reaches VerifyDataColumnsSidecarKZGProofs? In validateDataColumn, ValidFields() (line 81) is called before validateWithKzgBatchVerifier (line 148) - sequential error-return semantics enforce this ordering. In non-gossip paths (ByRange, ByRoot), RequireValidFields is listed first. Current call sites are safe. However, VerifyDataColumnsSidecarKZGProofs contains an implicit, undocumented prerequisite that callers must have performed VerifyDataColumnSidecar first. A future developer adding a new call site could trigger a panic.",
+      "counterexample_found": true,
+      "counterexample": "Latent vulnerability: A future developer who calls VerifyDataColumnsSidecarKZGProofs with a sidecar where len(Column) > len(KzgCommitments) will trigger a Go panic at line 75 (sidecar.KzgCommitments[i] index out of bounds). This is a real DoS vector if the function is called without prior VerifyDataColumnSidecar validation. Current call sites are safe but no compile-time or runtime enforcement prevents misuse.",
+      "attack_scenarios": [
+        "Current attack surface: Send sidecar with Index=128 via gossip - ValidFields() calls VerifyDataColumnSidecar which returns ErrIndexTooLarge. Function returns ValidationReject before reaching KZG verification.",
+        "Send sidecar with mismatched lengths (len(Column)=10, len(KzgCommitments)=5): VerifyDataColumnSidecar catches this via ErrMismatchLength. Safe at current call sites.",
+        "Future vulnerability: New code calls VerifyDataColumnsSidecarKZGProofs directly without prior VerifyDataColumnSidecar. An attacker sending sidecar with len(Column)=10, len(KzgCommitments)=5 would cause panic at line 75. Node crash = DoS."
+      ],
+      "timing_dependencies": "RODataColumn values are immutable value types in Go when passed through channels. No TOCTOU between ValidFields check and KZG verification."
+    },
+    "phase2_5_reachability_analysis": {
+      "summary": "VerifyDataColumnsSidecarKZGProofs is reachable from P2P gossip path (validateDataColumn in validate_data_column.go) and sync batch verification (batch_verifier.go). Both current paths guarantee index/length validation before KZG verification via sequential code ordering. C library's own bounds check in verify_cell_kzg_proof_batch provides an additional safety net for index bounds (but not for Go-level slice bounds panics on KzgCommitments/KzgProofs arrays).",
+      "entry_points": ["P2P gossip validateDataColumn (line 81 ValidFields, line 148 KZG)", "Sync ByRange/ByRoot with RequireValidFields requirement", "batch_verifier.go verifyKzgBatch (processes pre-validated data)"],
+      "attacker_controlled": true,
+      "classification": "defense-in-depth"
+    },
+    "phase3_invariant_proving": {
+      "summary": "Invariant: when VerifyDataColumnsSidecarKZGProofs is called, all sidecar lengths must satisfy len(Column) == len(KzgCommitments) == len(KzgProofs) and all sidecar.Index values must be in [0, CELLS_PER_EXT_BLOB). Proof for current call sites: ValidFields/VerifyDataColumnSidecar is always called before VerifyDataColumnsSidecarKZGProofs in all identified call sites. However, there is NO compile-time or runtime enforcement of this ordering. The invariant is maintained by caller convention only, creating a latent vulnerability if new call sites are added that skip VerifyDataColumnSidecar. The C library validates index bounds independently (line 858 in eip7594.c) but does NOT prevent Go-level slice panics from mismatched lengths.",
+      "proof_successful": false,
+      "guard_identified": "Caller convention: ValidFields/VerifyDataColumnSidecar must precede VerifyDataColumnsSidecarKZGProofs (convention only, not enforced) + C library bounds check in verify_cell_kzg_proof_batch",
+      "guard_sufficiency": "Guards are INSUFFICIENT as an architectural invariant. While current call sites are safe, the absence of internal validation in VerifyDataColumnsSidecarKZGProofs means a future call site that skips VerifyDataColumnSidecar could trigger a panic at line 75 (KzgCommitments[i] index out of bounds) causing a node crash DoS.",
+      "edge_cases": [
+        "Future code adds new call to VerifyDataColumnsSidecarKZGProofs without prior VerifyDataColumnSidecar: Would cause panic at sidecar.KzgCommitments[i] if len(Column) > len(KzgCommitments). Node crash DoS.",
+        "Empty sidecars slice: count=0, all slices empty, VerifyCellKZGProofBatch called with empty inputs. C library handles zero-length input; returns true with no verification.",
+        "Sidecar with len(Column)=0, len(KzgCommitments)=5: Inner loop 'for i := range sidecar.Column' doesn't execute - no panic. But this case would be caught by VerifyDataColumnSidecar's ErrMismatchLength check in current call sites."
+      ]
+    },
+    "phase3_5_scope_filtering": {
+      "bug_bounty_eligible": true,
+      "reason": "VerifyDataColumnsSidecarKZGProofs at beacon-chain/core/peerdas/p2p_interface.go lines 61-93 contains a latent but real DoS vulnerability. The inner loop 'for i := range sidecar.Column' accesses sidecar.KzgCommitments[i] and sidecar.KzgProofs[i] by index without bounds checking. If len(Column) > len(KzgCommitments) or len(Column) > len(KzgProofs), this causes an index-out-of-bounds panic, crashing the node. Current call sites are safe because they call VerifyDataColumnSidecar first, but this is an architectural weakness enforced by convention only. The vulnerability is latent (requires future misuse) but represents a real medium-severity issue: the function's safety depends on an undocumented, unenforced calling convention rather than internal validation.",
+      "recommendation": "Add defensive bounds checks at the beginning of VerifyDataColumnsSidecarKZGProofs: for each sidecar in sidecars, validate len(Column) == len(KzgCommitments) == len(KzgProofs) (mirroring VerifyDataColumnSidecar's ErrMismatchLength check) and sidecar.Index < CELLS_PER_EXT_BLOB. Also add a code comment documenting that VerifyDataColumnSidecar must be called before this function. Consider consolidating the two functions into a single ValidateAndVerifyDataColumnSidecar to eliminate the ordering requirement. This would prevent node crashes if new call sites are added in the future.",
+      "severity_estimate": "Medium - current call sites are safe but latent panic risk from missing length validation represents a real DoS vector if function is called without prior VerifyDataColumnSidecar"
+    },
+    "final_classification": "informational",
+    "bug_bounty_eligible": true
+  }
+]

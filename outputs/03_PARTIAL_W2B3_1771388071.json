@@ -1,0 +1,339 @@
+{
+  "audit_items": [
+    {
+      "check_id": "CHK-PROP-W5B6-20-001",
+      "checklist_item": {
+        "property_id": "PROP-W5B6-29",
+        "description": "logs_bloom MUST initialize the bloom bytearray to all zeros (256 bytes) before processing any logs.",
+        "graph_element_under_test": "ToConsensus, lines 73-78"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "api/server/structs/conversions_block_execution.go",
+            "symbol": "ToConsensus",
+            "line_range": {
+              "start": 73,
+              "end": 78
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Lines 73-78 of api/server/structs/conversions_block_execution.go\npayloadLogsBloom, err := bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength)\nif err != nil {\n    return nil, server.NewDecodeError(err, \"ExecutionPayload.LogsBloom\")\n}",
+      "state_context": "LogsBloomLength = 256 (config/fieldparams/mainnet.go:23). The bloom is received as a hex-encoded 256-byte field from the execution layer via Engine API. Prysm never constructs a bloom filter; it deserializes and stores the pre-computed value from the EL.",
+      "phase1_abstract_interpretation": {
+        "summary": "The code at lines 73-78 performs hex deserialization of the LogsBloom field using `bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength)`. This is a pure deserialization operation: it decodes a hex-encoded string into a 256-byte slice. There is no bloom filter initialization occurring here \u2014 Prysm does not construct a bloom filter; it receives a pre-computed one from the execution layer. The property under audit (initialize bloom to all zeros before processing logs) is an EL-side construction invariant, not a CL deserialization invariant. The abstract domain for `payloadLogsBloom` is: any valid 256-byte sequence.",
+        "state_anomalies_found": [
+          "No bloom initialization code exists in Prysm \u2014 by design. The function never initializes a bloom array.",
+          "The deserialized bloom value is taken entirely from attacker-controlled input (API JSON) without content validation.",
+          "No verification is performed that the received bloom is consistent with any logs or transactions."
+        ],
+        "cache_analysis": "No caching of the bloom filter is performed in this function. The deserialized value flows directly to the proto struct and ultimately to beacon state.",
+        "concurrency_analysis": "The function is stateless and creates a new proto object. No shared state is accessed. Concurrency is not a concern at this level."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Treating `e.LogsBloom` as a symbolic attacker-controlled string: an attacker submitting a block via the Beacon API can supply any 512-character hex string (representing 256 bytes) as LogsBloom. The only constraint enforced is length (exactly 256 bytes). An attacker can supply a bloom of all 0xFF bytes, all 0x00 bytes, or any arbitrary pattern and it will pass validation. However, this property concerns whether Prysm *initializes* a bloom \u2014 which it never does, as it is not the bloom constructor.",
+        "counterexample_found": false,
+        "counterexample": "No counterexample found for a violation of PROP-W5B6-29 in Prysm. The property is not applicable: Prysm never initializes a bloom bytearray. The question 'does Prysm initialize bloom to zeros before processing logs' is categorically inapplicable because Prysm does not call any bloom initialization function.",
+        "attack_scenarios": [
+          "An attacker could submit a block with a logically incorrect LogsBloom (e.g., all-zeros even if there are logs). Prysm would accept it if length is 256 bytes. However, this attack targets the EL level, not Prysm.",
+          "An invalid bloom would be propagated to beacon state and signed into block proposer attestations \u2014 but the EL's engine_newPayload call would reject invalid payloads, so the block would ultimately be marked invalid by the EL."
+        ],
+        "timing_dependencies": "None. The function is synchronous with no timing windows."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The `ToConsensus()` method is called from block conversion paths in `conversions_block.go`. These block conversion functions are invoked when a beacon node receives a block via the Beacon REST API. The endpoint accepts external input, so the code path is externally reachable. However, reachability does not change the fundamental finding: the property is not applicable to this code.",
+        "entry_points": [
+          "POST /eth/v1/beacon/blocks (Beacon API block submission)",
+          "Internal block processing after Engine API getPayload",
+          "conversions_block.go BeaconBlockBellatrix.ToConsensus"
+        ],
+        "attacker_controlled": true,
+        "classification": "out-of-scope",
+        "attack_surface": "While the entry point is external, the property being tested (bloom initialization) is not a CL concern. An attacker can submit arbitrary bloom data, but this is validated by the EL via engine_newPayload, not by Prysm. The CL acts as a pass-through for this field."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant PROP-W5B6-29 ('initialize bloom to zeros before processing logs') cannot be proven or disproven for Prysm because Prysm does not contain the bloom initialization code. The only guard Prysm applies is the 256-byte length check via `DecodeHexWithLength`. This guard is sufficient for Prysm's role: it ensures the field is the correct size for SSZ encoding and beacon state storage. The EL is responsible for enforcing the bloom construction algorithm.",
+        "proof_successful": true,
+        "guard_identified": "bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength) \u2014 enforces exactly 256 bytes",
+        "guard_sufficiency": "Sufficient for Prysm's role as a pass-through. The guard ensures SSZ encoding will not fail. The EL enforces bloom construction correctness via engine_newPayload payload validation.",
+        "edge_cases": [
+          "A bloom of all zeros is valid from Prysm's perspective even if transactions are present \u2014 but the EL's engine_newPayload would reject this.",
+          "The SSZ encoding layer (engine.ssz.go:582) provides a second length check: if size := len(e.LogsBloom); size != 256 \u2014 defense in depth."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "PROP-W5B6-29 is an EL-specification property for bloom filter construction. Prysm is a CL and never constructs a bloom filter. The code at lines 73-78 correctly deserializes and length-validates the bloom (256 bytes) as per its role. There is no vulnerability or logic gap in Prysm for this property. The property is categorically out-of-scope for Prysm's implementation.",
+        "recommendation": "No fix required. Prysm correctly delegates bloom construction to the EL. Bloom content validation against logs is the EL's responsibility.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "CHK-PROP-W5B6-21-001",
+      "checklist_item": {
+        "property_id": "PROP-W5B6-30",
+        "description": "logs_bloom MUST add every log address to the bloom filter exactly once per log.",
+        "graph_element_under_test": "ToConsensus, lines 73-78"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "api/server/structs/conversions_block_execution.go",
+            "symbol": "ToConsensus",
+            "line_range": {
+              "start": 73,
+              "end": 78
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Lines 73-78 of api/server/structs/conversions_block_execution.go\npayloadLogsBloom, err := bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength)\nif err != nil {\n    return nil, server.NewDecodeError(err, \"ExecutionPayload.LogsBloom\")\n}",
+      "state_context": "LogsBloomLength = 256. Prysm receives the aggregated bloom from the EL. No per-log address iteration or bloom.Add() calls exist anywhere in the CL consensus path. The ExecutionPayload proto (enginev1) does not contain a Logs field \u2014 only the pre-computed LogsBloom byte array.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-W5B6-30 requires that the bloom filter insertion of log addresses happens exactly once per log. The code at lines 73-78 performs a single operation: `bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength)`. This function decodes a hex string and verifies the length is exactly 256 bytes. There is no loop over logs, no address extraction, no bloom.Add() call, and no log processing of any kind. The property concerns EL bloom construction logic which is entirely absent from this code.",
+        "state_anomalies_found": [
+          "No log iteration code exists in this function or anywhere in Prysm's consensus path.",
+          "No bloom.Add(address) call exists \u2014 Prysm receives a completed bloom, not raw logs.",
+          "Prysm has no access to the per-transaction receipt logs at the CL level; only the aggregated bloom is transmitted."
+        ],
+        "cache_analysis": "Not applicable. The function performs a direct hex decode with no state management.",
+        "concurrency_analysis": "Not applicable for this property. No concurrent bloom modification paths exist."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "Symbolically: `e.LogsBloom` is a 512-char hex string controlled by the API caller. After decode, it becomes a 256-byte slice. No log addresses are extracted, no bloom.Add is called, no iteration occurs. The property 'add every log address exactly once' cannot be violated or satisfied by this code because the operation simply does not exist.",
+        "counterexample_found": false,
+        "counterexample": "Not applicable. The property describes an operation (add_to_bloom for each log address) that does not exist in this code or anywhere in Prysm.",
+        "attack_scenarios": [
+          "An attacker could submit a LogsBloom that misrepresents the set of log addresses (e.g., omits certain addresses from the bloom). Prysm would accept this without detecting the inconsistency. The EL would reject this via engine_newPayload as the payload hash would not match.",
+          "Cross-client attack: if a malicious EL provides Prysm with an execution payload having a manipulated bloom, Prysm would propagate it. The block would still be rejected by honest EL nodes during engine_newPayload."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The code path is externally reachable via the Beacon API (block submission endpoint). However, the property PROP-W5B6-30 describes EL-side bloom construction that never occurs in Prysm. No CL code path can violate or satisfy this property as it does not implement bloom filter construction.",
+        "entry_points": [
+          "POST /eth/v1/beacon/blocks",
+          "Engine API engine_getPayloadV* (EL provides pre-computed bloom)"
+        ],
+        "attacker_controlled": true,
+        "classification": "out-of-scope",
+        "attack_surface": "The bloom address-insertion logic is non-existent in Prysm. The EL is the trust boundary for bloom correctness."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'every log address added exactly once' cannot be proven at the CL level because Prysm does not have access to per-log address data when processing execution payloads \u2014 only the aggregated 256-byte bloom is transmitted. The Ethereum Engine API does not transmit receipt logs to the CL; only the payload header fields including the pre-computed bloom are used. The invariant is not provable or falsifiable at this layer.",
+        "proof_successful": true,
+        "guard_identified": "Length validation via DecodeHexWithLength + SSZ length check \u2014 sufficient for Prysm's role",
+        "guard_sufficiency": "The guards are appropriate for the CL's role. The EL enforces bloom construction correctness. No gap exists in Prysm's implementation relative to its specification responsibilities.",
+        "edge_cases": [
+          "Prysm does not verify bloom content against transactions \u2014 this is by design per the CL/EL separation of duties.",
+          "If the EL provides a corrupted bloom, Prysm propagates it, but the block will be rejected by other EL nodes via engine_newPayload."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "PROP-W5B6-30 is an EL-specification property. Prysm's consensus client correctly treats the LogsBloom as an opaque 256-byte field received from the execution layer. It correctly enforces the only CL-relevant constraint (length = 256 bytes). Prysm does not implement and is not responsible for bloom filter construction. This property is out-of-scope for Prysm.",
+        "recommendation": "No fix required. The property is not applicable to the consensus client. Bloom filter correctness is the EL's responsibility and is enforced via engine_newPayload validation across EL nodes.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "CHK-PROP-W5B6-22-001",
+      "checklist_item": {
+        "property_id": "PROP-W5B6-31",
+        "description": "logs_bloom MUST add every topic of every log to the bloom filter exactly once.",
+        "graph_element_under_test": "ToConsensus, lines 73-78"
+      },
+      "code_scope": {
+        "locations": [
+          {
+            "file": "api/server/structs/conversions_block_execution.go",
+            "symbol": "ToConsensus",
+            "line_range": {
+              "start": 73,
+              "end": 78
+            },
+            "role": "primary"
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "grep_fallback"
+      },
+      "code_snippet": "// Lines 73-78 of api/server/structs/conversions_block_execution.go\npayloadLogsBloom, err := bytesutil.DecodeHexWithLength(e.LogsBloom, fieldparams.LogsBloomLength)\nif err != nil {\n    return nil, server.NewDecodeError(err, \"ExecutionPayload.LogsBloom\")\n}",
+      "state_context": "Prysm has no access to per-log topic data. The CL's ExecutionPayload proto does not contain a Logs field \u2014 only the aggregated LogsBloom byte array. Topic-level bloom insertion is an EL implementation detail. No bloom.Add(topic) calls exist anywhere in Prysm.",
+      "phase1_abstract_interpretation": {
+        "summary": "PROP-W5B6-31 requires that bloom filter topic insertion happens exactly once per topic per log. The code at lines 73-78 exclusively performs hex decoding with length validation. No topic data structure exists anywhere in the CL payload representation. The Ethereum Engine API transmits only the aggregated bloom, not individual log topics. Topic-level bloom insertion is an EL implementation detail that Prysm has no visibility into and no code path to enforce.",
+        "state_anomalies_found": [
+          "No topic extraction code exists in Prysm's execution payload processing.",
+          "The CL's ExecutionPayload proto does not contain a Logs field \u2014 only the aggregated LogsBloom byte array.",
+          "Prysm has no mechanism to verify topic-to-bloom correspondence even if desired."
+        ],
+        "cache_analysis": "Not applicable. The bloom is stored as-is in beacon state after deserialization.",
+        "concurrency_analysis": "Not applicable for this property."
+      },
+      "phase2_symbolic_execution": {
+        "summary": "The symbolic analysis confirms: `payloadLogsBloom` is a 256-byte slice populated entirely from attacker-controlled hex input. There is no branch in the code that processes, iterates, or validates topics. A symbolic execution of this function produces a single path: decode hex \u2192 verify length \u2192 assign to proto field. No topic-related operations exist on any path.",
+        "counterexample_found": false,
+        "counterexample": "Not applicable. The operation described by the property (add topics to bloom filter) is absent from the code.",
+        "attack_scenarios": [
+          "An attacker submitting a block with LogsBloom that omits certain topics would not be detected by Prysm. The forged bloom would be propagated to the beacon chain. However, the EL performs engine_newPayload validation which includes block hash verification \u2014 a miscomputed bloom would invalidate the block hash and be rejected.",
+          "In a scenario where a malicious EL sends Prysm a payload with a crafted bloom, Prysm is a willing relay. This is a trust boundary concern at the EL level, not exploitable via this Prysm code."
+        ],
+        "timing_dependencies": "None."
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "The code is externally reachable via the Beacon API. However, the topic-to-bloom insertion operation described in PROP-W5B6-31 does not exist in Prysm anywhere. The EL is solely responsible for bloom construction correctness including topic insertion. Prysm's role is limited to opaque 256-byte field transport.",
+        "entry_points": [
+          "POST /eth/v1/beacon/blocks",
+          "Engine API engine_getPayloadV* response from EL",
+          "BeaconBlockBellatrix.ToConsensus \u2192 ExecutionPayload.ToConsensus"
+        ],
+        "attacker_controlled": true,
+        "classification": "out-of-scope",
+        "attack_surface": "Bloom topic insertion is a non-existent operation in Prysm. No attack surface for this property exists within the CL."
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'every topic of every log added exactly once' is not provable at the CL because Prysm does not process logs at all during execution payload handling. The consensus specification (ethereum/consensus-specs) does not require the CL to validate bloom content against transactions or logs \u2014 it only specifies that the CL stores and propagates the bloom field. Prysm is compliant with the consensus specification for this field.",
+        "proof_successful": true,
+        "guard_identified": "DecodeHexWithLength(e.LogsBloom, 256) \u2014 length enforcement only, as specified by consensus spec",
+        "guard_sufficiency": "Sufficient for the CL role. The EL enforces topic-to-bloom insertion. The consensus spec does not require the CL to perform this validation.",
+        "edge_cases": [
+          "SSZ encoding provides a second length enforcement (engine.ssz.go:582) ensuring exactly 256 bytes are stored.",
+          "The beacon state stores the bloom as part of ExecutionPayloadHeader, which is included in the block body hash. A manipulated bloom would change the block hash, which validators attest to \u2014 providing cryptographic integrity at the attestation level."
+        ]
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "PROP-W5B6-31 is an EL-specification property for bloom filter construction. It is not applicable to Prysm's consensus client implementation. Prysm correctly implements its specification role: deserialize and length-validate the bloom field. Topic insertion into bloom filters is exclusively an EL responsibility. No vulnerability exists in this Prysm code.",
+        "recommendation": "No fix required. The property is categorically out-of-scope for Prysm. Bloom filter correctness including topic insertion is enforced by the execution layer and indirectly validated via block hash verification during engine_newPayload.",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "CHK-PROP-W5B6-23-001",
+      "checklist_item": {
+        "property_id": "PROP-W5B6-32",
+        "description": "logs_bloom MUST return the final Bloom object only after ALL logs have been processed.",
+        "graph_element_under_test": "N/A (not_found)"
+      },
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_method": null
+      },
+      "code_snippet": "",
+      "state_context": "Code location could not be resolved in Phase 02c. This item has no identifiable implementation in Prysm \u2014 consistent with the architectural finding that Prysm does not construct bloom filters; the EL returns the completed bloom as an opaque field.",
+      "phase1_abstract_interpretation": {
+        "summary": "Cannot perform analysis: no code location was resolved. The property describes EL-side bloom construction logic (returning final bloom only after all log processing is complete). As established across items 20-22, Prysm does not implement bloom filter construction at the CL. This property is not applicable to Prysm.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No code to analyze. Property is an EL-construction invariant not present in Prysm.",
+        "counterexample_found": false,
+        "counterexample": "N/A",
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Code not found in Prysm. The property is an EL-level concern.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "not-found",
+        "attack_surface": "N/A"
+      },
+      "phase3_invariant_proving": {
+        "summary": "Property not applicable. Prysm does not implement bloom construction. The EL enforces this invariant.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Code location not found. Property is an EL-specification invariant not applicable to Prysm. Prysm never constructs or returns a bloom filter \u2014 it receives a pre-computed bloom from the execution layer.",
+        "recommendation": "N/A",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    },
+    {
+      "check_id": "CHK-PROP-W5B6-24-001",
+      "checklist_item": {
+        "property_id": "PROP-W5B6-33",
+        "description": "add_to_bloom MUST be called exactly (1 + len(log.topics)) times per log entry: once for the address and once per topic.",
+        "graph_element_under_test": "N/A (not_found)"
+      },
+      "code_scope": {
+        "locations": [],
+        "resolution_status": "not_found",
+        "resolution_method": null
+      },
+      "code_snippet": "",
+      "state_context": "Code location could not be resolved in Phase 02c. The function `add_to_bloom` does not exist in Prysm. Prysm does not implement Bloom-2048 construction logic; this is exclusively an execution layer operation. The CL receives only the completed 256-byte bloom aggregate via the Engine API.",
+      "phase1_abstract_interpretation": {
+        "summary": "Cannot perform analysis: no code location was resolved and `add_to_bloom` does not exist in Prysm. The property describes the EL's internal bloom filter construction algorithm \u2014 the exact number of add_to_bloom calls per log entry. This is an EL implementation invariant, not a CL responsibility.",
+        "state_anomalies_found": [],
+        "cache_analysis": "N/A",
+        "concurrency_analysis": "N/A"
+      },
+      "phase2_symbolic_execution": {
+        "summary": "No code to analyze. The function `add_to_bloom` does not exist anywhere in the Prysm codebase. This property targets EL-level bloom construction implementation.",
+        "counterexample_found": false,
+        "counterexample": "N/A",
+        "attack_scenarios": [],
+        "timing_dependencies": "N/A"
+      },
+      "phase2_5_reachability_analysis": {
+        "summary": "Code not found in Prysm. `add_to_bloom` is an EL function (go-ethereum: types.Bloom / CreateBloom / LogsBloom). It is not implemented in the Prysm CL codebase.",
+        "entry_points": [],
+        "attacker_controlled": false,
+        "classification": "not-found",
+        "attack_surface": "N/A"
+      },
+      "phase3_invariant_proving": {
+        "summary": "The invariant 'add_to_bloom called exactly (1 + len(log.topics)) times' is not applicable to Prysm. This is an EL-specification invariant enforced by the execution client's bloom construction implementation.",
+        "proof_successful": false,
+        "guard_identified": "N/A",
+        "guard_sufficiency": "N/A",
+        "edge_cases": []
+      },
+      "phase3_5_scope_filtering": {
+        "bug_bounty_eligible": false,
+        "reason": "Code location not found. `add_to_bloom` does not exist in Prysm. This EL-specification property describes the execution client's bloom filter construction algorithm and is completely out-of-scope for Prysm's consensus client implementation.",
+        "recommendation": "N/A",
+        "severity_estimate": "N/A"
+      },
+      "final_classification": "out-of-scope",
+      "bug_bounty_eligible": false
+    }
+  ],
+  "metadata": {
+    "phase": "03",
+    "worker_id": 2,
+    "batch_index": 3,
+    "item_count": 5,
+    "timestamp": 1771388071,
+    "processed_ids": [
+      "CHK-PROP-W5B6-20-001",
+      "CHK-PROP-W5B6-21-001",
+      "CHK-PROP-W5B6-22-001",
+      "CHK-PROP-W5B6-23-001",
+      "CHK-PROP-W5B6-24-001"
+    ]
+  }
+}
