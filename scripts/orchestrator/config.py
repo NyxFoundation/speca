@@ -45,6 +45,10 @@ class PhaseConfig(BaseModel):
     max_context_tokens: int = 190_000
     base_prompt_tokens: int = 5_000
     max_batch_size: int = 10
+    # Optional turn cap for Claude CLI (None to disable)
+    max_turns_per_batch: int | None = None
+    # Optional cache-read guard (0 to disable)
+    max_cache_read_tokens: int = 0
 
     # Execution configuration
     workdir: str | None = None
@@ -228,6 +232,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         input_patterns=["outputs/02c_PARTIAL_*.json", "outputs/02_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=5,  # Reduced to prevent timeout and improve completion rate
+        max_context_tokens=120_000,
+        base_prompt_tokens=2_000,
         item_id_field="check_id",
         result_key="audit_items",
         model="sonnet",
@@ -237,6 +243,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_empty_results=5,
         max_budget_usd=30.0,
         log_anomaly_threshold=3,
+        max_turns_per_batch=3,
+        max_cache_read_tokens=300_000,
     ),
 
     "04": PhaseConfig(

@@ -352,8 +352,10 @@ class BudgetExceeded(Exception):
 # Anthropic Claude pricing (per 1M tokens) — conservative estimates
 # These can be overridden via CostTracker constructor.
 _DEFAULT_PRICING = {
-    "input_per_million": 3.00,   # $3.00 / 1M input tokens
+    "input_per_million": 3.00,    # $3.00 / 1M input tokens
     "output_per_million": 15.00,  # $15.00 / 1M output tokens
+    "cache_read_multiplier": 0.10,     # billed at ~10% of input price
+    "cache_creation_multiplier": 1.25, # billed at ~125% of input price (5m tier)
 }
 
 
@@ -375,10 +377,14 @@ class CostTracker:
     max_budget_usd: float = 50.0
     input_price_per_million: float = _DEFAULT_PRICING["input_per_million"]
     output_price_per_million: float = _DEFAULT_PRICING["output_per_million"]
+    cache_read_multiplier: float = _DEFAULT_PRICING["cache_read_multiplier"]
+    cache_creation_multiplier: float = _DEFAULT_PRICING["cache_creation_multiplier"]
 
     # Accumulated counters
     total_input_tokens: int = field(default=0, init=False)
     total_output_tokens: int = field(default=0, init=False)
+    total_cache_read_tokens: int = field(default=0, init=False)
+    total_cache_creation_tokens: int = field(default=0, init=False)
     total_cost_usd: float = field(default=0.0, init=False)
     batch_count: int = field(default=0, init=False)
 
@@ -390,6 +396,8 @@ class CostTracker:
         self,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
         *,
         worker_id: int = 0,
         batch_index: int = 0,
@@ -401,12 +409,24 @@ class CostTracker:
             BudgetExceeded: when cumulative cost exceeds ``max_budget_usd``.
         """
         input_cost = (input_tokens / 1_000_000) * self.input_price_per_million
+        cache_read_cost = (
+            (cache_read_tokens / 1_000_000)
+            * self.input_price_per_million
+            * self.cache_read_multiplier
+        )
+        cache_creation_cost = (
+            (cache_creation_tokens / 1_000_000)
+            * self.input_price_per_million
+            * self.cache_creation_multiplier
+        )
         output_cost = (output_tokens / 1_000_000) * self.output_price_per_million
-        batch_cost = input_cost + output_cost
+        batch_cost = input_cost + cache_read_cost + cache_creation_cost + output_cost
 
         async with self._lock:
             self.total_input_tokens += input_tokens
             self.total_output_tokens += output_tokens
+            self.total_cache_read_tokens += cache_read_tokens
+            self.total_cache_creation_tokens += cache_creation_tokens
             self.total_cost_usd += batch_cost
             self.batch_count += 1
 
@@ -415,6 +435,8 @@ class CostTracker:
                 "worker_id": worker_id,
                 "batch_index": batch_index,
                 "input_tokens": input_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
                 "output_tokens": output_tokens,
                 "batch_cost_usd": round(batch_cost, 4),
                 "cumulative_cost_usd": round(self.total_cost_usd, 4),
@@ -425,7 +447,7 @@ class CostTracker:
                     f"Budget exceeded: ${self.total_cost_usd:.2f} > "
                     f"${self.max_budget_usd:.2f} "
                     f"(after {self.batch_count} batches, "
-                    f"{self.total_input_tokens + self.total_output_tokens:,} total tokens)",
+                    f"{self.total_input_tokens + self.total_output_tokens + self.total_cache_read_tokens + self.total_cache_creation_tokens:,} total tokens)",
                     stats=self.get_stats(),
                 )
 
@@ -435,8 +457,15 @@ class CostTracker:
         """Return a snapshot of all cost counters."""
         return {
             "total_input_tokens": self.total_input_tokens,
+            "total_cache_read_tokens": self.total_cache_read_tokens,
+            "total_cache_creation_tokens": self.total_cache_creation_tokens,
             "total_output_tokens": self.total_output_tokens,
-            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "total_tokens": (
+                self.total_input_tokens
+                + self.total_cache_read_tokens
+                + self.total_cache_creation_tokens
+                + self.total_output_tokens
+            ),
             "total_cost_usd": round(self.total_cost_usd, 4),
             "max_budget_usd": self.max_budget_usd,
             "budget_remaining_usd": round(
@@ -475,9 +504,16 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
 
     input_tokens = 0
     output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
 
     if not log_path.exists():
-        return {"input_tokens": 0, "output_tokens": 0}
+        return {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+        }
 
     try:
         with open(log_path, errors="replace") as f:
@@ -503,13 +539,23 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
                             usage = msg["usage"]
 
                 if usage:
-                    input_tokens = max(
-                        input_tokens,
-                        usage.get("input_tokens", 0),
-                    )
+                    input_tokens = max(input_tokens, usage.get("input_tokens", 0))
                     output_tokens += usage.get("output_tokens", 0)
+                    cache_read_tokens = max(
+                        cache_read_tokens,
+                        usage.get("cache_read_input_tokens", 0),
+                    )
+                    cache_creation_tokens = max(
+                        cache_creation_tokens,
+                        usage.get("cache_creation_input_tokens", 0),
+                    )
 
     except Exception:
         pass
 
-    return {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+    }
