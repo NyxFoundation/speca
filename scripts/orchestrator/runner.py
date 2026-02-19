@@ -480,22 +480,48 @@ class ClaudeRunner:
                 )
 
         # --- Cost tracking: extract token usage from log ---
+        usage = extract_token_usage_from_log(log_file)
+
+        if (
+            self.config.max_cache_read_tokens > 0
+            and usage["cache_read_tokens"] > self.config.max_cache_read_tokens
+        ):
+            raise CircuitBreakerTripped(
+                f"cache_read_tokens {usage['cache_read_tokens']:,} "
+                f"exceeds limit {self.config.max_cache_read_tokens:,} "
+                f"(batch {batch_index}, worker {worker_id})",
+                self.circuit_breaker.get_stats(),
+            )
+
         if self.cost_tracker:
-            usage = extract_token_usage_from_log(log_file)
-            if usage["input_tokens"] > 0 or usage["output_tokens"] > 0:
+            if (
+                usage["input_tokens"] > 0
+                or usage["output_tokens"] > 0
+                or usage["cache_read_tokens"] > 0
+                or usage["cache_creation_tokens"] > 0
+            ):
                 batch_cost = await self.cost_tracker.record_usage(
                     input_tokens=usage["input_tokens"],
                     output_tokens=usage["output_tokens"],
+                    cache_read_tokens=usage["cache_read_tokens"],
+                    cache_creation_tokens=usage["cache_creation_tokens"],
                     worker_id=worker_id,
                     batch_index=batch_index,
                 )
                 cost_stats = self.cost_tracker.get_stats()
+                total_tokens = (
+                    usage["input_tokens"]
+                    + usage["output_tokens"]
+                    + usage["cache_read_tokens"]
+                    + usage["cache_creation_tokens"]
+                )
                 print(
                     f"[W{worker_id}] Batch {batch_index}: "
-                    f"tokens={usage['input_tokens']+usage['output_tokens']:,} "
-                    f"(+${batch_cost:.4f}, "
-                    f"total=${cost_stats['total_cost_usd']:.2f}/"
-                    f"${cost_stats['max_budget_usd']:.2f})",
+                    f"tokens={total_tokens:,} "
+                    f"(in={usage['input_tokens']:,}, cache_read={usage['cache_read_tokens']:,}, "
+                    f"cache_create={usage['cache_creation_tokens']:,}, out={usage['output_tokens']:,}); "
+                    f"+${batch_cost:.4f}, total=${cost_stats['total_cost_usd']:.2f}/"
+                    f"${cost_stats['max_budget_usd']:.2f}",
                 )
 
         # Check result
@@ -691,6 +717,8 @@ class ClaudeRunner:
         ]
         if self.config.model:
             cmd.extend(["--model", self.config.model])
+        if self.config.max_turns_per_batch:
+            cmd.extend(["--max-turns", str(self.config.max_turns_per_batch)])
         return cmd
 
     def _save_json(self, path: Path, data: Any) -> None:

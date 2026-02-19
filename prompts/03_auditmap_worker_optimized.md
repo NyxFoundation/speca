@@ -95,16 +95,19 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - Ensure all phases were executed (no early exits)
           - Check that guards were challenged, not just identified
 
-    5. **Merge Results**: Merge skill output into result objects, append all to `results`.
+    5. **Merge Results**: For each item, map to the minimal schema:
+       - id = checklist/check_id
+       - classification (allowed set)
+       - code_path (primary location file::symbol::Lstart-end)
+       - proof_trace (succinct rationale or root cause/proof)
+       - attack_scenario (only for vulns/potential; else "")
+       - checklist_id (duplicate of id for downstream compatibility)
 
-    6. **Write Output**: After ALL items processed, write `results` array to <ref id="results"/>.
+    6. **Write Output**: After ALL items processed, write a JSON object with `metadata` and `audit_items` to <ref id="results"/>.
 
-    7. **Confirm**: Print summary including:
-       - Total items processed
-       - Number of vulnerabilities found (bug_bounty_eligible: true)
-       - Number of skill invocations
-       - Average analysis depth (phases executed per item)
-       End with: `Output File: {{OUTPUT_FILE}}`
+    7. **Confirm**: On stdout, print a one-line summary (<=5 lines total) and `Output File: {{OUTPUT_FILE}}`.
+
+    8. **Turn budget**: Complete the batch in a single assistant turn if possible (the orchestrator may cap max_turns_per_batch).
   </instructions>
 
   <data_sources>
@@ -115,33 +118,39 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     - **Search MCP**: Use `mcp__filesystem__search_files` to find state management code
   </data_sources>
 
-  <quality_gates>
-    **Before writing output, verify:**
-    
-    1. **No Premature Dismissals**:
-       - Items marked "not-a-vulnerability" MUST have concrete justification
-       - "Guards exist" is NOT sufficient justification alone
-       - Must explain why guards are SUFFICIENT for all attack scenarios
-    
-    2. **Concrete Attack Scenarios**:
-       - Items marked "vulnerability" MUST have concrete exploit description
-       - Include specific inputs, timing, or state combinations
-    
-    3. **Full Analysis**:
-       - Every item MUST have all phase outputs (phase1, phase2, phase2_5, phase3, phase3_5)
-       - No empty or missing phase results
-    
-    4. **Conservative Bias**:
-       - When uncertain, lean toward reporting (bug_bounty_eligible: true)
-       - Document uncertainty in reasoning
-  </quality_gates>
 </task>
 
 <output>
-  <format>JSON array</format>
-  <stdout>Max 10 lines: batch size, items processed, vulnerabilities found, status.</stdout>
+  <format>
+    - Write a single JSON object with two keys:
+      - "metadata": keep the existing metadata structure (phase, worker_id, batch_index, item_count, timestamp, processed_ids, etc.) unchanged.
+      - "audit_items": an array of result rows. Each row MUST contain ONLY the following keys, nothing else:
+        1) "id"                -> same as checklist_id / check_id string
+        2) "classification"    -> one of: vulnerability | potential-vulnerability | not-a-vulnerability | informational | out-of-scope
+        3) "code_path"         -> string like "path/to/file.go::FuncName::L22-33" (primary location)
+        4) "proof_trace"       -> 
+           - if classification is vulnerability or potential-vulnerability: concise root cause statement + short proof / why the guard fails (1–3 sentences)
+           - otherwise: concise rationale why it is safe or out-of-scope (1–3 sentences)
+        5) "attack_scenario"   -> 
+           - if vulnerability/potential-vulnerability: one concrete exploit path (1–2 sentences)
+           - otherwise: empty string ""
+        6) "checklist_id"      -> the checklist/check_id string
+    - Do NOT emit any other fields (no severity, confidence, bug_bounty_eligible, phases, state_context, summaries, recommendations, counts, or headers).
+    - Preserve JSON ordering above for readability.
+  </format>
+  <stdout>Max 5 lines: e.g., "items=5 vuln=1 out_of_scope=2 safe=2".</stdout>
   <final_line>Output File: {{OUTPUT_FILE}}</final_line>
 </output>
+
+<quality_gates>
+  **Before writing output, verify:**
+  
+  1. **Field whitelist**: Every audit_items element has exactly the 6 allowed keys (id, classification, code_path, proof_trace, attack_scenario, checklist_id). No extras.
+  2. **Non-empty rationale**: proof_trace non-empty (<= 3 sentences). attack_scenario non-empty only for vulnerability/potential-vulnerability; otherwise exactly "".
+  3. **Code path present**: code_path includes file, symbol (if available), and line range e.g., `beacon-chain/core/peerdas/reconstruction.go::ReconstructDataColumnSidecars::L31-122`.
+  4. **Classification sanity**: use allowed set only.
+  5. **Metadata preserved**: metadata object is still included and unchanged except for fields you legitimately update (e.g., timestamp, processed_ids).
+</quality_gates>
 
 <anti_patterns>
   **AVOID these common mistakes:**
