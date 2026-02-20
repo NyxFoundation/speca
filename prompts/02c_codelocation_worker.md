@@ -8,6 +8,7 @@ Language: English only.
 <task>
   <goal>For each checklist item in the batch, find the relevant code locations in the target repository. Return ONLY file paths, function names, and line ranges — do NOT extract code excerpts.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
@@ -19,6 +20,8 @@ Language: English only.
 
   <instructions>
     ## Step 1: Setup
+
+    Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context.
 
     Read `outputs/02c_TARGET_INFO.json`. It contains:
     - `target_repo`: repository identifier (e.g. "OffchainLabs/prysm")
@@ -53,8 +56,14 @@ Language: English only.
       {
         "checklist_with_code": [
           {
-            // ALL original fields from the input item must be preserved as-is
-
+            "check_id": "CHK-...",
+            "property_id": "PROP-...",
+            "title": "...",
+            "severity": "Critical|High|Medium|Low",
+            "test_procedure": "...",
+            "bug_class": "...",
+            "reachability": { ... },
+            "notes": "...",
             "code_scope": {
               "locations": [           // empty list if out_of_scope or not_found
                 {
@@ -71,6 +80,7 @@ Language: English only.
           }
         ]
       }
+      **Note**: Only the fields listed above are required. Do NOT include `mindset`, `is_boundary_check`, `risk_category`, `graph_element_under_test`, or `code_excerpt`.
     </schema>
     <stdout>Max 10 lines: processed count and per-status breakdown.</stdout>
     <final_line>Output File: {{OUTPUT_FILE}}</final_line>

@@ -18,12 +18,12 @@ Inherit the `bug_bounty_scope` from the input trust model. If not present, use t
 **In-Scope Entry Points:**
 - P2P networking (devp2p, libp2p)
 - Transaction submission and processing
-- Engine API (EL-CL interface)
 
 **Out-of-Scope Entry Points:**
 - JSON-RPC API
 - Beacon API
 - Configuration/Admin interfaces
+- Engine API (EL-CL interface)
 
 ## Input
 A JSON object containing a list of items, where each item references a trust model and its corresponding subgraph files.
@@ -40,7 +40,7 @@ A JSON object containing a list of items, where each item references a trust mod
 
 ## Procedure
 
-1.  **Load Inputs**: Read the content of the `trust_model_file` and all associated `subgraph_files`. Extract the `bug_bounty_scope` from the trust model.
+1.  **Load Inputs**: Read the content of the `trust_model_file` and all associated `subgraph_files`. Extract the `bug_bounty_scope` from the trust model. **Extract `severity_classification`** from `bug_bounty_scope` — this is the authoritative severity definition for the entire audit and MUST be used in step 9.
 
 2.  **Analyze Trust Boundaries**: For each trust boundary identified in the model, formulate properties that must hold true for the boundary to be secure. **Prioritize boundaries marked as `in-scope` and `attacker_controlled: true`.**
 
@@ -66,21 +66,28 @@ A JSON object containing a list of items, where each item references a trust mod
     - `out-of-scope`: Property is only reachable via out-of-scope entry points
     - `conditional`: Requires specific conditions or further investigation
 
-9.  **Assign Severity**: Based on impact and exploitability:
-    - `CRITICAL`: Consensus failure, fund loss, network-wide impact
-    - `HIGH`: Single-node crash, significant DoS, data corruption
-    - `MEDIUM`: Limited DoS, information disclosure, edge cases
-    - `LOW`: Minor issues, requires unlikely conditions
-    - `INFORMATIONAL`: Best practice violations, no direct security impact
+9.  **Assign Severity**: Use the `severity_classification` from the trust model's `bug_bounty_scope` as the **authoritative definition** for each severity level. Match the property's potential impact against the program-specific criteria, examples, and impact thresholds defined there.
+    - Compare the property's impact scope against each level's `criteria`, `examples`, and `impact` fields.
+    - Include a `severity_justification` that references the specific program criterion matched.
+    - **Fallback** (only if `severity_classification` is absent from the trust model):
+      - `CRITICAL`: Consensus failure, fund loss, network-wide impact
+      - `HIGH`: Single-node crash, significant DoS, data corruption
+      - `MEDIUM`: Limited DoS, information disclosure, edge cases
+      - `LOW`: Minor issues, requires unlikely conditions
+      - `INFORMATIONAL`: Best practice violations, no direct security impact
 
 10. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
     - `reachability.classification == "external-reachable"` AND
     - `reachability.bug_bounty_scope == "in-scope"` AND
     - `severity` is `MEDIUM` or higher
 
-11. **Assign IDs**: Assign a unique ID per property using the worker/batch/index scheme:
-    - Format: `PROP-W{worker_id}B{batch_index}-{index}` (1-based `index` within the file’s `properties` list).
-    - Example: `PROP-W3B12-7`
+11. **Assign IDs**: Assign a unique ID per property using the `_id_prefix` from the context data:
+    - Use the `_id_prefix` field from the input context (e.g., `"PROP-txval"`)
+    - Format: `{_id_prefix}-{type_abbrev}-{seq:03d}`
+      - `type_abbrev`: `inv` (invariant), `pre` (pre-condition), `post` (post-condition), `asm` (assumption)
+      - `seq`: 1-based sequence within this (prefix, type) combination
+    - Example: `PROP-txval-inv-001`, `PROP-p2p-pre-003`
+    - Fallback: If `_id_prefix` is not available, use `PROP-{hash8}-{type_abbrev}-{seq:03d}` where `hash8` is the first 8 chars of a hash of the source file path
 
 ## Output Format
 Return a JSON object containing the list of generated properties. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.

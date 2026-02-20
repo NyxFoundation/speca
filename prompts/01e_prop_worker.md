@@ -10,6 +10,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 <task>
   <goal>For each item in the batch, use the /property-generator skill to generate formal properties from a trust model and subgraphs.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
@@ -22,12 +23,13 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </critical_requirements>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/> and select the first BATCH_SIZE unprocessed items. Create an empty array `results = []`.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty array `results = []`.
 
     2. **Process Each Item**: For each item in the batch:
-       a. **Invoke Skill**: Call the `/property-generator` skill, passing the path to the trust model and subgraph files.
-       b. **Handle Errors**: If the skill fails, create an error object for that item.
-       c. **Append Result**: Append the successful result or the error object to the `results` array.
+       a. **Read ID Prefix**: Read the `_id_prefix` field from the context data for this item (e.g., `"PROP-txval"`). This prefix is used by the skill to generate meaningful property IDs.
+       b. **Invoke Skill**: Call the `/property-generator` skill, passing the path to the trust model and subgraph files, along with the `_id_prefix`.
+       c. **Handle Errors**: If the skill fails, create an error object for that item.
+       d. **Append Result**: Append the successful result or the error object to the `results` array.
 
     3. **Write Output File**: After ALL items have been processed, write the `results` array to <ref id="results"/>.
        - This step is **MANDATORY**.
@@ -37,7 +39,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
   <data_sources>
     - **Skill**: `/property-generator`
-    - **Queue File**: Contains items with `trust_model_file` and `subgraph_files` paths.
+    - **Queue File**: Contains `item_ids` and `context_file` path. Read the context file to get item data keyed by ID, each with `trust_model_file` and `subgraph_files` paths.
   </data_sources>
 </task>
 

@@ -23,12 +23,66 @@ from pydantic import BaseModel, Field, model_validator
 # ---------------------------------------------------------------------------
 
 class Severity(str, Enum):
-    """Severity levels used across the pipeline."""
+    """Severity levels used across the pipeline.
+
+    Members are ordered from most to least severe so that numeric
+    comparison works:  ``Severity.CRITICAL < Severity.HIGH`` is ``True``.
+    The ``rank`` property returns a numeric value (lower = more severe)
+    for use in threshold comparisons.
+    """
     CRITICAL = "Critical"
     HIGH = "High"
     MEDIUM = "Medium"
     LOW = "Low"
     INFORMATIONAL = "Informational"
+
+    @property
+    def rank(self) -> int:
+        """Numeric rank (0 = most severe)."""
+        return _SEVERITY_RANK[self]
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        # Lower rank = more severe, so "greater-or-equal severity" means
+        # rank is numerically less-or-equal.
+        return self.rank <= other.rank
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank < other.rank
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank >= other.rank
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Severity):
+            return NotImplemented
+        return self.rank > other.rank
+
+    @classmethod
+    def from_str(cls, value: str) -> Severity | None:
+        """Parse a severity string (case-insensitive).  Returns None on failure."""
+        if not value:
+            return None
+        normalised = value.strip().capitalize()
+        try:
+            return cls(normalised)
+        except ValueError:
+            return None
+
+
+# Rank lookup (populated after class definition to avoid forward-ref issues)
+_SEVERITY_RANK: dict[Severity, int] = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.INFORMATIONAL: 4,
+}
 
 
 class ReachabilityClassification(str, Enum):
@@ -199,6 +253,10 @@ class BugBountyScopeInfo(BaseModel):
     in_scope_components: list[str] = Field(default_factory=list)
     out_of_scope_components: list[str] = Field(default_factory=list)
     scope_notes: list[str] = Field(default_factory=list)
+    # Severity classification from the bug bounty program.
+    # Each key is a severity level (Critical/High/Medium/Low/Informational)
+    # with criteria, examples, and impact description.
+    severity_classification: dict[str, Any] = Field(default_factory=dict)
 
 
 class Phase01dPartial(BaseModel):
@@ -238,7 +296,7 @@ class Property(BaseModel):
     type: str = ""
     assertion: str = ""
     severity: str = ""
-    severity_justification: str = ""
+    severity_justification: str | None = None  # Optional — omitted in slim output
     covers: PropertyCovers = Field(default_factory=PropertyCovers)
     reachability: PropertyReachability = Field(default_factory=PropertyReachability)
     exploitability: str = ""
@@ -304,15 +362,15 @@ class ChecklistItem(BaseModel):
     property_id: str = ""
     title: str = ""
     severity: str = ""
-    mindset: str = ""
-    is_boundary_check: bool = False
+    mindset: str | None = None  # Optional — omitted in slim output
+    is_boundary_check: bool | None = None  # Optional — omitted in slim output
     reachability: ChecklistReachability = Field(default_factory=ChecklistReachability)
     test_procedure: str = ""
     bug_class: str = ""
-    risk_category: str = ""
+    risk_category: str | None = None  # Optional — omitted in slim output
     notes: str = ""
     # Optional fields from graph element
-    graph_element_under_test: str | None = None
+    graph_element_under_test: str | None = None  # Optional — omitted in slim output
     code_scope: CodeScope = Field(default_factory=CodeScope)  # Typed code location
     code_excerpt: str = ""  # Pre-resolved code snippet
 
@@ -450,11 +508,16 @@ class Phase04Partial(BaseModel):
 # ---------------------------------------------------------------------------
 
 class QueuePayload(BaseModel):
-    """Standard queue payload sent to Claude workers."""
+    """Standard queue payload sent to Claude workers.
+
+    Queue files contain only item IDs; full item data lives in a separate
+    context file (keyed by ID) to reduce context window pressure.
+    """
     worker_id: int
     phase: str
-    items: list[dict[str, Any]]
+    item_ids: list[str]
     total_items: int
+    context_file: str  # path to the companion context file
 
 
 # ---------------------------------------------------------------------------

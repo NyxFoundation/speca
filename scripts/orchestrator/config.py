@@ -93,6 +93,31 @@ class PhaseConfig(BaseModel):
     # batch log before the watcher recommends aborting.
     log_anomaly_threshold: int = 3
 
+    # ---- MCP / tool filtering ----
+    # Which MCP servers to load.  None = all servers from .mcp.json (default).
+    # Empty list = no MCP servers.  When set, the runner uses
+    # --strict-mcp-config to load only the listed servers.
+    mcp_servers: list[str] | None = None
+    # Built-in + MCP tool whitelist.  None = all available tools (default).
+    # When set, the runner passes --tools to restrict which tool definitions
+    # are sent to the API, reducing context token consumption.
+    tools_filter: list[str] | None = None
+
+    # ---- Severity gate ----
+    # Minimum severity level for items entering this phase.
+    # Items below this threshold are early-exited.
+    # None = no severity filtering (default for most phases).
+    # Value is a Severity enum string: "Critical", "High", "Medium", "Low", "Informational".
+    min_severity: str | None = None
+
+    # ---- Context / output field filtering ----
+    # Fields to include in the context file sent to workers.
+    # None = all fields (no filtering).
+    context_fields: list[str] | None = None
+    # Fields to keep in partial output files saved by the collector.
+    # None = all fields (no filtering).
+    output_fields: list[str] | None = None
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def effective_result_id_field(self) -> str:
@@ -114,6 +139,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         batch_strategy="count",
         max_batch_size=1,
         item_id_field="url",
+        mcp_servers=["fetch"],
     ),
 
     "01b": PhaseConfig(
@@ -132,6 +158,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         result_id_field="source_url",
         result_key="specs",
         output_mode="directory",
+        mcp_servers=["fetch", "filesystem"],
     ),
 
     "01c": PhaseConfig(
@@ -147,6 +174,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         batch_strategy="count",
         max_batch_size=10,
         item_id_field="file_path",
+        mcp_servers=["filesystem"],
     ),
 
     "01d": PhaseConfig(
@@ -163,6 +191,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=1,
         item_id_field="file_path",
         result_key="trust_model",
+        mcp_servers=["filesystem"],
     ),
 
     "01e": PhaseConfig(
@@ -179,6 +208,9 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=1,
         item_id_field="property_id",
         result_key="properties",
+        mcp_servers=[],
+        output_fields=["id", "text", "type", "assertion", "severity", "covers",
+                        "reachability", "bug_bounty_eligible", "exploitability"],
     ),
 
     "02": PhaseConfig(
@@ -196,6 +228,11 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="property_id",
         result_id_field="property_id",
         result_key="checklist",
+        mcp_servers=[],
+        min_severity="Low",  # Gate: drops Informational properties
+        context_fields=["property_id", "source_file", "_id_prefix"],
+        output_fields=["check_id", "property_id", "title", "severity",
+                        "test_procedure", "bug_class", "reachability", "notes"],
     ),
 
     "02c": PhaseConfig(
@@ -218,6 +255,11 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_total_retries=50,  # Increased - each tier may retry
         max_empty_results=20,  # Increased - out_of_scope items are valid results
         max_budget_usd=20.0,  # Moderate increase - Grep fallback reduces MCP costs
+        mcp_servers=["tree_sitter", "filesystem"],
+        context_fields=["check_id", "property_id", "title", "severity",
+                         "test_procedure", "reachability", "notes", "bug_class"],
+        output_fields=["check_id", "property_id", "title", "severity",
+                        "test_procedure", "bug_class", "reachability", "notes", "code_scope"],
     ),
 
     "03": PhaseConfig(
@@ -225,13 +267,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         name="Audit Map Generation",
         description="Perform formal audit analysis on checklist items",
         skill_path=Path(".claude/skills/formal-audit-unified/SKILL.md"),
-        prompt_path=Path("prompts/03_auditmap_worker_optimized.md"),
+        prompt_path=Path("prompts/03_auditmap_worker_inline.md"),  # Inlined skill — no fork
         queue_pattern="outputs/03_ASYNC_QUEUE_*.json",
         output_pattern="outputs/03_PARTIAL_*.json",
         depends_on=["02c"],  # Now depends on code pre-resolution
         input_patterns=["outputs/02c_PARTIAL_*.json", "outputs/02_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=5,  # Reduced to prevent timeout and improve completion rate
+        max_batch_size=1,  # Single item — eliminates inter-item context accumulation
         max_context_tokens=120_000,
         base_prompt_tokens=2_000,
         item_id_field="check_id",
@@ -243,8 +285,13 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_empty_results=5,
         max_budget_usd=30.0,
         log_anomaly_threshold=3,
-        max_turns_per_batch=3,
-        max_cache_read_tokens=300_000,
+        max_turns_per_batch=5,  # More turns for single-item inline audit
+        max_cache_read_tokens=100_000,  # Reduced — single item needs less cache
+        mcp_servers=[],  # No MCP — inlined prompt uses Read/Grep/Glob only
+        tools_filter=["Read", "Write", "Grep", "Glob"],
+        context_fields=["check_id", "property_id", "title", "severity",
+                         "test_procedure", "bug_class", "reachability", "notes",
+                         "code_scope", "code_excerpt"],
     ),
 
     "04": PhaseConfig(
@@ -261,6 +308,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_batch_size=2,
         item_id_field="check_id",
         result_key="reviewed_items",
+        mcp_servers=["filesystem"],
+        context_fields=["check_id", "audit_result"],
     ),
 }
 

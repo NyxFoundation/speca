@@ -341,14 +341,18 @@ class ClaudeRunner:
             result_parse_path = self.output_dir / f"{partial_base}_W{worker_id}B{batch_index}_{timestamp}.json"
             output_kwargs = {"output_file": str(result_parse_path)}
 
-        # Save queue
-        queue_payload = self._build_queue_payload(batch, worker_id)
+        # Save queue (ID-only) and context (full item data, optionally filtered)
+        context_path = self.output_dir / f"{phase_id}_CONTEXT_W{worker_id}B{batch_index}_{timestamp}.json"
+        queue_payload = self._build_queue_payload(batch, worker_id, str(context_path))
+        context_payload = self._build_context_payload(batch)
         self._save_json(queue_path, queue_payload)
+        self._save_json(context_path, context_payload)
 
         # Build prompt
         prompt_content = self._build_prompt(
             worker_id=worker_id,
             queue_file=str(queue_path),
+            context_file=str(context_path),
             batch_size=len(batch),
             iteration=batch_index,
             timestamp=timestamp,
@@ -362,6 +366,7 @@ class ClaudeRunner:
         env = self._build_env(
             worker_id=worker_id,
             queue_file=str(queue_path),
+            context_file=str(context_path),
             batch_size=len(batch),
             iteration=batch_index,
             timestamp=timestamp,
@@ -670,14 +675,34 @@ class ClaudeRunner:
         self,
         batch: list[dict[str, Any]],
         worker_id: int,
+        context_file: str,
     ) -> dict[str, Any]:
-        """Build the queue payload for Claude."""
+        """Build the queue payload for Claude (ID-only)."""
+        id_field = self.config.item_id_field
+        item_ids = [str(item.get(id_field, f"item-{i}")) for i, item in enumerate(batch)]
         return {
             "worker_id": worker_id,
             "phase": self.config.phase_id,
-            "items": batch,
+            "item_ids": item_ids,
             "total_items": len(batch),
+            "context_file": context_file,
         }
+
+    def _build_context_payload(
+        self,
+        batch: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Build the context payload (full item data keyed by ID, optionally filtered)."""
+        id_field = self.config.item_id_field
+        fields = self.config.context_fields
+        result: dict[str, Any] = {}
+        for i, item in enumerate(batch):
+            key = str(item.get(id_field, f"item-{i}"))
+            if fields:
+                result[key] = {k: item[k] for k in fields if k in item}
+            else:
+                result[key] = item
+        return result
 
     def _build_prompt(self, **kwargs) -> str:
         """Build the prompt content with arguments."""
@@ -706,6 +731,42 @@ class ClaudeRunner:
             env[key.upper()] = str(value)
         return env
 
+    def _get_phase_mcp_config(self) -> Path:
+        """Generate a filtered MCP config containing only the servers this phase needs.
+
+        Reads the project ``.mcp.json``, keeps only the servers listed in
+        ``self.config.mcp_servers``, and writes the result to a deterministic
+        path so it can be reused across workers of the same phase.
+        """
+        config_dir = Path("outputs/.mcp_configs")
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / f"mcp_{self.config.phase_id}.json"
+
+        # Reuse if already generated (deterministic per phase)
+        if config_path.exists():
+            return config_path
+
+        base_mcp = Path(".mcp.json")
+        if base_mcp.exists():
+            with open(base_mcp) as f:
+                base_config = json.load(f)
+        else:
+            base_config = {"mcpServers": {}}
+
+        needed = set(self.config.mcp_servers or [])
+        filtered = {
+            "mcpServers": {
+                name: srv
+                for name, srv in base_config.get("mcpServers", {}).items()
+                if name in needed
+            }
+        }
+
+        with open(config_path, "w") as f:
+            json.dump(filtered, f, indent=2)
+
+        return config_path
+
     def _build_cmd(self, prompt_content: str) -> list[str]:
         """Build the Claude CLI command."""
         cmd = [
@@ -719,6 +780,13 @@ class ClaudeRunner:
             cmd.extend(["--model", self.config.model])
         if self.config.max_turns_per_batch:
             cmd.extend(["--max-turns", str(self.config.max_turns_per_batch)])
+        # Tool whitelist: restrict which tool definitions are sent to the API
+        if self.config.tools_filter is not None:
+            cmd.extend(["--tools", ",".join(self.config.tools_filter)])
+        # MCP server filtering: only start the servers this phase needs
+        if self.config.mcp_servers is not None:
+            mcp_config_path = self._get_phase_mcp_config()
+            cmd.extend(["--strict-mcp-config", "--mcp-config", str(mcp_config_path)])
         return cmd
 
     def _save_json(self, path: Path, data: Any) -> None:

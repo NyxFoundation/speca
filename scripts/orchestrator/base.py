@@ -5,8 +5,10 @@ Provides the abstract base class for all phase orchestrators.
 """
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -34,6 +36,7 @@ from .schemas import (
     Phase02cPartial,
     Phase03Partial,
     AuditMapItem,
+    Severity,
     validate_checklist_item,
     validate_audit_map_item,
     validate_subgraph,
@@ -61,6 +64,35 @@ def _log_validation_warning(
     )
     for err in ve.errors():
         print(f"    {err['loc']}: {err['msg']}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Helper: generate slug from text for meaningful IDs
+# ---------------------------------------------------------------------------
+
+_SLUG_ABBREVS = {
+    "transaction": "txn", "p2p": "p2p", "engine api": "engapi",
+    "consensus": "cons", "validator": "val", "attestation": "attest",
+    "beacon": "beacon", "execution": "exec", "block": "blk",
+    "state": "state", "sync": "sync", "gossip": "gossip",
+    "networking": "net", "devp2p": "devp2p", "libp2p": "libp2p",
+}
+
+
+def generate_slug(text: str, max_len: int = 12) -> str:
+    """Generate a short slug from descriptive text for use in IDs.
+
+    Uses a known abbreviation map first, then falls back to
+    alphanumeric slugification, and finally a hash if nothing remains.
+    """
+    lower = text.lower().strip()
+    for phrase, abbrev in _SLUG_ABBREVS.items():
+        if phrase in lower:
+            return abbrev[:max_len]
+    slug = re.sub(r'[^a-z0-9]+', '-', lower).strip('-')
+    if len(slug) > max_len:
+        slug = slug[:max_len].rstrip('-')
+    return slug or hashlib.sha256(text.encode()).hexdigest()[:8]
 
 
 class BaseOrchestrator(ABC):
@@ -658,9 +690,65 @@ class Phase01Orchestrator(BaseOrchestrator):
                  print("Warning: KEYWORDS or SPEC_URLS not set, using defaults")
             return items
 
-        if self.config.phase_id in ("01d", "01e"):
+        if self.config.phase_id == "01e":
+            items = self._assign_property_id_prefixes(items)
+            return self._enrich_with_subgraph_context(items)
+        if self.config.phase_id == "01d":
             return self._enrich_with_subgraph_context(items)
         return items
+
+    def _assign_property_id_prefixes(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Assign meaningful _id_prefix to each item for property ID generation.
+
+        Derives a slug from the trust model's trust boundary data, ensuring
+        uniqueness via a disambiguation counter.
+        """
+        slug_counters: dict[str, int] = {}
+        for item in items:
+            file_path = item.get("file_path", "")
+            slug = self._derive_slug_from_trust_model(file_path)
+            count = slug_counters.get(slug, 0)
+            slug_counters[slug] = count + 1
+            unique_slug = slug if count == 0 else f"{slug}{count}"
+            item["_id_prefix"] = f"PROP-{unique_slug}"
+        return items
+
+    def _derive_slug_from_trust_model(self, file_path: str) -> str:
+        """Derive a slug from trust model data.
+
+        Reads the trust model JSON and uses the most common
+        entry_point_type from trust_boundaries to generate the slug.
+        Falls back to a hash of the file name on failure.
+        """
+        if not file_path:
+            return hashlib.sha256(b"unknown").hexdigest()[:8]
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+
+            # Try trust_model.trust_boundaries[].entry_point_type
+            trust_model = data.get("trust_model", data)
+            boundaries = trust_model.get("trust_boundaries", [])
+            if boundaries:
+                # Collect entry_point_type values and pick the most common
+                type_counts: dict[str, int] = {}
+                for boundary in boundaries:
+                    ept = boundary.get("entry_point_type", "")
+                    if ept:
+                        type_counts[ept] = type_counts.get(ept, 0) + 1
+                if type_counts:
+                    most_common = max(type_counts, key=type_counts.get)  # type: ignore[arg-type]
+                    return generate_slug(most_common)
+
+            # Fallback: use the file name stem
+            stem = Path(file_path).stem
+            return generate_slug(stem)
+        except Exception:
+            # Hash fallback
+            return hashlib.sha256(file_path.encode()).hexdigest()[:8]
     
     def _enrich_with_subgraph_context(
         self,
@@ -755,30 +843,57 @@ class Phase02Orchestrator(BaseOrchestrator):
         self,
         items: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Apply early exit for properties without required fields."""
+        """Apply early exit for properties without required fields.
+
+        Filters applied (in order):
+        1. Missing property ID → skip
+        2. Bug-bounty out-of-scope → skip
+        3. Severity below ``min_severity`` config threshold → skip
+        """
         early_exit_results = []
         items_to_process = []
-        
+
+        # Resolve the severity threshold once (None = no filtering)
+        min_sev = Severity.from_str(self.config.min_severity) if self.config.min_severity else None
+        if min_sev is not None:
+            print(f"  Severity gate: min_severity={min_sev.value} (dropping below)")
+
+        severity_skipped = 0
+
         for item in items:
             prop = item.get("property", {})
-            
+
             # Check required fields
             if not prop.get("id"):
                 early_exit_results.append(self._build_skip_result(item, "missing property id"))
                 continue
-            
+
             # Skip ONLY out-of-scope properties
             # Keep all other items (in-scope, conditional, unknown) for Phase 03 verification
             # This ensures we don't miss potential vulnerabilities due to overly strict filtering
             reachability = prop.get("reachability", {})
             bug_bounty_scope = reachability.get("bug_bounty_scope", "unknown")
-            
+
             if bug_bounty_scope == "out-of-scope":
                 early_exit_results.append(self._build_skip_result(item, "out-of-scope"))
                 continue
-            
+
+            # Severity gate — drop properties below the configured threshold
+            if min_sev is not None:
+                prop_severity = Severity.from_str(prop.get("severity", ""))
+                if prop_severity is None or prop_severity < min_sev:
+                    label = prop.get("severity", "(empty)")
+                    early_exit_results.append(
+                        self._build_skip_result(item, f"below min_severity ({label})")
+                    )
+                    severity_skipped += 1
+                    continue
+
             items_to_process.append(item)
-        
+
+        if severity_skipped and min_sev is not None:
+            print(f"  Severity gate: skipped {severity_skipped} properties below {min_sev.value}")
+
         return early_exit_results, items_to_process
     
     def _build_skip_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -790,6 +905,15 @@ class Phase02Orchestrator(BaseOrchestrator):
             "skipped": True,
             "skip_reason": reason,
         }
+
+    def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Assign meaningful _id_prefix for checklist ID generation."""
+        for item in items:
+            prop_id = item.get("property_id", "")
+            # Strip PROP- prefix to form the checklist slug
+            slug = prop_id[5:] if prop_id.startswith("PROP-") else prop_id
+            item["_id_prefix"] = f"CHK-{slug}"
+        return items
 
 
 class Phase02cOrchestrator(BaseOrchestrator):

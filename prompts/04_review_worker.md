@@ -10,6 +10,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 <task>
   <goal>For each item in the batch, use the /audit-reviewer skill to review and validate formal audit findings.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
@@ -22,7 +23,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   </critical_requirements>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/> and select the first BATCH_SIZE unprocessed items. Create an empty array `results = []`.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty array `results = []`.
 
     2. **Process Each Item**: For each item in the batch:
        a. **Invoke Skill**: Call the `/audit-reviewer` skill, passing the audit result from Phase 03.
@@ -37,7 +38,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   <data_sources>
     - **Skill**: `/audit-reviewer`
-    - **Queue File**: Contains items with the full audit result from Phase 03.
+    - **Queue File**: Contains `item_ids` and `context_file` path. Read the context file to get item data keyed by ID, each with the audit result from Phase 03.
     - **MCP Tools**: `mcp__filesystem__read_multiple_files` for batch loading audit results.
   </data_sources>
 </task>

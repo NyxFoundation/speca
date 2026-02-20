@@ -10,6 +10,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 <task>
   <goal>For each item in the batch, resolve code scope and invoke /formal-audit-adversarial skill with attacker mindset.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
@@ -52,7 +53,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
   </optimization_strategy>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/>, select first BATCH_SIZE items. Create `results = []`.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create `results = []`.
 
     2. **Group Items by Component**:
        - Group items by `code_scope.locations[0].file` (primary file)

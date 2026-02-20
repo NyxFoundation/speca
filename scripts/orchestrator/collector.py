@@ -92,6 +92,14 @@ class ResultCollector:
             if isinstance(item, dict) and id_field in item
         ]
 
+        # Apply output field filtering if configured
+        if self.config.output_fields:
+            results = [
+                {k: item[k] for k in self.config.output_fields if k in item}
+                for item in results
+                if isinstance(item, dict)
+            ]
+
         output_data = {
             self.config.result_key: results,
             "metadata": {

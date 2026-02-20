@@ -80,20 +80,23 @@ This skill MUST:
       - `Pre-condition`: Design a test to bypass the condition with invalid inputs.
       - `Post-condition`: Design a test to verify side-effects and check for unexpected state changes.
 
-7.  **Assign Severity**: Inherit severity from the property if available. Otherwise, assign based on:
-    - `Critical`: Boundary properties with `attacker_controlled: true`
-    - `High`: Properties with `severity: HIGH` or `CRITICAL`
-    - `Medium`: Properties with `severity: MEDIUM`
-    - `Low`: Properties with `severity: LOW`
-    - `Informational`: Properties with `severity: INFORMATIONAL`
+7.  **Assign Severity**: Inherit `severity` from the source property — properties already carry program-specific severity assigned using the bug bounty program's `severity_classification` criteria. Preserve the upstream severity value (normalise to Title Case: `Critical`, `High`, `Medium`, `Low`, `Informational`).
+    - If the property's `severity` field is missing or empty, assign based on:
+      - `Critical`: Boundary properties with `attacker_controlled: true`
+      - `High`: Properties with high impact potential
+      - `Medium`: Properties with moderate impact
+      - `Low`: Properties with limited impact
+      - `Informational`: Best practice observations only
 
 8.  **Map to Code**: Using the `covers` information in the property, identify specific code locations (files, functions) relevant to verifying the checklist item. If code locations are not determinable, omit this field.
 
 9.  **Define Test Procedure**: For each item, provide a clear procedure for how an auditor should test it.
 
-10. **Assign IDs**: Assign a unique ID to each checklist item using the property ID as base:
-    - Format: `CHK-{property_id}-{index}` where index is 1-based within this property's checks
-    - Example: For property `PROP-W3B12-7`, the first check is `CHK-W3B12-7-001`
+10. **Assign IDs**: Assign a unique ID to each checklist item using the `_id_prefix` from the context data:
+    - Use the `_id_prefix` field from the input context (e.g., `"CHK-txval-inv-001"`)
+    - Format: `{_id_prefix}-{seq:03d}`
+    - Example: `CHK-txval-inv-001-001`
+    - Fallback: If `_id_prefix` is not available, use `CHK-{property_id}-{seq:03d}`
 
 ## Required Fields
 
@@ -101,8 +104,8 @@ This skill MUST:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `check_id` | string | **YES** | Unique ID in format `CHK-{property_id}-{index}` |
-| `property_id` | string | **YES** | Source property ID (e.g., `PROP-W3B12-7`) |
+| `check_id` | string | **YES** | Unique ID in format `{_id_prefix}-{seq:03d}` (fallback: `CHK-{property_id}-{seq:03d}`) |
+| `property_id` | string | **YES** | Source property ID (e.g., `PROP-txval-inv-001`) |
 | `title` | string | **YES** | Clear, actionable question for the auditor |
 | `severity` | string | **YES** | One of: `Critical`, `High`, `Medium`, `Low`, `Informational` |
 | `mindset` | string | **YES** | One of: `Boundary Guard`, `Formal Verification Engineer` |
@@ -203,7 +206,7 @@ Before returning the result, verify:
 - [ ] Each checklist item includes `reachability` copied from the property
 - [ ] Each checklist item includes `is_boundary_check` flag
 - [ ] Each checklist item includes `mindset` indicator
-- [ ] `check_id` follows the format `CHK-{property_id}-{index}`
+- [ ] `check_id` follows the format `{_id_prefix}-{seq:03d}` (or `CHK-{property_id}-{seq:03d}` as fallback)
 - [ ] Filtering summary accurately reflects the filtering applied
 - [ ] All checklist items are traceable to source properties via `notes`
 - [ ] No external API calls were made (offline processing only)

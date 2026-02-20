@@ -153,7 +153,7 @@ Return a **detailed** JSON object with concrete findings:
     "bug_bounty_eligible": true/false,
     "reason": "Detailed reason for eligibility decision",
     "recommendation": "Concrete recommendation for fix",
-    "severity_estimate": "Critical/High/Medium/Low based on exploitability"
+    "severity_estimate": "Critical/High/Medium/Low — apply the program's severity_classification criteria from bug_bounty_scope (impact thresholds, network % affected, etc.)"
   },
   "final_classification": "vulnerability/not-a-vulnerability/informational/out-of-scope"
 }

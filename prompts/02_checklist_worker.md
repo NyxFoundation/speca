@@ -10,6 +10,7 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
 <task>
   <goal>For each item in the batch, use the /checklist-specialist skill to generate a security audit checklist from formal properties, then aggregate all checklist items into a single output file.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
@@ -23,14 +24,15 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
   </critical_requirements>
 
   <instructions>
-    1. **Initialize**: 
-       - Read <ref id="queue"/> and select the first BATCH_SIZE unprocessed items.
+    1. **Initialize**:
+       - Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context.
        - Create an empty array `all_checklist_items = []`.
        - Create counters: `total_properties = 0`, `total_filtered = 0`, `validation_warnings = 0`.
 
     2. **Process Each Item**: For each item in the batch:
-    
-       a. **Invoke Skill**: Call the `/checklist-specialist` skill, passing the property file path.
+
+       a. **Read ID Prefix**: Read the `_id_prefix` field from the context data for this item (e.g., `"CHK-txval-inv-001"`). This prefix is used by the skill to generate meaningful checklist IDs.
+       b. **Invoke Skill**: Call the `/checklist-specialist` skill, passing the property file path and the `_id_prefix`.
           The skill returns a JSON object with structure:
           ```json
           {
@@ -41,28 +43,25 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
           }
           ```
        
-       b. **Extract Checklist Items**: From the skill result:
+       c. **Extract Checklist Items**: From the skill result:
           - Get the `checklist` array from the result.
           - Update counters from `filtering_summary`.
-       
-       c. **Validate Each Checklist Item**: For each item in `checklist`:
+
+       d. **Validate Each Checklist Item**: For each item in `checklist`:
           - **REQUIRED FIELDS CHECK**: Verify ALL of these fields exist and are non-empty:
-            - `check_id` (string, format: `CHK-{property_id}-{index}`)
+            - `check_id` (string, format: `{_id_prefix}-{seq:03d}` or `CHK-{property_id}-{seq:03d}`)
             - `property_id` (string)
             - `title` (string)
             - `severity` (string: Critical/High/Medium/Low/Informational)
-            - `mindset` (string: Boundary Guard/Formal Verification Engineer)
-            - `is_boundary_check` (boolean)
             - `reachability` (object with `classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope`)
             - `test_procedure` (string, **MUST NOT be empty**, should have multiple steps)
             - `bug_class` (string)
-            - `risk_category` (string)
             - `notes` (string)
-          
+
           - **If validation passes**: Append the item to `all_checklist_items`.
           - **If validation fails**: Log a warning with the missing fields, increment `validation_warnings`, but still append the item (do not discard).
-       
-       d. **Handle Errors**: If the skill fails entirely for an item:
+
+       e. **Handle Errors**: If the skill fails entirely for an item:
           - Log the error with the property file path.
           - Continue to the next item (do not abort).
 
@@ -99,12 +98,10 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
     {
       "checklist": [
         {
-          "check_id": "CHK-W0B1-235264622-1-001",
-          "property_id": "PROP-W0B1-1",
+          "check_id": "CHK-txval-inv-001-001",
+          "property_id": "PROP-txval-inv-001",
           "title": "...",
           "severity": "Critical|High|Medium|Low|Informational",
-          "mindset": "Boundary Guard|Formal Verification Engineer",
-          "is_boundary_check": true|false,
           "reachability": {
             "classification": "external-reachable|internal-only|api-only",
             "entry_points": ["P2P", "Transaction", ...],
@@ -113,7 +110,6 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
           },
           "test_procedure": "1. Step one\n2. Step two\n3. Step three...",
           "bug_class": "Input Validation|State Consistency|...",
-          "risk_category": "Tampering|Spoofing|...",
           "notes": "Source: PROP-..., ..."
         }
       ],
@@ -129,11 +125,12 @@ Execution hint: This worker prompt is invoked by the phase-02 async orchestrator
       }
     }
     ```
+    **Note**: Do NOT include `mindset`, `is_boundary_check`, `risk_category`, `graph_element_under_test`, `code_scope`, or `code_excerpt` — these are omitted from output to reduce context size.
   </output_schema>
 
   <data_sources>
     - **Skill**: `/checklist-specialist` — returns checklist items, does NOT write files
-    - **Queue File**: Contains items with `property_file` paths pointing to `outputs/01e_PROP_PARTIAL_*.json`
+    - **Queue File**: Contains `item_ids` and `context_file` path. Read the context file to get item data keyed by ID, each with `property_id` and `source_file` path.
   </data_sources>
 
   <error_handling>

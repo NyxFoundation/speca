@@ -47,6 +47,8 @@ A JSON object containing a list of items, where each item is a file containing s
 1.  **Load Subgraphs**: Read the content of the `subgraph_file` for each item.
 
 2.  **Load Bug Bounty Scope**: Check if `outputs/BUG_BOUNTY_SCOPE.json` exists. If so, load it as the authoritative scope reference. Otherwise, use the default scope defined above.
+    - **CRITICAL — Severity Classification**: If the scope JSON contains a `severity_classification` object, use it as the **authoritative severity definition** for all STRIDE severity assignments. The classification defines what each severity level (Critical/High/Medium/Low/Informational) means in the context of this specific bug bounty program (e.g., network impact thresholds, validator slashing percentages). Apply these definitions consistently when assigning `severity` to each STRIDE threat.
+    - If no `severity_classification` is present, fall back to generic severity assessment based on impact and exploitability.
 
 3.  **Map Codebase Structure**: Use `mcp__filesystem__directory_tree` to understand the project layout and identify key directories (e.g., `contracts/`, `src/`, `lib/`).
 
@@ -75,7 +77,12 @@ A JSON object containing a list of items, where each item is a file containing s
     - `api-only`: Only exploitable via out-of-scope APIs (JSON-RPC, Beacon API)
     - `configuration-error`: Requires misconfiguration
 
-10. **Consolidate Findings**: Aggregate the analysis from all subgraphs into a single, coherent trust model.
+10. **Assign Severity Using Program-Specific Definitions**: For each STRIDE threat, assign severity using the `severity_classification` from `BUG_BOUNTY_SCOPE.json`. Match the threat's potential impact against the program's criteria:
+    - Compare the threat's impact scope (e.g., % of validators affected, network impact) against each severity level's criteria and examples.
+    - Use the `impact` and `attack_vector` fields from the classification to calibrate the severity.
+    - If `severity_classification` is unavailable, use generic impact-based assessment.
+
+11. **Consolidate Findings**: Aggregate the analysis from all subgraphs into a single, coherent trust model.
 
 ## Output Format
 Return a JSON object representing the trust model. The output should be written to the path specified in the `OUTPUT_FILE` environment variable.
@@ -90,7 +97,14 @@ Return a JSON object representing the trust model. The output should be written 
     "out_of_scope_components": ["JSON-RPC API", "Beacon API", "Configuration"],
     "scope_notes": [
       "High-effort DoS may be out-of-scope unless a clear safety impact is shown."
-    ]
+    ],
+    "severity_classification": {
+      "Critical": {"criteria": "...", "examples": ["..."], "impact": "..."},
+      "High":     {"criteria": "...", "examples": ["..."], "impact": "..."},
+      "Medium":   {"criteria": "...", "examples": ["..."], "impact": "..."},
+      "Low":      {"criteria": "...", "examples": ["..."], "impact": "..."},
+      "Informational": {"criteria": "...", "examples": ["..."], "impact": "..."}
+    }
   },
   "trust_model": {
     "actors": [
@@ -157,6 +171,6 @@ Return a JSON object representing the trust model. The output should be written 
 - [ ] All trust boundaries have `bug_bounty_scope` classification
 - [ ] All trust boundaries have `entry_point_type` specified
 - [ ] All STRIDE threats have `exploitability` classification
-- [ ] All STRIDE threats have `severity` assigned
-- [ ] `bug_bounty_scope` object is included in output
+- [ ] All STRIDE threats have `severity` assigned using program-specific `severity_classification` criteria
+- [ ] `bug_bounty_scope` object is included in output with `severity_classification` propagated from input scope
 - [ ] Scope summary statistics are accurate

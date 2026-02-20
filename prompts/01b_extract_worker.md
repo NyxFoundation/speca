@@ -10,6 +10,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 <task>
   <goal>For each item in the batch, invoke the /subgraph-extractor skill **once per URL** to extract program graphs. Aggregate all results into a single index.json.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
+  <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="directory" id="graphs">{{OUTPUT_DIR}}</output>
   <output type="file" id="index">{{OUTPUT_DIR}}/index.json</output>
 
@@ -34,7 +35,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </critical_requirements>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/> and select the first BATCH_SIZE unprocessed items. Create output directory structure.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` (list of IDs to process) and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create output directory structure.
 
     2. **Process Each Item** (one SKILL call per URL):
        For each item in the batch:
@@ -93,7 +94,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
   <data_sources>
     - **Skill**: `/subgraph-extractor` (called once per URL)
-    - **Queue File**: Contains items with `url` (the specification URL to fetch).
+    - **Queue File**: Contains `item_ids` (list of IDs) and `context_file` path. Read the context file to get item data keyed by ID, each with `url` (the specification URL to fetch).
     - **MCP Tools**: `mcp__fetch__fetch`, `mcp__filesystem__write_text_file`
   </data_sources>
 </task>

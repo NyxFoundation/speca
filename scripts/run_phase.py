@@ -132,6 +132,7 @@ async def run_phase(
     force: bool,
     target_layer: str | None = None,
     out_of_scope_layers: list[str] | None = None,
+    min_severity: str | None = None,
 ) -> bool:
     """Run a single phase with all checks and cleanup."""
     print(f"\n{'#'*60}")
@@ -173,6 +174,16 @@ async def run_phase(
             del os.environ["FORCE_EXECUTE"]
             
         orchestrator = create_orchestrator(phase_id, num_workers, max_concurrent)
+
+        # Override min_severity from CLI if provided
+        if min_severity is not None and orchestrator.config.min_severity is not None:
+            print(f"  --min-severity override: {orchestrator.config.min_severity} -> {min_severity}")
+            orchestrator.config.min_severity = min_severity
+        elif min_severity is not None:
+            # Phase doesn't have min_severity configured — set it anyway
+            orchestrator.config.min_severity = min_severity
+            print(f"  --min-severity set: {min_severity}")
+
         await orchestrator.run()
         return True
     except Exception as e:
@@ -190,6 +201,7 @@ async def run_pipeline(
     stop_on_failure: bool = True,
     target_layer: str | None = None,
     out_of_scope_layers: list[str] | None = None,
+    min_severity: str | None = None,
 ) -> dict[str, bool]:
     """Run a pipeline of multiple phases."""
     results = {}
@@ -198,6 +210,7 @@ async def run_pipeline(
             phase_id, num_workers, max_concurrent, force,
             target_layer=target_layer,
             out_of_scope_layers=out_of_scope_layers,
+            min_severity=min_severity,
         )
         results[phase_id] = success
         if not success and stop_on_failure:
@@ -235,6 +248,15 @@ def main():
              "Written into outputs/02c_TARGET_INFO.json when phase 02c is included.",
     )
 
+    # Severity gate
+    parser.add_argument(
+        "--min-severity",
+        choices=["Critical", "High", "Medium", "Low", "Informational"],
+        default=None,
+        help="Override min_severity for phases that support severity gating (e.g. phase 02). "
+             "Properties below this threshold are skipped. Default comes from PhaseConfig.",
+    )
+
     args = parser.parse_args()
     
     # Determine execution order
@@ -249,6 +271,8 @@ def main():
     print(f"  Max Concurrent: {args.max_concurrent}")
     print(f"  Force: {args.force}")
     print(f"  Phases: {phases}")
+    if args.min_severity:
+        print(f"  Min Severity: {args.min_severity}")
 
     if args.cleanup_dry_run:
         print("\nRunning cleanup dry-run...")
@@ -266,6 +290,7 @@ def main():
             args.force,
             target_layer=args.target_layer,
             out_of_scope_layers=args.out_of_scope_layers,
+            min_severity=args.min_severity,
         )
     )
     
