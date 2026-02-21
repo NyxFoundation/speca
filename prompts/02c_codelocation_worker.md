@@ -37,23 +37,53 @@ Language: English only.
     spec-level function names, state transitions, and invariants — use these as
     additional search keywords when resolving code locations.
 
-    ## Step 2: Layer Scope Check (per item, only if TARGET_INFO has `out_of_scope_spec_layers`)
+    ## Step 2: Layer Scope Check (per item)
 
-    If `out_of_scope_spec_layers` is present and non-empty, infer the spec layer for each item from its `covers` string (primary element ID) and property `text` (look for layer keywords or spec identifiers). If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
+    **When `out_of_scope_spec_layers` is present** in TARGET_INFO: infer the spec layer for each item from its `covers` string and property `text`. If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
 
-    When `out_of_scope_spec_layers` is absent or empty, skip this check entirely and treat all items as in-scope.
+    **Heuristic fallback** (when `out_of_scope_spec_layers` is absent or empty): use the repo orientation from Step 2.5 to infer scope. If the property clearly belongs to a domain with no matching top-level package in the target (e.g. the property references EVM opcodes/gas scheduling but the repo has no `core/vm/`, `evm/`, or `interpreter` package — only `beacon-chain/`), mark it `out_of_scope`. When uncertain, treat as in-scope and attempt resolution.
+
+    ## Step 2.5: Repository Orientation (once per batch)
+
+    Before resolving any item, run a single Glob on `target_workspace/*/` to list top-level directories. Build a mental map of which packages handle which domains (e.g. crypto, networking, state, consensus, validation, p2p, database). Reuse this map for all items in the batch — it tells you where to narrow searches and which properties are out of scope.
 
     ## Step 3: Code Resolution (per in-scope item)
 
-    **Primary — Tree-sitter MCP call graph:**
-    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `text`, `assertion`, and `covers` (primary element ID string). Extract **ONLY** file path, symbol name, and line range for the top matches.
+    For each in-scope property, follow this iterative methodology. **Do not mark `not_found` until you have tried at least 3 different search terms.**
 
-    **Fallback — Glob + Grep:**
-    If MCP fails or returns no results, use the standard Glob and Grep tools to search `target_workspace/` directly. Extract keywords (identifiers, constants, domain terms) from `text` and `assertion`, then search for matching function/type definitions. Use `reachability.entry_points` as a hint to narrow the search directory (e.g. an entry point named "P2P" likely maps to directories like `p2p/`, `sync/`, `network/`; "Transaction" to `txpool/`, `core/`; infer from the codebase structure if uncertain).
+    ### 3a. Derive Search Terms
 
-    **DO NOT read the matched files or extract code excerpts.** Only record the metadata (file path, symbol, line range).
+    Before any tool call, convert spec-level names from `assertion`, `text`, and the subgraph `.mmd` file (from the 01b index) into target-language identifiers:
+    - For Go targets: spec `snake_case` → `PascalCase` (e.g. `process_attestation` → `ProcessAttestation`), spec constants stay `ALL_CAPS` (e.g. `MAX_EFFECTIVE_BALANCE`).
+    - Extract function names from state transitions in the `.mmd` file — these are often close to real code identifiers.
+    - From the property `assertion`, pull key nouns, verbs, and domain constants.
 
-    If both MCP and Grep find nothing → mark as `not_found`.
+    Produce an ordered list: most-specific identifier first (e.g. exact function name), then broader terms (root words, abbreviations, related constants).
+
+    ### 3b. Search — Most Specific First
+
+    Grep `target_workspace/` for the most specific identifier. If it matches function/type definitions, record the location and move on. Use Tree-sitter MCP `get_symbols` or `find_text` when a directory-scoped search is more efficient.
+
+    ### 3c. Broaden If Needed
+
+    If the specific term fails:
+    - Try the next term in your list (root words, abbreviations, synonyms).
+    - Use the repo orientation map from Step 2.5 to narrow searches to relevant directories instead of the full repo.
+    - Try Tree-sitter `get_symbols` on the most likely package directory to browse available symbols.
+    - Try partial/substring matches (e.g. `Attestation` instead of `ProcessAttestation`).
+
+    ### 3d. Semantic Fallback
+
+    If identifier-based searches fail, search for:
+    - Constants or magic numbers from the spec (e.g. `4096`, `0x00000001`).
+    - Comments or string literals describing the same concept.
+    - Type definitions related to the data structures mentioned in the property.
+
+    ### 3e. Record Result
+
+    **DO NOT read the matched files or extract code excerpts.** Only record metadata (file path, symbol name, line range).
+
+    If all search attempts fail → mark as `not_found` with a mandatory `resolution_error` (see output schema).
 
   </instructions>
 
@@ -81,7 +111,7 @@ Language: English only.
                 }
               ],
               "resolution_status": "resolved" | "out_of_scope" | "not_found" | "error",
-              "resolution_error": "",   // empty string unless status is "error"
+              "resolution_error": "",   // MUST be non-empty when status is "not_found" or "error" — list the identifiers searched and why they failed
               "resolution_method": "mcp_callgraph" | "mcp_simple" | "grep_fallback"  // only when resolved
             }
           }
