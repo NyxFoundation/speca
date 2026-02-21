@@ -304,7 +304,7 @@ class TestPhaseConfig:
         cfg = PHASE_CONFIGS["03"]
         assert cfg.circuit_breaker_threshold == 5
         assert cfg.max_total_retries == 20
-        assert cfg.max_empty_results == 5
+        assert cfg.max_empty_results == 15
 
     def test_mcp_servers_defaults(self):
         """Phases without mcp_servers set should default to None (all servers)."""
@@ -2315,6 +2315,37 @@ class TestTryRecoverPartial(unittest.TestCase):
             assert result is None
         finally:
             log_path.unlink()
+
+
+class TestMaxTurnsExhausted(unittest.TestCase):
+    """Tests for error_max_turns detection in _execute_batch."""
+
+    def test_error_max_turns_returns_none_for_try_recover(self):
+        """_try_recover_partial should return None for error_max_turns
+        (it's handled earlier in _execute_batch now)."""
+        from orchestrator.runner import ClaudeRunner
+        from orchestrator.config import get_phase_config
+        config = get_phase_config("03")
+        sem = asyncio.Semaphore(1)
+        runner = ClaudeRunner(config, sem)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"error_max_turns","is_error":false,'
+                    '"num_turns":26,"duration_ms":90000}\n')
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is None
+        finally:
+            log_path.unlink()
+
+    def test_max_turns_exhausted_exception_exists(self):
+        """MaxTurnsExhausted should be importable from runner."""
+        from orchestrator.runner import MaxTurnsExhausted
+        exc = MaxTurnsExhausted("Batch 42 exhausted 26 turns")
+        assert "26 turns" in str(exc)
 
 
 class TestClaudeRunnerCommand(unittest.TestCase):

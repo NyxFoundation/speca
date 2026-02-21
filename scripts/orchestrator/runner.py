@@ -47,6 +47,16 @@ class CircuitBreakerTripped(Exception):
         super().__init__(f"Circuit breaker tripped: {reason} (stats={stats})")
 
 
+class MaxTurnsExhausted(Exception):
+    """Raised when a batch exhausts max_turns without producing output.
+
+    Retrying is pointless because hitting max_turns is deterministic for
+    the same prompt + queue.  Callers should treat this as a non-retriable
+    empty result that does NOT count toward the circuit breaker's
+    ``empty_results`` counter.
+    """
+
+
 class CircuitBreaker:
     """
     Tracks failure / anomaly counters and raises ``CircuitBreakerTripped``
@@ -299,6 +309,15 @@ class ClaudeRunner:
                         return result
                 except (CircuitBreakerTripped, BudgetExceeded):
                     raise  # Propagate immediately
+                except MaxTurnsExhausted as e:
+                    # Don't retry — hitting max_turns is deterministic.
+                    # Return empty list without counting toward empty_results
+                    # circuit breaker (this is a known limitation, not a bug).
+                    print(
+                        f"[W{worker_id}] {e}",
+                        file=sys.stderr,
+                    )
+                    return []
                 except Exception as e:
                     print(
                         f"[W{worker_id}] Batch {batch_index} attempt {attempt + 1} failed: {e}",
@@ -542,6 +561,33 @@ class ClaudeRunner:
                     f"+${batch_cost:.4f}, total=${cost_stats['total_cost_usd']:.2f}/"
                     f"${cost_stats['max_budget_usd']:.2f}",
                 )
+
+        # --- Detect error_max_turns (may arrive with returncode 0 or 1) ---
+        # Claude CLI can exit with code 0 while the result event carries
+        # subtype="error_max_turns".  Handling this before the returncode
+        # check covers both cases.
+        result_status = self._check_log_result_status(log_file)
+        if result_status and result_status.get("subtype") == "error_max_turns":
+            num_turns = result_status.get("num_turns", "?")
+            # Try to recover whatever output was produced
+            results = self._parse_results(result_parse_path)
+            if not results:
+                results = self._parse_results_from_log(log_file)
+            if results:
+                print(
+                    f"[W{worker_id}] Batch {batch_index}: "
+                    f"error_max_turns ({num_turns} turns) but "
+                    f"recovered {len(results)} result(s)",
+                    file=sys.stderr,
+                )
+                if not directory_mode and result_parse_path.exists():
+                    result_parse_path.unlink()
+                return results
+            # No output — retrying won't help (max_turns is deterministic)
+            raise MaxTurnsExhausted(
+                f"Batch {batch_index} exhausted {num_turns} turns "
+                f"without producing output"
+            )
 
         # Check result
         if proc.returncode != 0:
