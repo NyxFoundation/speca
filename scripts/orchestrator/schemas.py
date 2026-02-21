@@ -254,45 +254,31 @@ class Phase01dPartial(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PropertyReachability(BaseModel):
-    """Reachability information for a property."""
+    """Reachability information for a property (slim: 4 fields only)."""
     classification: str = ""
     entry_points: list[str] = Field(default_factory=list)
     attacker_controlled: bool = False
-    validation_layers: list[str] = Field(default_factory=list)
     bug_bounty_scope: str = "conditional"
-    notes: str = ""
-
-
-class PropertyCovers(BaseModel):
-    """Coverage information for a property."""
-    primary_element: str | None = None
-    edges: list[str] = Field(default_factory=list)
-    nodes: list[str] = Field(default_factory=list)
-    is_boundary_edge: bool = False
 
 
 class Property(BaseModel):
-    """A single formal property from Phase 01e."""
+    """A single formal property from Phase 01e.
+
+    ``covers`` is the primary element ID string (e.g. ``"FN-001"``).
+    """
     id: str
     text: str = ""
     type: str = ""
     assertion: str = ""
     severity: str = ""
-    severity_justification: str | None = None  # Optional — omitted in slim output
-    covers: PropertyCovers = Field(default_factory=PropertyCovers)
+    covers: str = ""  # Primary element ID (slim — was an object before)
     reachability: PropertyReachability = Field(default_factory=PropertyReachability)
     exploitability: str = ""
     bug_bounty_eligible: bool = False
-    bug_bounty_notes: str | None = None
-    source_assumption_id: str | None = None
-    source_invariant_id: str | None = None
-    source_threat_id: str | None = None
 
 
 class Phase01ePartial(BaseModel):
-    """Output of Phase 01e: properties extracted from trust model."""
-    source_files: dict[str, Any] | list[str] = Field(default_factory=dict)
-    bug_bounty_scope: BugBountyScopeInfo = Field(default_factory=BugBountyScopeInfo)
+    """Output of Phase 01e: properties extracted from trust model (slim)."""
     properties: list[Property] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -607,8 +593,8 @@ def validate_property(data: dict[str, Any]) -> tuple[Property | None, list[str]]
             errors.append("type is empty")
         if not item.severity:
             errors.append("severity is empty")
-        if not item.covers.primary_element and not item.covers.edges and not item.covers.nodes:
-            errors.append("covers has no primary_element, edges, or nodes")
+        if not item.covers:
+            errors.append("covers is empty (expected primary element ID string)")
         return item, errors
     except Exception as exc:
         return None, [str(exc)]

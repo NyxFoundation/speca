@@ -660,12 +660,18 @@ class Phase01Orchestrator(BaseOrchestrator):
     ) -> list[dict[str, Any]]:
         """Inject bug_bounty_scope from BUG_BOUNTY_SCOPE.json into each item.
 
-        If the file exists, reads it and adds the content as the
-        `bug_bounty_scope` key in each item's context data.
+        The file is **required** — if missing or unparseable, the orchestrator
+        aborts with a non-zero exit code.
         """
         scope_path = Path("outputs/BUG_BOUNTY_SCOPE.json")
         if not scope_path.exists():
-            return items
+            print(
+                f"ERROR: {scope_path} not found. "
+                f"bug_bounty_scope is required for Phase 01e. "
+                f"Create the file before running this phase.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         try:
             with open(scope_path) as f:
@@ -673,10 +679,10 @@ class Phase01Orchestrator(BaseOrchestrator):
             print(f"  Injected bug_bounty_scope from {scope_path}")
         except Exception as e:
             print(
-                f"Warning: Failed to load {scope_path}: {e}",
+                f"ERROR: Failed to parse {scope_path}: {e}",
                 file=sys.stderr,
             )
-            return items
+            sys.exit(1)
 
         for item in items:
             item["bug_bounty_scope"] = scope_data

@@ -32,14 +32,14 @@ Language: English only.
 
     ## Step 2: Layer Scope Check (per item, only if TARGET_INFO has `out_of_scope_spec_layers`)
 
-    If `out_of_scope_spec_layers` is present and non-empty, infer the spec layer for each item from its `covers` field and property `text` (look for layer keywords or spec identifiers). If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
+    If `out_of_scope_spec_layers` is present and non-empty, infer the spec layer for each item from its `covers` string (primary element ID) and property `text` (look for layer keywords or spec identifiers). If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
 
     When `out_of_scope_spec_layers` is absent or empty, skip this check entirely and treat all items as in-scope.
 
     ## Step 3: Code Resolution (per in-scope item)
 
     **Primary — Tree-sitter MCP call graph:**
-    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `text`, `assertion`, and `covers.primary_element`. Extract **ONLY** file path, symbol name, and line range for the top matches.
+    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `text`, `assertion`, and `covers` (primary element ID string). Extract **ONLY** file path, symbol name, and line range for the top matches.
 
     **Fallback — Glob + Grep:**
     If MCP fails or returns no results, use the standard Glob and Grep tools to search `target_workspace/` directly. Extract keywords (identifiers, constants, domain terms) from `text` and `assertion`, then search for matching function/type definitions. Use `reachability.entry_points` as a hint to narrow the search directory (e.g. an entry point named "P2P" likely maps to directories like `p2p/`, `sync/`, `network/`; "Transaction" to `txpool/`, `core/`; infer from the codebase structure if uncertain).
@@ -61,8 +61,8 @@ Language: English only.
             "type": "invariant|precondition|postcondition|...",
             "assertion": "...",
             "severity": "Critical|High|Medium|Low",
-            "covers": { ... },
-            "reachability": { ... },
+            "covers": "FN-001",
+            "reachability": { "classification": "...", "entry_points": [...], "attacker_controlled": true, "bug_bounty_scope": "..." },
             "exploitability": "...",
             "code_scope": {
               "locations": [           // empty list if out_of_scope or not_found

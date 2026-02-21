@@ -15,11 +15,11 @@ Each workflow step (01a through 04) can be triggered independently via `workflow
 
 ## Architecture
 
-The pipeline is driven by a Python-based **orchestrator** (`scripts/orchestrator/`) that manages queue distribution, parallel worker execution, batching, resume, cost tracking, and circuit-breaker logic. Each phase invokes Claude Code CLI with a dedicated skill and prompt, processing items in parallel across configurable workers.
+The pipeline is driven by a Python-based **orchestrator** (`scripts/orchestrator/`) that manages queue distribution, parallel worker execution, batching, resume, cost tracking, and circuit-breaker logic. Each phase invokes Claude Code CLI with a dedicated worker prompt, processing items in parallel across configurable workers.
 
 ```
 scripts/
-├── run_phase.py            # Entry point (replaces Makefile)
+├── run_phase.py            # Entry point
 ├── setup_mcp.sh            # MCP server registration
 └── orchestrator/
     ├── config.py            # Phase definitions (PhaseConfig)
@@ -40,13 +40,11 @@ scripts/
 flowchart TB
     subgraph "Preparation (Spec → Properties)"
         A["01a: Spec Discovery"] --> B["01b: Subgraph Extraction"]
-        B --> C["01c: Subgraph Verification"]
-        B --> D["01d: Trust Model Analysis"]
-        D --> E["01e: Property Generation"]
+        B --> E["01e: Property Generation<br/>(Trust Model + STRIDE + Formal Properties)"]
     end
 
-    subgraph "Checklist"
-        E --> F["02: Checklist Generation"]
+    subgraph "Code Resolution"
+        E --> F["02c: Code Location Pre-resolution"]
     end
 
     subgraph "Audit"
@@ -60,6 +58,10 @@ flowchart TB
         I -.-> J
         J -.-> K["06b: Full Audit Report"]
     end
+
+    BBS["BUG_BOUNTY_SCOPE.json"] -.->|required| E
+    TI["02c_TARGET_INFO.json"] -.->|target repo| F
+    TI -.->|auto-clone| G
 ```
 
 ## Phases
@@ -82,70 +84,57 @@ Crawls seed URLs to discover all relevant technical specification documents. Use
 | **Prompt** | `prompts/01b_extract_worker.md` |
 | **Skill** | `/subgraph-extractor` |
 | **Input** | `outputs/01a_STATE.json` |
-| **Output** | `outputs/graphs/*/index.json` + `.mmd` Mermaid files |
+| **Output** | `outputs/01b_PARTIAL_*.json` + `outputs/graphs/*/*.mmd` |
 
-Extracts formal **Program Graphs** (PG = (Q, q&#9655;, q&#9668;, Act, E), following Nielson & Nielson's definition) from each specification document. Each subgraph is output as a Mermaid state diagram (`.mmd`) alongside an aggregated `index.json`.
-
-### Phase 01c: Subgraph Verification
-
-| | |
-|---|---|
-| **Prompt** | `prompts/01c_verify_worker.md` |
-| **Skill** | `/subgraph-verifier` |
-| **Input** | `outputs/01b_PARTIAL_*.json` |
-| **Output** | `outputs/01c_VERIFIED_PARTIAL_*.json` |
-
-Validates extracted subgraphs for structural completeness and consistency. Checks node/edge integrity, initial/final state presence, and cross-references between subgraphs.
-
-### Phase 01d: Trust Model Analysis
-
-| | |
-|---|---|
-| **Prompt** | `prompts/01d_trustmodel_worker.md` |
-| **Skill** | `/trust-model-analyst` |
-| **Input** | `outputs/01b_PARTIAL_*.json` |
-| **Output** | `outputs/01d_TRUSTMODEL_PARTIAL_*.json` |
-
-Analyzes trust boundaries and security assumptions from the program graphs. Classifies actors by trust level (TRUSTED / SEMI_TRUSTED / UNTRUSTED), identifies trust boundary edges, and documents security assumptions for each boundary crossing.
+Extracts formal **Program Graphs** (following Nielson & Nielson's definition) from each specification document. Each subgraph is output as an enriched Mermaid state diagram (`.mmd`) with YAML frontmatter and inline invariant annotations. PARTIAL JSON files reference the `.mmd` paths for downstream consumption.
 
 ### Phase 01e: Property Generation
 
 | | |
 |---|---|
-| **Prompt** | `prompts/01e_prop_worker.md` |
-| **Skill** | `/property-generator` |
-| **Input** | `outputs/01d_PARTIAL_*.json` |
-| **Output** | `outputs/01e_PROP_PARTIAL_*.json` |
+| **Prompt** | `prompts/01e_prop_worker.md` (inlined — no skill fork) |
+| **Input** | `outputs/01b_PARTIAL_*.json` + `outputs/BUG_BOUNTY_SCOPE.json` (required) |
+| **Output** | `outputs/01e_PARTIAL_*.json` |
 
-Generates formal security properties from trust models and subgraphs. Each property includes a formal invariant statement, its negation (anti-property / attacker scenario), reachability analysis, and bug bounty scope classification.
+Performs inline trust model analysis and generates formal security properties from subgraphs. Combines former phases 01d (Trust Model) and property generation into a single inlined prompt. Key features:
 
-### Phase 02: Checklist Generation
+- **Ethereum-specific STRIDE threat model**: Peer/validator spoofing, block/state tampering, slashable offenses, MEV/timing leaks, eclipse/blob spam DoS, fork choice manipulation
+- **Reachability classification**: `external-reachable`, `internal-only`, `api-only`
+- **Bug bounty scope determination**: Uses `severity_classification` from `BUG_BOUNTY_SCOPE.json` as authoritative severity definitions
+- **Slim output**: `covers` is a string (primary element ID), `reachability` has 4 fields only (`classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope`)
+
+The orchestrator **requires** `outputs/BUG_BOUNTY_SCOPE.json` and aborts if the file is missing.
+
+### Phase 02c: Code Location Pre-resolution
 
 | | |
 |---|---|
-| **Prompt** | `prompts/02_checklist_worker.md` |
-| **Skill** | `/checklist-specialist` |
-| **Input** | `outputs/01e_PARTIAL_*.json` |
-| **Output** | `outputs/02_CHECKLIST_PARTIAL_*.json` |
+| **Prompt** | `prompts/02c_codelocation_worker.md` (inlined — no skill fork) |
+| **Input** | `outputs/01e_PARTIAL_*.json` + `outputs/02c_TARGET_INFO.json` |
+| **Output** | `outputs/02c_PARTIAL_*.json` |
+| **Model** | Sonnet |
 
-Generates security audit checklist items from formal properties. Each item includes severity, mindset (Boundary Guard / Formal Verification Engineer), reachability classification, test procedure, bug class, and risk category. Boundary-edge properties generate critical boundary checks; internal properties generate falsification checks.
+Pre-resolves code locations for each property against the target repository using Tree-sitter MCP (primary) with Glob/Grep fallback. Records file paths, symbol names, and line ranges without extracting code. Applies severity gating (drops `Informational` properties by default). Creates a branch with `outputs/02c_TARGET_INFO.json` for Phase 03 consistency.
+
+Reduces token consumption in Phase 03 by ~40-60%.
 
 ### Phase 03: Audit Map (Formal Audit)
 
 | | |
 |---|---|
-| **Prompt** | `prompts/03_auditmap_worker_optimized.md` |
-| **Skill** | `/formal-audit-unified` |
-| **Input** | `outputs/02_PARTIAL_*.json` + Target codebase |
+| **Prompt** | `prompts/03_auditmap_worker_inline.md` (inlined — no skill fork) |
+| **Input** | `outputs/02c_PARTIAL_*.json` + Target codebase (auto-cloned from `02c_TARGET_INFO.json`) |
 | **Output** | `outputs/03_AUDITMAP_PARTIAL_*.json` |
+| **Model** | Sonnet |
 
-Performs a three-phase formal audit for each checklist item against the target codebase:
+Performs a three-phase adversarial formal audit for each property against the target codebase:
 
-1. **Phase 1 (Abstract Interpretation):** Static analysis identifying potential violation patterns.
-2. **Phase 2 (Symbolic Execution + Reachability):** Counterexample construction with boundary values, type confusion, timing, and edge cases.
-3. **Phase 3 (Invariant Proving + Scope Filtering):** Guard/invariant search with strict STRONG/MODERATE/WEAK evaluation.
+1. **Phase 1 (Abstract Interpretation):** State anomaly identification with adversarial focus — cache inconsistencies, TOCTOU, race conditions, overflow.
+2. **Phase 2 (Symbolic Execution):** Concrete exploit construction from attacker-controlled entry points.
+3. **Phase 3 (Invariant Proving):** Guard sufficiency analysis with skepticism — challenges whether guards cover all scenarios.
+4. **Phase 3.5 (Scope Filtering):** Bug bounty eligibility with conservative bias toward reporting.
 
-Uses Tree-sitter MCP for code symbol resolution and Filesystem MCP for efficient partial reads.
+Compact 6-field output per item: `id`, `classification`, `code_path`, `proof_trace`, `attack_scenario`, `checklist_id`.
 
 ### Phase 04: Audit Review
 
@@ -193,10 +182,8 @@ All pipeline phases are executed via **GitHub Actions workflows** with `workflow
 |---|---|---|
 | 01a. Discovery | `01a-discovery.yml` | Crawl specification URLs |
 | 01b. Subgraph Extraction | `01b-subgraph.yml` | Extract program graphs |
-| 01c. Verification | `01c-verify.yml` | Verify subgraph consistency |
-| 01d. Trust Model | `01d-trustmodel.yml` | Analyze trust boundaries |
-| 01e. Properties | `01e-properties.yml` | Generate formal properties |
-| 02. Checklist | `02-checklist.yml` | Generate audit checklist |
+| 01e. Properties | `01e-properties.yml` | Trust model + property generation |
+| 02c. Code Resolution | `02c-enrich-code.yml` | Pre-resolve code locations |
 | 03. Audit Map | `03-audit-map.yml` | Formal 3-phase code audit |
 | 04. Audit Review | `04-audit-review.yml` | Review and validate findings |
 
@@ -232,12 +219,11 @@ The following MCP servers are registered by `scripts/setup_mcp.sh`:
 
 | Server | Command | Used In |
 |---|---|---|
-| `tree_sitter` | `uvx mcp-server-tree-sitter` | 01b, 03 |
-| `serena` | `uvx --from git+https://github.com/oraios/serena serena start-mcp-server` | Development workflow |
-| `semgrep` | `uvx semgrep-mcp` | Static analysis |
-| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | 01b-04 |
+| `tree_sitter` | `uvx mcp-server-tree-sitter` | 02c |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | 01b, 02c, 04 |
 | `fetch` | `uvx mcp-server-fetch` | 01a |
-| `github` | `npx -y @modelcontextprotocol/server-github` | 02 |
+
+Note: Phase 01e and 03 use inlined prompts with no MCP servers (only built-in Read/Write/Grep/Glob tools).
 
 ## Benchmarks
 

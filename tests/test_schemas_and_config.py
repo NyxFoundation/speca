@@ -51,7 +51,6 @@ from orchestrator.schemas import (
     Phase01dPartial,  # kept for backwards compatibility
     # Phase 01e
     PropertyReachability,
-    PropertyCovers,
     Property,
     Phase01ePartial,
     # Phase 02
@@ -550,9 +549,10 @@ class TestPhase01e:
             id="PROP-001",
             type="invariant",
             severity="HIGH",
-            covers={"primary_element": "FN-001"},
+            covers="FN-001",
         )
         assert prop.id == "PROP-001"
+        assert prop.covers == "FN-001"
 
     def test_property_reachability(self):
         r = PropertyReachability(
@@ -575,7 +575,7 @@ class TestPhase01e:
             "id": "PROP-001",
             "type": "invariant",
             "severity": "HIGH",
-            "covers": {"primary_element": "FN-001"},
+            "covers": "FN-001",
         }
         item, errs = validate_property(data)
         assert item is not None
@@ -852,7 +852,7 @@ class TestCrossPhaseDataFlow:
             id="PROP-001",
             type="invariant",
             severity="HIGH",
-            covers={"primary_element": "FN-001"},
+            covers="FN-001",
             reachability={
                 "classification": "external-reachable",
                 "bug_bounty_scope": "in-scope",
@@ -862,6 +862,7 @@ class TestCrossPhaseDataFlow:
         item["property_id"] = prop.id
         item["source_file"] = "test.json"
         assert item["reachability"]["bug_bounty_scope"] == "in-scope"
+        assert item["covers"] == "FN-001"
 
     def test_02c_property_to_03_audit(self):
         """Property with code from 02c should be parseable as Phase03 input."""
@@ -871,7 +872,7 @@ class TestCrossPhaseDataFlow:
             text="Test property",
             type="invariant",
             severity="High",
-            covers={"primary_element": "FN-001"},
+            covers="FN-001",
             code_scope={"resolution_status": "resolved", "locations": [
                 {"file": "test.go", "symbol": "TestFunc", "line_range": {"start": 1, "end": 10}, "role": "primary"}
             ]},
