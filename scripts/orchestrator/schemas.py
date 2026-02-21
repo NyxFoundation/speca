@@ -582,11 +582,14 @@ def validate_subgraph(data: dict[str, Any]) -> tuple[SubGraph | None, list[str]]
             errors.append("id is empty")
         if not item.name:
             errors.append("name is empty")
-        pg = item.program_graph
-        if not pg.Q:
-            errors.append("program_graph.Q is empty (no nodes)")
-        if not pg.E:
-            errors.append("program_graph.E is empty (no edges)")
+        # When mermaid_file is present, the structured PG lives in the .mmd
+        # file and program_graph/invariants may be absent from the JSON.
+        if not item.mermaid_file:
+            pg = item.program_graph
+            if not pg.Q:
+                errors.append("program_graph.Q is empty (no nodes)")
+            if not pg.E:
+                errors.append("program_graph.E is empty (no edges)")
         return item, errors
     except Exception as exc:
         return None, [str(exc)]

@@ -7,6 +7,7 @@ enabling incremental re-execution of a phase.
 
 import glob
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from .config import PhaseConfig
 class ResumeManager:
     """
     Determines which items have already been processed by inspecting
-    PARTIAL output files or directory outputs (index.json) on disk.
+    PARTIAL output files on disk.
 
     Usage in BaseOrchestrator.run():
         remaining, skipped = self.resume_manager.filter_remaining(all_items)
@@ -31,75 +32,14 @@ class ResumeManager:
 
     def get_processed_ids(self) -> set[str]:
         """
-        Scan output files and extract IDs from result items.
-
-        For output_mode="directory":
-            - Scans outputs/graphs/*/index.json files
-            - Only considers batches with index.json as "complete"
-            - mmd files without index.json are treated as incomplete
-
-        For output_mode="file" (default):
-            - Scans {phase_id}_PARTIAL_*.json files
+        Scan PARTIAL output files and extract IDs from result items.
 
         Falls back to ``metadata.processed_ids`` when present (faster
         path for future runs where the collector records IDs explicitly).
 
         Corrupted files are logged and skipped.
         """
-        if self.config.output_mode == "directory":
-            return self._get_processed_ids_from_directory()
-        else:
-            return self._get_processed_ids_from_partial_files()
-
-    def _get_processed_ids_from_directory(self) -> set[str]:
-        """
-        Scan outputs/graphs/*/index.json files for processed IDs.
-        
-        Only index.json files are considered as proof of complete processing.
-        Directories with mmd files but no index.json are treated as incomplete
-        and will be re-processed (Option B: safe re-processing).
-        """
-        graphs_dir = self.output_dir / "graphs"
-        id_field = self.config.effective_result_id_field
-        result_key = self.config.result_key
-        processed: set[str] = set()
-
-        if not graphs_dir.exists():
-            return processed
-
-        # Find all index.json files in batch directories
-        for index_file in graphs_dir.glob("*/index.json"):
-            try:
-                with open(index_file) as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, OSError) as exc:
-                print(
-                    f"Warning: skipping corrupted index.json {index_file}: {exc}",
-                    file=sys.stderr,
-                )
-                continue
-
-            # Fast path: use metadata.processed_ids if available
-            meta_ids = (
-                data.get("metadata", {}).get("processed_ids")
-                if isinstance(data.get("metadata"), dict)
-                else None
-            )
-            if meta_ids and isinstance(meta_ids, list):
-                processed.update(str(i) for i in meta_ids)
-                continue
-
-            # Slow path: scan result items
-            items = data.get(result_key, [])
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if isinstance(item, dict):
-                    item_id = item.get(id_field)
-                    if item_id is not None:
-                        processed.add(str(item_id))
-
-        return processed
+        return self._get_processed_ids_from_partial_files()
 
     def _get_processed_ids_from_partial_files(self) -> set[str]:
         """
@@ -172,11 +112,12 @@ class ResumeManager:
 
     def get_incomplete_batches(self) -> list[Path]:
         """
-        Find batch directories that have mmd files but no index.json.
-        
+        Find batch directories that have mmd files but no corresponding
+        PARTIAL file.
+
         These are considered incomplete and should be cleaned up before
         re-processing to avoid conflicts.
-        
+
         Returns:
             List of paths to incomplete batch directories
         """
@@ -187,13 +128,24 @@ class ResumeManager:
         if not graphs_dir.exists():
             return []
 
+        # Build set of W{n}B{m} prefixes referenced by existing PARTIAL files
+        partial_pattern = str(self.output_dir / f"{self.config.phase_id}_PARTIAL_*.json")
+        referenced_prefixes: set[str] = set()
+        for filepath in glob.glob(partial_pattern):
+            match = re.search(r"(W\d+B\d+)", Path(filepath).name)
+            if match:
+                referenced_prefixes.add(match.group(1))
+
         incomplete: list[Path] = []
         for batch_dir in graphs_dir.iterdir():
             if not batch_dir.is_dir():
                 continue
-            index_file = batch_dir / "index.json"
             has_mmd = any(batch_dir.rglob("*.mmd"))
-            if has_mmd and not index_file.exists():
+            if not has_mmd:
+                continue
+            dir_prefix_match = re.search(r"(W\d+B\d+)", batch_dir.name)
+            dir_prefix = dir_prefix_match.group(1) if dir_prefix_match else ""
+            if dir_prefix not in referenced_prefixes:
                 incomplete.append(batch_dir)
 
         return incomplete
@@ -230,8 +182,8 @@ class ResumeManager:
 
     def cleanup_incomplete_batches(self, dry_run: bool = True) -> dict[str, list[Path]]:
         """
-        Remove incomplete batch directories (mmd files without index.json)
-        and their corresponding log files.
+        Remove incomplete batch directories (mmd files without matching
+        PARTIAL file) and their corresponding log files.
         
         Args:
             dry_run: If True, only report what would be deleted without actually deleting.
@@ -320,14 +272,7 @@ class ResumeManager:
         if self.config.output_mode == "directory":
              graphs_dir = self.output_dir / "graphs"
              if graphs_dir.exists():
-                 # We need to be careful not to delete other phases' outputs if they share graph dir?
-                 # Currently graph dir structure is W{worker}B{batch}_{timestamp}.
-                 # Phase ID isn't in the directory name, only in logs.
-                 # However, if we are forcing a phase, we likely want to remove relevant batches.
-                 # But we can't easily distinguish batches of different phases if they share this structure without inspection.
-                 # Wait, Phase 01b (extraction) is the main one using directory mode.
-                 # If we force 01b, we should probably clean up ALL graph directories?
-                 # Or check index.json inside?
+                 # Phase 01b is the only phase using directory mode.
                  # Safe approach: check if log files for this batch match the phase.
                  for batch_dir in graphs_dir.iterdir():
                      if not batch_dir.is_dir(): continue

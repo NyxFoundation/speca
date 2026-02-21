@@ -67,7 +67,7 @@ class PhaseConfig(BaseModel):
     output_prefix: str = ""
 
     # Output mode: "file" (default) writes a single JSON; "directory" writes
-    # .mmd graphs + index.json under outputs/graphs/<batch>/
+    # .mmd graphs under outputs/graphs/<batch>/ and a PARTIAL JSON for resume
     output_mode: str = "file"
 
     # Early exit conditions
@@ -149,7 +149,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         skill_path=Path(".claude/skills/subgraph-extractor/SKILL.md"),
         prompt_path=Path("prompts/01b_extract_worker.md"),
         queue_pattern="outputs/01b_QUEUE_{worker_id}.json",
-        output_pattern="outputs/graphs/*/index.json",
+        output_pattern="outputs/01b_PARTIAL_*.json",
         depends_on=["01a"],
         input_patterns=["outputs/01a_STATE.json"],
         batch_strategy="count",

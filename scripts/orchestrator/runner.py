@@ -335,7 +335,9 @@ class ClaudeRunner:
         if directory_mode:
             batch_output_dir = self.output_dir / "graphs" / f"batch_w{worker_id}b{batch_index}_{timestamp}"
             batch_output_dir.mkdir(parents=True, exist_ok=True)
-            result_parse_path = batch_output_dir / "index.json"
+            # Directory mode has no result file; _parse_results will return []
+            # and the runner falls back to _parse_results_from_log automatically.
+            result_parse_path = batch_output_dir / ".no_result_file"
             output_kwargs: dict[str, str] = {"output_dir": str(batch_output_dir)}
         else:
             result_parse_path = self.output_dir / f"{partial_base}_W{worker_id}B{batch_index}_{timestamp}.json"
@@ -553,7 +555,7 @@ class ClaudeRunner:
             )
             return None
 
-        # Parse results from output file / index.json, fallback to log
+        # Parse results from output file, fallback to log
         results = self._parse_results(result_parse_path)
         if not results:
             results = self._parse_results_from_log(log_file)

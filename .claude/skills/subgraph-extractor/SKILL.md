@@ -74,6 +74,9 @@ The caller provides:
 ### Correct Mermaid Syntax
 
 ```mermaid
+---
+title: "factorial (Example Spec)"
+---
 stateDiagram-v2
     direction TB
     [*] --> q1: y = 1
@@ -81,6 +84,10 @@ stateDiagram-v2
     q1 --> [*]: x <= 0
     q2 --> q3: y = x * y
     q3 --> q1: x = x - 1
+
+    note right of q3
+        INV-001: y equals x! at loop termination
+    end note
 ```
 
 ### Incorrect (Will Fail)
@@ -104,42 +111,30 @@ The skill returns one JSON object per invocation (one spec → one object).
     {
       "id": "SG-001",
       "name": "get_blob_parameters",
-      "mermaid_file": "EIP-7892/SG-001_get_blob_parameters.mmd",
-      "program_graph": {
-        "Q": ["q_init", "q_iter", "q_check", "q_return", "q_final"],
-        "q_init": "q_init",
-        "q_final": "q_final",
-        "Act": [
-          "for entry in BLOB_SCHEDULE",
-          "epoch >= entry.epoch",
-          "epoch < entry.epoch",
-          "return entry.params",
-          "return DEFAULT_PARAMS"
-        ],
-        "E": [
-          ["q_init", "for entry in BLOB_SCHEDULE", "q_iter"],
-          ["q_iter", "epoch >= entry.epoch", "q_return"],
-          ["q_iter", "epoch < entry.epoch", "q_iter"],
-          ["q_return", "return entry.params", "q_final"]
-        ]
-      },
-      "invariants": [
-        "INV-001: BLOB_SCHEDULE entries have unique epochs"
-      ]
+      "mermaid_file": "EIP-7892/SG-001_get_blob_parameters.mmd"
     }
   ]
 }
 ```
 
+**Note**: The structured program graph (Q, q_init, q_final, Act, E) and invariants are encoded in the `.mmd` file itself. The JSON output contains only references. Include all invariants as `note right of` blocks in the `.mmd` file.
+
 ### Mermaid File (.mmd)
 
 ```mermaid
+---
+title: "get_blob_parameters (EIP-7892: Blob Schedule)"
+---
 stateDiagram-v2
     direction TB
     [*] --> q_iter: for entry in BLOB_SCHEDULE
     q_iter --> q_return: epoch >= entry.epoch
     q_iter --> q_iter: epoch < entry.epoch
     q_return --> [*]: return entry.params
+
+    note right of q_iter
+        INV-001: BLOB_SCHEDULE entries have unique epochs
+    end note
 ```
 
 ## Action Classification
@@ -187,6 +182,9 @@ function factorial(x):
 
 **Output (Mermaid)** - `examples/SG-factorial_factorial.mmd`:
 ```mermaid
+---
+title: "factorial (Factorial Example)"
+---
 stateDiagram-v2
     direction TB
     [*] --> q1: y = 1
@@ -194,6 +192,11 @@ stateDiagram-v2
     q1 --> [*]: x <= 0
     q2 --> q3: y = x * y
     q3 --> q1: x = x - 1
+
+    note right of q3
+        INV-001: y equals x! at loop termination
+        INV-002: x >= 0 at every iteration
+    end note
 ```
 
 **Output (JSON)**:
@@ -201,19 +204,6 @@ stateDiagram-v2
 {
   "id": "SG-factorial",
   "name": "factorial",
-  "mermaid_file": "examples/SG-factorial_factorial.mmd",
-  "program_graph": {
-    "Q": ["q_init", "q1", "q2", "q3", "q_final"],
-    "q_init": "q_init",
-    "q_final": "q_final",
-    "Act": ["y = 1", "x > 0", "x <= 0", "y = x * y", "x = x - 1"],
-    "E": [
-      ["q_init", "y = 1", "q1"],
-      ["q1", "x > 0", "q2"],
-      ["q1", "x <= 0", "q_final"],
-      ["q2", "y = x * y", "q3"],
-      ["q3", "x = x - 1", "q1"]
-    ]
-  }
+  "mermaid_file": "examples/SG-factorial_factorial.mmd"
 }
 ```
