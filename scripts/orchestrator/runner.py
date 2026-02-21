@@ -450,6 +450,15 @@ class ClaudeRunner:
             await watcher_task
             return None
         finally:
+            # Kill subprocess if still running (critical for circuit breaker /
+            # cancellation — without this, cancelled tasks leave orphan Claude
+            # CLI processes that prevent the orchestrator from exiting).
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
             # Ensure watcher is stopped
             watcher.stop()
             if not watcher_task.done():
@@ -607,10 +616,10 @@ class ClaudeRunner:
         is_error = result_info.get("is_error", False)
 
         if subtype != "success":
-            # e.g. subtype="error" — genuine failure
+            # e.g. subtype="error", "error_max_turns" — genuine failure
             return None
 
-        # subtype=success, is_error=true — likely max_turns reached
+        # subtype=success, is_error=true — likely graceful exit with output
         duration_s = result_info.get("duration_ms", 0) / 1000
         print(
             f"[W{worker_id}] Batch {batch_index}: Claude exited non-zero but "

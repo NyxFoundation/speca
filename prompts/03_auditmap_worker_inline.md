@@ -48,6 +48,9 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). Extract the single item by looking up the first ID.
 
     2. **Resolve Code Scope**:
+
+       **Path prefix**: The target repository is cloned under `target_workspace/`. All `code_scope.locations[].file` paths from Phase 02c are relative to the repo root — prepend `target_workspace/` when reading files (e.g. `beacon-chain/core/blocks/payload.go` → `target_workspace/beacon-chain/core/blocks/payload.go`). Read `outputs/TARGET_INFO.json` for repository metadata.
+
        a. **Pre-resolved (preferred)**: If `item.code_scope.resolution_status == "resolved"` and `item.code_scope.locations` is not empty:
           - Use pre-resolved data from Phase 02c
           - Primary location is first item with `role == "primary"` in locations array

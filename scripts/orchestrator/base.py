@@ -491,6 +491,16 @@ class BaseOrchestrator(ABC):
                     self.failed_batches.append((0, 0))
                 finally:
                     pbar.update(batch_size)
+
+        # Wait for cancelled tasks to finish cleanup (subprocess kill etc.)
+        # Without this, orphan Claude CLI processes keep running after exit.
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            print(
+                f"Waiting for {len(pending)} task(s) to shut down...",
+                file=sys.stderr,
+            )
+            await asyncio.gather(*pending, return_exceptions=True)
     
 
 
