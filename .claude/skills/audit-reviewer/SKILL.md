@@ -23,7 +23,7 @@ A JSON object containing a list of items, where each item is an audit result fro
 {
   "items": [
     {
-      "check_id": "CHK-0001",
+      "property_id": "PROP-0001",
       "audit_result": {
         "final_classification": "vulnerable",
         "summary": "Counterexample found for invariant...",
@@ -56,7 +56,7 @@ Return a JSON object containing the list of reviewed findings. The output should
   "source_files": ["outputs/03_AUDITMAP_PARTIAL_W0_B0.json"],
   "reviewed_items": [
     {
-      "check_id": "CHK-0001",
+      "property_id": "PROP-0001",
       "original_finding": {
         "final_classification": "vulnerable",
         "summary": "..."
@@ -67,7 +67,7 @@ Return a JSON object containing the list of reviewed findings. The output should
       "final_recommendation": "Implement a re-entrancy guard on the `execute` function and add input validation to sanitize the price feed data."
     },
     {
-      "check_id": "CHK-0002",
+      "property_id": "PROP-0002",
       "original_finding": {
         "final_classification": "vulnerable",
         "summary": "..."

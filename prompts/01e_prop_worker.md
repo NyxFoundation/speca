@@ -169,7 +169,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
     {
       "properties": [
         {
-          "id": "PROP-txval-inv-001",
+          "property_id": "PROP-txval-inv-001",
           "text": "Total supply must not change during transfer.",
           "type": "invariant",
           "assertion": "forall transfer(from, to, amt): supply_before == supply_after",

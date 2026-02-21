@@ -266,7 +266,7 @@ class Property(BaseModel):
 
     ``covers`` is the primary element ID string (e.g. ``"FN-001"``).
     """
-    id: str
+    property_id: str
     text: str = ""
     type: str = ""
     assertion: str = ""
@@ -591,8 +591,8 @@ def validate_property(data: dict[str, Any]) -> tuple[Property | None, list[str]]
     errors: list[str] = []
     try:
         item = Property.model_validate(data)
-        if not item.id:
-            errors.append("id is empty")
+        if not item.property_id:
+            errors.append("property_id is empty")
         if not item.type:
             errors.append("type is empty")
         if not item.severity:

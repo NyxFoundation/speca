@@ -546,12 +546,12 @@ class TestTrustModelSchemas:
 class TestPhase01e:
     def test_property_valid(self):
         prop = Property(
-            id="PROP-001",
+            property_id="PROP-001",
             type="invariant",
             severity="HIGH",
             covers="FN-001",
         )
-        assert prop.id == "PROP-001"
+        assert prop.property_id == "PROP-001"
         assert prop.covers == "FN-001"
 
     def test_property_reachability(self):
@@ -564,15 +564,15 @@ class TestPhase01e:
     def test_phase01e_partial_valid(self):
         partial = Phase01ePartial(
             properties=[
-                {"id": "PROP-001", "type": "invariant"},
-                {"id": "PROP-002", "type": "postcondition"},
+                {"property_id": "PROP-001", "type": "invariant"},
+                {"property_id": "PROP-002", "type": "postcondition"},
             ]
         )
         assert len(partial.properties) == 2
 
     def test_validate_property_valid(self):
         data = {
-            "id": "PROP-001",
+            "property_id": "PROP-001",
             "type": "invariant",
             "severity": "HIGH",
             "covers": "FN-001",
@@ -849,7 +849,7 @@ class TestCrossPhaseDataFlow:
     def test_01e_property_to_02c_code_resolution(self):
         """Property from 01e should be usable as input for 02c code resolution."""
         prop = Property(
-            id="PROP-001",
+            property_id="PROP-001",
             type="invariant",
             severity="HIGH",
             covers="FN-001",
@@ -859,7 +859,6 @@ class TestCrossPhaseDataFlow:
             },
         )
         item = dict(prop.model_dump())
-        item["property_id"] = prop.id
         item["source_file"] = "test.json"
         assert item["reachability"]["bug_bounty_scope"] == "in-scope"
         assert item["covers"] == "FN-001"
@@ -868,7 +867,7 @@ class TestCrossPhaseDataFlow:
         """Property with code from 02c should be parseable as Phase03 input."""
         from orchestrator.schemas import PropertyWithCode
         pwc = PropertyWithCode(
-            id="PROP-001",
+            property_id="PROP-001",
             text="Test property",
             type="invariant",
             severity="High",

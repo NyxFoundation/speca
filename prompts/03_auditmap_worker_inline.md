@@ -148,7 +148,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
        4. **When in doubt, report it**
 
     4. **Compress to 6-Field Output**: Map the analysis to the minimal schema:
-       - `id` = property_id
+       - `property_id`
        - `classification` (one of: vulnerability | potential-vulnerability | not-a-vulnerability | informational | out-of-scope)
        - `code_path` (primary location: `file::symbol::Lstart-end`)
        - `proof_trace` (succinct rationale or root cause/proof, 1-3 sentences)
@@ -164,7 +164,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     Write a single JSON object with two keys:
     - "metadata": keep the existing metadata structure (phase, worker_id, batch_index, item_count, timestamp, processed_ids, etc.) unchanged.
     - "audit_items": an array of result rows. Each row MUST contain ONLY the following keys, nothing else:
-      1) "id"                -> same as property_id string
+      1) "property_id"       -> the property_id string
       2) "classification"    -> one of: vulnerability | potential-vulnerability | not-a-vulnerability | informational | out-of-scope
       3) "code_path"         -> string like "path/to/file.go::FuncName::L22-33" (primary location)
       4) "proof_trace"       ->
@@ -181,7 +181,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
   <quality_gates>
     **Before writing output, verify:**
 
-    1. **Field whitelist**: Every audit_items element has exactly the 6 allowed keys (id, classification, code_path, proof_trace, attack_scenario, checklist_id). No extras.
+    1. **Field whitelist**: Every audit_items element has exactly the 6 allowed keys (property_id, classification, code_path, proof_trace, attack_scenario, checklist_id). No extras.
     2. **Non-empty rationale**: proof_trace non-empty (<= 3 sentences). attack_scenario non-empty only for vulnerability/potential-vulnerability; otherwise exactly "".
     3. **Code path present**: code_path includes file, symbol (if available), and line range e.g., `beacon-chain/core/peerdas/reconstruction.go::ReconstructDataColumnSidecars::L31-122`.
     4. **Classification sanity**: use allowed set only.

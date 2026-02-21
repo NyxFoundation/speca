@@ -790,18 +790,17 @@ class Phase02cOrchestrator(BaseOrchestrator):
                     if isinstance(prop, dict):
                         parsed, errs = validate_property(prop)
                         if errs:
-                            prop_id_raw = prop.get("id", "<unknown>")
+                            prop_id_raw = prop.get("property_id", "<unknown>")
                             for err in errs:
                                 print(
                                     f"    ⚠️  {filepath} property {prop_id_raw}: {err}",
                                     file=sys.stderr,
                                 )
 
-                        prop_id = prop.get("id")
+                        prop_id = prop.get("property_id")
                         if prop_id and prop_id not in items:
                             # Flatten property fields as top-level item fields
                             item = dict(prop)
-                            item["property_id"] = prop_id
                             item["source_file"] = filepath
                             items[prop_id] = item
             except Exception as e:
@@ -836,7 +835,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
         severity_skipped = 0
 
         for item in items:
-            prop_id = item.get("property_id") or item.get("id")
+            prop_id = item.get("property_id")
             if not prop_id:
                 early_exit_results.append(self._build_skip_result(item, "missing property id"))
                 continue
@@ -870,7 +869,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
 
     def _build_skip_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
         """Build a skip result for early exit items."""
-        prop_id = item.get("property_id") or item.get("id", "unknown")
+        prop_id = item.get("property_id", "unknown")
         return {
             "property_id": prop_id,
             "skipped": True,
@@ -921,14 +920,14 @@ class Phase03Orchestrator(BaseOrchestrator):
 
                     parsed, errs = validate_property(entry)
                     if errs:
-                        prop_id_raw = entry.get("property_id") or entry.get("id", "<unknown>")
+                        prop_id_raw = entry.get("property_id", "<unknown>")
                         for err in errs:
                             print(
                                 f"    ⚠️  {filepath} property {prop_id_raw}: {err}",
                                 file=sys.stderr,
                             )
 
-                    prop_id = entry.get("property_id") or entry.get("id")
+                    prop_id = entry.get("property_id")
                     if not prop_id:
                         continue
 
@@ -972,7 +971,7 @@ class Phase03Orchestrator(BaseOrchestrator):
 
     def _build_early_exit_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
         """Build early exit result for out-of-scope items."""
-        prop_id = item.get("property_id") or item.get("id", "")
+        prop_id = item.get("property_id", "")
         code_scope = item.get("code_scope", {})
 
         return {
