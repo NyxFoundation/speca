@@ -521,6 +521,7 @@ class ClaudeRunner:
                     output_tokens=usage["output_tokens"],
                     cache_read_tokens=usage["cache_read_tokens"],
                     cache_creation_tokens=usage["cache_creation_tokens"],
+                    num_turns=usage.get("num_turns", 0),
                     worker_id=worker_id,
                     batch_index=batch_index,
                 )
@@ -531,11 +532,13 @@ class ClaudeRunner:
                     + usage["cache_read_tokens"]
                     + usage["cache_creation_tokens"]
                 )
+                turns_str = f", turns={usage['num_turns']}" if usage.get("num_turns") else ""
                 print(
                     f"[W{worker_id}] Batch {batch_index}: "
                     f"tokens={total_tokens:,} "
                     f"(in={usage['input_tokens']:,}, cache_read={usage['cache_read_tokens']:,}, "
-                    f"cache_create={usage['cache_creation_tokens']:,}, out={usage['output_tokens']:,}); "
+                    f"cache_create={usage['cache_creation_tokens']:,}, out={usage['output_tokens']:,}"
+                    f"{turns_str}); "
                     f"+${batch_cost:.4f}, total=${cost_stats['total_cost_usd']:.2f}/"
                     f"${cost_stats['max_budget_usd']:.2f}",
                 )

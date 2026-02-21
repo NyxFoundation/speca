@@ -386,6 +386,7 @@ class CostTracker:
     total_cache_read_tokens: int = field(default=0, init=False)
     total_cache_creation_tokens: int = field(default=0, init=False)
     total_cost_usd: float = field(default=0.0, init=False)
+    total_turns: int = field(default=0, init=False)
     batch_count: int = field(default=0, init=False)
 
     # Per-batch history for diagnostics
@@ -398,6 +399,7 @@ class CostTracker:
         output_tokens: int = 0,
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
+        num_turns: int = 0,
         *,
         worker_id: int = 0,
         batch_index: int = 0,
@@ -428,6 +430,7 @@ class CostTracker:
             self.total_cache_read_tokens += cache_read_tokens
             self.total_cache_creation_tokens += cache_creation_tokens
             self.total_cost_usd += batch_cost
+            self.total_turns += num_turns
             self.batch_count += 1
 
             self._history.append({
@@ -438,6 +441,7 @@ class CostTracker:
                 "cache_read_tokens": cache_read_tokens,
                 "cache_creation_tokens": cache_creation_tokens,
                 "output_tokens": output_tokens,
+                "num_turns": num_turns,
                 "batch_cost_usd": round(batch_cost, 4),
                 "cumulative_cost_usd": round(self.total_cost_usd, 4),
             })
@@ -477,6 +481,7 @@ class CostTracker:
                 else 0,
                 1,
             ),
+            "total_turns": self.total_turns,
             "batch_count": self.batch_count,
         }
 
@@ -493,27 +498,35 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
     """
     Parse a Claude CLI stream-json log and extract total token usage.
 
-    The stream-json format emits one JSON object per line.  We look for
-    ``usage`` objects that contain ``input_tokens`` and ``output_tokens``.
+    The stream-json format emits one JSON object per line.  The ``result``
+    event (emitted at the end of a successful run) carries authoritative
+    cumulative totals and ``num_turns``.  When the process was killed before
+    emitting a ``result`` event, we fall back to summing per-message usage
+    (deduplicated by message ID to avoid double-counting duplicate events
+    within the same API turn).
 
-    Returns:
-        {"input_tokens": N, "output_tokens": M}
+    Returns a dict with keys: ``input_tokens``, ``output_tokens``,
+    ``cache_read_tokens``, ``cache_creation_tokens``, ``num_turns``.
     """
     if not isinstance(log_path, Path):
         log_path = Path(log_path)
 
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_creation_tokens = 0
+    _ZERO: dict[str, int] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "num_turns": 0,
+    }
 
     if not log_path.exists():
-        return {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-        }
+        return dict(_ZERO)
+
+    result_usage: dict | None = None
+    result_num_turns: int = 0
+    # Per-message usage for fallback (message_id -> best usage snapshot)
+    msg_usage: dict[str, dict[str, int]] = {}
+    msg_order: list[str] = []
 
     try:
         with open(log_path, errors="replace") as f:
@@ -526,36 +539,80 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
                 except json.JSONDecodeError:
                     continue
 
-                # Claude CLI stream-json emits usage in various message types
-                usage = None
-                if isinstance(obj, dict):
-                    # Direct usage field
-                    if "usage" in obj and isinstance(obj["usage"], dict):
-                        usage = obj["usage"]
-                    # Nested in message
-                    elif "message" in obj and isinstance(obj["message"], dict):
-                        msg = obj["message"]
-                        if "usage" in msg and isinstance(msg["usage"], dict):
-                            usage = msg["usage"]
+                if not isinstance(obj, dict):
+                    continue
+
+                # --- Prefer the result event (authoritative totals) ---
+                if obj.get("type") == "result":
+                    u = obj.get("usage")
+                    if isinstance(u, dict):
+                        result_usage = u
+                        result_num_turns = obj.get("num_turns", 0) or 0
+                    continue
+
+                # --- Collect per-message usage for fallback ---
+                msg_id: str | None = None
+                usage: dict | None = None
+
+                if "message" in obj and isinstance(obj["message"], dict):
+                    msg = obj["message"]
+                    msg_id = msg.get("id")
+                    if "usage" in msg and isinstance(msg["usage"], dict):
+                        usage = msg["usage"]
+                elif "usage" in obj and isinstance(obj["usage"], dict):
+                    usage = obj["usage"]
 
                 if usage:
-                    input_tokens = max(input_tokens, usage.get("input_tokens", 0))
-                    output_tokens += usage.get("output_tokens", 0)
-                    cache_read_tokens = max(
-                        cache_read_tokens,
-                        usage.get("cache_read_input_tokens", 0),
-                    )
-                    cache_creation_tokens = max(
-                        cache_creation_tokens,
-                        usage.get("cache_creation_input_tokens", 0),
-                    )
+                    # Use message ID for dedup; fall back to sequential key
+                    # for events that lack a message ID.
+                    key = msg_id or f"__anon_{len(msg_order)}"
+                    # Keep max of each field per message (events for the
+                    # same message report identical or cumulative values).
+                    prev = msg_usage.get(key)
+                    if prev is None:
+                        msg_order.append(key)
+                        msg_usage[key] = {
+                            "input_tokens": usage.get("input_tokens", 0),
+                            "output_tokens": usage.get("output_tokens", 0),
+                            "cache_read": usage.get("cache_read_input_tokens", 0),
+                            "cache_creation": usage.get("cache_creation_input_tokens", 0),
+                        }
+                    else:
+                        prev["input_tokens"] = max(prev["input_tokens"], usage.get("input_tokens", 0))
+                        prev["output_tokens"] = max(prev["output_tokens"], usage.get("output_tokens", 0))
+                        prev["cache_read"] = max(prev["cache_read"], usage.get("cache_read_input_tokens", 0))
+                        prev["cache_creation"] = max(prev["cache_creation"], usage.get("cache_creation_input_tokens", 0))
 
     except Exception:
         pass
+
+    # --- Build result ---
+    if result_usage is not None:
+        # Result event has authoritative totals
+        return {
+            "input_tokens": result_usage.get("input_tokens", 0),
+            "output_tokens": result_usage.get("output_tokens", 0),
+            "cache_read_tokens": result_usage.get("cache_read_input_tokens", 0),
+            "cache_creation_tokens": result_usage.get("cache_creation_input_tokens", 0),
+            "num_turns": result_num_turns,
+        }
+
+    # Fallback: sum per-message values
+    input_tokens = 0
+    output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    for mid in msg_order:
+        u = msg_usage[mid]
+        input_tokens += u["input_tokens"]
+        output_tokens += u["output_tokens"]
+        cache_read_tokens += u["cache_read"]
+        cache_creation_tokens += u["cache_creation"]
 
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,
+        "num_turns": len(msg_order),
     }
