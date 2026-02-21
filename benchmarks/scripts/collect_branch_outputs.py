@@ -335,9 +335,9 @@ def collect_branch(branch: str, output_root: Path, globs: list[str], logs_dir: s
         collected.append(name)
 
     target_info = {}
-    if "03_TARGET_INFO.json" in files:
+    if "TARGET_INFO.json" in files:
         try:
-            target_info = json.loads(run_git(["show", f"{ref}:outputs/03_TARGET_INFO.json"]))
+            target_info = json.loads(run_git(["show", f"{ref}:outputs/TARGET_INFO.json"]))
         except (subprocess.CalledProcessError, json.JSONDecodeError):
             target_info = {}
 
@@ -375,7 +375,7 @@ def main() -> None:
     parser.add_argument("--branches", required=True, help="Comma-separated branch names")
     parser.add_argument(
         "--output-globs",
-        default="03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,03_TARGET_INFO.json,03_*.json",
+        default="03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,TARGET_INFO.json,03_*.json",
         help="Comma-separated glob patterns to select outputs (default includes 03_PARTIAL/03_AUDITMAP_PARTIAL)",
     )
     parser.add_argument("--logs-dir", default="outputs/logs", help="Logs directory in repo")

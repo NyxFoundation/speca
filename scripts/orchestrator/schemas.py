@@ -521,7 +521,11 @@ class PartialMetadata(BaseModel):
 # ---------------------------------------------------------------------------
 
 class TargetInfo(BaseModel):
-    """Target repository information saved by Phase 03 for Phase 04."""
+    """Target repository information (outputs/TARGET_INFO.json).
+
+    Created by the 02c CI workflow before Phase 02c runs. Consumed by
+    Phases 02c, 03, and 04 for target repository/commit consistency.
+    """
     target_repo: str
     target_ref_type: str = ""
     target_ref_label: str = ""

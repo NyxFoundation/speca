@@ -23,12 +23,19 @@ Language: English only.
 
     Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context.
 
-    Read `outputs/02c_TARGET_INFO.json`. It contains:
+    Read `outputs/TARGET_INFO.json`. It contains:
     - `target_repo`: repository identifier (e.g. "OffchainLabs/prysm")
     - `target_layer` *(optional)*: the functional layer this target belongs to (e.g. "consensus", "execution", "l2-node", "validator-runtime")
     - `out_of_scope_spec_layers` *(optional)*: list of spec layer strings that are out of scope for this target (e.g. `["execution"]`)
 
     Register the cloned repository at `target_workspace/` with Tree-sitter MCP.
+
+    Read `outputs/01b_SUBGRAPH_INDEX.json` for spec-level context. This index maps
+    specification titles to their subgraphs (name + mermaid file path). For each
+    property, match keywords from `text`/`assertion` against subgraph names to identify
+    the relevant spec. Read the corresponding `.mmd` mermaid file to extract
+    spec-level function names, state transitions, and invariants — use these as
+    additional search keywords when resolving code locations.
 
     ## Step 2: Layer Scope Check (per item, only if TARGET_INFO has `out_of_scope_spec_layers`)
 

@@ -34,7 +34,7 @@ _CLIENT_ALIASES = {
 
 
 def load_target_info(results_dir: Path, sanitized_branch: str) -> dict:
-    target_path = results_dir / sanitized_branch / "03_TARGET_INFO.json"
+    target_path = results_dir / sanitized_branch / "TARGET_INFO.json"
     if not target_path.exists():
         return {}
     try:

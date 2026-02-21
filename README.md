@@ -60,7 +60,7 @@ flowchart TB
     end
 
     BBS["BUG_BOUNTY_SCOPE.json"] -.->|required| E
-    TI["02c_TARGET_INFO.json"] -.->|target repo| F
+    TI["TARGET_INFO.json"] -.->|target repo| F
     TI -.->|auto-clone| G
 ```
 
@@ -110,11 +110,11 @@ The orchestrator **requires** `outputs/BUG_BOUNTY_SCOPE.json` and aborts if the 
 | | |
 |---|---|
 | **Prompt** | `prompts/02c_codelocation_worker.md` (inlined — no skill fork) |
-| **Input** | `outputs/01e_PARTIAL_*.json` + `outputs/02c_TARGET_INFO.json` |
+| **Input** | `outputs/01e_PARTIAL_*.json` + `outputs/TARGET_INFO.json` + `outputs/01b_SUBGRAPH_INDEX.json` |
 | **Output** | `outputs/02c_PARTIAL_*.json` |
 | **Model** | Sonnet |
 
-Pre-resolves code locations for each property against the target repository using Tree-sitter MCP (primary) with Glob/Grep fallback. Records file paths, symbol names, and line ranges without extracting code. Applies severity gating (drops `Informational` properties by default). Creates a branch with `outputs/02c_TARGET_INFO.json` for Phase 03 consistency.
+Pre-resolves code locations for each property against the target repository using Tree-sitter MCP (primary) with Glob/Grep fallback. Records file paths, symbol names, and line ranges without extracting code. Applies severity gating (drops `Informational` properties by default). Builds `outputs/01b_SUBGRAPH_INDEX.json` from 01b partials for spec-level context. Reads `outputs/TARGET_INFO.json` (created by 02c workflow before phase runs).
 
 Reduces token consumption in Phase 03 by ~40-60%.
 
@@ -123,7 +123,7 @@ Reduces token consumption in Phase 03 by ~40-60%.
 | | |
 |---|---|
 | **Prompt** | `prompts/03_auditmap_worker_inline.md` (inlined — no skill fork) |
-| **Input** | `outputs/02c_PARTIAL_*.json` + Target codebase (auto-cloned from `02c_TARGET_INFO.json`) |
+| **Input** | `outputs/02c_PARTIAL_*.json` + Target codebase (auto-cloned from `TARGET_INFO.json`) |
 | **Output** | `outputs/03_AUDITMAP_PARTIAL_*.json` |
 | **Model** | Sonnet |
 

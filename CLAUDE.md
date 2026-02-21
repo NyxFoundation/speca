@@ -53,8 +53,8 @@ Phase IDs: `01a` → `01b` → `01e` → `02c` → `03` → `04`
 - **01a** Spec Discovery: crawl URLs → `outputs/01a_STATE.json`
 - **01b** Subgraph Extraction: specs → enriched Mermaid state diagrams (`.mmd` with YAML frontmatter + `note right of` invariant blocks) + `01b_PARTIAL_*.json`
 - **01e** Property Generation: trust model analysis (Ethereum-specific STRIDE) + formal security properties from subgraphs (depends on 01b). **Requires** `outputs/BUG_BOUNTY_SCOPE.json` — orchestrator calls `sys.exit(1)` if missing. Logic inlined in worker prompt (no skill fork). Slim output: `covers` is a string (primary element ID), `reachability` has 4 fields only.
-- **02c** Code Pre-resolution: pre-resolve code locations (`code_scope`) for properties against target repository using Tree-sitter MCP. Requires `outputs/02c_TARGET_INFO.json`. Severity gate drops `Informational` properties. Model: Sonnet.
-- **03** Audit Map: three-phase adversarial formal audit (Abstract Interpretation → Symbolic Execution → Invariant Proving) against target codebase. Reads `outputs/02c_TARGET_INFO.json` to auto-clone same target repository/commit. Inlined prompt (no skill fork). Model: Sonnet. Tools: Read/Write/Grep/Glob only.
+- **02c** Code Pre-resolution: pre-resolve code locations (`code_scope`) for properties against target repository using Tree-sitter MCP. Requires `outputs/TARGET_INFO.json` (created by 02c workflow before phase runs). Also builds `outputs/01b_SUBGRAPH_INDEX.json` from 01b partials for spec-level context. Severity gate drops `Informational` properties. Model: Sonnet.
+- **03** Audit Map: three-phase adversarial formal audit (Abstract Interpretation → Symbolic Execution → Invariant Proving) against target codebase. Reads `outputs/TARGET_INFO.json` to auto-clone same target repository/commit. Inlined prompt (no skill fork). Model: Sonnet. Tools: Read/Write/Grep/Glob only.
 - **04** Review: six-category verdict system (CONFIRMED_VULNERABILITY through REQUIRES_MANUAL_REVIEW)
 
 Manual (not orchestrated): `05` PoC Generation, `06` Bug-Bounty Report, `06b` Full Audit Report.
@@ -82,7 +82,8 @@ Phases 01e, 02c, and 03 use **inlined prompts** (no skill fork) — all analysis
 - **Circuit breaker is shared:** All workers in a phase share one circuit breaker, so systemic issues (bad prompt, API outage) trigger fast abort.
 - **MCP-first code resolution:** Phase 02c uses `mcp__tree_sitter__get_symbols` / `run_query` for code location before reading files. Phase 03 uses built-in Read/Grep/Glob only (no MCP).
 - **Budget enforcement:** Cost tracking is built into `ClaudeRunner`, not bolted on. Raises `BudgetExceeded` at the runner level.
-- **Phase 02c/03 target consistency:** Phase 02c creates a branch with `outputs/02c_TARGET_INFO.json` containing target repository and commit info. Phase 03 reads this file to auto-clone the same target, ensuring consistency.
+- **Phase 02c/03 target consistency:** The 02c CI workflow creates `outputs/TARGET_INFO.json` **before** Phase 02c runs, containing target repository and commit info. Phases 03 and 04 read this same file, ensuring consistency without redundant copies.
+- **01b subgraph index for 02c:** Phase 02c builds `outputs/01b_SUBGRAPH_INDEX.json` from 01b partials at load time. Workers use this index to find spec-level function names, state transitions, and mermaid files for improved code resolution accuracy.
 - **Phase 02c optimization:** Pre-resolves code locations for properties before Phase 03, reducing redundant MCP calls and token consumption by ~40-60%.
 - **Inline prompts (01e, 02c, 03):** Full analysis logic inlined in worker prompts (no skill fork), reducing context fork overhead. Phase 01e inlines trust model + Ethereum-specific STRIDE + property generation; Phase 03 inlines 3-phase adversarial formal audit.
 - **Required bug_bounty_scope:** Phase 01e requires `outputs/BUG_BOUNTY_SCOPE.json`. The orchestrator aborts with `sys.exit(1)` if the file is missing or unparseable. No hardcoded defaults.

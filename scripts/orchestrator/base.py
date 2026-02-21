@@ -727,9 +727,46 @@ class Phase02cOrchestrator(BaseOrchestrator):
     filtering, and sends them for code location resolution.
     """
 
+    def _build_subgraph_index(self) -> None:
+        """Build and save 01b subgraph index for worker context."""
+        import glob as glob_mod
+
+        index = []
+        for filepath in sorted(glob_mod.glob("outputs/01b_PARTIAL_*.json")):
+            try:
+                with open(filepath) as f:
+                    data = json.load(f)
+                for spec in data.get("specs", []):
+                    entry = {
+                        "spec_title": spec.get("title", ""),
+                        "source_url": spec.get("source_url", ""),
+                        "subgraphs": [
+                            {
+                                "id": sg["id"],
+                                "name": sg.get("name", ""),
+                                "mermaid_file": sg.get("mermaid_file", ""),
+                            }
+                            for sg in spec.get("sub_graphs", [])
+                            if sg.get("id")
+                        ],
+                    }
+                    if entry["subgraphs"]:
+                        index.append(entry)
+            except Exception as e:
+                print(f"Warning: Failed to read {filepath} for subgraph index: {e}", file=sys.stderr)
+
+        out_path = Path("outputs/01b_SUBGRAPH_INDEX.json")
+        with open(out_path, "w") as f:
+            json.dump(index, f, indent=2)
+
+        total_sg = sum(len(e["subgraphs"]) for e in index)
+        print(f"  Built subgraph index: {len(index)} specs, {total_sg} subgraphs → {out_path}")
+
     def load_items(self) -> list[dict[str, Any]]:
         """Load properties from 01e partials with Pydantic validation and deduplication."""
         import glob
+
+        self._build_subgraph_index()  # Generate index for workers
 
         items = {}  # Deduplication map
         validation_warnings = 0

@@ -268,10 +268,10 @@ class TestPhaseConfig:
         """Phase 02 should not exist in PHASE_CONFIGS."""
         assert "02" not in PHASE_CONFIGS
 
-    def test_02c_depends_on_01e(self):
-        """Phase 02c should depend on 01e."""
+    def test_02c_depends_on_01e_and_01b(self):
+        """Phase 02c should depend on 01e and 01b."""
         cfg = get_phase_config("02c")
-        assert cfg.depends_on == ["01e"]
+        assert cfg.depends_on == ["01e", "01b"]
 
     def test_phase_chain_excludes_01c(self):
         """Phase chain should not include 01c."""

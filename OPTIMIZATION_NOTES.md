@@ -53,7 +53,7 @@ This document describes the optimizations implemented to reduce token consumptio
 **Implementation**:
 - **Type-safe schema**: Added `CodeScope` model with `resolution_status` field
 - **Orchestrated phase**: Phase 02c runs via `scripts/run_phase.py --phase 02c`
-- **Target consistency**: Phase 02c creates branch with `02c_TARGET_INFO.json`, Phase 03 auto-clones same target
+- **Target consistency**: Phase 02c creates branch with `TARGET_INFO.json`, Phase 03 auto-clones same target
 - **Batch optimization**: Resolves code locations in parallel batches (100 items per batch)
 - **MCP-based**: Uses Tree-sitter MCP for symbolic code navigation
 
@@ -77,7 +77,7 @@ uv run python3 scripts/run_phase.py --phase 02 --workers 4 --max-concurrent 64
 # Via GitHub Workflow (recommended):
 #   Manually trigger "02c. Code Pre-resolution" workflow
 #   Inputs: target_repo, target_ref_type, audit_scope
-#   Creates new branch with 02c_TARGET_INFO.json
+#   Creates new branch with TARGET_INFO.json
 
 # Or via command line (after setting up target_workspace):
 uv run python3 scripts/run_phase.py --phase 02c --workers 4 --max-concurrent 64
@@ -86,7 +86,7 @@ uv run python3 scripts/run_phase.py --phase 02c --workers 4 --max-concurrent 64
 # Via GitHub Workflow (recommended):
 #   Manually trigger "03. Audit Map" workflow
 #   Input: branch (from Phase 02c)
-#   Auto-reads 02c_TARGET_INFO.json and clones same target
+#   Auto-reads TARGET_INFO.json and clones same target
 
 # Or via command line:
 uv run python3 scripts/run_phase.py --phase 03 --workers 4 --max-concurrent 64

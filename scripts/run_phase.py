@@ -93,7 +93,7 @@ def run_cleanup(phase_id: str, dry_run: bool = True) -> bool:
 
 
 def patch_target_info(target_layer: str | None, out_of_scope_layers: list[str] | None) -> None:
-    """Merge optional scope metadata into outputs/02c_TARGET_INFO.json (in-place).
+    """Merge optional scope metadata into outputs/TARGET_INFO.json (in-place).
 
     Called before Phase 02c runs. Safe to call even if the file does not yet
     exist (writes nothing in that case) or if both arguments are None (no-op).
@@ -101,10 +101,10 @@ def patch_target_info(target_layer: str | None, out_of_scope_layers: list[str] |
     if not target_layer and not out_of_scope_layers:
         return
 
-    target_info_path = Path("outputs/02c_TARGET_INFO.json")
+    target_info_path = Path("outputs/TARGET_INFO.json")
     if not target_info_path.exists():
         print(
-            "⚠️  outputs/02c_TARGET_INFO.json not found — skipping --target-layer / "
+            "⚠️  outputs/TARGET_INFO.json not found — skipping --target-layer / "
             "--out-of-scope-layers injection. Run phase 02c setup first.",
             file=sys.stderr,
         )
@@ -238,14 +238,14 @@ def main():
     parser.add_argument(
         "--target-layer",
         help="Functional layer of the target repo (e.g. 'consensus', 'execution', 'l2-node'). "
-             "Written into outputs/02c_TARGET_INFO.json when phase 02c is included.",
+             "Written into outputs/TARGET_INFO.json when phase 02c is included.",
     )
     parser.add_argument(
         "--out-of-scope-layers",
         nargs="+",
         metavar="LAYER",
         help="Spec layers to mark as out_of_scope for this target (e.g. 'execution'). "
-             "Written into outputs/02c_TARGET_INFO.json when phase 02c is included.",
+             "Written into outputs/TARGET_INFO.json when phase 02c is included.",
     )
 
     # Severity gate
