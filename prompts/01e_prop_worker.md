@@ -28,17 +28,25 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </mindset>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty array `results = []`.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty list `all_properties = []` and tracking counters for metadata.
 
     2. **Process Each Item**: For each item in the batch:
        a. **Read ID Prefix**: Read the `_id_prefix` field from the context data (e.g., `"PROP-txval"`). Used to generate meaningful property IDs.
-       b. **Validate Bug Bounty Scope**: Read the `bug_bounty_scope` field from the context data. If **not present**, create an error result for this item (`"error": "bug_bounty_scope missing from context"`) and skip to the next item.
+       b. **Validate Bug Bounty Scope**: Read the `bug_bounty_scope` field from the context data. If **not present**, skip to the next item and log the error.
        c. **Load Subgraphs**: Read the content of each `subgraph_file` referenced in the item. Parse any `.mmd` files referenced in the PARTIAL data.
        d. **Execute Phase A** (Trust Model Analysis) — see below.
        e. **Execute Phase B** (Property Generation) — see below.
-       f. **Append Result**: Append the successful result or the error object to the `results` array.
+       f. **Collect Properties**: Extend `all_properties` with the generated property objects from this item.
 
-    3. **Write Output File**: After ALL items have been processed, write the `results` array to <ref id="results"/>.
+    3. **Write Output File**: After ALL items have been processed, write a **single JSON object** to <ref id="results"/>:
+       ```json
+       {
+         "properties": [ ...all_properties... ],
+         "metadata": { "timestamp": "...", "total_properties": N, "by_severity": {...}, "by_scope": {...}, "bug_bounty_eligible_count": N }
+       }
+       ```
+       - The top-level structure MUST be a **JSON object** (dict), NOT a JSON array.
+       - `"properties"` MUST be the key containing the flat list of all property objects across all items.
        - This step is **MANDATORY**.
 
     4. **Confirm Completion**: Print a summary and end with: `Output File: {{OUTPUT_FILE}}`
@@ -103,17 +111,17 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </phase_a>
 
   <phase_b title="Property Generation">
-    Using the trust model from Phase A, generate formal properties:
+    Using the trust model from Phase A, generate formal properties. Work through each source below in order — do not skip any.
 
-    1. **Analyze Trust Boundaries**: For each trust boundary identified in Phase A, formulate properties that must hold true for the boundary to be secure. **Prioritize boundaries marked as `in-scope` and `attacker_controlled: true`.**
+    1. **STRIDE Threat Properties** (from Phase A step 4): For each concrete threat identified in the Ethereum-specific STRIDE analysis, create a property that, if verified, would mitigate that threat. Each of the 6 STRIDE categories that produced threats in Phase A must yield at least one property. If a category produced no relevant threats for this subgraph, skip it — do not force irrelevant properties.
 
-    2. **Formalise Assumptions**: Convert each trust assumption into a formal property. Example: if an assumption is "only authenticated Engine API callers can trigger newPayload," the property would be `forall caller: engineAPI.newPayload(caller, payload) => caller.hasValidJWT == true`.
+    2. **Trust Boundary Properties**: For each trust boundary identified in Phase A, formulate properties that must hold true for the boundary to be secure. **Prioritize boundaries marked as `in-scope` and `attacker_controlled: true`.**
 
-    3. **Cover Invariants**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property.
+    3. **Assumption Properties**: Convert each trust assumption into a formal property. Example: if an assumption is "only authenticated Engine API callers can trigger newPayload," the property would be `forall caller: engineAPI.newPayload(caller, payload) => caller.hasValidJWT == true`.
 
-    4. **Define Pre/Post-conditions**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after.
+    4. **Invariant Properties**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property.
 
-    5. **Address STRIDE Threats**: For each threat identified in the Ethereum-specific STRIDE analysis (Phase A step 4), create a property that, if verified, would mitigate that threat.
+    5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after.
 
     6. **Classify Reachability**: For each property, determine:
        - `entry_points`: List of entry points that can trigger this property (e.g., `["P2P", "EngineAPI"]`)
@@ -128,14 +136,11 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
        - `out-of-scope`: Property is only reachable via out-of-scope entry points
        - `conditional`: Requires specific conditions or further investigation
 
-    8. **Assign Severity**: Use the `severity_classification` from the `bug_bounty_scope` as the **authoritative definition** for each severity level. Match the property's potential impact against the program-specific criteria, examples, and impact thresholds defined there.
-       - Compare the property's impact scope against each level's `criteria`, `examples`, and `impact` fields.
-       - **Fallback** (only if `severity_classification` is absent in `bug_bounty_scope`):
-         - `CRITICAL`: Consensus failure, fund loss, network-wide impact (>1/3 validators)
-         - `HIGH`: Single-node crash, significant DoS, state corruption
-         - `MEDIUM`: Limited DoS, information disclosure, edge case state issues
-         - `LOW`: Minor issues, requires unlikely conditions, defense-in-depth gaps
-         - `INFORMATIONAL`: Best practice violations, no direct security impact
+    8. **Assign Severity**: Use the `severity_classification` from `bug_bounty_scope` as the **sole decision boundary**. For each property:
+       - Ask: **"If this property is violated, what is the blast radius on the live network?"**
+       - Start from INFORMATIONAL and escalate **only** when the violation's impact meets or exceeds the next level's `impact` threshold.
+       - A correctness property (data format, type constraint, encoding rule) is INFORMATIONAL unless you can articulate a concrete attack path where violating it causes network-level impact (crashes, splits, slashing at the threshold %).
+       - Do NOT inflate severity based on "importance to correctness" — severity is about **attacker-exploitable network impact**, not code criticality.
 
     9. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
        - `reachability.classification == "external-reachable"` AND
@@ -152,9 +157,10 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </phase_b>
 
   <severity_context>
-    The `severity_classification` object inside `bug_bounty_scope` is the **authoritative severity definition** for all STRIDE severity assignments and property severity assignments.
-    - If the scope JSON contains a `severity_classification` object, use it as the authoritative severity definition. The classification defines what each severity level means in this specific bug bounty program. Apply these definitions consistently.
-    - If no `severity_classification` is present, fall back to the Ethereum-specific defaults in Phase B step 8.
+    The `severity_classification` object inside `bug_bounty_scope` is the **sole decision boundary** for severity assignment.
+    - Each level's `impact` field defines the minimum blast radius required. Severity is about **attacker-exploitable network impact**, not code criticality or "importance."
+    - A property that enforces a data format constraint (e.g., fixed-length fields, type bounds) is INFORMATIONAL unless violating it leads to a concrete attack path with measurable network impact at the level's threshold.
+    - If no `severity_classification` is present, default all properties to MEDIUM and flag for manual review.
   </severity_context>
 
   <output_schema>
@@ -201,15 +207,17 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   <quality_checklist>
     **Before writing output, verify:**
     - [ ] Trust model analysis completed: actors, boundaries, assumptions, Ethereum-specific STRIDE
+    - [ ] STRIDE threat properties generated first — each STRIDE category that produced threats in Phase A has at least one property
     - [ ] All properties have `reachability` with exactly 4 fields: `classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope`
     - [ ] All properties have `severity` (one of: CRITICAL, HIGH, MEDIUM, LOW, INFORMATIONAL)
+    - [ ] Severity assigned using `severity_classification.impact` thresholds, not intuitive importance — correctness-only properties without concrete network impact are INFORMATIONAL
     - [ ] All properties have `exploitability` classification
     - [ ] All properties have `bug_bounty_eligible` determination
     - [ ] `covers` is a string (primary element ID), not an object
     - [ ] `text` is ≤ 120 chars, `assertion` is ≤ 200 chars
     - [ ] Properties are prioritized by `bug_bounty_scope` (in-scope first)
     - [ ] IDs follow the `{_id_prefix}-{type_abbrev}-{seq:03d}` format
-    - [ ] Metadata includes accurate statistics by severity and scope
+    - [ ] `metadata.total_properties` == actual length of `properties` array, `sum(by_severity.values()) == total_properties`
   </quality_checklist>
 
   <data_sources>
@@ -219,7 +227,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 </task>
 
 <output>
-  <format>JSON array</format>
+  <format>JSON object with "properties" key (NOT a JSON array)</format>
   <stdout>Max 8 lines: batch size, items processed, short status.</stdout>
   <final_line>Output File: {{OUTPUT_FILE}}</final_line>
 </output>

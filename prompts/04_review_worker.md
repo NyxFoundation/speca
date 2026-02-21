@@ -23,14 +23,22 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   </critical_requirements>
 
   <instructions>
-    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty array `results = []`.
+    1. **Initialize**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context. Create an empty list `all_reviewed = []`.
 
     2. **Process Each Item**: For each item in the batch:
        a. **Invoke Skill**: Call the `/audit-reviewer` skill, passing the audit result from Phase 03.
        b. **Handle Errors**: If the skill fails, create an error object for that item.
-       c. **Append Result**: Append the successful result or the error object to the `results` array.
+       c. **Collect Result**: Append the successful result or the error object to `all_reviewed`.
 
-    3. **Write Output File**: After ALL items have been processed, write the `results` array to <ref id="results"/>.
+    3. **Write Output File**: After ALL items have been processed, write a **single JSON object** to <ref id="results"/>:
+       ```json
+       {
+         "reviewed_items": [ ...all_reviewed... ],
+         "metadata": { "phase": "04", "total_reviewed": N, "timestamp": "..." }
+       }
+       ```
+       - The top-level structure MUST be a **JSON object** (dict), NOT a JSON array.
+       - `"reviewed_items"` MUST be the key containing the flat list of all reviewed item objects.
        - This step is **MANDATORY**.
 
     4. **Confirm Completion**: Print a summary and end with: `Output File: {{OUTPUT_FILE}}`
@@ -44,7 +52,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 </task>
 
 <output>
-  <format>JSON array</format>
+  <format>JSON object with "reviewed_items" key (NOT a JSON array)</format>
   <stdout>Max 8 lines: batch size, items processed, short status.</stdout>
   <final_line>Output File: {{OUTPUT_FILE}}</final_line>
 </output>

@@ -45,7 +45,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
   </adversarial_mindset>
 
   <instructions>
-    1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). Extract the single item by looking up the first ID. Create `results = []`.
+    1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). Extract the single item by looking up the first ID.
 
     2. **Resolve Code Scope**:
        a. **Pre-resolved (preferred)**: If `item.code_scope.resolution_status == "resolved"` and `item.code_scope.locations` is not empty:
