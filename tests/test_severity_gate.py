@@ -1,4 +1,4 @@
-"""Tests for the Severity enum ordering and the Phase02 severity gate."""
+"""Tests for the Severity enum ordering and the Phase02c severity gate."""
 
 import sys
 import os
@@ -15,7 +15,7 @@ sys.modules["anthropic"] = MagicMock()
 sys.modules["tenacity"] = MagicMock()
 
 from scripts.orchestrator.schemas import Severity
-from scripts.orchestrator.base import Phase02Orchestrator
+from scripts.orchestrator.base import Phase02cOrchestrator
 from scripts.orchestrator.config import get_phase_config
 
 
@@ -84,33 +84,29 @@ class TestSeverityFromStr(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Phase02Orchestrator severity gate
+# Phase02cOrchestrator severity gate
 # ---------------------------------------------------------------------------
 
 def _make_property_item(prop_id: str, severity: str, scope: str = "in-scope") -> dict:
-    """Helper: build a Phase02 input item with embedded property."""
+    """Helper: build a Phase02c input item (flat property)."""
     return {
         "property_id": prop_id,
-        "property": {
-            "id": prop_id,
-            "severity": severity,
-            "reachability": {"bug_bounty_scope": scope},
-        },
-        "source_file": "test.json",
+        "severity": severity,
+        "text": f"Test property {prop_id}",
+        "reachability": {"bug_bounty_scope": scope},
     }
 
 
-class TestPhase02SeverityGate(unittest.TestCase):
-    """Verify that Phase02Orchestrator.apply_early_exit filters by severity."""
+class TestPhase02cSeverityGate(unittest.TestCase):
+    """Verify that Phase02cOrchestrator.apply_early_exit filters by severity."""
 
     def setUp(self):
         with patch("scripts.orchestrator.base.BaseOrchestrator.__init__", return_value=None):
-            self.orchestrator = Phase02Orchestrator.__new__(Phase02Orchestrator)
-            # Use model_copy() to avoid mutating the shared PHASE_CONFIGS object
-            self.orchestrator.config = get_phase_config("02").model_copy()
+            self.orchestrator = Phase02cOrchestrator.__new__(Phase02cOrchestrator)
+            self.orchestrator.config = get_phase_config("02c").model_copy()
 
     def test_default_config_has_min_severity_low(self):
-        """Phase 02 config should default to min_severity=Low."""
+        """Phase 02c config should default to min_severity=Low."""
         self.assertEqual(self.orchestrator.config.min_severity, "Low")
 
     def test_informational_dropped(self):
@@ -201,11 +197,9 @@ class TestPhase02SeverityGate(unittest.TestCase):
 
         self.assertEqual(len(skipped), 1)
         result = skipped[0]
-        self.assertTrue(result["check_id"].startswith("SKIP-"))
         self.assertEqual(result["property_id"], "PROP-001")
-        self.assertEqual(result["checklist"], [])
         self.assertTrue(result["skipped"])
-        self.assertIn("below min_severity", result["skip_reason"])
+        self.assertIn("min_severity", result["skip_reason"])
 
 
 if __name__ == "__main__":

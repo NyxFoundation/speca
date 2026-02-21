@@ -1,6 +1,6 @@
 
 ---
-Description: "[WORKER] Perform inline adversarial 3-phase formal audit for a single checklist item (no skill fork)."
+Description: "[WORKER] Perform inline adversarial 3-phase formal audit for a single property (no skill fork)."
 Usage: "/03_auditmap_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=1] [OUTPUT_FILE=...]"
 Example: "/03_auditmap_worker WORKER_ID=0 QUEUE_FILE=outputs/03_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=1 OUTPUT_FILE=outputs/03_PARTIAL_W0_1700000000_1.json"
 Language: English only.
@@ -8,7 +8,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 ---
 
 <task>
-  <goal>Execute a complete 3-phase adversarial formal audit for a single checklist item and write the result.</goal>
+  <goal>Execute a complete 3-phase adversarial formal audit for a single property and write the result.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
@@ -21,7 +21,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
   </critical_requirements>
 
   <severity_context>
-    The `severity` field on each checklist item was assigned using the bug bounty program's
+    The `severity` field on each property was assigned using the bug bounty program's
     `severity_classification` criteria (e.g., network impact thresholds, % of validators affected).
     When assessing findings, respect these program-specific severity definitions — do not
     re-classify severity using generic heuristics.
@@ -52,9 +52,9 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - Use pre-resolved data from Phase 02c
           - Primary location is first item with `role == "primary"` in locations array
           - Related locations (callers, callees, state management) are available for context
-          - Use `item.code_excerpt` which contains all relevant code sections
+          - Use `item.code_excerpt` if available, which contains all relevant code sections
 
-       b. **Fallback resolution**: If not pre-resolved, use Read/Grep/Glob to find code from `item.checklist_item.graph_element_under_test`. Extract relevant lines as `code_excerpt`.
+       b. **Fallback resolution**: If not pre-resolved, use Read/Grep/Glob to find code from `item.text` and `item.assertion`. Derive your own attack approach from the property text and assertion. Think about how to break this property. Extract relevant lines as `code_excerpt`.
 
        c. **Expand Context for State Analysis**:
           - Use Grep to find related state management code
@@ -148,12 +148,12 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
        4. **When in doubt, report it**
 
     4. **Compress to 6-Field Output**: Map the analysis to the minimal schema:
-       - `id` = checklist/check_id
+       - `id` = property_id
        - `classification` (one of: vulnerability | potential-vulnerability | not-a-vulnerability | informational | out-of-scope)
        - `code_path` (primary location: `file::symbol::Lstart-end`)
        - `proof_trace` (succinct rationale or root cause/proof, 1-3 sentences)
        - `attack_scenario` (only for vulnerability/potential-vulnerability; else "")
-       - `checklist_id` (duplicate of id for downstream compatibility)
+       - `checklist_id` (set to property_id for downstream compatibility)
 
     5. **Write Output**: Write a JSON object with `metadata` and `audit_items` to <ref id="results"/>.
 
@@ -164,7 +164,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     Write a single JSON object with two keys:
     - "metadata": keep the existing metadata structure (phase, worker_id, batch_index, item_count, timestamp, processed_ids, etc.) unchanged.
     - "audit_items": an array of result rows. Each row MUST contain ONLY the following keys, nothing else:
-      1) "id"                -> same as checklist_id / check_id string
+      1) "id"                -> same as property_id string
       2) "classification"    -> one of: vulnerability | potential-vulnerability | not-a-vulnerability | informational | out-of-scope
       3) "code_path"         -> string like "path/to/file.go::FuncName::L22-33" (primary location)
       4) "proof_trace"       ->
@@ -173,7 +173,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
       5) "attack_scenario"   ->
          - if vulnerability/potential-vulnerability: one concrete exploit path (1-2 sentences)
          - otherwise: empty string ""
-      6) "checklist_id"      -> the checklist/check_id string
+      6) "checklist_id"      -> the property_id string (for downstream compatibility)
     - Do NOT emit any other fields (no severity, confidence, bug_bounty_eligible, phases, state_context, summaries, recommendations, counts, or headers).
     - Preserve JSON ordering above for readability.
   </output_schema>

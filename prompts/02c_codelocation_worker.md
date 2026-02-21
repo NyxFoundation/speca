@@ -1,12 +1,12 @@
 
 ---
-Description: [WORKER] Pre-resolve code locations for checklist items (OPTIMIZED: metadata only, no code excerpts)
+Description: [WORKER] Pre-resolve code locations for properties (OPTIMIZED: metadata only, no code excerpts)
 Usage: `/02c_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]`
 Language: English only.
 ---
 
 <task>
-  <goal>For each checklist item in the batch, find the relevant code locations in the target repository. Return ONLY file paths, function names, and line ranges — do NOT extract code excerpts.</goal>
+  <goal>For each property in the batch, find the relevant code locations in the target repository. Return ONLY file paths, function names, and line ranges — do NOT extract code excerpts.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
@@ -32,17 +32,17 @@ Language: English only.
 
     ## Step 2: Layer Scope Check (per item, only if TARGET_INFO has `out_of_scope_spec_layers`)
 
-    If `out_of_scope_spec_layers` is present and non-empty, infer the spec layer for each item from its `notes` field (look for layer keywords or spec identifiers). If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
+    If `out_of_scope_spec_layers` is present and non-empty, infer the spec layer for each item from its `covers` field and property `text` (look for layer keywords or spec identifiers). If the inferred layer matches any entry in `out_of_scope_spec_layers` → mark as `out_of_scope` and skip to next item.
 
     When `out_of_scope_spec_layers` is absent or empty, skip this check entirely and treat all items as in-scope.
 
     ## Step 3: Code Resolution (per in-scope item)
 
     **Primary — Tree-sitter MCP call graph:**
-    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `test_procedure`. Extract **ONLY** file path, symbol name, and line range for the top matches.
+    Use Tree-sitter MCP to identify entry point functions matching `reachability.entry_points`, then traverse the call graph (depth ≤ 3) to find functions whose names or logic match keywords extracted from `text`, `assertion`, and `covers.primary_element`. Extract **ONLY** file path, symbol name, and line range for the top matches.
 
     **Fallback — Glob + Grep:**
-    If MCP fails or returns no results, use the standard Glob and Grep tools to search `target_workspace/` directly. Extract keywords (identifiers, constants, domain terms) from `test_procedure`, then search for matching function/type definitions. Use `reachability.entry_points` as a hint to narrow the search directory (e.g. an entry point named "P2P" likely maps to directories like `p2p/`, `sync/`, `network/`; "Transaction" to `txpool/`, `core/`; infer from the codebase structure if uncertain).
+    If MCP fails or returns no results, use the standard Glob and Grep tools to search `target_workspace/` directly. Extract keywords (identifiers, constants, domain terms) from `text` and `assertion`, then search for matching function/type definitions. Use `reachability.entry_points` as a hint to narrow the search directory (e.g. an entry point named "P2P" likely maps to directories like `p2p/`, `sync/`, `network/`; "Transaction" to `txpool/`, `core/`; infer from the codebase structure if uncertain).
 
     **DO NOT read the matched files or extract code excerpts.** Only record the metadata (file path, symbol, line range).
 
@@ -51,19 +51,19 @@ Language: English only.
   </instructions>
 
   <output>
-    <format>JSON object with "checklist_with_code" array</format>
+    <format>JSON object with "properties_with_code" array</format>
     <schema>
       {
-        "checklist_with_code": [
+        "properties_with_code": [
           {
-            "check_id": "CHK-...",
             "property_id": "PROP-...",
-            "title": "...",
+            "text": "...",
+            "type": "invariant|precondition|postcondition|...",
+            "assertion": "...",
             "severity": "Critical|High|Medium|Low",
-            "test_procedure": "...",
-            "bug_class": "...",
+            "covers": { ... },
             "reachability": { ... },
-            "notes": "...",
+            "exploitability": "...",
             "code_scope": {
               "locations": [           // empty list if out_of_scope or not_found
                 {
@@ -80,7 +80,7 @@ Language: English only.
           }
         ]
       }
-      **Note**: Only the fields listed above are required. Do NOT include `mindset`, `is_boundary_check`, `risk_category`, `graph_element_under_test`, or `code_excerpt`.
+      **Note**: Pass through all property fields from the input. The `code_scope` field is the new addition.
     </schema>
     <stdout>Max 10 lines: processed count and per-status breakdown.</stdout>
     <final_line>Output File: {{OUTPUT_FILE}}</final_line>

@@ -161,105 +161,50 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         mcp_servers=["fetch", "filesystem"],
     ),
 
-    "01c": PhaseConfig(
-        phase_id="01c",
-        name="Subgraph Verification",
-        description="Verify and validate extracted subgraphs",
-        skill_path=Path(".claude/skills/subgraph-verifier/SKILL.md"),
-        prompt_path=Path("prompts/01c_verify_worker.md"),
-        queue_pattern="outputs/01c_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01c_PARTIAL_*.json",
-        depends_on=["01b"],
-        input_patterns=["outputs/01b_PARTIAL_*.json"],
-        batch_strategy="count",
-        max_batch_size=10,
-        item_id_field="file_path",
-        mcp_servers=["filesystem"],
-    ),
-
-    "01d": PhaseConfig(
-        phase_id="01d",
-        name="Trust Model Analysis",
-        description="Analyze trust boundaries and security assumptions",
-        skill_path=Path(".claude/skills/trust-model-analyst/SKILL.md"),
-        prompt_path=Path("prompts/01d_trustmodel_worker.md"),
-        queue_pattern="outputs/01d_QUEUE_{worker_id}.json",
-        output_pattern="outputs/01d_PARTIAL_*.json",
-        depends_on=["01b"],
-        input_patterns=["outputs/01b_PARTIAL_*.json"],
-        batch_strategy="count",
-        max_batch_size=1,
-        item_id_field="file_path",
-        result_key="trust_model",
-        mcp_servers=["filesystem"],
-    ),
-
     "01e": PhaseConfig(
         phase_id="01e",
         name="Property Generation",
-        description="Generate formal properties from trust model",
+        description="Analyze trust boundaries and generate formal properties from subgraphs",
         skill_path=Path(".claude/skills/property-generator/SKILL.md"),
         prompt_path=Path("prompts/01e_prop_worker.md"),
         queue_pattern="outputs/01e_QUEUE_{worker_id}.json",
         output_pattern="outputs/01e_PARTIAL_*.json",
-        depends_on=["01d"],
-        input_patterns=["outputs/01d_PARTIAL_*.json"],
+        depends_on=["01b"],
+        input_patterns=["outputs/01b_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=1,
-        item_id_field="property_id",
+        item_id_field="file_path",
         result_key="properties",
         mcp_servers=[],
         output_fields=["id", "text", "type", "assertion", "severity", "covers",
                         "reachability", "bug_bounty_eligible", "exploitability"],
     ),
 
-    "02": PhaseConfig(
-        phase_id="02",
-        name="Checklist Generation",
-        description="Generate security audit checklist from properties",
-        skill_path=Path(".claude/skills/checklist-specialist/SKILL.md"),
-        prompt_path=Path("prompts/02_checklist_worker.md"),
-        queue_pattern="outputs/02_QUEUE_{worker_id}.json",
-        output_pattern="outputs/02_PARTIAL_*.json",
-        depends_on=["01e"],
-        input_patterns=["outputs/01e_PARTIAL_*.json"],
-        batch_strategy="count",
-        max_batch_size=25,
-        item_id_field="property_id",
-        result_id_field="property_id",
-        result_key="checklist",
-        mcp_servers=[],
-        min_severity="Low",  # Gate: drops Informational properties
-        context_fields=["property_id", "source_file", "_id_prefix"],
-        output_fields=["check_id", "property_id", "title", "severity",
-                        "test_procedure", "bug_class", "reachability", "notes"],
-    ),
-
     "02c": PhaseConfig(
         phase_id="02c",
         name="Code Location Pre-resolution",
-        description="Pre-resolve code locations using multi-tier fallback (MCP → Glob/Grep)",
-        skill_path=Path(".claude/skills/checklist-specialist/SKILL.md"),  # Dummy path, not used
+        description="Pre-resolve code locations for properties using multi-tier fallback (MCP → Glob/Grep)",
+        skill_path=Path(".claude/skills/property-generator/SKILL.md"),  # Dummy path, not used
         prompt_path=Path("prompts/02c_codelocation_worker.md"),
         queue_pattern="outputs/02c_QUEUE_{worker_id}.json",
         output_pattern="outputs/02c_PARTIAL_*.json",
-        depends_on=["02"],
-        input_patterns=["outputs/02_PARTIAL_*.json"],
+        depends_on=["01e"],
+        input_patterns=["outputs/01e_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=50,  # Reduced from 100 for deeper analysis per item
-        item_id_field="check_id",
-        result_key="checklist_with_code",
+        max_batch_size=50,
+        item_id_field="property_id",
+        result_key="properties_with_code",
         model="sonnet",
-        # Adjusted for multi-tier fallback strategy (Grep fallback is reliable)
-        circuit_breaker_threshold=15,  # Increased - fallback makes failures less critical
-        max_total_retries=50,  # Increased - each tier may retry
-        max_empty_results=20,  # Increased - out_of_scope items are valid results
-        max_budget_usd=20.0,  # Moderate increase - Grep fallback reduces MCP costs
+        min_severity="Low",  # Gate: drops Informational properties
+        circuit_breaker_threshold=15,
+        max_total_retries=50,
+        max_empty_results=20,
+        max_budget_usd=20.0,
         mcp_servers=["tree_sitter", "filesystem"],
-        context_fields=["check_id", "property_id", "title", "severity",
-                         "test_procedure", "reachability", "notes", "bug_class"],
-        output_fields=["check_id", "property_id", "title", "severity",
-                        "test_procedure", "bug_class", "reachability", "notes", "code_scope"],
+        context_fields=["property_id", "text", "type", "assertion", "severity",
+                         "covers", "reachability", "exploitability", "_id_prefix"],
+        output_fields=["property_id", "text", "type", "assertion", "severity",
+                        "covers", "reachability", "exploitability", "code_scope"],
     ),
 
     "03": PhaseConfig(
@@ -271,12 +216,12 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         queue_pattern="outputs/03_ASYNC_QUEUE_*.json",
         output_pattern="outputs/03_PARTIAL_*.json",
         depends_on=["02c"],  # Now depends on code pre-resolution
-        input_patterns=["outputs/02c_PARTIAL_*.json", "outputs/02_PARTIAL_*.json"],
+        input_patterns=["outputs/02c_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=1,  # Single item — eliminates inter-item context accumulation
         max_context_tokens=120_000,
         base_prompt_tokens=2_000,
-        item_id_field="check_id",
+        item_id_field="property_id",
         result_key="audit_items",
         model="sonnet",
         # Phase 03 is the most expensive — tighter circuit breaker
@@ -289,8 +234,8 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         max_cache_read_tokens=100_000,  # Reduced — single item needs less cache
         mcp_servers=[],  # No MCP — inlined prompt uses Read/Grep/Glob only
         tools_filter=["Read", "Write", "Grep", "Glob"],
-        context_fields=["check_id", "property_id", "title", "severity",
-                         "test_procedure", "bug_class", "reachability", "notes",
+        context_fields=["property_id", "text", "type", "assertion", "severity",
+                         "covers", "reachability", "exploitability",
                          "code_scope", "code_excerpt"],
     ),
 
@@ -306,10 +251,10 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         input_patterns=["outputs/03_PARTIAL_*.json"],
         batch_strategy="count",
         max_batch_size=2,
-        item_id_field="check_id",
+        item_id_field="property_id",
         result_key="reviewed_items",
         mcp_servers=["filesystem"],
-        context_fields=["check_id", "audit_result"],
+        context_fields=["property_id", "audit_result"],
     ),
 }
 

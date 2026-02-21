@@ -41,17 +41,14 @@ from orchestrator.schemas import (
     SubGraph,
     SpecSubGraphs,
     Phase01bPartial,
-    # Phase 01c
-    VerificationResult,
-    Phase01cPartial,
-    # Phase 01d
+    # Trust Model (referenced by Phase 01e)
     TrustModelActor,
     TrustBoundary,
     TrustAssumption,
     StrideAnalysisItem,
     TrustModel,
     BugBountyScopeInfo,
-    Phase01dPartial,
+    Phase01dPartial,  # kept for backwards compatibility
     # Phase 01e
     PropertyReachability,
     PropertyCovers,
@@ -95,7 +92,7 @@ from orchestrator.runner import (
     LogAnomalyDetector,
 )
 from orchestrator.collector import ResultCollector
-from orchestrator.base import generate_slug, Phase01Orchestrator, Phase02Orchestrator
+from orchestrator.base import generate_slug, Phase01Orchestrator
 
 
 # =========================================================================
@@ -147,30 +144,30 @@ class TestGenerateSlug:
 class TestIdPrefixAssignment:
     """Tests for Phase01Orchestrator._assign_property_id_prefixes."""
 
-    def test_assigns_prefix_from_trust_model(self):
-        """Items should get _id_prefix based on trust model data."""
+    def test_assigns_prefix_from_partial(self):
+        """Items should get _id_prefix based on 01b partial data."""
         orch = Phase01Orchestrator("01e")
-        # Create a temp trust model file
+        # Create a temp 01b partial file
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False
         ) as f:
             json.dump({
-                "trust_model": {
-                    "trust_boundaries": [
-                        {"entry_point_type": "P2P Network"},
-                        {"entry_point_type": "P2P Network"},
-                        {"entry_point_type": "Transaction"},
-                    ]
-                }
+                "specs": [
+                    {
+                        "source_url": "https://eips.ethereum.org/EIPS/eip-7594",
+                        "title": "EIP-7594",
+                        "sub_graphs": [{"id": "SG-001", "name": "test"}],
+                    }
+                ]
             }, f)
-            trust_file = f.name
+            partial_file = f.name
 
         try:
-            items = [{"file_path": trust_file}]
+            items = [{"file_path": partial_file}]
             result = orch._assign_property_id_prefixes(items)
-            assert result[0]["_id_prefix"] == "PROP-p2p"
+            assert result[0]["_id_prefix"] == "PROP-eip-7594"
         finally:
-            os.unlink(trust_file)
+            os.unlink(partial_file)
 
     def test_disambiguation_on_slug_collision(self):
         """Duplicate slugs should get a numeric disambiguator."""
@@ -179,26 +176,28 @@ class TestIdPrefixAssignment:
             mode="w", suffix=".json", delete=False
         ) as f:
             json.dump({
-                "trust_model": {
-                    "trust_boundaries": [
-                        {"entry_point_type": "Transaction Pool"},
-                    ]
-                }
+                "specs": [
+                    {
+                        "source_url": "https://example.com/transaction-pool",
+                        "title": "Transaction Pool",
+                        "sub_graphs": [{"id": "SG-001", "name": "test"}],
+                    }
+                ]
             }, f)
-            trust_file = f.name
+            partial_file = f.name
 
         try:
             items = [
-                {"file_path": trust_file},
-                {"file_path": trust_file},
-                {"file_path": trust_file},
+                {"file_path": partial_file},
+                {"file_path": partial_file},
+                {"file_path": partial_file},
             ]
             result = orch._assign_property_id_prefixes(items)
             assert result[0]["_id_prefix"] == "PROP-txn"
             assert result[1]["_id_prefix"] == "PROP-txn1"
             assert result[2]["_id_prefix"] == "PROP-txn2"
         finally:
-            os.unlink(trust_file)
+            os.unlink(partial_file)
 
     def test_fallback_on_missing_file(self):
         """Missing file should produce a hash-based prefix."""
@@ -216,43 +215,6 @@ class TestIdPrefixAssignment:
         items = [{"file_path": ""}]
         result = orch._assign_property_id_prefixes(items)
         assert result[0]["_id_prefix"].startswith("PROP-")
-
-
-class TestPhase02EnrichItems:
-    """Tests for Phase02Orchestrator.enrich_items."""
-
-    def test_assigns_checklist_prefix(self):
-        """Phase 02 should derive CHK prefix from property_id."""
-        orch = Phase02Orchestrator("02")
-        items = [
-            {"property_id": "PROP-txval-inv-001", "source_file": "test.json"},
-            {"property_id": "PROP-p2p-pre-003", "source_file": "test2.json"},
-        ]
-        result = orch.enrich_items(items)
-        assert result[0]["_id_prefix"] == "CHK-txval-inv-001"
-        assert result[1]["_id_prefix"] == "CHK-p2p-pre-003"
-
-    def test_handles_legacy_property_id(self):
-        """Legacy property IDs (PROP-W3B12-7) should also work."""
-        orch = Phase02Orchestrator("02")
-        items = [{"property_id": "PROP-W3B12-7", "source_file": "test.json"}]
-        result = orch.enrich_items(items)
-        assert result[0]["_id_prefix"] == "CHK-W3B12-7"
-
-    def test_handles_missing_property_id(self):
-        """Missing property_id should still produce a prefix."""
-        orch = Phase02Orchestrator("02")
-        items = [{"source_file": "test.json"}]
-        result = orch.enrich_items(items)
-        assert result[0]["_id_prefix"] == "CHK-"
-
-
-class TestPhase02ContextFieldsIncludeIdPrefix:
-    """Test that Phase 02 config includes _id_prefix in context_fields."""
-
-    def test_context_fields_include_id_prefix(self):
-        config = get_phase_config("02")
-        assert "_id_prefix" in config.context_fields
 
 
 # =========================================================================
@@ -285,8 +247,44 @@ class TestPhaseConfig:
     def test_get_phase_chain(self):
         chain = get_phase_chain("03")
         assert "01a" in chain
-        assert "02" in chain
+        assert "02c" in chain
+        assert "01e" in chain
+        assert "02" not in chain
         assert chain[-1] == "03"
+
+    def test_01e_depends_on_01b(self):
+        """Phase 01e should depend on 01b (not 01d)."""
+        cfg = get_phase_config("01e")
+        assert cfg.depends_on == ["01b"]
+
+    def test_01c_not_in_configs(self):
+        """Phase 01c should not exist in PHASE_CONFIGS."""
+        assert "01c" not in PHASE_CONFIGS
+
+    def test_01d_not_in_configs(self):
+        """Phase 01d should not exist in PHASE_CONFIGS."""
+        assert "01d" not in PHASE_CONFIGS
+
+    def test_02_not_in_configs(self):
+        """Phase 02 should not exist in PHASE_CONFIGS."""
+        assert "02" not in PHASE_CONFIGS
+
+    def test_02c_depends_on_01e(self):
+        """Phase 02c should depend on 01e."""
+        cfg = get_phase_config("02c")
+        assert cfg.depends_on == ["01e"]
+
+    def test_phase_chain_excludes_01c(self):
+        """Phase chain should not include 01c."""
+        chain = get_phase_chain("03")
+        assert "01c" not in chain
+
+    def test_phase_chain_excludes_01d(self):
+        """Phase chain to 02c should not include 01d."""
+        chain = get_phase_chain("02c")
+        assert "01d" not in chain
+        assert "01e" in chain
+        assert "01b" in chain
 
     def test_phase03_config_values(self):
         cfg = PHASE_CONFIGS["03"]
@@ -492,34 +490,10 @@ class TestPhase01b:
 
 
 # =========================================================================
-# Phase 01c – Verification
+# Trust Model Schemas (referenced by Phase 01e)
 # =========================================================================
 
-class TestPhase01c:
-    def test_verification_result_valid(self):
-        vr = VerificationResult(
-            file_path="outputs/01b_PARTIAL_0.json",
-            status="verified",
-            issues=[],
-        )
-        assert vr.status == "verified"
-
-    def test_phase01c_partial_valid(self):
-        partial = Phase01cPartial(
-            results=[
-                {"file_path": "test.json", "status": "verified"},
-                {"file_path": "test2.json", "status": "failed", "issues": ["bad edge"]},
-            ]
-        )
-        assert len(partial.results) == 2
-        assert partial.results[1].issues == ["bad edge"]
-
-
-# =========================================================================
-# Phase 01d – Trust Model
-# =========================================================================
-
-class TestPhase01d:
+class TestTrustModelSchemas:
     def test_trust_model_actor_valid(self):
         actor = TrustModelActor(
             id="actor-user",
@@ -646,7 +620,6 @@ class TestPhase02:
 class TestPhase03:
     def test_audit_trail_full(self):
         item = AuditMapItem(
-            check_id="CHK-001",
             property_id="PROP-001",
             final_classification="vulnerable",
             summary="Found issue",
@@ -683,13 +656,13 @@ class TestPhase03:
     def test_audit_map_item_with_code_snippet(self):
         """Test that AuditMapItem includes code_snippet field."""
         item = AuditMapItem(
-            check_id="CHK-001",
             property_id="PROP-001",
             final_classification="vulnerable",
             summary="Found issue",
             code_snippet="int x = 0;\nif (x > 0) {\n    return true;\n}",
         )
-        assert item.check_id == "CHK-001"
+        assert item.property_id == "PROP-001"
+        assert item.check_id == "PROP-001"  # Auto-populated from property_id
         assert item.code_snippet == "int x = 0;\nif (x > 0) {\n    return true;\n}"
         # Test that it can be serialized
         dumped = item.model_dump()
@@ -699,7 +672,6 @@ class TestPhase03:
     def test_audit_map_item_complete_fields(self):
         """Test that AuditMapItem can be created with all fields including code snippet."""
         item = AuditMapItem(
-            check_id="CHK-001",
             property_id="PROP-001",
             code_scope=CodeScope(
                 locations=[
@@ -717,7 +689,8 @@ class TestPhase03:
             bug_bounty_eligible=True,
             summary="Found issue"
         )
-        assert item.check_id == "CHK-001"
+        assert item.property_id == "PROP-001"
+        assert item.check_id == "PROP-001"  # Auto-populated
         assert len(item.code_scope.locations) == 1
         assert item.code_scope.locations[0].file == "test.java"
         assert item.code_scope.locations[0].line_range.start == 10
@@ -731,7 +704,7 @@ class TestPhase03Partial:
     def test_valid_partial(self):
         partial = Phase03Partial(
             audit_items=[
-                {"check_id": "CHK-001", "final_classification": "safe"},
+                {"property_id": "PROP-001", "final_classification": "safe"},
             ]
         )
         assert len(partial.audit_items) == 1
@@ -791,7 +764,7 @@ class TestValidationHelpers:
     # -- audit map items --
     def test_validate_audit_map_item_valid(self):
         data = {
-            "check_id": "CHK-001",
+            "property_id": "PROP-001",
             "final_classification": "vulnerable",
         }
         item, errs = validate_audit_map_item(data)
@@ -799,7 +772,7 @@ class TestValidationHelpers:
         assert errs == []
 
     def test_validate_audit_map_item_missing_classification(self):
-        data = {"check_id": "CHK-001"}
+        data = {"property_id": "PROP-001"}
         item, errs = validate_audit_map_item(data)
         assert "final_classification is empty" in errs
 
@@ -821,7 +794,7 @@ class TestValidationHelpers:
     def test_validate_reviewed_item_empty_check_id(self):
         data = {"check_id": "", "review_verdict": "Confirmed"}
         item, errs = validate_reviewed_item(data)
-        assert "check_id is empty" in errs
+        assert "property_id is empty" in errs
 
 
 # =========================================================================
@@ -873,8 +846,8 @@ class TestTargetInfo:
 class TestCrossPhaseDataFlow:
     """Test that data structures are compatible across phase boundaries."""
 
-    def test_01e_property_to_02_checklist(self):
-        """Property from 01e should be usable as input for 02 checklist."""
+    def test_01e_property_to_02c_code_resolution(self):
+        """Property from 01e should be usable as input for 02c code resolution."""
         prop = Property(
             id="PROP-001",
             type="invariant",
@@ -885,31 +858,32 @@ class TestCrossPhaseDataFlow:
                 "bug_bounty_scope": "in-scope",
             },
         )
-        item = {
-            "property_id": prop.id,
-            "property": prop.model_dump(),
-            "source_file": "test.json",
-        }
-        assert item["property"]["reachability"]["bug_bounty_scope"] == "in-scope"
+        item = dict(prop.model_dump())
+        item["property_id"] = prop.id
+        item["source_file"] = "test.json"
+        assert item["reachability"]["bug_bounty_scope"] == "in-scope"
 
-    def test_02_checklist_to_03_audit(self):
-        """Checklist item from 02 should be parseable as Phase03 input."""
-        cl = ChecklistItem(
-            check_id="CHK-001",
-            property_id="PROP-001",
-            title="Test check",
+    def test_02c_property_to_03_audit(self):
+        """Property with code from 02c should be parseable as Phase03 input."""
+        from orchestrator.schemas import PropertyWithCode
+        pwc = PropertyWithCode(
+            id="PROP-001",
+            text="Test property",
+            type="invariant",
             severity="High",
-            test_procedure="Run the test",
+            covers={"primary_element": "FN-001"},
+            code_scope={"resolution_status": "resolved", "locations": [
+                {"file": "test.go", "symbol": "TestFunc", "line_range": {"start": 1, "end": 10}, "role": "primary"}
+            ]},
         )
-        entry = cl.model_dump()
-        parsed, errs = validate_checklist_item(entry)
+        entry = pwc.model_dump()
+        parsed, errs = validate_property(entry)
         assert parsed is not None
         assert errs == []
 
     def test_03_audit_to_04_review(self):
         """Audit item from 03 should be parseable as Phase04 input."""
         audit = AuditMapItem(
-            check_id="CHK-001",
             property_id="PROP-001",
             final_classification="vulnerable",
             summary="Found issue",
@@ -1211,7 +1185,7 @@ class TestResultCollector:
                 config = self._make_config("03")
                 collector = ResultCollector(config)
                 results = [
-                    {"check_id": "CHK-001", "final_classification": "safe"},
+                    {"property_id": "PROP-001", "check_id": "PROP-001", "final_classification": "safe"},
                 ]
                 collector.save_partial(results, worker_id=0, batch_index=1)
                 summary = collector.get_validation_summary()
@@ -1227,10 +1201,10 @@ class TestResultCollector:
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
             try:
-                config = self._make_config("02")
+                config = self._make_config("01e")
                 collector = ResultCollector(config)
-                # Pass something that doesn't match Phase02Partial schema
-                results = [{"garbage_key": "not a checklist item"}]
+                # Pass something that doesn't match Phase01ePartial schema
+                results = [{"garbage_key": "not a property"}]
                 path = collector.save_partial(results, worker_id=0, batch_index=1)
                 # File should still be saved
                 assert path.exists()
@@ -2335,7 +2309,7 @@ class TestClaudeRunnerCommand(unittest.TestCase):
     def test_omits_model_when_not_configured(self):
         from orchestrator.runner import ClaudeRunner
         from orchestrator.config import get_phase_config
-        config = get_phase_config("02")
+        config = get_phase_config("01e")
         sem = asyncio.Semaphore(1)
         runner = ClaudeRunner(config, sem)
         cmd = runner._build_cmd("hello")

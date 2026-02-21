@@ -8,7 +8,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 ---
 
 <task>
-  <goal>For each item in the batch, use the /property-generator skill to generate formal properties from a trust model and subgraphs.</goal>
+  <goal>For each item in the batch, use the /property-generator skill to analyze trust boundaries and generate formal properties from subgraphs and bug bounty scope.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
@@ -27,9 +27,10 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     2. **Process Each Item**: For each item in the batch:
        a. **Read ID Prefix**: Read the `_id_prefix` field from the context data for this item (e.g., `"PROP-txval"`). This prefix is used by the skill to generate meaningful property IDs.
-       b. **Invoke Skill**: Call the `/property-generator` skill, passing the path to the trust model and subgraph files, along with the `_id_prefix`.
-       c. **Handle Errors**: If the skill fails, create an error object for that item.
-       d. **Append Result**: Append the successful result or the error object to the `results` array.
+       b. **Read Bug Bounty Scope**: Read the `bug_bounty_scope` field from the context data for this item (inline JSON object). Pass it to the skill.
+       c. **Invoke Skill**: Call the `/property-generator` skill, passing the subgraph file paths and the `bug_bounty_scope` context, along with the `_id_prefix`.
+       d. **Handle Errors**: If the skill fails, create an error object for that item.
+       e. **Append Result**: Append the successful result or the error object to the `results` array.
 
     3. **Write Output File**: After ALL items have been processed, write the `results` array to <ref id="results"/>.
        - This step is **MANDATORY**.
@@ -39,7 +40,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
   <data_sources>
     - **Skill**: `/property-generator`
-    - **Queue File**: Contains `item_ids` and `context_file` path. Read the context file to get item data keyed by ID, each with `trust_model_file` and `subgraph_files` paths.
+    - **Queue File**: Contains `item_ids` and `context_file` path. Read the context file to get item data keyed by ID, each with `subgraph_files` paths and optional `bug_bounty_scope` inline JSON.
   </data_sources>
 </task>
 

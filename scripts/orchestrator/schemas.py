@@ -176,25 +176,7 @@ class Phase01bPartial(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Phase 01c – Subgraph Verification
-# ---------------------------------------------------------------------------
-
-class VerificationResult(BaseModel):
-    """Verification result for a single subgraph file."""
-    file_path: str
-    status: str = ""  # "verified", "failed", "error"
-    issues: list[str] = Field(default_factory=list)
-    corrections: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class Phase01cPartial(BaseModel):
-    """Output of Phase 01c: verification results."""
-    results: list[VerificationResult] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Phase 01d – Trust Model Analysis
+# Trust Model (referenced by Phase 01e)
 # ---------------------------------------------------------------------------
 
 class TrustModelActor(BaseModel):
@@ -316,7 +298,7 @@ class Phase01ePartial(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Phase 02 – Checklist
+# Phase 02c – Code Pre-resolution (properties with code)
 # ---------------------------------------------------------------------------
 
 class ChecklistReachability(BaseModel):
@@ -356,8 +338,14 @@ class CodeScope(BaseModel):
     resolution_error: str = ""
 
 
+class PropertyWithCode(Property):
+    """Property with pre-resolved code locations from Phase 02c."""
+    code_scope: CodeScope = Field(default_factory=CodeScope)
+    code_excerpt: str = ""
+
+
 class ChecklistItem(BaseModel):
-    """A single checklist item from Phase 02."""
+    """A single checklist item from Phase 02 (kept for backwards compatibility)."""
     check_id: str
     property_id: str = ""
     title: str = ""
@@ -391,8 +379,8 @@ class Phase02Partial(BaseModel):
 
 
 class Phase02cPartial(BaseModel):
-    """Output of Phase 02c: checklist items with pre-resolved code locations."""
-    checklist_with_code: list[ChecklistItem] = Field(default_factory=list)
+    """Output of Phase 02c: properties with pre-resolved code locations."""
+    properties_with_code: list[PropertyWithCode] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -460,14 +448,21 @@ class AuditTrail(BaseModel):
 
 class AuditMapItem(BaseModel):
     """A single audit result from Phase 03."""
-    check_id: str
-    property_id: str | None = None
+    property_id: str
+    check_id: str = ""  # Kept for downstream compatibility (populated with property_id)
     code_scope: CodeScope = Field(default_factory=CodeScope)  # Type-safe code scope
     code_snippet: str = ""
     final_classification: str = ""
     bug_bounty_eligible: bool = False
     summary: str = ""
     audit_trail: AuditTrail = Field(default_factory=AuditTrail)
+
+    @model_validator(mode="after")
+    def _sync_check_id(self) -> "AuditMapItem":
+        """Populate check_id from property_id for downstream compatibility."""
+        if not self.check_id and self.property_id:
+            self.check_id = self.property_id
+        return self
 
 
 class Phase03Partial(BaseModel):
@@ -488,7 +483,8 @@ class OriginalFinding(BaseModel):
 
 class ReviewedItem(BaseModel):
     """A single reviewed item from Phase 04."""
-    check_id: str
+    property_id: str = ""
+    check_id: str = ""  # Kept for downstream compatibility
     original_finding: OriginalFinding = Field(default_factory=OriginalFinding)
     review_verdict: str = ""
     adjusted_severity: str = ""
@@ -650,8 +646,8 @@ def validate_audit_map_item(data: dict[str, Any]) -> tuple[AuditMapItem | None, 
     errors: list[str] = []
     try:
         item = AuditMapItem.model_validate(data)
-        if not item.check_id:
-            errors.append("check_id is empty")
+        if not item.property_id:
+            errors.append("property_id is empty")
         if not item.final_classification:
             errors.append("final_classification is empty")
         return item, errors
@@ -669,8 +665,8 @@ def validate_reviewed_item(data: dict[str, Any]) -> tuple[ReviewedItem | None, l
     errors: list[str] = []
     try:
         item = ReviewedItem.model_validate(data)
-        if not item.check_id:
-            errors.append("check_id is empty")
+        if not item.property_id and not item.check_id:
+            errors.append("property_id is empty")
         if not item.review_verdict:
             errors.append("review_verdict is empty")
         return item, errors

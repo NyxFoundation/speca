@@ -26,18 +26,13 @@ from .watchdog import CostTracker
 from .collector import ResultCollector
 from .resume import ResumeManager
 from .schemas import (
-    ChecklistItem,
     Phase01aState,
     Phase01bPartial,
-    Phase01cPartial,
-    Phase01dPartial,
     Phase01ePartial,
-    Phase02Partial,
     Phase02cPartial,
     Phase03Partial,
     AuditMapItem,
     Severity,
-    validate_checklist_item,
     validate_audit_map_item,
     validate_subgraph,
     validate_property,
@@ -508,7 +503,6 @@ class Phase01Orchestrator(BaseOrchestrator):
 
         - 01a: Returns a single seed item (no input file).
         - 01b: Loads discovered specs from 01a_STATE.json with validation.
-        - 01c/01d: Loads file paths as items with structural validation.
         - 01e: Loads trust model outputs with validation.
         - Others: Standard queue loading.
         """
@@ -517,12 +511,6 @@ class Phase01Orchestrator(BaseOrchestrator):
 
         if self.config.phase_id == "01b":
             return self._load_01b_items()
-
-        if self.config.phase_id == "01c":
-            return self._load_01c_items()
-
-        if self.config.phase_id == "01d":
-            return self._load_01d_items()
 
         if self.config.phase_id == "01e":
             return self._load_01e_items()
@@ -562,56 +550,10 @@ class Phase01Orchestrator(BaseOrchestrator):
                     )
         return items
 
-    # -- Phase 01c: load subgraph files for verification -----------------
+    # -- Phase 01e: load subgraph files for property generation -----------
 
-    def _load_01c_items(self) -> list[dict[str, Any]]:
-        """Load subgraph files for verification with Pydantic validation."""
-        import glob as glob_mod
-
-        items: list[dict[str, Any]] = []
-        validation_warnings = 0
-
-        for pattern in self.config.input_patterns:
-            for filepath in sorted(glob_mod.glob(pattern)):
-                try:
-                    with open(filepath) as f:
-                        data = json.load(f)
-
-                    # Validate 01b partial structure
-                    try:
-                        partial = Phase01bPartial.model_validate(data)
-                        for spec in partial.specs:
-                            for sg in spec.sub_graphs:
-                                _, errs = validate_subgraph(sg.model_dump())
-                                if errs:
-                                    for err in errs:
-                                        print(
-                                            f"    ⚠️  {filepath} subgraph {sg.id}: {err}",
-                                            file=sys.stderr,
-                                        )
-                    except ValidationError as ve:
-                        _log_validation_warning(filepath, ve, prefix="01b→01c")
-                        validation_warnings += 1
-
-                    # Regardless of validation, load file path items
-                    items.append({"file_path": filepath})
-                except Exception as e:
-                    print(
-                        f"Warning: Failed to load {filepath}: {e}",
-                        file=sys.stderr,
-                    )
-
-        if validation_warnings:
-            print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01b→01c)",
-                file=sys.stderr,
-            )
-        return items
-
-    # -- Phase 01d: load subgraph files for trust model analysis ---------
-
-    def _load_01d_items(self) -> list[dict[str, Any]]:
-        """Load subgraph files for trust model analysis with Pydantic validation."""
+    def _load_01e_items(self) -> list[dict[str, Any]]:
+        """Load subgraph files for property generation with Pydantic validation."""
         import glob as glob_mod
 
         items: list[dict[str, Any]] = []
@@ -627,7 +569,7 @@ class Phase01Orchestrator(BaseOrchestrator):
                     try:
                         Phase01bPartial.model_validate(data)
                     except ValidationError as ve:
-                        _log_validation_warning(filepath, ve, prefix="01b→01d")
+                        _log_validation_warning(filepath, ve, prefix="01b→01e")
                         validation_warnings += 1
 
                     items.append({"file_path": filepath})
@@ -639,43 +581,7 @@ class Phase01Orchestrator(BaseOrchestrator):
 
         if validation_warnings:
             print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01b→01d)",
-                file=sys.stderr,
-            )
-        return items
-
-    # -- Phase 01e: load trust model outputs for property generation -----
-
-    def _load_01e_items(self) -> list[dict[str, Any]]:
-        """Load trust model outputs for property generation with Pydantic validation."""
-        import glob as glob_mod
-
-        items: list[dict[str, Any]] = []
-        validation_warnings = 0
-
-        for pattern in self.config.input_patterns:
-            for filepath in sorted(glob_mod.glob(pattern)):
-                try:
-                    with open(filepath) as f:
-                        data = json.load(f)
-
-                    # Validate 01d partial structure
-                    try:
-                        Phase01dPartial.model_validate(data)
-                    except ValidationError as ve:
-                        _log_validation_warning(filepath, ve, prefix="01d→01e")
-                        validation_warnings += 1
-
-                    items.append({"file_path": filepath})
-                except Exception as e:
-                    print(
-                        f"Warning: Failed to load {filepath}: {e}",
-                        file=sys.stderr,
-                    )
-
-        if validation_warnings:
-            print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01d→01e)",
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01b→01e)",
                 file=sys.stderr,
             )
         return items
@@ -692,8 +598,7 @@ class Phase01Orchestrator(BaseOrchestrator):
 
         if self.config.phase_id == "01e":
             items = self._assign_property_id_prefixes(items)
-            return self._enrich_with_subgraph_context(items)
-        if self.config.phase_id == "01d":
+            items = self._inject_bug_bounty_scope(items)
             return self._enrich_with_subgraph_context(items)
         return items
 
@@ -703,24 +608,24 @@ class Phase01Orchestrator(BaseOrchestrator):
     ) -> list[dict[str, Any]]:
         """Assign meaningful _id_prefix to each item for property ID generation.
 
-        Derives a slug from the trust model's trust boundary data, ensuring
-        uniqueness via a disambiguation counter.
+        Derives a slug from 01b partial data (spec title or source_url),
+        ensuring uniqueness via a disambiguation counter.
         """
         slug_counters: dict[str, int] = {}
         for item in items:
             file_path = item.get("file_path", "")
-            slug = self._derive_slug_from_trust_model(file_path)
+            slug = self._derive_slug_from_partial(file_path)
             count = slug_counters.get(slug, 0)
             slug_counters[slug] = count + 1
             unique_slug = slug if count == 0 else f"{slug}{count}"
             item["_id_prefix"] = f"PROP-{unique_slug}"
         return items
 
-    def _derive_slug_from_trust_model(self, file_path: str) -> str:
-        """Derive a slug from trust model data.
+    def _derive_slug_from_partial(self, file_path: str) -> str:
+        """Derive a slug from 01b partial data.
 
-        Reads the trust model JSON and uses the most common
-        entry_point_type from trust_boundaries to generate the slug.
+        Reads the 01b partial JSON and uses the spec title or source_url
+        to generate a meaningful slug (e.g., "EIP-7594" -> "eip-7594").
         Falls back to a hash of the file name on failure.
         """
         if not file_path:
@@ -729,19 +634,18 @@ class Phase01Orchestrator(BaseOrchestrator):
             with open(file_path) as f:
                 data = json.load(f)
 
-            # Try trust_model.trust_boundaries[].entry_point_type
-            trust_model = data.get("trust_model", data)
-            boundaries = trust_model.get("trust_boundaries", [])
-            if boundaries:
-                # Collect entry_point_type values and pick the most common
-                type_counts: dict[str, int] = {}
-                for boundary in boundaries:
-                    ept = boundary.get("entry_point_type", "")
-                    if ept:
-                        type_counts[ept] = type_counts.get(ept, 0) + 1
-                if type_counts:
-                    most_common = max(type_counts, key=type_counts.get)  # type: ignore[arg-type]
-                    return generate_slug(most_common)
+            # Try specs[].title or specs[].source_url
+            specs = data.get("specs", [])
+            if specs and isinstance(specs, list):
+                first_spec = specs[0] if isinstance(specs[0], dict) else {}
+                title = first_spec.get("title", "")
+                if title:
+                    return generate_slug(title)
+                source_url = first_spec.get("source_url", "")
+                if source_url:
+                    # Extract meaningful part from URL (e.g. "eip-7594" from path)
+                    url_stem = Path(source_url.rstrip("/")).stem
+                    return generate_slug(url_stem)
 
             # Fallback: use the file name stem
             stem = Path(file_path).stem
@@ -749,6 +653,34 @@ class Phase01Orchestrator(BaseOrchestrator):
         except Exception:
             # Hash fallback
             return hashlib.sha256(file_path.encode()).hexdigest()[:8]
+
+    def _inject_bug_bounty_scope(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Inject bug_bounty_scope from BUG_BOUNTY_SCOPE.json into each item.
+
+        If the file exists, reads it and adds the content as the
+        `bug_bounty_scope` key in each item's context data.
+        """
+        scope_path = Path("outputs/BUG_BOUNTY_SCOPE.json")
+        if not scope_path.exists():
+            return items
+
+        try:
+            with open(scope_path) as f:
+                scope_data = json.load(f)
+            print(f"  Injected bug_bounty_scope from {scope_path}")
+        except Exception as e:
+            print(
+                f"Warning: Failed to load {scope_path}: {e}",
+                file=sys.stderr,
+            )
+            return items
+
+        for item in items:
+            item["bug_bounty_scope"] = scope_data
+        return items
     
     def _enrich_with_subgraph_context(
         self,
@@ -782,9 +714,13 @@ class Phase01Orchestrator(BaseOrchestrator):
         return enriched
 
 
-class Phase02Orchestrator(BaseOrchestrator):
-    """Orchestrator for Phase 02 (Checklist Generation)."""
-    
+class Phase02cOrchestrator(BaseOrchestrator):
+    """Orchestrator for Phase 02c (Code Location Pre-resolution).
+
+    Loads properties directly from 01e partials, applies scope/severity
+    filtering, and sends them for code location resolution.
+    """
+
     def load_items(self) -> list[dict[str, Any]]:
         """Load properties from 01e partials with Pydantic validation and deduplication."""
         import glob
@@ -792,7 +728,6 @@ class Phase02Orchestrator(BaseOrchestrator):
         items = {}  # Deduplication map
         validation_warnings = 0
 
-        # Simple pattern: always {phase}_PARTIAL_*.json
         for filepath in sorted(glob.glob("outputs/01e_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
@@ -805,12 +740,11 @@ class Phase02Orchestrator(BaseOrchestrator):
                         f"  ✓ {filepath}: {len(partial.properties)} properties validated"
                     )
                 except ValidationError as ve:
-                    _log_validation_warning(filepath, ve, prefix="01e→02")
+                    _log_validation_warning(filepath, ve, prefix="01e→02c")
                     validation_warnings += 1
 
                 for prop in data.get("properties", []):
                     if isinstance(prop, dict):
-                        # Validate individual properties
                         parsed, errs = validate_property(prop)
                         if errs:
                             prop_id_raw = prop.get("id", "<unknown>")
@@ -822,21 +756,20 @@ class Phase02Orchestrator(BaseOrchestrator):
 
                         prop_id = prop.get("id")
                         if prop_id and prop_id not in items:
-                            # Keep first occurrence
-                            items[prop_id] = {
-                                "property_id": prop_id,
-                                "property": prop,
-                                "source_file": filepath,
-                            }
+                            # Flatten property fields as top-level item fields
+                            item = dict(prop)
+                            item["property_id"] = prop_id
+                            item["source_file"] = filepath
+                            items[prop_id] = item
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
 
         if validation_warnings:
             print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01e→02)",
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (01e→02c)",
                 file=sys.stderr,
             )
-        
+
         return list(items.values())
 
     def apply_early_exit(
@@ -853,7 +786,6 @@ class Phase02Orchestrator(BaseOrchestrator):
         early_exit_results = []
         items_to_process = []
 
-        # Resolve the severity threshold once (None = no filtering)
         min_sev = Severity.from_str(self.config.min_severity) if self.config.min_severity else None
         if min_sev is not None:
             print(f"  Severity gate: min_severity={min_sev.value} (dropping below)")
@@ -861,28 +793,25 @@ class Phase02Orchestrator(BaseOrchestrator):
         severity_skipped = 0
 
         for item in items:
-            prop = item.get("property", {})
-
-            # Check required fields
-            if not prop.get("id"):
+            prop_id = item.get("property_id") or item.get("id")
+            if not prop_id:
                 early_exit_results.append(self._build_skip_result(item, "missing property id"))
                 continue
 
-            # Skip ONLY out-of-scope properties
-            # Keep all other items (in-scope, conditional, unknown) for Phase 03 verification
-            # This ensures we don't miss potential vulnerabilities due to overly strict filtering
-            reachability = prop.get("reachability", {})
-            bug_bounty_scope = reachability.get("bug_bounty_scope", "unknown")
+            reachability = item.get("reachability", {})
+            if isinstance(reachability, dict):
+                bug_bounty_scope = reachability.get("bug_bounty_scope", "unknown")
+            else:
+                bug_bounty_scope = "unknown"
 
             if bug_bounty_scope == "out-of-scope":
                 early_exit_results.append(self._build_skip_result(item, "out-of-scope"))
                 continue
 
-            # Severity gate — drop properties below the configured threshold
             if min_sev is not None:
-                prop_severity = Severity.from_str(prop.get("severity", ""))
+                prop_severity = Severity.from_str(item.get("severity", ""))
                 if prop_severity is None or prop_severity < min_sev:
-                    label = prop.get("severity", "(empty)")
+                    label = item.get("severity", "(empty)")
                     early_exit_results.append(
                         self._build_skip_result(item, f"below min_severity ({label})")
                     )
@@ -895,237 +824,90 @@ class Phase02Orchestrator(BaseOrchestrator):
             print(f"  Severity gate: skipped {severity_skipped} properties below {min_sev.value}")
 
         return early_exit_results, items_to_process
-    
+
     def _build_skip_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
         """Build a skip result for early exit items."""
+        prop_id = item.get("property_id") or item.get("id", "unknown")
         return {
-            "check_id": f"SKIP-{item.get('property_id', 'unknown')}",
-            "property_id": item.get("property_id"),
-            "checklist": [],  # Empty checklist for skipped items
+            "property_id": prop_id,
             "skipped": True,
             "skip_reason": reason,
+            "code_scope": {"resolution_status": "out_of_scope"},
         }
 
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Assign meaningful _id_prefix for checklist ID generation."""
+        """Assign _id_prefix from property_id."""
         for item in items:
             prop_id = item.get("property_id", "")
-            # Strip PROP- prefix to form the checklist slug
-            slug = prop_id[5:] if prop_id.startswith("PROP-") else prop_id
-            item["_id_prefix"] = f"CHK-{slug}"
+            item["_id_prefix"] = prop_id
         return items
 
 
-class Phase02cOrchestrator(BaseOrchestrator):
-    """Orchestrator for Phase 02c (Code Location Pre-resolution)."""
-    
-    def load_items(self) -> list[dict[str, Any]]:
-        """Load checklist items from 02 partials with Pydantic validation."""
-        import glob
-
-        items = {}
-        validation_warnings = 0
-
-        # Simple pattern: read from Phase 02 outputs
-        for filepath in sorted(glob.glob("outputs/02_PARTIAL_*.json")):
-            try:
-                with open(filepath) as f:
-                    data = json.load(f)
-
-                # Validate the partial file structure using Pydantic
-                try:
-                    partial = Phase02Partial.model_validate(data)
-                    print(
-                        f"  ✓ {filepath}: {len(partial.checklist)} checklist items validated"
-                    )
-                except ValidationError as ve:
-                    _log_validation_warning(filepath, ve, prefix="02→02c")
-                    validation_warnings += 1
-
-                # Extract checklist items
-                checklist_items = data.get("checklist", [])
-                for entry in checklist_items:
-                    if not isinstance(entry, dict):
-                        continue
-
-                    # Validate individual checklist items
-                    parsed_item, item_errors = validate_checklist_item(entry)
-                    if item_errors:
-                        check_id_raw = entry.get("check_id", "<unknown>")
-                        for err in item_errors:
-                            print(
-                                f"    ⚠️  {filepath} item {check_id_raw}: {err}",
-                                file=sys.stderr,
-                            )
-
-                    check_id = entry.get("check_id")
-                    if not check_id:
-                        continue
-
-                    # Avoid duplicates (keep first occurrence)
-                    if check_id not in items:
-                        items[check_id] = {
-                            "check_id": check_id,
-                            "checklist_item": entry,
-                            "source_file": filepath,
-                        }
-
-            except Exception as e:
-                print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
-
-        if validation_warnings:
-            print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (02→02c)",
-                file=sys.stderr,
-            )
-        
-        return list(items.values())
-
-
 class Phase03Orchestrator(BaseOrchestrator):
-    """
-    Orchestrator for Phase 03 (Audit Map Generation).
-    
-    This is the reference implementation that other phases should follow.
-    """
-    
+    """Orchestrator for Phase 03 (Audit Map Generation)."""
+
     def __init__(self, num_workers: int = 4, max_concurrent: int = 8):
         super().__init__("03", num_workers, max_concurrent)
-        self.property_subgraph_map: dict[str, tuple[str | None, str]] = {}
-    
-    def load_items(self) -> list[dict[str, Any]]:
-        """Load checklist items from 02c partials (with 02 as fallback) with Pydantic validation."""
-        import glob
 
-        # Build property to subgraph mapping
-        self._build_property_subgraph_map()
+    def load_items(self) -> list[dict[str, Any]]:
+        """Load properties with code from 02c partials with Pydantic validation."""
+        import glob
 
         items = {}
         validation_warnings = 0
 
-        # Priority: Read 02c first (with pre-resolved code locations), then 02 as fallback
-        all_files = []
-        all_files.extend(sorted(glob.glob("outputs/02c_PARTIAL_*.json")))
-        all_files.extend(sorted(glob.glob("outputs/02_PARTIAL_*.json")))
-
-        for filepath in all_files:
+        for filepath in sorted(glob.glob("outputs/02c_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
 
-                # Validate the partial file structure using Pydantic
-                # Support both Phase02Partial (checklist) and Phase02cPartial (checklist_with_code)
                 try:
-                    if "02c" in filepath:
-                        partial = Phase02cPartial.model_validate(data)
-                        entries_raw = data.get("checklist_with_code", [])
-                    else:
-                        partial = Phase02Partial.model_validate(data)
-                        entries_raw = data.get("checklist", [])
+                    partial = Phase02cPartial.model_validate(data)
+                    print(
+                        f"  ✓ {filepath}: {len(partial.properties_with_code)} properties validated"
+                    )
                 except ValidationError as ve:
-                    _log_validation_warning(filepath, ve, prefix="02c/02→03")
+                    _log_validation_warning(filepath, ve, prefix="02c→03")
                     validation_warnings += 1
-                    # Fall back to raw dict parsing
-                    entries_raw = data.get("checklist_with_code") or data.get("checklist", [])
+
+                entries_raw = data.get("properties_with_code", [])
 
                 for entry in entries_raw:
                     if not isinstance(entry, dict):
                         continue
 
-                    # Validate individual checklist items
-                    parsed_item, item_errors = validate_checklist_item(entry)
-                    if item_errors:
-                        check_id_raw = entry.get("check_id", "<unknown>")
-                        for err in item_errors:
+                    parsed, errs = validate_property(entry)
+                    if errs:
+                        prop_id_raw = entry.get("property_id") or entry.get("id", "<unknown>")
+                        for err in errs:
                             print(
-                                f"    ⚠️  {filepath} item {check_id_raw}: {err}",
+                                f"    ⚠️  {filepath} property {prop_id_raw}: {err}",
                                 file=sys.stderr,
                             )
 
-                    check_id = entry.get("check_id")
-                    if not check_id:
+                    prop_id = entry.get("property_id") or entry.get("id")
+                    if not prop_id:
                         continue
 
-                    # Skip if already loaded from 02c (priority to pre-resolved items)
-                    if check_id in items:
+                    if prop_id in items:
                         continue
 
-                    item = {
-                        "check_id": check_id,
-                        "checklist_item": entry,
-                        "checklist_file": filepath,
-                    }
+                    item = dict(entry)
+                    item["property_id"] = prop_id
+                    item["source_file"] = filepath
+                    items[prop_id] = item
 
-                    # Add property and subgraph references
-                    property_id = entry.get("property_id")
-                    if property_id:
-                        item["property_id"] = property_id
-                        subgraph_info = self.property_subgraph_map.get(property_id)
-                        if subgraph_info:
-                            item["subgraph_id"], item["subgraph_file"] = subgraph_info
-
-                    items[check_id] = item
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
 
         if validation_warnings:
             print(
-                f"⚠️  {validation_warnings} file(s) had schema validation warnings (02c/02→03)",
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (02c→03)",
                 file=sys.stderr,
             )
-        
-        return list(items.values())
-    
-    def _build_property_subgraph_map(self) -> None:
-        """Build mapping from property_id to (subgraph_id, subgraph_file)."""
-        import glob
 
-        # Use renamed files (01e_PARTIAL_*.json)
-        for prop_file in sorted(glob.glob("outputs/01e_PARTIAL_*.json")):
-            try:
-                with open(prop_file) as f:
-                    prop_data = json.load(f)
-                
-                source_files = prop_data.get("metadata", {}).get("source_files", [])
-                subgraph_cache = {}
-                
-                for sg_file in source_files:
-                    if Path(sg_file).exists():
-                        with open(sg_file) as f:
-                            subgraph_cache[sg_file] = json.load(f)
-                
-                for prop in prop_data.get("properties", []):
-                    if not isinstance(prop, dict):
-                        continue
-                    prop_id = prop.get("id")
-                    if not prop_id:
-                        continue
-                    
-                    # Find primary element
-                    covers = prop.get("covers", {})
-                    primary_element = covers.get("primary_element")
-                    if not primary_element:
-                        edges = covers.get("edges", [])
-                        nodes = covers.get("nodes", [])
-                        primary_element = edges[0] if edges else (nodes[0] if nodes else None)
-                    
-                    if not primary_element:
-                        continue
-                    
-                    # Find subgraph containing this element
-                    for sg_file, sg_data in subgraph_cache.items():
-                        for subgraph in sg_data.get("sub_graphs", []):
-                            edge_ids = [e.get("id") for e in subgraph.get("edges", [])]
-                            node_ids = [n.get("id") for n in subgraph.get("nodes", [])]
-                            if primary_element in edge_ids or primary_element in node_ids:
-                                self.property_subgraph_map[prop_id] = (
-                                    subgraph.get("id"),
-                                    sg_file,
-                                )
-                                break
-            except Exception as e:
-                print(f"Warning: Failed to process {prop_file}: {e}", file=sys.stderr)
-    
+        return list(items.values())
+
     def apply_early_exit(
         self,
         items: list[dict[str, Any]],
@@ -1133,28 +915,26 @@ class Phase03Orchestrator(BaseOrchestrator):
         """Apply early exit for out-of-scope items only."""
         early_exit_results = []
         items_to_process = []
-        
+
         for item in items:
-            checklist_item = item.get("checklist_item", {})
-            code_scope = item.get("code_scope") or checklist_item.get("code_scope", {})
+            code_scope = item.get("code_scope", {})
 
             if isinstance(code_scope, dict) and code_scope.get("resolution_status") == "out_of_scope":
                 early_exit_results.append(self._build_early_exit_result(item, "out-of-scope"))
                 continue
 
             items_to_process.append(item)
-        
+
         return early_exit_results, items_to_process
-    
+
     def _build_early_exit_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
         """Build early exit result for out-of-scope items."""
-        check_id = item.get("check_id")
-        checklist_item = item.get("checklist_item", {})
-        code_scope = item.get("code_scope") or checklist_item.get("code_scope", {})
-        
+        prop_id = item.get("property_id") or item.get("id", "")
+        code_scope = item.get("code_scope", {})
+
         return {
-            "check_id": check_id,
-            "property_id": item.get("property_id"),
+            "property_id": prop_id,
+            "check_id": prop_id,  # Downstream compat
             "code_scope": code_scope,
             "final_classification": "out-of-scope",
             "bug_bounty_eligible": False,
@@ -1176,34 +956,6 @@ class Phase03Orchestrator(BaseOrchestrator):
                 },
             },
         }
-    
-    def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Enrich items with subgraph data."""
-        subgraph_cache: dict[str, dict] = {}
-        enriched = []
-        
-        for item in items:
-            enriched_item = item.copy()
-            
-            subgraph_file = item.get("subgraph_file")
-            subgraph_id = item.get("subgraph_id")
-            
-            if subgraph_file and subgraph_id:
-                if subgraph_file not in subgraph_cache:
-                    try:
-                        with open(subgraph_file) as f:
-                            subgraph_cache[subgraph_file] = json.load(f)
-                    except Exception:
-                        subgraph_cache[subgraph_file] = {}
-                
-                for sg in subgraph_cache[subgraph_file].get("sub_graphs", []):
-                    if sg.get("id") == subgraph_id:
-                        enriched_item["subgraph"] = sg
-                        break
-            
-            enriched.append(enriched_item)
-        
-        return enriched
 
 
 class Phase04Orchestrator(BaseOrchestrator):
@@ -1212,7 +964,7 @@ class Phase04Orchestrator(BaseOrchestrator):
     def load_items(self) -> list[dict[str, Any]]:
         """Load audit results from 03 partials with Pydantic validation."""
         import glob
-        
+
         items = []
         validation_warnings = 0
         for filepath in sorted(glob.glob("outputs/03_AUDITMAP_PARTIAL_*.json")):
@@ -1220,7 +972,6 @@ class Phase04Orchestrator(BaseOrchestrator):
                 with open(filepath) as f:
                     data = json.load(f)
 
-                # Validate the partial file structure using Pydantic
                 try:
                     Phase03Partial.model_validate(data)
                 except ValidationError as ve:
@@ -1229,20 +980,23 @@ class Phase04Orchestrator(BaseOrchestrator):
 
                 audit_items = data.get("audit_items", [])
                 for item in audit_items:
-                    if isinstance(item, dict) and item.get("check_id"):
-                        # Validate individual audit items
-                        parsed, errs = validate_audit_map_item(item)
-                        if errs:
-                            for err in errs:
-                                print(
-                                    f"    ⚠️  {filepath} item {item.get('check_id', '?')}: {err}",
-                                    file=sys.stderr,
-                                )
-                        items.append({
-                            "check_id": item.get("check_id"),
-                            "audit_result": item,
-                            "source_file": filepath,
-                        })
+                    if not isinstance(item, dict):
+                        continue
+                    prop_id = item.get("property_id") or item.get("check_id")
+                    if not prop_id:
+                        continue
+                    parsed, errs = validate_audit_map_item(item)
+                    if errs:
+                        for err in errs:
+                            print(
+                                f"    ⚠️  {filepath} item {prop_id}: {err}",
+                                file=sys.stderr,
+                            )
+                    items.append({
+                        "property_id": prop_id,
+                        "audit_result": item,
+                        "source_file": filepath,
+                    })
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
 
@@ -1251,5 +1005,5 @@ class Phase04Orchestrator(BaseOrchestrator):
                 f"⚠️  {validation_warnings} file(s) had schema validation warnings (03→04)",
                 file=sys.stderr,
             )
-        
+
         return items

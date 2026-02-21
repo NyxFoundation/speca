@@ -17,10 +17,7 @@ from pydantic import ValidationError
 from .config import PhaseConfig
 from .schemas import (
     Phase01bPartial,
-    Phase01cPartial,
-    Phase01dPartial,
     Phase01ePartial,
-    Phase02Partial,
     Phase02cPartial,
     Phase03Partial,
     Phase04Partial,
@@ -32,10 +29,7 @@ from .schemas import (
 # The collector validates the full output envelope (result_key + metadata).
 _PHASE_OUTPUT_MODELS: dict[str, type] = {
     "01b": Phase01bPartial,
-    "01c": Phase01cPartial,
-    "01d": Phase01dPartial,
     "01e": Phase01ePartial,
-    "02": Phase02Partial,
     "02c": Phase02cPartial,
     "03": Phase03Partial,
     "04": Phase04Partial,

@@ -26,37 +26,33 @@ class TestPhase03EarlyExit(unittest.TestCase):
 
     def test_out_of_scope_only_early_exit(self):
         items = [
-            # Missing property_id, but should not early exit
+            # Resolved property -> should be kept
             {
-                "check_id": "C1",
-                "checklist_item": {
-                    "property_id": None,
-                    "code_scope": {"resolution_status": "resolved"},
-                },
+                "property_id": "P1",
+                "text": "Some property",
+                "code_scope": {"resolution_status": "resolved"},
             },
             # Explicitly out of scope -> should early exit
             {
-                "check_id": "C2",
-                "checklist_item": {
-                    "property_id": "P2",
-                    "code_scope": {"resolution_status": "out_of_scope"},
-                },
+                "property_id": "P2",
+                "text": "Out of scope property",
+                "code_scope": {"resolution_status": "out_of_scope"},
             },
             # No code_scope at all -> should be processed
             {
-                "check_id": "C3",
-                "checklist_item": {"property_id": "P3"},
+                "property_id": "P3",
+                "text": "Property without code scope",
             },
         ]
 
         skipped, kept = self.orchestrator.apply_early_exit(items)
 
         self.assertEqual(len(skipped), 1)
-        self.assertEqual(skipped[0]["check_id"], "C2")
+        self.assertEqual(skipped[0]["property_id"], "P2")
         self.assertIn("out-of-scope", skipped[0]["summary"])
 
-        kept_ids = sorted([i["check_id"] for i in kept])
-        self.assertEqual(kept_ids, ["C1", "C3"])
+        kept_ids = sorted([i["property_id"] for i in kept])
+        self.assertEqual(kept_ids, ["P1", "P3"])
 
 
 if __name__ == "__main__":
