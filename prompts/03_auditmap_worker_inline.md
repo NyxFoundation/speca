@@ -1,6 +1,6 @@
 
 ---
-Description: "[WORKER] Perform inline adversarial 3-phase formal audit for a single property (no skill fork)."
+Description: "[WORKER] Perform inline proof-based 3-phase formal audit for a single property (no skill fork)."
 Usage: "/03_auditmap_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=1] [OUTPUT_FILE=...]"
 Example: "/03_auditmap_worker WORKER_ID=0 QUEUE_FILE=outputs/03_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=1 OUTPUT_FILE=outputs/03_PARTIAL_W0_1700000000_1.json"
 Language: English only.
@@ -8,14 +8,14 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 ---
 
 <task>
-  <goal>Execute a complete 3-phase adversarial formal audit for a single property and write the result.</goal>
+  <goal>Execute a complete 3-phase proof-based formal audit for a single property and write the result.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
     1. Process the item with FULL 3-phase analysis (no shortcuts, no early exits)
-    2. Apply adversarial mindset: think like an attacker, not a verifier
+    2. Understand the code deeply before judging — read complete functions, not snippets
     3. Write JSON file to <ref id="results"/> after processing
     4. File MUST be written even if the item is skipped (out-of-scope)
   </critical_requirements>
@@ -27,20 +27,17 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     re-classify severity using generic heuristics.
   </severity_context>
 
-  <adversarial_mindset>
-    **CRITICAL: Your goal is to FIND vulnerabilities, not prove correctness.**
+  <audit_approach>
+    **Your method: try to PROVE the property holds. Where the proof breaks, that is the bug.**
 
-    **Think like an attacker, not a verifier.**
+    This is the most effective way to find real vulnerabilities:
+    - Proving correctness forces you to deeply understand the code
+    - Every gap in the proof is a precise, verified finding
+    - You cannot accidentally "find" a bug in code you misread
 
-    Your goal is NOT to prove the code is correct. Your goal is to **find ways to break it**. Ask:
-    - "How can I exploit this code from an external entry point?"
-    - "Can I craft inputs that bypass validation?"
-    - "What if the cache key is incomplete, or the cached value is stale?"
-    - "Does the implementation introduce bugs the spec doesn't anticipate (e.g., optimization that weakens a guarantee)?"
-    - "What happens in unexpected combinations of states or operation orderings?"
-
-    **DO NOT be satisfied with finding guards. Challenge whether guards are sufficient.**
-  </adversarial_mindset>
+    Do NOT start by looking for bugs. Start by understanding what the code does and
+    how it enforces the property. The bugs will reveal themselves as gaps in your proof.
+  </audit_approach>
 
   <instructions>
     1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). Extract the single item by looking up the first ID.
@@ -55,7 +52,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - Related locations (callers, callees, state management) are available for context
           - Use `item.code_excerpt` if available, which contains all relevant code sections
 
-       b. **Fallback resolution**: If not pre-resolved, use Read/Grep/Glob to find code from `item.text` and `item.assertion`. Derive your own attack approach from the property text and assertion. Think about how to break this property. Extract relevant lines as `code_excerpt`.
+       b. **Fallback resolution**: If not pre-resolved, use Read/Grep/Glob to find code from `item.text` and `item.assertion`. Identify which code elements are responsible for enforcing this property. Extract relevant lines as `code_excerpt`.
 
        c. **Expand Context for State Analysis**:
           - Use Grep to find related state management code
@@ -72,118 +69,122 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 
        **Tool restriction**: Use ONLY Read, Grep, Glob, Write tools for code access.
 
-    3. **3-Phase Adversarial Formal Audit**:
+    3. **3-Phase Proof-Based Audit**:
 
        Execute all three phases sequentially. **DO NOT use early exits or shortcuts.**
 
-       ### Phase 1: Abstract Interpretation with Adversarial Focus
+       ### Phase 1: Map the Property to Code
 
-       **Objective:** Identify state anomalies that could be exploited, not just documented.
+       **Objective:** Identify exactly HOW the codebase enforces this property.
 
-       1. Use Grep to find related code (callers, state management, caches)
-       2. Identify variables and their abstract domains (ranges, sets, **state machines**)
-       3. **Focus on state transitions**: How does state change over time? Can state become inconsistent?
-       4. Look for:
-          - **Cache inconsistencies**: Is cached data invalidated correctly?
-          - **TOCTOU (Time-of-Check-Time-of-Use)**: Can state change between check and use?
-          - **Unordered operations**: Does order matter (e.g., Go map iteration)?
-          - **Concurrent access**: Can multiple goroutines/threads cause race conditions?
-          - **Overflow, null, unbounded growth**
-          - **Related field inconsistency**: When data has both declared metadata (counts, lengths, hashes) and actual arrays, can they diverge?
-          - **Variable selection errors**: When multiple related variables exist (parent/child, cached/recomputed, current/next), can the wrong one be used?
-       5. **Output**: List ALL potential state anomalies, even if guards exist
+       1. **Decompose the assertion**: What does the property claim? Break it into
+          specific conditions (e.g., "cache key includes all inputs" → which inputs?
+          which cache? which key construction?).
 
-       **CRITICAL**: Do NOT skip this phase even if code looks simple. Complex bugs hide in simple-looking code.
+       2. **Read the enforcement code completely**: Read the FULL primary function
+          (not just flagged lines). Read callers (at least one level up) and callees
+          (at least one level down) using Grep.
 
-       ### Phase 2: Symbolic Execution with Exploit Construction
+       3. **Identify enforcement mechanisms**: List every code element that contributes
+          to enforcing this property:
+          - Guards/validation checks (what do they check? what do they miss?)
+          - Locks/synchronization (what scope do they protect?)
+          - Type constraints, bounds checks, SSZ max sizes
+          - Trust boundaries (which components are trusted? which aren't?)
+          - Spec-mandated behavior (read comments with spec pseudocode)
 
-       **Objective:** Construct concrete exploit scenarios, not just find counterexamples.
+       4. **Document your understanding**: Before proceeding, state:
+          "Property X is enforced by: mechanism M1 (file:line), M2 (file:line), ..."
+          If you cannot identify ANY enforcement mechanism → that itself is a finding.
 
-       1. Treat inputs as symbolic variables
-       2. Build path conditions through control flow
-       3. **Actively try to construct exploits**:
-          - Can you craft inputs that bypass validation?
-          - Can you trigger the anomalies found in Phase 1?
-          - Can you exploit timing windows (TOCTOU)?
-          - Can you cause state inconsistency through specific operation sequences?
-       4. **For each anomaly from Phase 1**, attempt to build a concrete attack scenario
-       5. Analyze reachability from attacker-controlled entry points (P2P, RPC, user input)
-       6. Classify exploitability:
-          - **exploitable**: Attacker can trigger from external interface
-          - **defense-in-depth**: Requires bypassing other layers, but theoretically possible
-          - **internal-only**: Only reachable from trusted code paths
-          - **unreachable**: No path exists
+       ### Phase 2: Attempt to Prove the Property Holds
 
-       **CRITICAL**: "No counterexample found" does NOT mean safe. It may mean the exploit is complex or requires specific timing. Document this uncertainty.
+       **Objective:** Construct a proof that the property holds.
+       Where the proof fails, that is your finding.
 
-       ### Phase 2.5: Implementation Pattern Audit
+       For each enforcement mechanism from Phase 1, verify it is sufficient:
 
-       **Objective:** Detect bugs introduced by implementation-level optimizations absent from the specification.
+       1. **Input coverage**: Does the mechanism handle ALL possible inputs?
+          - What are the valid ranges? What happens at boundaries?
+          - What happens with nil/empty/maximum-size inputs?
 
-       When implementations cache, memoize, or deduplicate to optimize performance, they introduce new correctness requirements that the specification does not describe. Audit these patterns:
+       2. **Path coverage**: Is the mechanism applied on ALL code paths?
+          - Use Grep to find all callers. Do all callers go through the guard?
+          - Are there alternative construction paths (deserialization, config,
+            checkpoint sync) that skip the guard?
 
-       1. **Caching / Memoization**: Search for maps used as caches, LRU structures, `sync.Map`, or result-reuse patterns.
-          - Ask: "Does the cache key capture EVERY input that can change the result?" If any input is omitted from the key, two semantically different calls may share a single cached result.
-          - Ask: "Can the cached value become stale if the underlying state mutates after caching?"
+       3. **Concurrency**: Is the mechanism valid under concurrent execution?
+          - Is the protected data accessed under a lock? Verify the lock scope.
+          - Is the operation init-only (runs once at startup)? If so, no race.
+          - If a race is claimed, verify BOTH operations actually run concurrently
+            at runtime — not just theoretically.
 
-       2. **Deduplication / Seen-sets**: Search for duplicate-detection checks (seen maps, bloom filters, `has[key]` guards).
-          - Ask: "Does the dedup key include ALL fields that make items semantically distinct?" If a distinguishing field is missing, a valid-but-different item may be silently dropped.
+       4. **Temporal validity**: Does the mechanism hold over time?
+          - Can the protected state become stale? When is it refreshed?
+          - TOCTOU: can state change between check and use? Verify with actual
+            call chain — is there a yield point between them?
 
-       3. **Derived / Precomputed State**: Search for values computed from other mutable state and stored for reuse.
-          - Ask: "When the source state changes, is the derived value invalidated or recomputed?"
-          - Ask: "When both a cached/authoritative value and a recomputation path exist, does the code always use the authoritative source?" If the code recomputes from potentially stale input instead of reading the cached value, the result can diverge from the system's actual state.
+       5. **Implementation pattern obligations**: If the code uses any of these
+          patterns, perform the corresponding additional check:
 
-       4. **Repeated Accessor Reads**: Search for the same getter or accessor function called multiple times within one scope without caching the first result.
-          - Ask: "If the underlying state is mutable (e.g., peer metadata updated concurrently), can the values returned by successive calls differ?" If yes, the function operates on inconsistent snapshots — a TOCTOU across repeated reads.
+          - **Cache/Memoization**: List every input that affects the computation's
+            result. Verify each is part of the cache key. If an input is missing
+            from the key, the cache can return wrong results for different inputs.
+          - **Deduplication/Seen-set**: List every field that makes items semantically
+            distinct. Verify each is part of the dedup key.
+          - **Derived/Precomputed state**: Verify the derived value is invalidated
+            or recomputed when the source state changes.
+          - **Multi-path construction**: Verify ALL construction paths enforce the
+            same invariants (ordering, bounds, uniqueness).
+          - **Repeated accessor reads**: If the same getter is called multiple times
+            on mutable state, verify the values cannot diverge between calls.
+          - **Return value completeness**: Verify callers handle all semantic
+            variants (success-true, success-false, error), not just the error case.
 
-       5. **Return Value Completeness**: For functions returning compound types (`Result<bool>`, `(value, error)`, optional+error), verify the caller handles **every semantic variant**, not just the error branch.
-          - Ask: "Is the success-but-false case (`Ok(false)`, `(false, nil)`) distinguished from success-and-true?" If not, a failed verification that returns a clean non-error result will be silently accepted.
+       6. **Write the proof**:
+          - If proof succeeds: "Property holds because M1 guarantees A, M2 guarantees
+            B, and A ∧ B → property." Proceed to Phase 3.
+          - If proof fails at a specific point: That is your finding. Document:
+            (a) which condition is not satisfied, (b) which code path violates it,
+            (c) what state inconsistency results.
 
-       6. **Error Swallowing in Retry / Fallback Paths**: Search for catch/rescue blocks in retry loops or fallback branches that log an error but return a success status to the caller.
-          - Ask: "If the retry fails, does the caller learn about the failure, or does it believe the operation succeeded?" If the error is caught and discarded, the system can enter a permanently stalled state with no further retry attempts.
+       ### Phase 3: Stress-Test Your Conclusion
 
-       7. **Multi-Path Construction**: When a data structure is constructible via multiple code paths (config files, constructors, deserialization), check whether all paths enforce the same invariants (ordering, bounds, uniqueness).
-          - Ask: "Does path A sort the data while path B does not? Does path A validate bounds while path B skips it?" If the consumer assumes an invariant that only some paths enforce, the other paths produce silently incorrect data.
+       **Objective:** Challenge your own proof (if it succeeded) or verify your
+       finding (if the proof failed). Either way, question your assumptions.
 
-       8. **Related Data Consistency**: When a data structure contains both declared metadata (counts, lengths, hashes) and actual data arrays, or when a calculation can draw from multiple related variables (parent vs child, current vs next, cached vs recomputed):
-          - Ask: "Are declared counts/lengths/hashes validated against the actual data they describe?" If a declared count says N but the actual array has M items, indexing based on the count will over-read or under-process.
-          - Ask: "Does this calculation use the correct variable from a set of semantically similar ones (parent vs child value, current epoch vs next epoch)?" Selecting the wrong tier's value produces subtly incorrect results that may pass unrelated validation.
+       **If your proof succeeded (you believe the property holds):**
+       1. List every assumption your proof depends on. For each:
+          - "This function is only called at init" → Grep for ALL callers to confirm
+          - "Config is immutable at runtime" → Search for Override/Set/Update methods
+          - "This lock protects the data" → Verify the lock is held at EVERY access
+          - "The spec mandates this behavior" → Re-read the spec comment to confirm
+       2. If any assumption is wrong, re-do Phase 2 with corrected understanding.
 
-       For each pattern found, attempt to construct a concrete exploit using the methodology from Phase 2.
+       **If your proof failed (you found a potential bug):**
+       1. **Verify your code reading is correct**:
+          - Re-read the exact lines you cited. Does the code actually do what you claim?
+          - If you claim a check is MISSING, Grep for it — it may exist in a caller
+            or a different function on the same path.
+          - If you claim a race condition, verify both operations run concurrently
+            at runtime (not just at init or behind a lock).
+       2. **Check for intentional design**:
+          - Read comments near the code. Is this behavior intentional?
+          - Is there a trust boundary? (local EL is trusted, spec defers some validation)
+          - Does a test file exercise this exact behavior?
+       3. **Construct a concrete attack path**: Trace from an external entry point
+          (P2P message, RPC call) through the actual call chain to the vulnerable code.
+          If you cannot construct a reachable path, downgrade to informational.
 
-       ### Phase 3: Invariant Analysis with Skepticism
-
-       **Objective:** Determine if guards are SUFFICIENT, not just present.
-
-       1. **DO NOT assume guards are sufficient just because they exist**
-       2. For each guard/validation:
-          - Does it cover ALL attack scenarios from Phase 2?
-          - Can it be bypassed in specific states or timing?
-          - Does it protect against concurrent access?
-          - Does it validate ALL relevant properties (not just input values)?
-       3. **Check for logic gaps**:
-          - Is validation applied consistently across all code paths?
-          - Are there edge cases where validation is skipped?
-          - Does the guard protect the ACTUAL invariant, or just a proxy?
-       4. **Attempt to prove the property holds**, but:
-          - If proof fails, document why
-          - If proof succeeds, **challenge it**: What assumptions did you make? Are they valid?
-
-       ### Phase 3.5: Scope Filtering with Conservative Bias
-
-       **Objective:** Determine bug bounty eligibility with a **bias toward reporting**.
-
-       1. **Default to "eligible" unless clearly out-of-scope**
-       2. Mark as eligible if:
-          - Any exploit scenario exists (even if requires specific timing)
-          - State inconsistency is possible
-          - Guards are incomplete or bypassable
-          - Concurrent access can violate invariants
-       3. Mark as NOT eligible ONLY if:
-          - Completely unreachable from any external interface
-          - Explicitly out-of-scope per the bug bounty scope definition
-          - Trivially safe with no state or external input (e.g., pure constant getter)
-       4. **When in doubt, report it**
+       **Classification criteria:**
+       - `vulnerability`: Proof failed, code reading verified, no intentional design
+         explains the gap, concrete attack path exists from external entry point.
+       - `potential-vulnerability`: Proof failed, but attack reachability is uncertain
+         or requires specific conditions. OR proof succeeded but an assumption is
+         hard to fully verify.
+       - `not-a-vulnerability`: Proof succeeded and survived stress-testing. OR proof
+         failed but the gap is intentional by design/spec.
+       - `out-of-scope`: Code is in external library, vendor/, or unrelated component.
 
     4. **Compress to 6-Field Output**: Map the analysis to the minimal schema:
        - `property_id`
@@ -224,17 +225,23 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     3. **Code path present**: code_path includes file, symbol (if available), and line range e.g., `beacon-chain/core/peerdas/reconstruction.go::ReconstructDataColumnSidecars::L31-122`.
     4. **Classification sanity**: use allowed set only.
     5. **Metadata preserved**: metadata object is still included and unchanged except for fields you legitimately update (e.g., timestamp, processed_ids).
-    6. **All phases executed**: Every phase (1, 2, 2.5, 3, 3.5) must have been considered. No early exits.
+    6. **All phases executed**: Every phase (1: Map, 2: Prove, 3: Stress) must have been executed. No early exits.
   </quality_gates>
 
   <anti_patterns>
-    **AVOID these common mistakes:**
+    **AVOID these thinking errors:**
 
-    - "This code has validation, so it's safe" -> "Is validation sufficient for ALL scenarios?"
-    - "No counterexample found, mark as safe" -> "Why couldn't I find one? Is it complex?"
-    - "Code looks simple, skip detailed analysis" -> "Complex bugs hide in simple code"
-    - "Early exit to save tokens" -> "Full analysis to find real bugs"
-    - "Validation exists, therefore safe" -> "How can I exploit this despite the guards?"
-    - "Guards exist, skip proving they're sufficient" -> "What state combinations can cause issues?"
+    False negatives (missing real bugs):
+    - "Guards exist → safe" — Prove guards are sufficient for ALL paths and states
+    - "No counterexample found → safe" — Revisit your proof assumptions
+    - "Code looks simple → skip analysis" — Complex bugs hide in simple code
+
+    False positives (reporting non-bugs):
+    - "Check X is missing from this function" — Grep for it in callers/upstream first
+    - "Race condition possible" — Verify operations actually run concurrently at RUNTIME, not just at init
+    - "Cache key is incomplete" — Verify the omitted field actually varies during the cache's lifetime
+    - "Path A bypasses validation" — Check if it has a different trust model (local EL, local validator)
+    - "Function doesn't verify Y" — Check the spec. Y may be verified elsewhere by design
+    - "Different results on different paths" — Check if paths serve different use cases (e.g., different epoch ranges)
   </anti_patterns>
 </task>

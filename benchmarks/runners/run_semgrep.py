@@ -6,6 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from benchmarks.bench_utils import extract_id
 from benchmarks.runners.base_runner import CommandSpec, write_metadata
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -29,9 +30,9 @@ def run_semgrep_on_primevul(dataset_path: Path, output_path: Path, config: str, 
 
     results = []
     with open(dataset_path, "r") as f:
-        for line in f:
+        for idx, line in enumerate(f):
             sample = json.loads(line)
-            func_id = sample.get("func_hash")
+            func_id = extract_id(sample, idx)
             code = sample.get("func")
 
             # Create a temporary file to scan

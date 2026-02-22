@@ -13,12 +13,12 @@ ID_KEYS = (
     "id",
     "sample_id",
     "uuid",
-    "cve",
-    "cve_id",
-    "cwe_id",
     "func_hash",
     "idx",
     "index",
+    "cve",
+    "cve_id",
+    "cwe_id",
 )
 
 LABEL_KEYS = (
