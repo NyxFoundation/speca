@@ -1875,11 +1875,11 @@ class TestCostTrackerIntegration:
     """Test CostTracker with real PhaseConfig values."""
 
     def test_phase03_budget(self):
-        """Phase 03 should have max_budget_usd=50.0."""
+        """Phase 03 should have max_budget_usd=100.0."""
         config = get_phase_config("03")
-        assert config.max_budget_usd == 50.0
+        assert config.max_budget_usd == 100.0
         tracker = CostTracker(max_budget_usd=config.max_budget_usd)
-        assert tracker.max_budget_usd == 50.0
+        assert tracker.max_budget_usd == 100.0
 
     def test_phase03_log_anomaly_threshold(self):
         """Phase 03 should have log_anomaly_threshold=3."""
