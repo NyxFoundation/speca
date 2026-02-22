@@ -47,6 +47,16 @@ class CircuitBreakerTripped(Exception):
         super().__init__(f"Circuit breaker tripped: {reason} (stats={stats})")
 
 
+class MaxTurnsExhausted(Exception):
+    """Raised when a batch exhausts max_turns without producing output.
+
+    Retrying is pointless because hitting max_turns is deterministic for
+    the same prompt + queue.  Callers should treat this as a non-retriable
+    empty result that does NOT count toward the circuit breaker's
+    ``empty_results`` counter.
+    """
+
+
 class CircuitBreaker:
     """
     Tracks failure / anomaly counters and raises ``CircuitBreakerTripped``
@@ -299,6 +309,15 @@ class ClaudeRunner:
                         return result
                 except (CircuitBreakerTripped, BudgetExceeded):
                     raise  # Propagate immediately
+                except MaxTurnsExhausted as e:
+                    # Don't retry — hitting max_turns is deterministic.
+                    # Return empty list without counting toward empty_results
+                    # circuit breaker (this is a known limitation, not a bug).
+                    print(
+                        f"[W{worker_id}] {e}",
+                        file=sys.stderr,
+                    )
+                    return []
                 except Exception as e:
                     print(
                         f"[W{worker_id}] Batch {batch_index} attempt {attempt + 1} failed: {e}",
@@ -450,6 +469,15 @@ class ClaudeRunner:
             await watcher_task
             return None
         finally:
+            # Kill subprocess if still running (critical for circuit breaker /
+            # cancellation — without this, cancelled tasks leave orphan Claude
+            # CLI processes that prevent the orchestrator from exiting).
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
             # Ensure watcher is stopped
             watcher.stop()
             if not watcher_task.done():
@@ -512,6 +540,7 @@ class ClaudeRunner:
                     output_tokens=usage["output_tokens"],
                     cache_read_tokens=usage["cache_read_tokens"],
                     cache_creation_tokens=usage["cache_creation_tokens"],
+                    num_turns=usage.get("num_turns", 0),
                     worker_id=worker_id,
                     batch_index=batch_index,
                 )
@@ -522,14 +551,43 @@ class ClaudeRunner:
                     + usage["cache_read_tokens"]
                     + usage["cache_creation_tokens"]
                 )
+                turns_str = f", turns={usage['num_turns']}" if usage.get("num_turns") else ""
                 print(
                     f"[W{worker_id}] Batch {batch_index}: "
                     f"tokens={total_tokens:,} "
                     f"(in={usage['input_tokens']:,}, cache_read={usage['cache_read_tokens']:,}, "
-                    f"cache_create={usage['cache_creation_tokens']:,}, out={usage['output_tokens']:,}); "
+                    f"cache_create={usage['cache_creation_tokens']:,}, out={usage['output_tokens']:,}"
+                    f"{turns_str}); "
                     f"+${batch_cost:.4f}, total=${cost_stats['total_cost_usd']:.2f}/"
                     f"${cost_stats['max_budget_usd']:.2f}",
                 )
+
+        # --- Detect error_max_turns (may arrive with returncode 0 or 1) ---
+        # Claude CLI can exit with code 0 while the result event carries
+        # subtype="error_max_turns".  Handling this before the returncode
+        # check covers both cases.
+        result_status = self._check_log_result_status(log_file)
+        if result_status and result_status.get("subtype") == "error_max_turns":
+            num_turns = result_status.get("num_turns", "?")
+            # Try to recover whatever output was produced
+            results = self._parse_results(result_parse_path)
+            if not results:
+                results = self._parse_results_from_log(log_file)
+            if results:
+                print(
+                    f"[W{worker_id}] Batch {batch_index}: "
+                    f"error_max_turns ({num_turns} turns) but "
+                    f"recovered {len(results)} result(s)",
+                    file=sys.stderr,
+                )
+                if not directory_mode and result_parse_path.exists():
+                    result_parse_path.unlink()
+                return results
+            # No output — retrying won't help (max_turns is deterministic)
+            raise MaxTurnsExhausted(
+                f"Batch {batch_index} exhausted {num_turns} turns "
+                f"without producing output"
+            )
 
         # Check result
         if proc.returncode != 0:
@@ -607,10 +665,10 @@ class ClaudeRunner:
         is_error = result_info.get("is_error", False)
 
         if subtype != "success":
-            # e.g. subtype="error" — genuine failure
+            # e.g. subtype="error", "error_max_turns" — genuine failure
             return None
 
-        # subtype=success, is_error=true — likely max_turns reached
+        # subtype=success, is_error=true — likely graceful exit with output
         duration_s = result_info.get("duration_ms", 0) / 1000
         print(
             f"[W{worker_id}] Batch {batch_index}: Claude exited non-zero but "

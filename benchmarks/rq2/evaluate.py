@@ -346,6 +346,9 @@ def evaluate_dataset(dataset_name: str, dataset_path: Path) -> dict:
                 predictions_by_tool[tool],
                 ground_truth,
                 eligible_cases,
+                samples=BOOTSTRAP_SAMPLES,
+                seed=BOOTSTRAP_SEED,
+                ci_level=CI_LEVEL,
             )
             pairwise_stats[tool] = {
                 "n": n,

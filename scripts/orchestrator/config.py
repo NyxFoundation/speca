@@ -227,11 +227,11 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         # Phase 03 is the most expensive — tighter circuit breaker
         circuit_breaker_threshold=5,
         max_total_retries=20,
-        max_empty_results=5,
-        max_budget_usd=30.0,
+        max_empty_results=15,
+        max_budget_usd=50.0,
         log_anomaly_threshold=3,
-        max_turns_per_batch=5,  # More turns for single-item inline audit
-        max_cache_read_tokens=100_000,  # Reduced — single item needs less cache
+        max_turns_per_batch=50,  # Complex properties need 25-30 turns; median ~19
+        max_cache_read_tokens=0,  # Disabled — 25-turn audit reads substantial code
         mcp_servers=[],  # No MCP — inlined prompt uses Read/Grep/Glob only
         tools_filter=["Read", "Write", "Grep", "Glob"],
         context_fields=["property_id", "text", "type", "assertion", "severity",

@@ -304,7 +304,7 @@ class TestPhaseConfig:
         cfg = PHASE_CONFIGS["03"]
         assert cfg.circuit_breaker_threshold == 5
         assert cfg.max_total_retries == 20
-        assert cfg.max_empty_results == 5
+        assert cfg.max_empty_results == 15
 
     def test_mcp_servers_defaults(self):
         """Phases without mcp_servers set should default to None (all servers)."""
@@ -1791,16 +1791,23 @@ class TestExtractTokenUsage:
     """Tests for the extract_token_usage_from_log utility."""
 
     def test_extract_from_stream_json(self):
-        """Should extract usage from Claude CLI stream-json format."""
+        """Should extract usage from Claude CLI stream-json format with message IDs."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
-            f.write('{"type": "message_start", "message": {"usage": {"input_tokens": 5000, "output_tokens": 0}}}\n')
+            # Two events for the same message (same id) — should be deduped
+            f.write('{"type": "assistant", "message": {"id": "msg_01", "usage": {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 1000}}}\n')
             f.write('{"type": "content_block_delta"}\n')
-            f.write('{"type": "message_delta", "usage": {"input_tokens": 5000, "output_tokens": 1200}}\n')
+            f.write('{"type": "assistant", "message": {"id": "msg_01", "usage": {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 1000}}}\n')
+            # Second message
+            f.write('{"type": "assistant", "message": {"id": "msg_02", "usage": {"input_tokens": 7, "output_tokens": 2, "cache_read_input_tokens": 5200, "cache_creation_input_tokens": 800}}}\n')
             f.flush()
             usage = extract_token_usage_from_log(f.name)
         os.unlink(f.name)
-        assert usage["input_tokens"] == 5000
-        assert usage["output_tokens"] == 1200
+        # Summed across 2 unique messages (msg_01 deduped)
+        assert usage["input_tokens"] == 12
+        assert usage["output_tokens"] == 3
+        assert usage["cache_read_tokens"] == 9200
+        assert usage["cache_creation_tokens"] == 1800
+        assert usage["num_turns"] == 2
 
     def test_extract_from_empty_log(self):
         """Empty log should return zero tokens."""
@@ -1810,15 +1817,33 @@ class TestExtractTokenUsage:
         os.unlink(f.name)
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
+        assert usage["num_turns"] == 0
 
     def test_extract_from_nonexistent_file(self):
         """Nonexistent file should return zero tokens."""
         usage = extract_token_usage_from_log("/nonexistent/file.jsonl")
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
+        assert usage["num_turns"] == 0
 
-    def test_extract_with_multiple_usage_entries(self):
-        """Should take max input_tokens and sum output_tokens."""
+    def test_extract_with_result_event(self):
+        """Result event provides authoritative totals."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            # Some per-message events (should be ignored when result present)
+            f.write('{"type": "assistant", "message": {"id": "msg_01", "usage": {"input_tokens": 5, "output_tokens": 1, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 1000}}}\n')
+            # Result event with authoritative totals
+            f.write('{"type": "result", "subtype": "success", "num_turns": 16, "usage": {"input_tokens": 61, "output_tokens": 2146, "cache_read_input_tokens": 259216, "cache_creation_input_tokens": 31808}}\n')
+            f.flush()
+            usage = extract_token_usage_from_log(f.name)
+        os.unlink(f.name)
+        assert usage["input_tokens"] == 61
+        assert usage["output_tokens"] == 2146
+        assert usage["cache_read_tokens"] == 259216
+        assert usage["cache_creation_tokens"] == 31808
+        assert usage["num_turns"] == 16
+
+    def test_extract_with_anonymous_events(self):
+        """Events without message IDs are treated as unique messages and summed."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             f.write('{"usage": {"input_tokens": 3000, "output_tokens": 500}}\n')
             f.write('{"usage": {"input_tokens": 5000, "output_tokens": 800}}\n')
@@ -1826,14 +1851,14 @@ class TestExtractTokenUsage:
             f.flush()
             usage = extract_token_usage_from_log(f.name)
         os.unlink(f.name)
-        assert usage["input_tokens"] == 5000  # max
-        assert usage["output_tokens"] == 1500  # sum
+        assert usage["input_tokens"] == 13000  # sum of 3 unique events
+        assert usage["output_tokens"] == 1500   # sum
 
     def test_extract_with_malformed_lines(self):
         """Should gracefully skip malformed JSON lines."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
             f.write('not json at all\n')
-            f.write('{"usage": {"input_tokens": 1000, "output_tokens": 200}}\n')
+            f.write('{"type": "assistant", "message": {"id": "msg_01", "usage": {"input_tokens": 1000, "output_tokens": 200}}}\n')
             f.write('{broken json\n')
             f.flush()
             usage = extract_token_usage_from_log(f.name)
@@ -2290,6 +2315,37 @@ class TestTryRecoverPartial(unittest.TestCase):
             assert result is None
         finally:
             log_path.unlink()
+
+
+class TestMaxTurnsExhausted(unittest.TestCase):
+    """Tests for error_max_turns detection in _execute_batch."""
+
+    def test_error_max_turns_returns_none_for_try_recover(self):
+        """_try_recover_partial should return None for error_max_turns
+        (it's handled earlier in _execute_batch now)."""
+        from orchestrator.runner import ClaudeRunner
+        from orchestrator.config import get_phase_config
+        config = get_phase_config("03")
+        sem = asyncio.Semaphore(1)
+        runner = ClaudeRunner(config, sem)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"type":"result","subtype":"error_max_turns","is_error":false,'
+                    '"num_turns":26,"duration_ms":90000}\n')
+            log_path = Path(f.name)
+        result_path = Path("/tmp/nonexistent_result.json")
+        try:
+            result = runner._try_recover_partial(
+                log_path, result_path, False, 0, 1, 12345
+            )
+            assert result is None
+        finally:
+            log_path.unlink()
+
+    def test_max_turns_exhausted_exception_exists(self):
+        """MaxTurnsExhausted should be importable from runner."""
+        from orchestrator.runner import MaxTurnsExhausted
+        exc = MaxTurnsExhausted("Batch 42 exhausted 26 turns")
+        assert "26 turns" in str(exc)
 
 
 class TestClaudeRunnerCommand(unittest.TestCase):

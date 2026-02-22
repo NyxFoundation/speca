@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch from benchmark-02-semgrep"
+        description: "Branch from benchmark-02-tools"
         required: true
         type: string
       dataset:
@@ -16,6 +16,16 @@ on:
           - cvefixes
           - vul4j
         default: "primevul"
+      tools_run_id:
+        description: "Run ID from benchmark-02-tools (for artifact download)"
+        required: false
+        type: string
+        default: ""
+      rq1_summary:
+        description: "Path to RQ1 evaluation_summary.json (optional, for combined report)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -60,6 +70,36 @@ jobs:
               ;;
           esac
           echo "DATASET_PATH=${DATASET_PATH}" >> $GITHUB_ENV
+          echo "RESULTS_DIR=benchmarks/results/rq2/${{ inputs.dataset }}" >> $GITHUB_ENV
+
+      - name: Download Tool Results Artifact
+        if: ${{ inputs.tools_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rq2-tool-results-${{ inputs.dataset }}-*-${{ inputs.tools_run_id }}
+          path: benchmarks/results/rq2/${{ inputs.dataset }}/
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Fallback to ~/.cache (Dataset)
+        run: |
+          CACHE_DIR="${HOME}/.cache/security-agent/benchmarks/${{ inputs.dataset }}"
+          DEST_DIR="benchmarks/data/${{ inputs.dataset }}"
+          if [ ! -f "${DATASET_PATH}" ] && [ -d "${CACHE_DIR}" ]; then
+            echo "Restoring dataset from ~/.cache..."
+            mkdir -p "${DEST_DIR}"
+            cp -rf "${CACHE_DIR}/." "${DEST_DIR}/"
+          fi
+
+      - name: Fallback to ~/.cache (Results)
+        run: |
+          CACHE_DIR="${HOME}/.cache/security-agent/benchmarks/results/${{ inputs.dataset }}"
+          DEST_DIR="benchmarks/results/rq2/${{ inputs.dataset }}"
+          if ! ls "${DEST_DIR}"/*_results.* >/dev/null 2>&1 && [ -d "${CACHE_DIR}" ]; then
+            echo "Restoring results from ~/.cache..."
+            mkdir -p "${DEST_DIR}"
+            cp -rf "${CACHE_DIR}/." "${DEST_DIR}/"
+          fi
 
       - name: Verify Inputs
         run: |
@@ -78,12 +118,48 @@ jobs:
       - name: Evaluate Benchmark
         run: uv run python benchmarks/rq2/evaluate.py --dataset "${{ inputs.dataset }}" --dataset-path "${DATASET_PATH}"
 
-      - name: Push Evaluation Summary
+      - name: Generate Report
+        run: |
+          RQ1_ARG=""
+          if [ -n "${{ inputs.rq1_summary }}" ] && [ -f "${{ inputs.rq1_summary }}" ]; then
+            RQ1_ARG="--rq1-summary ${{ inputs.rq1_summary }}"
+          fi
+          uv run python benchmarks/rq2/generate_report.py \
+            --metrics benchmarks/results/rq2/metrics.json \
+            --output benchmarks/results/rq2/report.md \
+            ${RQ1_ARG}
+
+      - name: Save Evaluation to Cache
         if: always()
         run: |
-          git add benchmarks/results/rq2/evaluation_summary.json
-          if ! git diff --staged --quiet; then
-            git commit -m "benchmark: evaluation summary"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push origin "${{ inputs.branch }}" --force-with-lease
+          CACHE_DIR="${HOME}/.cache/security-agent/benchmarks/results/${{ inputs.dataset }}"
+          mkdir -p "${CACHE_DIR}"
+          for f in evaluation_summary.json metrics.json report.md; do
+            if [ -f "benchmarks/results/rq2/${f}" ]; then
+              cp "benchmarks/results/rq2/${f}" "${CACHE_DIR}/${f}"
+            fi
+          done
+          echo "Saved evaluation results to ${CACHE_DIR}"
+
+      - name: Upload Evaluation Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rq2-evaluation-${{ inputs.dataset }}-${{ github.run_id }}
+          path: |
+            benchmarks/results/rq2/evaluation_summary.json
+            benchmarks/results/rq2/metrics.json
+            benchmarks/results/rq2/report.md
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Print Report Summary
+        if: always()
+        run: |
+          echo "## RQ2 Benchmark Report (${{ inputs.dataset }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "benchmarks/results/rq2/report.md" ]; then
+            cat benchmarks/results/rq2/report.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Report generation failed. Check evaluation_summary.json for raw metrics." >> $GITHUB_STEP_SUMMARY
           fi

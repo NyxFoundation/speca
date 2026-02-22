@@ -123,7 +123,9 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after.
 
-    6. **Classify Reachability**: For each property, determine:
+    6. **Optimization Correctness Properties**: When the specification describes an operation whose correctness is critical (verification, validation, proof checking, uniqueness enforcement), consider that implementations commonly cache, deduplicate, or precompute results for performance. For each such operation, generate a property asserting that any such optimization must preserve the original correctness guarantee — i.e., the optimized path must produce the same accept/reject decision as the unoptimized path for all inputs. Mark these as `type: "invariant"`, severity based on blast radius if violated.
+
+    7. **Classify Reachability**: For each property, determine:
        - `entry_points`: List of entry points that can trigger this property (e.g., `["P2P", "EngineAPI"]`)
        - `attacker_controlled`: Can an external attacker control the inputs? (`true`/`false`)
        - `classification`: One of:
@@ -131,23 +133,23 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
          - `internal-only`: Only reachable via internal calls
          - `api-only`: Only reachable via out-of-scope APIs (JSON-RPC, Beacon API)
 
-    7. **Determine Bug Bounty Scope**: Based on reachability analysis:
+    8. **Determine Bug Bounty Scope**: Based on reachability analysis:
        - `in-scope`: Property is reachable via in-scope entry points with attacker-controlled input
        - `out-of-scope`: Property is only reachable via out-of-scope entry points
        - `conditional`: Requires specific conditions or further investigation
 
-    8. **Assign Severity**: Use the `severity_classification` from `bug_bounty_scope` as the **sole decision boundary**. For each property:
+    9. **Assign Severity**: Use the `severity_classification` from `bug_bounty_scope` as the **sole decision boundary**. For each property:
        - Ask: **"If this property is violated, what is the blast radius on the live network?"**
        - Start from INFORMATIONAL and escalate **only** when the violation's impact meets or exceeds the next level's `impact` threshold.
        - A correctness property (data format, type constraint, encoding rule) is INFORMATIONAL unless you can articulate a concrete attack path where violating it causes network-level impact (crashes, splits, slashing at the threshold %).
        - Do NOT inflate severity based on "importance to correctness" — severity is about **attacker-exploitable network impact**, not code criticality.
 
-    9. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
+    10. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
        - `reachability.classification == "external-reachable"` AND
        - `reachability.bug_bounty_scope == "in-scope"` AND
        - `severity` is `MEDIUM` or higher
 
-    10. **Assign IDs**: Assign a unique ID per property using the `_id_prefix` from the context data:
+    11. **Assign IDs**: Assign a unique ID per property using the `_id_prefix` from the context data:
         - Use the `_id_prefix` field from the input context (e.g., `"PROP-txval"`)
         - Format: `{_id_prefix}-{type_abbrev}-{seq:03d}`
           - `type_abbrev`: `inv` (invariant), `pre` (pre-condition), `post` (post-condition), `asm` (assumption)

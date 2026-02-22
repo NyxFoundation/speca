@@ -6,14 +6,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = ROOT_DIR / "benchmarks" / "data"
 CACHE_DIR = Path.home() / ".cache" / "security-agent" / "benchmarks"
 
 # Dataset configurations
 DATASETS = {
     "primevul": {
-        "url": "https://huggingface.co/datasets/DLVulDet/PrimeVul/resolve/main/primevul_test_paired.jsonl",
+        "url": "https://huggingface.co/datasets/colin/PrimeVul/resolve/main/primevul_test_paired.jsonl",
         "output_dir": DATA_DIR / "primevul",
     },
     # Add other datasets like VulDetectBench here
@@ -40,10 +40,15 @@ def setup_dataset(name: str, config: dict) -> None:
 
     print(f"    Downloading from {config['url']}...")
     subprocess.run(
-        ["curl", "-L", "-o", str(target_file), config["url"]],
+        ["curl", "-L", "-f", "-o", str(target_file), config["url"]],
         check=True,
         capture_output=True,
     )
+    # Sanity check: reject suspiciously small files (likely error pages)
+    if target_file.stat().st_size < 1024:
+        content = target_file.read_text(errors="replace")[:200]
+        target_file.unlink()
+        raise RuntimeError(f"Download failed — server returned error: {content}")
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(target_file, cache_file)
     print(f"    Successfully downloaded to {target_file}")

@@ -17,7 +17,7 @@ on:
           - vul4j
         default: "primevul"
       tools:
-        description: "Tools to run (security_agent is not implemented yet)."
+        description: "Tools to run (comma-separated or 'all')"
         required: true
         type: choice
         options:
@@ -33,11 +33,21 @@ on:
         required: false
         type: number
         default: 120
+      dataset_run_id:
+        description: "Run ID from benchmark-01-setup (for artifact download)"
+        required: false
+        type: string
+        default: ""
       force_execute:
         description: "Force execute even if results exist"
         required: false
         type: boolean
         default: false
+      security_agent_command:
+        description: "security-agent command template ({code_path}, {output_path}, {case_id})"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -84,6 +94,24 @@ jobs:
           echo "DATASET_PATH=${DATASET_PATH}" >> $GITHUB_ENV
           echo "RESULTS_DIR=benchmarks/results/rq2/${{ inputs.dataset }}" >> $GITHUB_ENV
 
+      - name: Download Dataset Artifact
+        if: ${{ inputs.dataset_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: rq2-dataset-${{ inputs.dataset }}-${{ inputs.dataset_run_id }}
+          path: benchmarks/data/${{ inputs.dataset }}/
+        continue-on-error: true
+
+      - name: Fallback to ~/.cache
+        run: |
+          CACHE_DIR="${HOME}/.cache/security-agent/benchmarks/${{ inputs.dataset }}"
+          DEST_DIR="benchmarks/data/${{ inputs.dataset }}"
+          if [ ! -f "${DATASET_PATH}" ] && [ -d "${CACHE_DIR}" ]; then
+            echo "Restoring from ~/.cache..."
+            mkdir -p "${DEST_DIR}"
+            cp -rf "${CACHE_DIR}/." "${DEST_DIR}/"
+          fi
+
       - name: Verify Dataset
         run: |
           if [ ! -f "${DATASET_PATH}" ]; then
@@ -121,8 +149,7 @@ jobs:
             echo "run_codeql=false" >> $GITHUB_OUTPUT
           fi
           if echo "$TOOLS" | grep -Eq "security_agent|agent"; then
-            echo "run_security_agent=false" >> $GITHUB_OUTPUT
-            echo "security_agent is not implemented; skipping." >&2
+            echo "run_security_agent=true" >> $GITHUB_OUTPUT
           else
             echo "run_security_agent=false" >> $GITHUB_OUTPUT
           fi
@@ -167,10 +194,32 @@ jobs:
             --timeout "${{ inputs.tool_timeout }}" \
             --shell
 
-      - name: Security Agent (not implemented)
+      - name: Run Security Agent
         if: steps.tool_select.outputs.run_security_agent == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo "security_agent is not implemented for RQ2; skipping."
+          if [ "${{ inputs.force_execute }}" != "true" ] && \
+             [ -f "${RESULTS_DIR}/security_agent_results.jsonl" ]; then
+            echo "Security agent results already exist. Use force_execute to re-run."
+            exit 0
+          fi
+          SA_CMD="${{ inputs.security_agent_command }}"
+          if [ -z "${SA_CMD}" ]; then
+            echo "No security_agent_command provided. Writing placeholder results."
+            mkdir -p "${RESULTS_DIR}"
+            echo '{"id":"_placeholder","predicted_vulnerable":null,"error":"runner_not_configured"}' \
+              > "${RESULTS_DIR}/security_agent_results.jsonl"
+            exit 0
+          fi
+          uv run python benchmarks/runners/run_security_agent.py \
+            --dataset "${DATASET_PATH}" \
+            --output "${RESULTS_DIR}/security_agent_results.jsonl" \
+            --tmp-dir benchmarks/tmp/security_agent \
+            --command "${SA_CMD}" \
+            --shell \
+            --timeout "${{ inputs.tool_timeout }}"
 
       - name: Run LLM Baseline
         if: steps.tool_select.outputs.run_llm == 'true'
@@ -198,17 +247,32 @@ jobs:
             --timeout "${{ inputs.tool_timeout }}" \
             --shell
 
-      - name: Push Results
+      - name: Save Results to Cache
         if: always()
         run: |
-          git add benchmarks/results/
-          if ! git diff --staged --quiet; then
-            git commit -m "benchmark: tool results"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push origin "${{ inputs.branch }}" --force-with-lease
+          CACHE_DIR="${HOME}/.cache/security-agent/benchmarks/results/${{ inputs.dataset }}"
+          mkdir -p "${CACHE_DIR}"
+          if [ -d "${RESULTS_DIR}" ]; then
+            cp -rf "${RESULTS_DIR}/." "${CACHE_DIR}/"
+            echo "Saved results to ${CACHE_DIR}"
           fi
+
+      - name: Upload Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rq2-tool-results-${{ inputs.dataset }}-${{ inputs.tools }}-${{ github.run_id }}
+          path: benchmarks/results/rq2/${{ inputs.dataset }}/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Summary
         run: |
-          echo "## Next: Run **RQ2 Benchmark 03: Evaluate**" >> $GITHUB_STEP_SUMMARY
-          echo "Branch: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "## RQ2 Benchmark 02: Tool Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Dataset: \`${{ inputs.dataset }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Tools: \`${{ inputs.tools }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Results artifact: \`rq2-tool-results-${{ inputs.dataset }}-${{ inputs.tools }}-${{ github.run_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next: Run **RQ2 Benchmark 03: Evaluate**" >> $GITHUB_STEP_SUMMARY

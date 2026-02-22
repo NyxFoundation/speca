@@ -13,29 +13,59 @@ from scripts.orchestrator.watchdog import (
 
 def test_extract_token_usage_with_cache_fields(tmp_path: Path):
     log = tmp_path / "log.jsonl"
-    # first line sets small usage; second line should override input/cache_read via max
+    # Two messages with different IDs — both contribute via sum
     lines = [
-        {"type": "assistant", "message": {"usage": {
+        {"type": "assistant", "message": {"id": "msg_01", "usage": {
             "input_tokens": 10,
             "output_tokens": 5,
             "cache_read_input_tokens": 100,
             "cache_creation_input_tokens": 50,
         }}},
-        {"usage": {
+        {"type": "assistant", "message": {"id": "msg_02", "usage": {
             "input_tokens": 20,
             "output_tokens": 7,
             "cache_read_input_tokens": 150,
             "cache_creation_input_tokens": 25,
-        }},
+        }}},
     ]
     log.write_text("\n".join(json.dumps(l) for l in lines))
 
     usage = extract_token_usage_from_log(log)
-    # input and cache_* take max, output is cumulative sum
-    assert usage["input_tokens"] == 20
-    assert usage["cache_read_tokens"] == 150
-    assert usage["cache_creation_tokens"] == 50  # max(50,25)
-    assert usage["output_tokens"] == 12  # 5 + 7
+    # All fields summed across 2 unique messages
+    assert usage["input_tokens"] == 30       # 10 + 20
+    assert usage["cache_read_tokens"] == 250  # 100 + 150
+    assert usage["cache_creation_tokens"] == 75  # 50 + 25
+    assert usage["output_tokens"] == 12       # 5 + 7
+    assert usage["num_turns"] == 2
+
+
+def test_extract_token_usage_dedup_same_message(tmp_path: Path):
+    """Duplicate events for the same message ID should be deduped (max per field)."""
+    log = tmp_path / "log.jsonl"
+    lines = [
+        # Two events for msg_01 (same values, typical of Claude CLI stream-json)
+        {"type": "assistant", "message": {"id": "msg_01", "usage": {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 1000,
+        }}},
+        {"type": "assistant", "message": {"id": "msg_01", "usage": {
+            "input_tokens": 5,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 1000,
+        }}},
+    ]
+    log.write_text("\n".join(json.dumps(l) for l in lines))
+
+    usage = extract_token_usage_from_log(log)
+    # Only 1 unique message — deduped via max
+    assert usage["input_tokens"] == 5
+    assert usage["cache_read_tokens"] == 4000
+    assert usage["cache_creation_tokens"] == 1000
+    assert usage["output_tokens"] == 1
+    assert usage["num_turns"] == 1
 
 
 def test_cost_tracker_accumulates_cache_tokens():

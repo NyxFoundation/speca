@@ -271,6 +271,7 @@ class BaseOrchestrator(ABC):
             print(f"  Cache read tokens:     {cost_stats['total_cache_read_tokens']:,}")
             print(f"  Cache create tokens:   {cost_stats['total_cache_creation_tokens']:,}")
             print(f"  Output tokens:         {cost_stats['total_output_tokens']:,}")
+            print(f"  Total turns:           {cost_stats['total_turns']:,}")
             print(f"  Estimated cost:        ${cost_stats['total_cost_usd']:.2f}")
             print(f"  Budget:                ${cost_stats['max_budget_usd']:.2f}")
             print(f"  Budget utilization:    {cost_stats['budget_utilization_pct']:.1f}%")
@@ -343,6 +344,7 @@ class BaseOrchestrator(ABC):
             lines.append(f"| Cache read tokens | {cost_stats.get('total_cache_read_tokens', 0):,} |")
             lines.append(f"| Cache creation tokens | {cost_stats.get('total_cache_creation_tokens', 0):,} |")
             lines.append(f"| Output tokens | {cost_stats.get('total_output_tokens', 0):,} |")
+            lines.append(f"| Total turns | {cost_stats.get('total_turns', 0):,} |")
             lines.append(f"| Estimated cost | ${cost_stats.get('total_cost_usd', 0):.2f} |")
             lines.append(f"| Budget | ${cost_stats.get('max_budget_usd', 0):.2f} |")
             lines.append(f"| Budget utilization | {cost_stats.get('budget_utilization_pct', 0):.1f}% |")
@@ -491,6 +493,16 @@ class BaseOrchestrator(ABC):
                     self.failed_batches.append((0, 0))
                 finally:
                     pbar.update(batch_size)
+
+        # Wait for cancelled tasks to finish cleanup (subprocess kill etc.)
+        # Without this, orphan Claude CLI processes keep running after exit.
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            print(
+                f"Waiting for {len(pending)} task(s) to shut down...",
+                file=sys.stderr,
+            )
+            await asyncio.gather(*pending, return_exceptions=True)
     
 
 
@@ -1009,7 +1021,7 @@ class Phase04Orchestrator(BaseOrchestrator):
 
         items = []
         validation_warnings = 0
-        for filepath in sorted(glob.glob("outputs/03_AUDITMAP_PARTIAL_*.json")):
+        for filepath in sorted(glob.glob("outputs/03_PARTIAL_*.json")):
             try:
                 with open(filepath) as f:
                     data = json.load(f)
