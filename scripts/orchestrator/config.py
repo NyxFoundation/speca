@@ -176,7 +176,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         item_id_field="file_path",
         result_key="properties",
         mcp_servers=[],
-        output_fields=["id", "text", "type", "assertion", "severity", "covers",
+        output_fields=["property_id", "text", "type", "assertion", "severity", "covers",
                         "reachability", "bug_bounty_eligible", "exploitability"],
     ),
 

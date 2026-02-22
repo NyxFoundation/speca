@@ -798,6 +798,11 @@ class Phase02cOrchestrator(BaseOrchestrator):
                     _log_validation_warning(filepath, ve, prefix="01e→02c")
                     validation_warnings += 1
 
+                # Derive a fallback prefix from the file name for ID generation
+                file_stem = Path(filepath).stem  # e.g. "01e_PARTIAL_W0B1_1771748647"
+                fallback_hash = hashlib.sha256(file_stem.encode()).hexdigest()[:8]
+                auto_id_counter = 0
+
                 for prop in data.get("properties", []):
                     if isinstance(prop, dict):
                         parsed, errs = validate_property(prop)
@@ -810,7 +815,19 @@ class Phase02cOrchestrator(BaseOrchestrator):
                                 )
 
                         prop_id = prop.get("property_id")
-                        if prop_id and prop_id not in items:
+                        if not prop_id:
+                            # Auto-generate property_id when worker didn't include one
+                            auto_id_counter += 1
+                            prop_type = prop.get("type", "unk")
+                            type_abbrev = {"invariant": "inv", "precondition": "pre",
+                                           "postcondition": "post", "assumption": "asm"}.get(prop_type, "unk")
+                            prop_id = f"PROP-{fallback_hash}-{type_abbrev}-{auto_id_counter:03d}"
+                            prop["property_id"] = prop_id
+                            print(
+                                f"    ⚠️  {filepath}: auto-assigned {prop_id} (worker omitted property_id)",
+                                file=sys.stderr,
+                            )
+                        if prop_id not in items:
                             # Flatten property fields as top-level item fields
                             item = dict(prop)
                             item["source_file"] = filepath

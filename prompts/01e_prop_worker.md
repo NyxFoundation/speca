@@ -125,7 +125,9 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     3. **Assumption Properties**: Convert each trust assumption into a formal property. Example: if an assumption is "only authenticated callers can invoke a critical operation," the property would be `forall caller: critical_op(caller, payload) => caller.is_authenticated == true`.
 
-    4. **Invariant Properties**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property. Additionally, when the specification defines a data structure with ordering, uniqueness, or completeness constraints, consider that implementations may construct the same structure via multiple code paths (config loaders, constructors, deserializers). Generate an invariant asserting that the constraint holds regardless of which construction path is taken.
+    4. **Invariant Properties**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property. Additionally:
+       - When the specification defines a data structure with ordering, uniqueness, or completeness constraints, consider that implementations may construct the same structure via multiple code paths (config loaders, constructors, deserializers). Generate an invariant asserting that the constraint holds regardless of which construction path is taken.
+       - When the specification describes a data structure with both declared metadata (counts, lengths, hashes) and actual data arrays, generate an invariant asserting their consistency (e.g., `len(declared_hashes) == len(actual_data)`). Mismatches between declared and actual fields cause indexing errors or silent data corruption.
 
     5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after. Pay special attention to **lifecycle events** (fork transitions, epoch boundaries, validator set changes): any derived or cached state that depends on the pre-transition configuration must be invalidated or refreshed before post-transition operations that consume it.
 
@@ -155,13 +157,14 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
        - `reachability.bug_bounty_scope == "in-scope"` AND
        - `severity` is `MEDIUM` or higher
 
-    11. **Assign IDs**: Assign a unique ID per property using the `_id_prefix` from the context data:
-        - Use the `_id_prefix` field from the input context (e.g., `"PROP-txval"`)
+    11. **Assign IDs** (**CRITICAL — every property MUST have a `property_id`**):
+        - Read the `_id_prefix` field from the input context (e.g., `"PROP-txval"`)
         - Format: `{_id_prefix}-{type_abbrev}-{seq:03d}`
           - `type_abbrev`: `inv` (invariant), `pre` (pre-condition), `post` (post-condition), `asm` (assumption)
           - `seq`: 1-based sequence within this (prefix, type) combination
         - Example: `PROP-txval-inv-001`, `PROP-p2p-pre-003`
         - Fallback: If `_id_prefix` is not available, use `PROP-{hash8}-{type_abbrev}-{seq:03d}` where `hash8` is the first 8 chars of a hash of the source file path
+        - **Every property in the output JSON MUST include a `"property_id"` field. Properties without IDs will be dropped by downstream phases.**
   </phase_b>
 
   <severity_context>
@@ -224,7 +227,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
     - [ ] `covers` is a string (primary element ID), not an object
     - [ ] `text` is ≤ 120 chars, `assertion` is ≤ 200 chars
     - [ ] Properties are prioritized by `bug_bounty_scope` (in-scope first)
-    - [ ] IDs follow the `{_id_prefix}-{type_abbrev}-{seq:03d}` format
+    - [ ] **Every property has a `property_id` field** — IDs follow the `{_id_prefix}-{type_abbrev}-{seq:03d}` format
     - [ ] `metadata.total_properties` == actual length of `properties` array, `sum(by_severity.values()) == total_properties`
   </quality_checklist>
 

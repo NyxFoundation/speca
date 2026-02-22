@@ -89,6 +89,8 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - **Unordered operations**: Does order matter (e.g., Go map iteration)?
           - **Concurrent access**: Can multiple goroutines/threads cause race conditions?
           - **Overflow, null, unbounded growth**
+          - **Related field inconsistency**: When data has both declared metadata (counts, lengths, hashes) and actual arrays, can they diverge?
+          - **Variable selection errors**: When multiple related variables exist (parent/child, cached/recomputed, current/next), can the wrong one be used?
        5. **Output**: List ALL potential state anomalies, even if guards exist
 
        **CRITICAL**: Do NOT skip this phase even if code looks simple. Complex bugs hide in simple-looking code.
@@ -129,6 +131,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 
        3. **Derived / Precomputed State**: Search for values computed from other mutable state and stored for reuse.
           - Ask: "When the source state changes, is the derived value invalidated or recomputed?"
+          - Ask: "When both a cached/authoritative value and a recomputation path exist, does the code always use the authoritative source?" If the code recomputes from potentially stale input instead of reading the cached value, the result can diverge from the system's actual state.
 
        4. **Repeated Accessor Reads**: Search for the same getter or accessor function called multiple times within one scope without caching the first result.
           - Ask: "If the underlying state is mutable (e.g., peer metadata updated concurrently), can the values returned by successive calls differ?" If yes, the function operates on inconsistent snapshots — a TOCTOU across repeated reads.
@@ -141,6 +144,10 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
 
        7. **Multi-Path Construction**: When a data structure is constructible via multiple code paths (config files, constructors, deserialization), check whether all paths enforce the same invariants (ordering, bounds, uniqueness).
           - Ask: "Does path A sort the data while path B does not? Does path A validate bounds while path B skips it?" If the consumer assumes an invariant that only some paths enforce, the other paths produce silently incorrect data.
+
+       8. **Related Data Consistency**: When a data structure contains both declared metadata (counts, lengths, hashes) and actual data arrays, or when a calculation can draw from multiple related variables (parent vs child, current vs next, cached vs recomputed):
+          - Ask: "Are declared counts/lengths/hashes validated against the actual data they describe?" If a declared count says N but the actual array has M items, indexing based on the count will over-read or under-process.
+          - Ask: "Does this calculation use the correct variable from a set of semantically similar ones (parent vs child value, current epoch vs next epoch)?" Selecting the wrong tier's value produces subtly incorrect results that may pass unrelated validation.
 
        For each pattern found, attempt to construct a concrete exploit using the methodology from Phase 2.
 
