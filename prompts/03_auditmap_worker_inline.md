@@ -130,6 +130,18 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
        3. **Derived / Precomputed State**: Search for values computed from other mutable state and stored for reuse.
           - Ask: "When the source state changes, is the derived value invalidated or recomputed?"
 
+       4. **Repeated Accessor Reads**: Search for the same getter or accessor function called multiple times within one scope without caching the first result.
+          - Ask: "If the underlying state is mutable (e.g., peer metadata updated concurrently), can the values returned by successive calls differ?" If yes, the function operates on inconsistent snapshots — a TOCTOU across repeated reads.
+
+       5. **Return Value Completeness**: For functions returning compound types (`Result<bool>`, `(value, error)`, optional+error), verify the caller handles **every semantic variant**, not just the error branch.
+          - Ask: "Is the success-but-false case (`Ok(false)`, `(false, nil)`) distinguished from success-and-true?" If not, a failed verification that returns a clean non-error result will be silently accepted.
+
+       6. **Error Swallowing in Retry / Fallback Paths**: Search for catch/rescue blocks in retry loops or fallback branches that log an error but return a success status to the caller.
+          - Ask: "If the retry fails, does the caller learn about the failure, or does it believe the operation succeeded?" If the error is caught and discarded, the system can enter a permanently stalled state with no further retry attempts.
+
+       7. **Multi-Path Construction**: When a data structure is constructible via multiple code paths (config files, constructors, deserialization), check whether all paths enforce the same invariants (ordering, bounds, uniqueness).
+          - Ask: "Does path A sort the data while path B does not? Does path A validate bounds while path B skips it?" If the consumer assumes an invariant that only some paths enforce, the other paths produce silently incorrect data.
+
        For each pattern found, attempt to construct a concrete exploit using the methodology from Phase 2.
 
        ### Phase 3: Invariant Analysis with Skepticism
@@ -162,7 +174,7 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - Concurrent access can violate invariants
        3. Mark as NOT eligible ONLY if:
           - Completely unreachable from any external interface
-          - Explicitly out-of-scope (e.g., execution layer concern in consensus client)
+          - Explicitly out-of-scope per the bug bounty scope definition
           - Trivially safe with no state or external input (e.g., pure constant getter)
        4. **When in doubt, report it**
 

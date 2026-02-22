@@ -79,7 +79,19 @@ Language: English only.
     - Comments or string literals describing the same concept.
     - Type definitions related to the data structures mentioned in the property.
 
-    ### 3e. Record Result
+    ### 3e. Resolve Implementation-Level Relatives
+
+    After finding the primary location, search for **implementation-level code that wraps, caches, or mediates** the primary symbol. These are invisible in specs but critical for Phase 03 auditing.
+
+    1. **Callers/wrappers**: Grep for the primary symbol name as a callee (e.g. `VerifyCellKzgProofBatch`) within the same package directory. Record any caller that adds caching, deduplication, or memoization logic as `role: "related"`.
+
+    2. **Cache/map structures**: In the same package, Grep for `map[`, `cache`, `Cache`, `sync.Map`, `lru`, `seen` near the primary symbol's file. If a map is keyed by a subset of the primary function's inputs, record the map declaration and the key-building function as `role: "related"`.
+
+    3. **Dedup/filter wrappers**: Grep for functions that check a set/map before calling the primary symbol (patterns like `if _, ok := seen[key]; ok { return }`). Record these as `role: "related"`.
+
+    Keep this step lightweight: **at most 3 Grep calls per property**. Only record metadata (file, symbol, line_range) — do not extract code.
+
+    ### 3f. Record Result
 
     **DO NOT read the matched files or extract code excerpts.** Only record metadata (file path, symbol name, line range).
 
