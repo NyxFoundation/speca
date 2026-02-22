@@ -41,7 +41,8 @@ curl -L -o "${ZIP_PATH}" "${URL}"
 echo "Extracting ${ZIP_PATH}..."
 unzip -q "${ZIP_PATH}" -d "${RAW_DIR}"
 
-DB_FOUND="$(find "${RAW_DIR}" -maxdepth 5 -type f \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" \) | head -n 1 || true)"
+# Search broadly for database files (case-insensitive, deeper search)
+DB_FOUND="$(find "${RAW_DIR}" -maxdepth 8 -type f \( -iname "*.db" -o -iname "*.sqlite" -o -iname "*.sqlite3" -o -iname "CVEfixes*" \) 2>/dev/null | head -n 1 || true)"
 if [ -n "${DB_FOUND}" ]; then
   echo "Found DB: ${DB_FOUND}"
   cp -f "${DB_FOUND}" "${DEST_DB}"
@@ -51,9 +52,15 @@ if [ -n "${DB_FOUND}" ]; then
   exit 0
 fi
 
-SQL_FOUND="$(find "${RAW_DIR}" -maxdepth 5 -type f -name "*.sql" | head -n 1 || true)"
+SQL_FOUND="$(find "${RAW_DIR}" -maxdepth 8 -type f -iname "*.sql" 2>/dev/null | head -n 1 || true)"
 if [ -z "${SQL_FOUND}" ]; then
-  echo "No .db or .sql found after extraction. Check ${RAW_DIR}." >&2
+  echo "=== DEBUG: Listing extracted files (top 50) ===" >&2
+  find "${RAW_DIR}" -maxdepth 4 -type f 2>/dev/null | head -50 >&2
+  echo "=== DEBUG: Largest files ===" >&2
+  find "${RAW_DIR}" -maxdepth 4 -type f -exec ls -lhS {} + 2>/dev/null | head -10 >&2
+  echo "" >&2
+  echo "No .db or .sql found after extraction." >&2
+  echo "If the archive contains CSV files, place a pre-built CVEfixes.db at ${DEST_DB}." >&2
   exit 1
 fi
 

@@ -37,7 +37,8 @@ curl -L -o "${ZIP_PATH}" "${URL}"
 echo "Extracting ${ZIP_PATH}..."
 unzip -q "${ZIP_PATH}" -d "${RAW_DIR}"
 
-JSONL_FOUND="$(find "${RAW_DIR}" -maxdepth 5 -type f -name "*.jsonl" | head -n 1 || true)"
+# Search for JSONL files
+JSONL_FOUND="$(find "${RAW_DIR}" -maxdepth 8 -type f -iname "*.jsonl" 2>/dev/null | head -n 1 || true)"
 if [ -n "${JSONL_FOUND}" ]; then
   echo "Found JSONL: ${JSONL_FOUND}"
   cp -f "${JSONL_FOUND}" "${EXPORT_JSONL}"
@@ -47,6 +48,37 @@ if [ -n "${JSONL_FOUND}" ]; then
   exit 0
 fi
 
+# Try JSON files (Vul4J metadata)
+JSON_FOUND="$(find "${RAW_DIR}" -maxdepth 8 -type f -iname "*.json" 2>/dev/null | head -n 1 || true)"
+if [ -n "${JSON_FOUND}" ]; then
+  echo "Found JSON (not JSONL): ${JSON_FOUND}"
+  echo "Attempting to convert to JSONL..."
+  # If it's a JSON array, convert each element to a line
+  python3 -c "
+import json, sys
+with open('${JSON_FOUND}') as f:
+    data = json.load(f)
+if isinstance(data, list):
+    with open('${EXPORT_JSONL}', 'w') as out:
+        for item in data:
+            out.write(json.dumps(item) + '\n')
+    print(f'Converted {len(data)} records to ${EXPORT_JSONL}')
+else:
+    print('JSON is not an array, cannot auto-convert.', file=sys.stderr)
+    sys.exit(1)
+" 2>&1
+  if [ -f "${EXPORT_JSONL}" ]; then
+    mkdir -p "$(dirname "${CACHE_EXPORT}")"
+    cp -f "${EXPORT_JSONL}" "${CACHE_EXPORT}"
+    exit 0
+  fi
+fi
+
+echo "=== DEBUG: Listing extracted files (top 50) ===" >&2
+find "${RAW_DIR}" -maxdepth 4 -type f 2>/dev/null | head -50 >&2
+echo "=== DEBUG: Largest files ===" >&2
+find "${RAW_DIR}" -maxdepth 4 -type f -exec ls -lhS {} + 2>/dev/null | head -10 >&2
+echo "" >&2
 echo "No JSONL export found. Place a Vul4J JSONL export at ${EXPORT_JSONL}." >&2
 echo "Then run: uv run python benchmarks/datasets/builders/setup_vul4j_from_jsonl.py" >&2
 exit 2

@@ -32,7 +32,7 @@ class CommandSpec:
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=False, default=None)
-    parser.add_argument("--tmp-dir", type=Path, required=True)
+    parser.add_argument("--tmp-dir", type=Path, default=None)
     parser.add_argument("--metadata", type=Path, required=False, default=None)
     parser.add_argument("--tool-name", type=str, default="")
     parser.add_argument(

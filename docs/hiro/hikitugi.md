@@ -1,7 +1,7 @@
 # 引き継ぎ資料 — SPECA セキュリティエージェント
 
 > 次回セッション開始時にこのファイルを読んで状況を把握してください。
-> 最終更新: 2026-02-21
+> 最終更新: 2026-02-22
 
 ---
 
@@ -83,7 +83,7 @@ security-agent/
 |------|-----|
 | **作業ブランチ** | `claude/understand-project-overview-RPCCv` |
 | **ベースブランチ** | `master` |
-| **master からの差分** | 5 コミット, 8 ファイル変更, +1102 行 |
+| **master からの差分** | 15 コミット, 30 ファイル変更, +7246 行 |
 | **テスト** | 178 passed (全パス) |
 
 ### ブランチ上のコミット履歴（古い順）
@@ -95,12 +95,24 @@ security-agent/
 | 3 | `7560c86` | RQ2 ワークフロー間のデータセットアーティファクトキャッシング追加 |
 | 4 | `1ea6c7c` | LOCAL_VERIFICATION_GUIDE にデータセットキャッシュ検証セクション追加 |
 | 5 | `65e13df` | **RQ2 パイプライン改善（メイン作業）**: evaluate.py 修正、ワークフロー改善、スクリプト新規作成 |
+| 6 | `6332f09` | 引き継ぎ資料 `docs/hikitugi.md` 追加 |
+| 7 | `a3ba5b4` | RQ2 ワークフローから git push を削除、artifact のみに統一 |
+| 8 | `cacd5a7` | PR #55 マージ（ベンチマーク実装検証） |
+| 9 | `72f34b3` | Dockerfile PYTHONPATH 修正、`--tmp-dir` 不足修正、`continue-on-error` 追加 |
+| 10 | `7c9e17c` | データセット fetch スクリプトにデバッグ出力と広範ファイル検索追加 |
+| 11 | `ed95762` | 評価パイプラインの ID ミスマッチ修正 + Semgrep 結果 & 可視化追加 |
+| 12 | `f48fc85` | LLM ベースライン結果追加（全エラー、CI 再実行が必要） |
+| 13 | `9bfc9b5` | Docker import 用 `__init__.py` 追加 + 評価結果更新 |
+| 14 | `6d03e79` | Docker root 所有ファイルのパーミッションエラー修正（初回: `sudo find -not -writable`） |
+| 15 | `49bbed8` | **パーミッション修正 v2**: `sudo find -not -writable` → `sudo chown -R` に変更 |
 
 ---
 
-## 4. 今回のセッションで行った変更の詳細
+## 4. セッション別の変更履歴
 
-### 4.1 `benchmarks/rq2/evaluate.py` — バグ修正
+### セッション 1 (2026-02-21): RQ2 パイプライン構築
+
+#### 4.1 `benchmarks/rq2/evaluate.py` — バグ修正
 
 **問題**: `stats.py:54` の `bootstrap_metric_diffs()` は `samples`, `seed`, `ci_level` を必須引数として要求するが、`evaluate.py:344` では渡していなかった。security_agent の結果がある状態で `evaluate.py` を実行すると `TypeError` で即座にクラッシュする。
 
@@ -119,7 +131,7 @@ diffs = bootstrap_metric_diffs(
 )
 ```
 
-### 4.2 `.github/workflows/benchmark-rq2-02-tools.yml` — security_agent 統合
+#### 4.2 `.github/workflows/benchmark-rq2-02-tools.yml` — security_agent 統合
 
 主な変更:
 - `security_agent_command` 入力パラメータ追加（外部から `--command` テンプレートを渡せるように）
@@ -128,7 +140,7 @@ diffs = bootstrap_metric_diffs(
 - `upload-artifact` + `~/.cache` 保存ステップ追加
 - git push は残存（下流ワークフローが `ref:` で checkout するため必要）
 
-### 4.3 `.github/workflows/benchmark-rq2-03-evaluate.yml` — 評価パイプライン完成
+#### 4.3 `.github/workflows/benchmark-rq2-03-evaluate.yml` — 評価パイプライン完成
 
 主な変更:
 - `tools_run_id`, `rq1_summary` 入力パラメータ追加
@@ -137,11 +149,11 @@ diffs = bootstrap_metric_diffs(
 - `upload-artifact` + `~/.cache` 保存ステップ追加
 - `$GITHUB_STEP_SUMMARY` にレポート全文出力
 
-### 4.4 `benchmarks/runners/invoke_security_agent.sh` — 新規
+#### 4.4 `benchmarks/runners/invoke_security_agent.sh` — 新規
 
 security-agent 単一ファイル監査のプレースホルダースクリプト。`{code_path}`, `{output_path}`, `{case_id}` を受け取り、予測 JSON を出力する形式。**本体は未実装**で `"error": "not_implemented"` を返す。
 
-### 4.5 `benchmarks/scripts/run_rq2_local.sh` — 新規
+#### 4.5 `benchmarks/scripts/run_rq2_local.sh` — 新規
 
 ローカル一括実行スクリプト。Step 1（データセット）→ Step 2（ツール実行）→ Step 3（評価）→ Step 4（レポート生成）→ Step 5（キャッシュ）を順次実行。既存結果がある場合はスキップ。
 
@@ -152,11 +164,43 @@ bash benchmarks/scripts/run_rq2_local.sh primevul all 100       # 全ツール, 
 bash benchmarks/scripts/run_rq2_local.sh primevul semgrep,codeql
 ```
 
+### セッション 2 (2026-02-22): CI パーミッションエラー修正
+
+#### 4.6 Docker root 所有ファイルのパーミッションエラー修正
+
+**問題**: self-hosted ランナーで `actions/checkout@v4` が `__pycache__/*.pyc` ファイルを削除できず失敗。Docker がコンテナ内で root として作成したファイルがワークスペースに残り、ランナーユーザー（`gohan`）が unlink できない。
+
+**初回修正 (`6d03e79`)**: `sudo find -not -writable -delete` をチェックアウト前に実行。
+
+**問題の再発 (`49bbed8`)**: `sudo find -not -writable` は `sudo` で実行されるため `find` プロセスが root として動作し、root にとっては全ファイルが writable → `-not -writable` が何にもマッチせず **何も削除されない**。Clean workspace ステップは「成功」するが、実際には何もしていなかった。
+
+**最終修正**: `sudo chown -R "$(id -u):$(id -g)"` で所有権をランナーユーザーに変更。`actions/checkout` が正常にクリーンアップ可能に。
+
+変更ファイル（3つ全て同じ修正）:
+- `.github/workflows/benchmark-rq2-01-setup.yml` — clean workspace ステップ新規追加
+- `.github/workflows/benchmark-rq2-02-tools.yml` — `find -not -writable` → `chown -R` に修正
+- `.github/workflows/benchmark-rq2-03-evaluate.yml` — clean workspace ステップ新規追加
+
+```yaml
+# 全3ワークフローの checkout 前に配置
+- name: Clean workspace (fix Docker root-owned files)
+  run: |
+    if [ -d "${{ github.workspace }}" ]; then
+      sudo chown -R "$(id -u):$(id -g)" "${{ github.workspace }}" 2>/dev/null || true
+    fi
+```
+
 ---
 
 ## 5. 未完了のタスク・次回やるべきこと
 
-### 5.1 `invoke_security_agent.sh` の本体実装
+### 5.1 CI パーミッション修正の動作確認 ★最優先
+
+`49bbed8` の `chown -R` 修正がプッシュ済み。次回 CI 実行（`benchmark-rq2-02-tools` ワークフロー）で `actions/checkout` が `__pycache__` で失敗しないことを確認する。
+
+確認方法: GitHub Actions → workflow_dispatch で `benchmark-rq2-02-tools` を実行し、「Checkout Branch」ステップが成功するか確認。
+
+### 5.2 `invoke_security_agent.sh` の本体実装
 
 現在プレースホルダー。SPECA パイプラインの「単一ファイル監査モード」が完成したら、以下のような呼び出しに置き換える:
 
@@ -168,17 +212,17 @@ uv run python -m scripts.run_phase --phase 03 \
   --case-id "${CASE_ID}"
 ```
 
-### 5.2 PR の作成
+### 5.3 PR の作成
 
-`claude/understand-project-overview-RPCCv` ブランチは push 済みだが、PR はまだ作成されていない。内容を確認して master へのマージ PR を作成する必要がある。
+`claude/understand-project-overview-RPCCv` ブランチは push 済みだが、PR はまだ作成されていない。内容を確認して master へのマージ PR を作成する必要がある。15 コミット, 30 ファイル変更, +7246 行。
 
-### 5.3 MCP セットアップ問題
+### 5.4 MCP セットアップ問題
 
 ローカル環境で `bash scripts/setup_mcp.sh` が `claude` CLI not found で失敗する件。`npm install -g @anthropic-ai/claude-code` でインストールが必要。ただしテストやベンチマークの実行には MCP は不要。
 
-### 5.4 `.zshrc:14` のエラー
+### 5.5 LLM ベースライン結果の再取得
 
-ユーザーの `~/.zshrc` 14行目にクォート閉じ忘れがある。プロジェクトとは無関係だが、ターミナル起動時に毎回表示される。
+`benchmarks/results/rq2/primevul/llm_baseline_results.jsonl` は全件エラー（`"error": "..."` のみ）。CI で API キー付きで再実行が必要。
 
 ---
 
@@ -288,3 +332,5 @@ git diff master..HEAD --stat
 2. **`run_security_agent.py`**: `--command` テンプレートに `{code_path}`, `{output_path}`, `{case_id}` プレースホルダーを含む文字列を渡す設計。`invoke_security_agent.sh` がそのデフォルト実装
 3. **Docker 必須**: Semgrep ランナーは Docker コンテナ内で実行される（`benchmarks/Dockerfile`）。Docker がない環境では Semgrep はスキップされる
 4. **`sweagent` 依存**: `pyproject.toml` に git 依存として入っている。ネットワーク環境によっては `uv sync` が遅い/失敗する可能性あり
+5. **Docker root ファイル問題**: Docker コンテナがデフォルトで root としてファイルを作成する。`--user "$(id -u):$(id -g)"` を指定しても `__pycache__` など Python が自動生成するファイルが残る場合がある。全 self-hosted ワークフローの checkout 前に `sudo chown -R` を入れること
+6. **`sudo find -not -writable` は root で無効**: `sudo` で `find -not -writable` を実行すると root の視点で評価されるため、全ファイルが writable と判定される。所有権ベース（`chown`）または UID ベース（`-not -user $(id -u)`）で判定すること
