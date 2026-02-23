@@ -438,7 +438,7 @@ class AuditMapItem(BaseModel):
     check_id: str = ""  # Kept for downstream compatibility (populated with property_id)
     code_scope: CodeScope = Field(default_factory=CodeScope)  # Type-safe code scope
     code_snippet: str = ""
-    final_classification: str = ""
+    classification: str = ""
     bug_bounty_eligible: bool = False
     summary: str = ""
     audit_trail: AuditTrail = Field(default_factory=AuditTrail)
@@ -463,7 +463,7 @@ class Phase03Partial(BaseModel):
 
 class OriginalFinding(BaseModel):
     """Summary of the original finding from Phase 03."""
-    final_classification: str = ""
+    classification: str = ""
     summary: str = ""
 
 
@@ -638,8 +638,8 @@ def validate_audit_map_item(data: dict[str, Any]) -> tuple[AuditMapItem | None, 
         item = AuditMapItem.model_validate(data)
         if not item.property_id:
             errors.append("property_id is empty")
-        if not item.final_classification:
-            errors.append("final_classification is empty")
+        if not item.classification:
+            errors.append("classification is empty")
         return item, errors
     except Exception as exc:
         return None, [str(exc)]

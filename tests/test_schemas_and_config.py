@@ -637,7 +637,7 @@ class TestPhase03:
     def test_audit_trail_full(self):
         item = AuditMapItem(
             property_id="PROP-001",
-            final_classification="vulnerable",
+            classification="vulnerable",
             summary="Found issue",
             audit_trail={
                 "phase1_abstract_interpretation": {
@@ -673,7 +673,7 @@ class TestPhase03:
         """Test that AuditMapItem includes code_snippet field."""
         item = AuditMapItem(
             property_id="PROP-001",
-            final_classification="vulnerable",
+            classification="vulnerable",
             summary="Found issue",
             code_snippet="int x = 0;\nif (x > 0) {\n    return true;\n}",
         )
@@ -701,7 +701,7 @@ class TestPhase03:
                 resolution_status="resolved"
             ),
             code_snippet="int x = 0;\nif (x > 0) {\n    return true;\n}",
-            final_classification="vulnerable",
+            classification="vulnerable",
             bug_bounty_eligible=True,
             summary="Found issue"
         )
@@ -712,7 +712,7 @@ class TestPhase03:
         assert item.code_scope.locations[0].line_range.start == 10
         assert item.code_scope.locations[0].line_range.end == 20
         assert item.code_snippet == "int x = 0;\nif (x > 0) {\n    return true;\n}"
-        assert item.final_classification == "vulnerable"
+        assert item.classification == "vulnerable"
         assert item.bug_bounty_eligible is True
 
 
@@ -720,7 +720,7 @@ class TestPhase03Partial:
     def test_valid_partial(self):
         partial = Phase03Partial(
             audit_items=[
-                {"property_id": "PROP-001", "final_classification": "safe"},
+                {"property_id": "PROP-001", "classification": "safe"},
             ]
         )
         assert len(partial.audit_items) == 1
@@ -781,7 +781,7 @@ class TestValidationHelpers:
     def test_validate_audit_map_item_valid(self):
         data = {
             "property_id": "PROP-001",
-            "final_classification": "vulnerable",
+            "classification": "vulnerable",
         }
         item, errs = validate_audit_map_item(data)
         assert item is not None
@@ -790,7 +790,7 @@ class TestValidationHelpers:
     def test_validate_audit_map_item_missing_classification(self):
         data = {"property_id": "PROP-001"}
         item, errs = validate_audit_map_item(data)
-        assert "final_classification is empty" in errs
+        assert "classification is empty" in errs
 
     # -- reviewed items --
     def test_validate_reviewed_item_valid(self):
@@ -901,7 +901,7 @@ class TestCrossPhaseDataFlow:
         """Audit item from 03 should be parseable as Phase04 input."""
         audit = AuditMapItem(
             property_id="PROP-001",
-            final_classification="vulnerable",
+            classification="vulnerable",
             summary="Found issue",
         )
         entry = audit.model_dump()
@@ -1179,8 +1179,8 @@ class TestResultCollector:
                 config = self._make_config("03")
                 collector = ResultCollector(config)
                 results = [
-                    {"check_id": "CHK-001", "final_classification": "safe"},
-                    {"check_id": "CHK-002", "final_classification": "vulnerable"},
+                    {"check_id": "CHK-001", "classification": "safe"},
+                    {"check_id": "CHK-002", "classification": "vulnerable"},
                 ]
                 path = collector.save_partial(results, worker_id=0, batch_index=1)
                 assert path.exists()
@@ -1201,7 +1201,7 @@ class TestResultCollector:
                 config = self._make_config("03")
                 collector = ResultCollector(config)
                 results = [
-                    {"property_id": "PROP-001", "check_id": "PROP-001", "final_classification": "safe"},
+                    {"property_id": "PROP-001", "check_id": "PROP-001", "classification": "safe"},
                 ]
                 collector.save_partial(results, worker_id=0, batch_index=1)
                 summary = collector.get_validation_summary()
@@ -1255,7 +1255,7 @@ class TestResultCollector:
                 config = self._make_config("03")
                 collector = ResultCollector(config)
                 for i in range(3):
-                    results = [{"check_id": f"CHK-{i:03d}", "final_classification": "safe"}]
+                    results = [{"check_id": f"CHK-{i:03d}", "classification": "safe"}]
                     collector.save_partial(results, worker_id=0, batch_index=i)
                 summary = collector.get_validation_summary()
                 assert summary["total_saves"] == 3

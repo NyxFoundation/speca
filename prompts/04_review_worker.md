@@ -1,3 +1,4 @@
+
 ---
 Description: "[WORKER] Inline proof-based review of Phase 03 audit findings with spec cross-reference."
 Usage: /04_review_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]

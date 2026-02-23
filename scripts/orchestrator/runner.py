@@ -829,6 +829,10 @@ class ClaudeRunner:
 
     def _build_cmd(self, prompt_content: str) -> list[str]:
         """Build the Claude CLI command."""
+        # Ensure prompt doesn't start with '-' which Claude CLI would
+        # misinterpret as an option flag (e.g. YAML frontmatter '---').
+        if prompt_content.lstrip().startswith("-"):
+            prompt_content = "\n" + prompt_content.lstrip()
         cmd = [
             "claude",
             "--dangerously-skip-permissions",

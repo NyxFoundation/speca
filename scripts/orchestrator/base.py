@@ -1007,7 +1007,7 @@ class Phase03Orchestrator(BaseOrchestrator):
             "property_id": prop_id,
             "check_id": prop_id,  # Downstream compat
             "code_scope": code_scope,
-            "final_classification": "out-of-scope",
+            "classification": "out-of-scope",
             "bug_bounty_eligible": False,
             "summary": f"Early exit: {reason}.",
             "audit_trail": {
@@ -1092,11 +1092,7 @@ class Phase04Orchestrator(BaseOrchestrator):
 
         for item in items:
             audit_result = item.get("audit_result", {})
-            classification = (
-                audit_result.get("classification")
-                or audit_result.get("final_classification")
-                or ""
-            )
+            classification = audit_result.get("classification", "")
 
             if classification in self._NEEDS_REVIEW:
                 items_to_process.append(item)
