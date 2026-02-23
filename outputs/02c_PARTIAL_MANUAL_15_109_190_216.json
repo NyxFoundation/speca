@@ -1,0 +1,172 @@
+{
+  "properties_with_code": [
+    {
+      "property_id": "PROP-6a4369e9-inv-047",
+      "text": "Peer-reported custody_group_count must be validated against NUMBER_OF_CUSTODY_GROUPS upper bound before use in any loop or data structure sizing. handle_custody_groups must terminate in O(NUMBER_OF_CUSTODY_GROUPS) iterations regardless of the peer-advertised value.",
+      "type": "invariant",
+      "assertion": "forall peer_cgc: handle_custody_groups(peer_cgc, ...) terminates AND iterations <= NUMBER_OF_CUSTODY_GROUPS, even when peer_cgc > NUMBER_OF_CUSTODY_GROUPS",
+      "severity": "MEDIUM",
+      "covers": "SG-006",
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "exploitability": "external-attack",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/networking/eth2_network.nim",
+            "symbol": "lookupCgcFromPeer",
+            "line_range": {"start": 2506, "end": 2531},
+            "role": "primary",
+            "note": "Returns peer.metadata.custody_group_count without any upper-bound validation against NUMBER_OF_CUSTODY_GROUPS. An attacker-controlled peer can advertise an arbitrarily high value."
+          },
+          {
+            "file": "beacon_chain/sync/request_manager.nim",
+            "symbol": "checkPeerCustody",
+            "line_range": {"start": 313, "end": 372},
+            "role": "related",
+            "note": "Consumer of lookupCgcFromPeer: passes unvalidated remoteCustodyGroupCount to resolve_columns_from_custody_groups (line 345-348). An inflated value could cause excessive column resolution."
+          },
+          {
+            "file": "beacon_chain/sync/request_manager.nim",
+            "symbol": "matchIntersection",
+            "line_range": {"start": 374, "end": 384},
+            "role": "related",
+            "note": "Second consumer: also calls lookupCgcFromPeer and passes result to resolve_columns_from_custody_groups without clamping."
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "manual"
+      }
+    },
+    {
+      "property_id": "PROP-6a4369e9-inv-048",
+      "text": "Between successive reads of a peer's custody_group_count within checkPeerCustody, the value must not change due to concurrent metadata updates. If lookupCgcFromPeer is called multiple times within one logical operation, either the value must be read once and cached, or the function must tolerate mid-call changes without entering an invalid state.",
+      "type": "invariant",
+      "assertion": "forall peer, call_sequence in checkPeerCustody: all lookupCgcFromPeer(peer) calls within one invocation observe the same value OR the function handles mid-call changes safely",
+      "severity": "LOW",
+      "covers": "SG-006",
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "exploitability": "external-attack",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/sync/request_manager.nim",
+            "symbol": "checkPeerCustody",
+            "line_range": {"start": 313, "end": 372},
+            "role": "primary",
+            "note": "Calls lookupCgcFromPeer multiple times within one invocation (lines 319, 327, 330, 338, 342). If peer metadata is updated concurrently between calls, different values may be observed, leading to inconsistent custody decisions."
+          },
+          {
+            "file": "beacon_chain/networking/eth2_network.nim",
+            "symbol": "lookupCgcFromPeer",
+            "line_range": {"start": 2506, "end": 2531},
+            "role": "related",
+            "note": "Reads live peer.metadata on every call — no snapshot/caching within caller context."
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "manual"
+      }
+    },
+    {
+      "property_id": "PROP-6a4369e9-inv-049",
+      "text": "After a protocol upgrade or fork transition, all peer metadata fields that are semantically redefined by the new protocol version (e.g., custody_group_count becoming meaningful at Fulu) must be refreshed from each connected peer within a bounded time. Stale pre-transition default values (e.g., zero) must not be used for post-transition decisions.",
+      "type": "invariant",
+      "assertion": "forall peer, field in fork_redefined_metadata: time_since_fork_activation() > REFRESH_BOUND => peer.metadata[field] reflects post-fork value, not pre-fork default",
+      "severity": "MEDIUM",
+      "covers": "SG-012",
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P", "Consensus"],
+        "attacker_controlled": false,
+        "bug_bounty_scope": "in-scope"
+      },
+      "exploitability": "indirect-attack",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/networking/eth2_network.nim",
+            "symbol": "peerPingerHeartbeat",
+            "line_range": {"start": 2211, "end": 2222},
+            "role": "primary",
+            "note": "Metadata refresh loop with MetadataRequestFrequency = 30.minutes (line 2208). After Fulu fork activation, custody_group_count remains at pre-fork default (0) for up to 30 minutes because the refresh timer is not accelerated on fork transitions."
+          },
+          {
+            "file": "beacon_chain/networking/eth2_network.nim",
+            "symbol": "lookupCgcFromPeer",
+            "line_range": {"start": 2506, "end": 2531},
+            "role": "related",
+            "note": "Returns stale custody_group_count=0 (pre-Fulu default) because peerPingerHeartbeat hasn't refreshed metadata yet. All callers (checkPeerCustody, matchIntersection) see zero overlap, preventing data column fetching."
+          },
+          {
+            "file": "beacon_chain/sync/request_manager.nim",
+            "symbol": "matchIntersection",
+            "line_range": {"start": 374, "end": 384},
+            "role": "related",
+            "note": "Peer filter callback: computes overlap using stale remoteCustodyGroupCount=0. Returns false for all peers, blocking all data column sync requests during the 30-minute stale window."
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "manual"
+      }
+    },
+    {
+      "property_id": "PROP-6a4369e9-inv-050",
+      "text": "If the implementation caches the result of verify_data_column_sidecar_inclusion_proof, the cache key must include all three spec-defined inputs: (kzg_commitments, kzg_commitments_inclusion_proof, signed_block_header). Omitting any input from the cache key allows a sidecar with different commitments but matching proof and header to reuse a stale cached result, bypassing inclusion proof verification.",
+      "type": "invariant",
+      "assertion": "forall cache_hit(sidecar_a, sidecar_b): cached_result(sidecar_a) reused for sidecar_b => sidecar_a.kzg_commitments == sidecar_b.kzg_commitments AND sidecar_a.inclusion_proof == sidecar_b.inclusion_proof AND sidecar_a.signed_block_header == sidecar_b.signed_block_header",
+      "severity": "HIGH",
+      "covers": "SG-004",
+      "reachability": {
+        "classification": "external-reachable",
+        "entry_points": ["P2P"],
+        "attacker_controlled": true,
+        "bug_bounty_scope": "in-scope"
+      },
+      "exploitability": "external-attack",
+      "code_scope": {
+        "locations": [
+          {
+            "file": "beacon_chain/gossip_processing/gossip_validation.nim",
+            "symbol": "validateDataColumnSidecar",
+            "line_range": {"start": 627, "end": 632},
+            "role": "primary",
+            "note": "Calls check_data_column_sidecar_inclusion_proof(data_column_sidecar). Nimbus calls this on every gossip validation without caching — the property may not be violated here. Phase 03 should verify whether any caching layer exists upstream."
+          },
+          {
+            "file": "beacon_chain/spec/peerdas_helpers.nim",
+            "symbol": "verify_data_column_sidecar_inclusion_proof",
+            "line_range": {"start": 368, "end": 375},
+            "role": "related",
+            "note": "Actual Merkle branch verification. No internal caching. This is the spec-defined verification function — audit should check all call sites for caching wrappers."
+          }
+        ],
+        "resolution_status": "resolved",
+        "resolution_method": "manual"
+      }
+    }
+  ],
+  "metadata": {
+    "phase": "02c",
+    "worker_id": "manual",
+    "batch_index": "manual_15_109_190_216",
+    "item_count": 4,
+    "timestamp": 1771900000,
+    "processed_ids": [
+      "PROP-6a4369e9-inv-047",
+      "PROP-6a4369e9-inv-048",
+      "PROP-6a4369e9-inv-049",
+      "PROP-6a4369e9-inv-050"
+    ],
+    "note": "Manual code resolution for Sherlock issues #15/#109 (custody_group_count), #216 (stale metadata after fork), #190 (inclusion proof cache key)"
+  }
+}
