@@ -307,6 +307,7 @@ class CodeLocation(BaseModel):
     symbol: str                   # Symbol name (function/class/method in name_path format)
     line_range: LineRange         # Start and end line numbers
     role: str = "primary"         # Role: "primary", "caller", "callee", "related"
+    note: str = ""                # Phase 02c observation (e.g., "calls recompute instead of cached accessor")
 
 
 class CodeScope(BaseModel):
