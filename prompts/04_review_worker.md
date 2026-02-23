@@ -42,13 +42,15 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   <instructions>
     1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context.
 
-    2. **Read Context Files** (do this ONCE at the start of the batch):
-       a. Read `outputs/01b_SUBGRAPH_INDEX.json` — spec subgraph index for cross-reference.
-       b. Read `outputs/BUG_BOUNTY_SCOPE.json` — severity definitions, scope rules, and
-          domain-specific context (e.g., deployment share, trust model, out-of-scope components).
-       c. Read `outputs/TARGET_INFO.json` — target repository/project metadata.
-       All three files are **required**. If any file is missing, stop and report the error.
-       Cache all files for use across all items in the batch.
+  2. **Read Context Files** (do this ONCE at the start of the batch):
+     a. Read `outputs/BUG_BOUNTY_SCOPE.json` — severity definitions, scope rules, and
+        domain-specific context (e.g., deployment share, trust model, out-of-scope components).
+     b. Read `outputs/TARGET_INFO.json` — target repository/project metadata.
+     These two files are **required**. If either is missing, stop and report the error.
+     c. For each `property_id` in the batch, you MUST locate the matching 01e output
+        (e.g., `outputs/01e_PARTIAL_*.json` or `outputs/01e_CONTEXT_*.json`) that contains that `property_id`.
+        If no 01e file contains the property, mark that item as `NEEDS_MANUAL_REVIEW` with reason "01e missing".
+     Cache all files for use across all items in the batch.
 
     3. **For Each Item** (property_id, audit_result, text, assertion, covers, severity):
 
@@ -86,16 +88,14 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
             (not CONFIRMED_VULNERABILITY).
 
        Step C. **Spec Cross-Reference** (MANDATORY):
-         1. From the item's `covers` field (element ID like "FN-001"), find the matching
-            subgraph in the 01b index (search subgraph entries for the element ID).
-         2. Read the corresponding `.mmd` file (path from index, prepend `outputs/graphs/`
-            or use the full path from index).
-         3. Check: Does the spec REQUIRE the behavior that Phase 03 flagged as a bug?
-            - If the spec explicitly mandates this behavior → DISPUTED_FP (spec-compliant)
-            - If the spec defines different requirements for different contexts (e.g., internal
-              vs external callers, different protocol versions) → DISPUTED_FP (by-design)
-            - If the spec is silent on this → finding remains valid
-         4. Record the spec reference in reviewer_notes.
+         1. Use the 01e entry for this `property_id` as the authoritative spec requirement.
+            Cite the exact invariant text in reviewer_notes.
+         2. Optional: If you know the `.mmd` file path for the `covers` id, you MAY open it for context,
+            but 01e takes precedence. If both disagree, follow 01e and do NOT mark DISPUTED_FP.
+         3. Decide: Does 01e REQUIRE the behavior Phase 03 flagged as a bug?
+            - If 01e explicitly mandates the behavior → the code must meet it; otherwise it is a real issue.
+            - If 01e is silent or missing → treat as normal (or NEEDS_MANUAL_REVIEW if missing, per Step 2).
+         4. Record the 01e file name and the cited invariant in reviewer_notes.
 
        Step D. **Check Common FP Patterns**:
          1. Phantom concurrency bugs: Phase 03 claims unguarded access but synchronization exists
@@ -139,24 +139,25 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
          6. Check `out_of_scope` and `conditional_scope` sections — if the finding falls
             under an explicitly excluded category, mark as DISPUTED_FP.
 
-       Step F. **Determine Verdict**:
-         - CONFIRMED_VULNERABILITY: Code reading verified, no spec justification, attack path
-           reachable with CURRENT code and dependencies, severity calibrated
-         - CONFIRMED_POTENTIAL: Uncertainty is genuine (ambiguous spec, complex concurrency),
-           but exploitability cannot be confirmed or denied
+  Step F. **Determine Verdict**:
+    - CONFIRMED_VULNERABILITY: Code reading verified, no spec justification, attack path
+      reachable with CURRENT code and dependencies, severity calibrated
+    - CONFIRMED_POTENTIAL: Uncertainty is genuine (ambiguous spec, complex concurrency),
+      but exploitability cannot be confirmed or denied
          - DISPUTED_FP: Code misread, spec-compliant, defensive pattern exists, unreachable attack,
            latent issue not exploitable with current dependencies, by-design trust boundary,
-           or out-of-scope per program rules
-         - DOWNGRADED: Real issue but lower severity than claimed (adjust severity and explain why)
-         - NEEDS_MANUAL_REVIEW: Cannot determine with available information
+      or out-of-scope per program rules
+    - DOWNGRADED: Real issue but lower severity than claimed (adjust severity and explain why)
+    - NEEDS_MANUAL_REVIEW: Cannot determine with available information
 
-         **Consistency rule:** The verdict MUST be consistent with reviewer_notes.
-         - If reviewer_notes concludes "by design", "intentional", "trust boundary",
-           "spec-compliant", or "not exploitable" → verdict MUST be DISPUTED_FP.
-           Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
-         - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
+    **Consistency rule:** The verdict MUST be consistent with reviewer_notes.
+    - If reviewer_notes concludes "by design", "intentional", "trust boundary",
+      "spec-compliant", or "not exploitable" → verdict MUST be DISPUTED_FP.
+      Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
+    - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
+    - If 01e states a required behavior and the code violates it, DISPUTED_FP is forbidden.
 
-    4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
+  4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
        ```json
        {
          "reviewed_items": [ ...all reviewed items... ],
@@ -187,13 +188,14 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   <quality_gates>
     1. Every reviewed_items element has exactly the 6 allowed keys (property_id, review_verdict, original_classification, adjusted_severity, reviewer_notes, spec_reference).
-    2. reviewer_notes includes spec cross-reference result (even if "spec silent on this").
+    2. reviewer_notes cites the 01e file (name) and the specific invariant text used.
     3. Code was actually re-read for all vulnerability/potential-vulnerability items.
     4. DISPUTED_FP has a specific reason (not just "looks safe").
     5. adjusted_severity is justified against `BUG_BOUNTY_SCOPE.json` severity definitions.
        reviewer_notes must mention the severity reasoning.
     6. If the finding depends on external library behavior, reviewer_notes must state which
        library version was checked and whether the current version is actually affected.
+    7. DISPUTED_FP is not allowed when 01e explicitly requires the flagged behavior and the code deviates from it.
   </quality_gates>
 </task>
 
