@@ -1031,7 +1031,7 @@ class Phase03Orchestrator(BaseOrchestrator):
 
 class Phase04Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 04 (Audit Review)."""
-    
+
     def load_items(self) -> list[dict[str, Any]]:
         """Load audit results from 03 partials with Pydantic validation."""
         import glob
@@ -1076,5 +1076,66 @@ class Phase04Orchestrator(BaseOrchestrator):
                 f"⚠️  {validation_warnings} file(s) had schema validation warnings (03→04)",
                 file=sys.stderr,
             )
+
+        return items
+
+    # Only these classifications need LLM review.
+    _NEEDS_REVIEW = {"vulnerability", "potential-vulnerability"}
+
+    def apply_early_exit(
+        self,
+        items: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Skip non-findings. Only vulnerability/potential-vulnerability go to LLM."""
+        early_exit_results = []
+        items_to_process = []
+
+        for item in items:
+            audit_result = item.get("audit_result", {})
+            classification = (
+                audit_result.get("classification")
+                or audit_result.get("final_classification")
+                or ""
+            )
+
+            if classification in self._NEEDS_REVIEW:
+                items_to_process.append(item)
+            else:
+                early_exit_results.append({
+                    "property_id": item.get("property_id", ""),
+                    "review_verdict": "PASS_THROUGH",
+                    "original_classification": classification,
+                    "adjusted_severity": audit_result.get("severity", "Informational"),
+                    "reviewer_notes": f"Auto-passed: Phase 03 classified as {classification}",
+                    "spec_reference": "",
+                })
+
+        return early_exit_results, items_to_process
+
+    def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Enrich items with original property data from 02c PARTIALs."""
+        import glob as glob_mod
+
+        # Build property lookup from 02c PARTIALs
+        prop_lookup: dict[str, dict[str, Any]] = {}
+        for filepath in sorted(glob_mod.glob("outputs/02c_PARTIAL_*.json")):
+            try:
+                with open(filepath) as f:
+                    data = json.load(f)
+                for prop in data.get("properties_with_code", []):
+                    pid = prop.get("property_id", "")
+                    if pid:
+                        prop_lookup[pid] = prop
+            except Exception:
+                pass
+
+        # Merge relevant fields into each item
+        MERGE_FIELDS = ["text", "assertion", "covers", "severity", "type"]
+        for item in items:
+            pid = item.get("property_id", "")
+            upstream = prop_lookup.get(pid, {})
+            for field in MERGE_FIELDS:
+                if field not in item and field in upstream:
+                    item[field] = upstream[field]
 
         return items

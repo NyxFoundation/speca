@@ -140,12 +140,12 @@ Compact 6-field output per item: `id`, `classification`, `code_path`, `proof_tra
 
 | | |
 |---|---|
-| **Prompt** | `prompts/04_review_worker.md` |
-| **Skill** | `/audit-reviewer` |
+| **Prompt** | `prompts/04_review_worker.md` (inlined) |
+| **Skill** | None (inlined in worker prompt) |
 | **Input** | `outputs/03_PARTIAL_*.json` |
-| **Output** | `outputs/04_REVIEW_PARTIAL_*.json` |
+| **Output** | `outputs/04_PARTIAL_*.json` |
 
-Reviews and validates audit findings with a six-category verdict system: CONFIRMED_VULNERABILITY, LIKELY_VULNERABILITY, VERIFIED_SAFE, FALSE_POSITIVE, CODE_QUALITY_ISSUE, REQUIRES_MANUAL_REVIEW. Includes counterexample evaluation, guard analysis, exploitability assessment, and proof trace construction.
+Reviews and validates audit findings with spec cross-reference and code verification. Early-exits non-findings (not-a-vulnerability, out-of-scope, informational). Verdict system: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW.
 
 ### Phase 05: PoC Generation (Manual)
 

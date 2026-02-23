@@ -64,9 +64,8 @@ Manual (not orchestrated): `05` PoC Generation, `06` Bug-Bounty Report, `06b` Fu
 Skills live in `.claude/skills/<name>/SKILL.md`. Each has YAML frontmatter (`name`, `description`, `allowed-tools`, `context: fork`). Currently active skills:
 - `spec-discovery` — Phase 01a
 - `subgraph-extractor` — Phase 01b
-- `audit-reviewer` — Phase 04
 
-Phases 01e, 02c, and 03 use **inlined prompts** (no skill fork) — all analysis logic is embedded directly in the worker prompt to reduce context fork overhead.
+Phases 01e, 02c, 03, and 04 use **inlined prompts** (no skill fork) — all analysis logic is embedded directly in the worker prompt to reduce context fork overhead.
 
 ### Data Flow Convention
 

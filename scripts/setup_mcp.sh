@@ -24,7 +24,7 @@ set -euo pipefail
 #   Phase 01e (property-generator)    -> (none)
 #   Phase 02  (checklist-specialist)  -> github
 #   Phase 03  (formal-audit-phase*)   -> tree_sitter, filesystem
-#   Phase 04  (audit-reviewer)        -> filesystem
+#   Phase 04  (inline review)          -> (none — uses Read/Grep/Glob)
 #
 # =============================================================================
 

@@ -73,7 +73,7 @@ run_semgrep() {
   fi
   if command -v docker &>/dev/null; then
     docker build -t security-agent-benchmark -f benchmarks/Dockerfile . -q
-    docker run --rm -v "${ROOT_DIR}":/app security-agent-benchmark \
+    docker run --rm --user "$(id -u):$(id -g)" -v "${ROOT_DIR}":/app -e PYTHONPATH=/app security-agent-benchmark \
       python3 /app/benchmarks/runners/run_semgrep.py \
         --dataset "/app/${DATASET_PATH}" \
         --output "/app/${RESULTS_DIR}/semgrep_results.json" \

@@ -3,10 +3,6 @@ name: "04. Audit Review"
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Branch from 03'
-        required: true
-        type: string
       workers:
         description: 'Number of parallel workers'
         required: false
@@ -35,7 +31,7 @@ jobs:
       - name: Checkout Branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
 
       - name: Update Scripts and Prompts from Remote
@@ -45,50 +41,48 @@ jobs:
           git fetch --prune origin
           git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
 
-      - name: Merge Base Branch
-        run: |
-          set -e
-          git fetch --prune origin
-          git merge --no-ff -m "Merge branch '${{ github.ref_name }}'" "origin/${{ github.ref_name }}"
-
       - name: Load Target Info
-        id: target_info_from_03
+        id: target_info
         run: |
-          python3 - <<'PY'
-          import json
-          import os
+          set -euo pipefail
 
-          with open("outputs/TARGET_INFO.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
+          if [ ! -f "outputs/TARGET_INFO.json" ]; then
+            echo "ERROR: outputs/TARGET_INFO.json not found!"
+            echo "This branch must be created from Phase 02c workflow."
+            exit 1
+          fi
 
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-              env.write(f"TARGET_REPO={data['target_repo']}\n")
-              env.write(f"TARGET_REF={data['target_commit']}\n")
+          TARGET_REPO="$(jq -r '.target_repo' outputs/TARGET_INFO.json)"
+          TARGET_REF_TYPE="$(jq -r '.target_ref_type' outputs/TARGET_INFO.json)"
+          TARGET_REF_LABEL="$(jq -r '.target_ref_label' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT="$(jq -r '.target_commit' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT_SHORT="$(jq -r '.target_commit_short' outputs/TARGET_INFO.json)"
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"target_ref_label={data.get('target_ref_label','')}\n")
-              out.write(f"target_commit_short={data.get('target_commit_short','')}\n")
-          PY
+          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_TYPE=${TARGET_REF_TYPE}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_LABEL=${TARGET_REF_LABEL}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=${TARGET_COMMIT}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT_SHORT=${TARGET_COMMIT_SHORT}" >> "$GITHUB_ENV"
+
+          echo "target_repo=${TARGET_REPO}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_type=${TARGET_REF_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_label=${TARGET_REF_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${TARGET_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${TARGET_COMMIT_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
+
+          echo "Loaded target info:"
+          echo "  Repository: ${TARGET_REPO}"
+          echo "  Ref: ${TARGET_REF_LABEL}"
+          echo "  Commit: ${TARGET_COMMIT_SHORT}"
 
       - name: Checkout Target Repository
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TARGET_REPO }}
-          ref: ${{ env.TARGET_REF }}
+          ref: ${{ env.TARGET_COMMIT }}
+          fetch-depth: 0
           path: target_workspace
-
-      - name: Get Target Info
-        id: target_info
-        working-directory: ./target_workspace
-        run: |
-          set -euo pipefail
-          actual_full="$(git rev-parse HEAD)"
-          if [ "${actual_full}" != "${TARGET_REF}" ]; then
-            echo "Target commit mismatch: ${actual_full} != ${TARGET_REF}"
-            exit 1
-          fi
-          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "full_sha=${actual_full}" >> $GITHUB_OUTPUT
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -111,8 +105,21 @@ jobs:
           git config --local user.name "Security Agent Bot"
           git config --local user.email "bot@nyxfoundation.org"
 
+      - name: Ensure master merged into branch
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          if git merge-base --is-ancestor origin/master HEAD; then
+            echo "Branch already contains origin/master"
+          else
+            git merge --no-edit origin/master
+          fi
+
       - name: "Pre-flight: Schema & Config Tests"
         run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: Reset Phase 04 outputs
+        run: rm -rf outputs/**/04_* outputs/04_*
 
       - name: "Step 04: Audit Review (Parallel)"
         run: uv run python3 scripts/run_phase.py --phase 04 --workers ${{ inputs.workers }} --max-concurrent ${{ inputs.max_concurrent }}
@@ -125,24 +132,22 @@ jobs:
             git add outputs/logs/
             git commit -m "04: audit review for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git push origin "${{ inputs.branch }}" --force-with-lease
+            git push origin "${{ github.ref_name }}" --force-with-lease
           fi
 
       - name: Summary
         run: |
-          echo "## Audit Complete" >> $GITHUB_STEP_SUMMARY
-          echo "Branch: \`${{ inputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "## Audit Review Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Target ref: \`${{ steps.target_info_from_03.outputs.target_ref_label }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target ref: \`${{ env.TARGET_REF_LABEL }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Run **Create PR** to create a pull request." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: step-8-logs-${{ github.run_id }}
+          name: audit-review-logs-${{ github.run_id }}
           path: outputs/logs/
           retention-days: 7
