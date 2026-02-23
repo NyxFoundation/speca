@@ -146,10 +146,11 @@ class TestIdPrefixAssignment:
     def test_assigns_prefix_from_partial(self):
         """Items should get _id_prefix based on 01b partial data."""
         orch = Phase01Orchestrator("01e")
-        # Create a temp 01b partial file
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        # Create a temp 01b partial file inside outputs/ (required by path
+        # traversal guard SEC-C02)
+        os.makedirs("outputs", exist_ok=True)
+        partial_file = os.path.join("outputs", "_test_prefix_partial.json")
+        with open(partial_file, "w") as f:
             json.dump({
                 "specs": [
                     {
@@ -159,7 +160,6 @@ class TestIdPrefixAssignment:
                     }
                 ]
             }, f)
-            partial_file = f.name
 
         try:
             items = [{"file_path": partial_file}]
@@ -171,9 +171,10 @@ class TestIdPrefixAssignment:
     def test_disambiguation_on_slug_collision(self):
         """Duplicate slugs should get a numeric disambiguator."""
         orch = Phase01Orchestrator("01e")
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        # Create temp file inside outputs/ (required by path traversal guard SEC-C02)
+        os.makedirs("outputs", exist_ok=True)
+        partial_file = os.path.join("outputs", "_test_disambiguation_partial.json")
+        with open(partial_file, "w") as f:
             json.dump({
                 "specs": [
                     {
@@ -183,7 +184,6 @@ class TestIdPrefixAssignment:
                     }
                 ]
             }, f)
-            partial_file = f.name
 
         try:
             items = [
@@ -937,7 +937,7 @@ class TestCircuitBreaker:
 
     def test_initial_state(self):
         cb = CircuitBreaker(self._make_config())
-        stats = cb.get_stats()
+        stats = cb._get_stats_unlocked()
         assert stats["consecutive_failures"] == 0
         assert stats["total_retries"] == 0
         assert stats["empty_results"] == 0
@@ -1026,7 +1026,7 @@ class TestCircuitBreaker:
         try:
             loop.run_until_complete(cb.record_success())
             loop.run_until_complete(cb.record_retry())
-            stats = cb.get_stats()
+            stats = cb._get_stats_unlocked()
             assert stats == {
                 "consecutive_failures": 0,
                 "total_retries": 1,
@@ -1938,7 +1938,7 @@ class TestGitHubStepSummary:
         old = os.environ.pop("GITHUB_STEP_SUMMARY", None)
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             # Should not raise
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
@@ -1953,7 +1953,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(60.0, 10, cb_stats, val_stats, None)
 
@@ -1975,7 +1975,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             cost_stats = {
                 "total_input_tokens": 100000,
@@ -2006,7 +2006,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2024,7 +2024,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2043,7 +2043,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch._circuit_breaker_tripped = True
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 3, cb_stats, val_stats, None)
 
@@ -2062,7 +2062,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch._budget_exceeded = True
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 2, cb_stats, val_stats, None)
 
@@ -2081,7 +2081,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch.failed_batches = [(0, 3), (1, 7)]
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2101,7 +2101,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             cost_stats = {
                 "total_input_tokens": 500000,
@@ -2129,7 +2129,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
