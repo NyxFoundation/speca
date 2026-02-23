@@ -7,7 +7,9 @@ LLM outputs before they are persisted to disk.
 """
 
 import json
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -110,8 +112,21 @@ class ResultCollector:
         self.total_saves += 1
         self._validate_output(output_data, output_path)
 
-        with open(output_path, "w") as f:
-            json.dump(output_data, f, indent=2)
+        # Atomic write: write to temp file then rename to prevent
+        # partial reads by concurrent workers (e.g. resume scanning).
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.output_dir), suffix=".json.tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(output_data, f, indent=2)
+            os.replace(tmp_path, str(output_path))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         return output_path
 

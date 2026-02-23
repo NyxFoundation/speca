@@ -90,6 +90,29 @@ def generate_slug(text: str, max_len: int = 12) -> str:
     return slug or hashlib.sha256(text.encode()).hexdigest()[:8]
 
 
+# ---------------------------------------------------------------------------
+# Helper: path traversal guard for LLM-supplied file paths
+# ---------------------------------------------------------------------------
+
+def _is_safe_output_path(file_path: str) -> bool:
+    """Check that *file_path* resolves to within the ``outputs/`` directory.
+
+    LLM output JSON may contain ``file_path`` or ``subgraph_file`` fields
+    that are subsequently opened.  This guard prevents path-traversal attacks
+    (e.g. ``../../../../etc/passwd``) by ensuring the resolved path stays
+    inside the ``outputs/`` directory relative to the current working
+    directory.
+
+    Returns ``True`` when the path is safe, ``False`` otherwise.
+    """
+    try:
+        outputs_dir = Path("outputs").resolve()
+        resolved = Path(file_path).resolve()
+        return resolved.is_relative_to(outputs_dir)
+    except (ValueError, OSError):
+        return False
+
+
 class BaseOrchestrator(ABC):
     """
     Abstract base class for phase orchestrators.
@@ -214,7 +237,7 @@ class BaseOrchestrator(ABC):
         total_results = len(early_exit_results) + len(self.results)
 
         # Step 6: Print statistics
-        self._print_run_statistics(duration, total_results)
+        await self._print_run_statistics(duration, total_results)
         
         # Step 7: Report failures
         if self._budget_exceeded:
@@ -245,9 +268,9 @@ class BaseOrchestrator(ABC):
         print(f"\n✅ Phase {self.config.phase_id} completed in {duration:.1f}s")
         print(f"   Total results: {total_results}")
 
-    def _print_run_statistics(self, duration: float, total_results: int) -> None:
+    async def _print_run_statistics(self, duration: float, total_results: int) -> None:
         """Print circuit breaker and validation statistics."""
-        cb_stats = self.circuit_breaker.get_stats()
+        cb_stats = await self.circuit_breaker.get_stats()
         val_stats = self.collector.get_validation_summary()
 
         print(f"\n{'─'*40}")
@@ -642,6 +665,15 @@ class Phase01Orchestrator(BaseOrchestrator):
         """
         if not file_path:
             return hashlib.sha256(b"unknown").hexdigest()[:8]
+
+        # SEC-C02: Guard against path traversal in LLM-supplied file_path
+        if not _is_safe_output_path(file_path):
+            print(
+                f"Warning: path traversal blocked in _derive_slug_from_partial: {file_path!r}",
+                file=sys.stderr,
+            )
+            return hashlib.sha256(file_path.encode()).hexdigest()[:8]
+
         try:
             with open(file_path) as f:
                 data = json.load(f)
@@ -713,7 +745,14 @@ class Phase01Orchestrator(BaseOrchestrator):
             
             subgraph_file = item.get("subgraph_file")
             if subgraph_file:
-                if subgraph_file not in subgraph_cache:
+                # SEC-C02: Guard against path traversal in LLM-supplied subgraph_file
+                if not _is_safe_output_path(subgraph_file):
+                    print(
+                        f"Warning: path traversal blocked in _enrich_with_subgraph_context: {subgraph_file!r}",
+                        file=sys.stderr,
+                    )
+                    subgraph_cache[subgraph_file] = {}
+                elif subgraph_file not in subgraph_cache:
                     try:
                         with open(subgraph_file) as f:
                             subgraph_cache[subgraph_file] = json.load(f)

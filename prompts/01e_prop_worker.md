@@ -100,6 +100,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
          - Can network partitioning or eclipse attacks isolate the node from legitimate peers?
          - Can a slow client, slow loris connection, or incomplete request starve the worker/connection pool?
          - Can malformed serialized payloads cause excessive deserialization, parsing, or regex backtracking cost?
+         - Can malformed, truncated, or structurally invalid input cause an unhandled exception (index-out-of-bounds, null dereference, assertion failure, stack overflow) that crashes the process? For every deserialization or parsing entry point reachable from untrusted sources, the system must reject invalid input gracefully without terminating. This is distinct from resource exhaustion — even an O(1) crash is a critical DoS vector.
          - Can an attacker trigger excessive recomputation of derived state (re-indexing, cache rebuilding, state replays)?
          - Can pub/sub, broadcast, or fan-out mechanisms be manipulated to cause message amplification?
          - Can an externally-supplied numeric value control a loop bound or allocation size without an upper-bound check? If the domain of valid values is smaller than the type's range, an attacker can force unbounded iteration or memory allocation (CWE-770).
@@ -127,7 +128,10 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     4. **Invariant Properties**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property. Additionally:
        - When the specification defines a data structure with ordering, uniqueness, or completeness constraints, consider that implementations may construct the same structure via multiple code paths (config loaders, constructors, deserializers). Generate an invariant asserting that the constraint holds regardless of which construction path is taken.
-       - When the specification describes a data structure with both declared metadata (counts, lengths, hashes) and actual data arrays, generate an invariant asserting their consistency (e.g., `len(declared_hashes) == len(actual_data)`). Mismatches between declared and actual fields cause indexing errors or silent data corruption.
+       - **[CRITICAL — commonly missed]** When the specification describes a data structure with both declared metadata (counts, lengths, hashes) and actual data arrays, you MUST generate an invariant asserting their consistency. Specifically:
+         - Every structure where a count/list of identifiers is declared separately from the actual data MUST have: `len(declared) == len(actual)` (e.g., `len(tx.hashes) == len(wrapper.data_items)`, `len(header.field_count) == len(body.fields)`).
+         - Each pair of parallel arrays that are iterated together MUST have a length equality property. If code iterates one array using the other's length as the loop bound, a mismatch causes index-out-of-bounds crashes or silent data truncation.
+         - This applies to wrapper/envelope patterns where an outer object declares identifiers (hashes, keys, counts) and an inner object or sidecar carries the actual data.
 
     5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after. Pay special attention to **lifecycle events** (fork transitions, epoch boundaries, validator set changes): any derived or cached state that depends on the pre-transition configuration must be invalidated or refreshed before post-transition operations that consume it.
 
@@ -229,6 +233,8 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
     - [ ] Properties are prioritized by `bug_bounty_scope` (in-scope first)
     - [ ] **Every property has a `property_id` field** — IDs follow the `{_id_prefix}-{type_abbrev}-{seq:03d}` format
     - [ ] `metadata.total_properties` == actual length of `properties` array, `sum(by_severity.values()) == total_properties`
+    - [ ] **Crash safety**: For each deserialization/parsing path from untrusted sources, at least one property asserts graceful rejection of malformed input (not just resource bounds)
+    - [ ] **Declared-vs-actual consistency**: For each data structure with declared metadata (counts, hashes, keys) and separate actual data arrays, a `len(declared) == len(actual)` invariant exists
   </quality_checklist>
 
   <data_sources>

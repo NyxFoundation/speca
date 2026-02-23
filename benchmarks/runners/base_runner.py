@@ -74,7 +74,14 @@ def default_metadata_path(tool_name: str, dataset_path: Path) -> Path:
 def run_command(
     template: str, code_path: Path, output_path: Path, case_id: str, use_shell: bool, timeout: int
 ) -> tuple[int, str]:
-    formatted = template.format(code_path=code_path, output_path=output_path, case_id=case_id)
+    if use_shell:
+        formatted = template.format(
+            code_path=shlex.quote(str(code_path)),
+            output_path=shlex.quote(str(output_path)),
+            case_id=shlex.quote(case_id),
+        )
+    else:
+        formatted = template.format(code_path=code_path, output_path=output_path, case_id=case_id)
     try:
         if use_shell:
             result = subprocess.run(formatted, shell=True, capture_output=True, text=True, timeout=timeout or None)
@@ -89,7 +96,7 @@ def resolve_version(command: str) -> str | None:
     if not command:
         return None
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        result = subprocess.run(shlex.split(command), capture_output=True, text=True)
     except Exception:
         return None
     output = (result.stdout or result.stderr).strip()
