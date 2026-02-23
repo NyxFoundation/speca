@@ -1022,7 +1022,7 @@ class Phase03Orchestrator(BaseOrchestrator):
         self,
         items: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Apply early exit for out-of-scope items only."""
+        """Apply early exit for out-of-scope and skipped items."""
         early_exit_results = []
         items_to_process = []
 
@@ -1033,12 +1033,16 @@ class Phase03Orchestrator(BaseOrchestrator):
                 early_exit_results.append(self._build_early_exit_result(item, "out-of-scope"))
                 continue
 
+            if isinstance(code_scope, dict) and code_scope.get("resolution_status") == "skipped":
+                early_exit_results.append(self._build_early_exit_result(item, "skipped"))
+                continue
+
             items_to_process.append(item)
 
         return early_exit_results, items_to_process
 
     def _build_early_exit_result(self, item: dict[str, Any], reason: str) -> dict[str, Any]:
-        """Build early exit result for out-of-scope items."""
+        """Build early exit result for out-of-scope or skipped items."""
         prop_id = item.get("property_id", "")
         code_scope = item.get("code_scope", {})
 
@@ -1046,7 +1050,7 @@ class Phase03Orchestrator(BaseOrchestrator):
             "property_id": prop_id,
             "check_id": prop_id,  # Downstream compat
             "code_scope": code_scope,
-            "classification": "out-of-scope",
+            "classification": reason,
             "bug_bounty_eligible": False,
             "summary": f"Early exit: {reason}.",
             "audit_trail": {
