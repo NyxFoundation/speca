@@ -292,6 +292,22 @@ class TestPhaseConfig:
         assert cfg.result_key == "audit_items"
         assert cfg.output_pattern == "outputs/03_PARTIAL_*.json"
 
+    def test_phase04_config_values(self):
+        """Phase 04 should use inlined prompt with no MCP and strict tools."""
+        cfg = PHASE_CONFIGS["04"]
+        assert cfg.batch_strategy == "count"
+        assert cfg.max_batch_size == 5
+        assert cfg.result_key == "reviewed_items"
+        assert cfg.model == "sonnet"
+        assert cfg.mcp_servers == []
+        assert cfg.tools_filter == ["Read", "Write", "Grep", "Glob"]
+        assert "text" in cfg.context_fields
+        assert "assertion" in cfg.context_fields
+        assert "covers" in cfg.context_fields
+        assert "severity" in cfg.context_fields
+        assert "type" in cfg.context_fields
+        assert "audit_result" in cfg.context_fields
+
     def test_circuit_breaker_defaults(self):
         """Default circuit breaker values should be sensible."""
         cfg = PHASE_CONFIGS["01b"]

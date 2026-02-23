@@ -242,19 +242,22 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
     "04": PhaseConfig(
         phase_id="04",
         name="Audit Review",
-        description="Review and validate audit findings",
-        skill_path=Path(".claude/skills/audit-reviewer/SKILL.md"),
+        description="Review and validate audit findings with spec cross-reference",
+        skill_path=Path("prompts/04_review_worker.md"),  # Unused — inlined
         prompt_path=Path("prompts/04_review_worker.md"),
         queue_pattern="outputs/04_QUEUE_{worker_id}.json",
         output_pattern="outputs/04_PARTIAL_*.json",
         depends_on=["03"],
         input_patterns=["outputs/03_PARTIAL_*.json"],
         batch_strategy="count",
-        max_batch_size=2,
+        max_batch_size=5,
         item_id_field="property_id",
         result_key="reviewed_items",
-        mcp_servers=["filesystem"],
-        context_fields=["property_id", "audit_result"],
+        model="sonnet",
+        mcp_servers=[],
+        tools_filter=["Read", "Write", "Grep", "Glob"],
+        context_fields=["property_id", "audit_result", "text", "assertion",
+                         "covers", "severity", "type"],
     ),
 }
 
