@@ -296,7 +296,7 @@ class TestPhaseConfig:
         """Phase 04 should use inlined prompt with no MCP and strict tools."""
         cfg = PHASE_CONFIGS["04"]
         assert cfg.batch_strategy == "count"
-        assert cfg.max_batch_size == 5
+        assert cfg.max_batch_size == 1
         assert cfg.result_key == "reviewed_items"
         assert cfg.model == "sonnet"
         assert cfg.mcp_servers == []

@@ -114,19 +114,29 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
             current version handles the edge case properly
 
        Step E. **Calibrate Severity** (MANDATORY):
-         Determine `adjusted_severity` using `BUG_BOUNTY_SCOPE.json` and `TARGET_INFO.json`:
+         Determine `adjusted_severity` by strictly applying `BUG_BOUNTY_SCOPE.json`:
 
-         1. Read the `severity_classification` section for the program's severity definitions.
-         2. Read `deployment_context` (if present) for deployment topology and target share.
-         3. If severity is defined by deployment-wide impact (e.g., "% of users/nodes affected"):
-            - Identify what fraction of the overall deployment the target project represents
-              from `deployment_context.target_share.value` or similar fields.
-            - A bug in a single component can only affect users/nodes of THAT component.
-              The maximum severity is capped by the component's deployment share.
+         1. Read the `severity_classification` section. Each severity level has an explicit
+            impact threshold (e.g., ">33% of network", ">5% of network"). These thresholds
+            are the ONLY criteria — do not invent your own severity reasoning.
+         2. Read `deployment_context.client_diversity` to find the target project's share.
+            Match the target from `TARGET_INFO.json` (e.g., repo name) to a client entry.
+            This share is the MAXIMUM network-wide impact for a single-component bug.
+         3. Determine the severity cap:
+            - Compare the target's share against EACH threshold in `severity_classification`.
+            - The highest severity whose threshold the share EXCEEDS is the cap.
+            - Example: share=31%, thresholds are Critical >50%, High >33%, Medium >5%
+              → 31% > 5% but 31% < 33% → cap is **Medium**.
+         4. Apply the cap:
+            - If the bug affects ALL nodes of the target component → severity = cap.
             - If the bug only triggers under specific conditions (certain configurations,
-              specific timing, specific roles), the effective impact is further reduced.
-         4. If the item's original severity exceeds the calibrated maximum → DOWNGRADE.
-         5. Check `out_of_scope` and `conditional_scope` sections — if the finding falls
+              specific timing, specific roles, requires attacker-controlled input beyond
+              normal operation), the effective impact is LOWER than the cap.
+            - Do NOT inflate severity by speculating about multi-client composition,
+              widespread propagation, or cascading effects. Evaluate the single-component
+              impact as-is.
+         5. If the item's original severity exceeds the calibrated result → DOWNGRADE.
+         6. Check `out_of_scope` and `conditional_scope` sections — if the finding falls
             under an explicitly excluded category, mark as DISPUTED_FP.
 
        Step F. **Determine Verdict**:
@@ -135,9 +145,16 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
          - CONFIRMED_POTENTIAL: Uncertainty is genuine (ambiguous spec, complex concurrency),
            but exploitability cannot be confirmed or denied
          - DISPUTED_FP: Code misread, spec-compliant, defensive pattern exists, unreachable attack,
-           latent issue not exploitable with current dependencies, or out-of-scope per program rules
+           latent issue not exploitable with current dependencies, by-design trust boundary,
+           or out-of-scope per program rules
          - DOWNGRADED: Real issue but lower severity than claimed (adjust severity and explain why)
          - NEEDS_MANUAL_REVIEW: Cannot determine with available information
+
+         **Consistency rule:** The verdict MUST be consistent with reviewer_notes.
+         - If reviewer_notes concludes "by design", "intentional", "trust boundary",
+           "spec-compliant", or "not exploitable" → verdict MUST be DISPUTED_FP.
+           Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
+         - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
 
     4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
        ```json
