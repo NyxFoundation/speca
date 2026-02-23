@@ -1032,9 +1032,25 @@ class Phase03Orchestrator(BaseOrchestrator):
 class Phase04Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 04 (Audit Review)."""
 
+    _REQUIRED_FILES = [
+        "outputs/BUG_BOUNTY_SCOPE.json",
+        "outputs/TARGET_INFO.json",
+        "outputs/01b_SUBGRAPH_INDEX.json",
+    ]
+
     def load_items(self) -> list[dict[str, Any]]:
         """Load audit results from 03 partials with Pydantic validation."""
         import glob
+
+        # Verify required context files exist before processing
+        for path in self._REQUIRED_FILES:
+            if not Path(path).exists():
+                print(
+                    f"ERROR: {path} not found. "
+                    f"Phase 04 requires this file for severity calibration and spec cross-reference.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         items = []
         validation_warnings = 0
