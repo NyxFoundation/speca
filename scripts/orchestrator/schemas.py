@@ -321,7 +321,7 @@ class CodeScope(BaseModel):
     - Related: other relevant code locations
     """
     locations: list[CodeLocation] = Field(default_factory=list)
-    resolution_status: str = ""  # "resolved", "not_found", "specification_only", "out_of_scope", "error"
+    resolution_status: str = ""  # "resolved", "not_found", "specification_only", "out_of_scope", "skipped", "error"
     resolution_error: str = ""
 
 
