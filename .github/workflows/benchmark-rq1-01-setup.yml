@@ -1,0 +1,94 @@
+name: "RQ1 Benchmark 01: Setup Data"
+
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Comma-separated list of audit branches"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  setup-data:
+    runs-on: self-hosted
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RESULTS_DIR: benchmarks/results/rq1/sherlock_ethereum_audit_contest
+
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Fetch Remote Branches
+        run: git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+      - name: Setup Python (uv)
+        run: uv sync --python 3.11
+
+      - name: Reset Previous Results
+        run: |
+          rm -rf "${RESULTS_DIR}"
+          mkdir -p "${RESULTS_DIR}"
+
+      - name: Collect Audit Outputs
+        run: |
+          uv run python benchmarks/scripts/collect_branch_outputs.py \
+            --branches "${{ inputs.branches }}" \
+            --output-globs "03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,TARGET_INFO.json" \
+            --output-root "${RESULTS_DIR}"
+
+      - name: Verify Collected Outputs
+        run: |
+          python3 - <<'PY'
+          import glob, os
+          branches = [b.strip() for b in os.environ.get("BRANCHES", "").split(",") if b.strip()]
+          results_dir = os.environ["RESULTS_DIR"]
+          patterns = [p.strip() for p in os.environ.get("OUTPUT_GLOBS", "").split(",") if p.strip()]
+          missing = []
+          for branch in branches:
+            sanitized = branch.replace("/", "__")
+            matches = []
+            for pattern in patterns:
+              matches.extend(glob.glob(f"{results_dir}/{sanitized}/{pattern}"))
+            if not matches:
+              missing.append(branch)
+          if missing:
+            raise SystemExit(f"No outputs collected for: {', '.join(missing)}")
+          PY
+        env:
+          BRANCHES: ${{ inputs.branches }}
+          OUTPUT_GLOBS: "03_PARTIAL_*.json,03_AUDITMAP_PARTIAL_*.json,TARGET_INFO.json"
+
+      - name: Capture AI Version
+        run: |
+          AI_VERSION="unknown"
+          if command -v claude >/dev/null 2>&1; then
+            AI_VERSION="$(claude --version 2>/dev/null | head -n1)"
+            if [ -z "$AI_VERSION" ]; then
+              AI_VERSION="unknown"
+            fi
+          fi
+          echo "AI_VERSION=$AI_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build Run Metadata
+        run: |
+          uv run python benchmarks/rq1/build_metadata.py \
+            --collection "${RESULTS_DIR}/collection_summary.json" \
+            --output "${RESULTS_DIR}/run_metadata.json" \
+            --ai-version "${AI_VERSION}"
+
+      - name: Push Setup Results
+        if: always()
+        run: |
+          git add "${RESULTS_DIR}/"
+          if ! git diff --staged --quiet; then
+            git commit -m "benchmark: rq1 01-setup data collection"
+            git push origin "${{ github.ref_name }}" --force-with-lease
+          fi
