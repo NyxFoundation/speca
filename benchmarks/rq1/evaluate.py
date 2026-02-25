@@ -231,6 +231,100 @@ def compute_precision(labels_csv_path: Path) -> dict:
     }
 
 
+# ── Phase 04 verdict integration ────────────────────────────────────
+
+
+_REJECT_VERDICTS = {"DISPUTED_FP"}
+_ACCEPT_VERDICTS = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "DOWNGRADED"}
+_TP_LABELS = {"tp", "tp_info", "fixed", "partially_fixed"}
+_FP_LABELS = {"fp_invalid"}
+
+
+def _load_phase04_verdicts(partials_dir: Path) -> dict[str, str]:
+    """Load Phase 04 PARTIAL files → {property_id: verdict}."""
+    verdicts: dict[str, str] = {}
+    for path in sorted(partials_dir.glob("04_PARTIAL_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        for item in data.get("reviewed_items", []):
+            pid = item.get("property_id", "")
+            if pid:
+                verdicts[pid] = item.get("review_verdict", "")
+    return verdicts
+
+
+def compute_phase04_impact(
+    labels_csv_path: Path,
+    phase04_verdicts: dict[str, str],
+    recall_matches: dict[str, dict],
+) -> dict:
+    """Compute Phase 04 impact on precision/recall vs Phase 03 baseline.
+
+    Returns metrics showing how Phase 04 filtering changes FP/FN rates.
+    """
+    rows: list[dict] = []
+    with labels_csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+
+    total = len(rows)
+    processed = 0
+    # Confusion matrix counts
+    p04_tp = 0   # Phase 04 accepted a real finding
+    p04_fn = 0   # Phase 04 rejected a real finding (false negative)
+    p04_tn = 0   # Phase 04 rejected an FP (correct)
+    p04_fp = 0   # Phase 04 accepted an FP (false positive retained)
+
+    fn_details: list[dict] = []
+
+    for row in rows:
+        fid = row["finding_id"]
+        auto_label = row.get("auto_label", "")
+
+        if fid not in phase04_verdicts:
+            continue
+        processed += 1
+        verdict = phase04_verdicts[fid]
+
+        if verdict in _ACCEPT_VERDICTS and auto_label in _TP_LABELS:
+            p04_tp += 1
+        elif verdict in _REJECT_VERDICTS and auto_label in _TP_LABELS:
+            p04_fn += 1
+            fn_details.append({
+                "finding_id": fid,
+                "benchmark_label": auto_label,
+                "csv_severity": row.get("csv_severity", ""),
+                "csv_issue_id": row.get("csv_issue_id", ""),
+            })
+        elif verdict in _REJECT_VERDICTS and auto_label in _FP_LABELS:
+            p04_tn += 1
+        elif verdict in _ACCEPT_VERDICTS and auto_label in _FP_LABELS:
+            p04_fp += 1
+
+    # Impact on recall: which Sherlock issues are lost due to Phase 04 FNs?
+    fn_finding_ids = {d["finding_id"] for d in fn_details}
+    recall_issues_lost: list[str] = []
+    for issue_id, match_info in recall_matches.items():
+        if match_info.get("finding_id") in fn_finding_ids:
+            recall_issues_lost.append(issue_id)
+
+    return {
+        "phase04_processed": processed,
+        "phase04_unprocessed": total - processed,
+        "confusion": {
+            "true_positive": p04_tp,
+            "false_negative": p04_fn,
+            "true_negative": p04_tn,
+            "false_positive_retained": p04_fp,
+        },
+        "false_negatives": fn_details,
+        "recall_issues_lost": recall_issues_lost,
+    }
+
+
 # ── Main evaluation ─────────────────────────────────────────────────
 
 
@@ -301,6 +395,26 @@ def evaluate(
         else:
             summary["f1"] = 0.0
         print(f"[rq1] precision={prec['precision_full']:.1%} f1={summary['f1']:.3f}")
+
+    # Phase 04 impact (if Phase 04 outputs exist)
+    phase04_verdicts = _load_phase04_verdicts(results_dir.parent.parent.parent / "outputs")
+    if not phase04_verdicts:
+        # Also try the results_dir parent chain for different layouts
+        for candidate in [results_dir / ".." / ".." / ".." / "outputs", Path("outputs")]:
+            candidate = candidate.resolve()
+            if candidate.is_dir():
+                phase04_verdicts = _load_phase04_verdicts(candidate)
+                if phase04_verdicts:
+                    break
+
+    if phase04_verdicts and labels_csv.exists():
+        p04_impact = compute_phase04_impact(labels_csv, phase04_verdicts, recall_matches)
+        summary["phase04_impact"] = p04_impact
+        p04_proc = p04_impact["phase04_processed"]
+        cm = p04_impact["confusion"]
+        print(f"[rq1] phase04: {p04_proc} processed, fn={cm['false_negative']}, tn={cm['true_negative']}")
+        if p04_impact["recall_issues_lost"]:
+            print(f"[rq1] phase04 recall issues lost: {p04_impact['recall_issues_lost']}")
 
     if metadata_path and metadata_path.exists():
         try:

@@ -37,6 +37,17 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     2. The attack path is reachable with the CURRENT codebase and dependencies.
     3. No defensive pattern, library guarantee, or architectural design prevents exploitation.
     If ANY of these fail, the finding is a false positive.
+
+    **Defense-in-depth principle — CRITICAL:**
+    A missing validation or check is a real vulnerability even if a DOWNSTREAM layer
+    currently catches the issue. Reasons:
+    - The downstream defense may change, be refactored, or be bypassed in future versions.
+    - Specifications that mandate a check at a specific layer mean the code is non-compliant
+      if that check is missing, regardless of other layers.
+    - "The system is currently safe end-to-end" does NOT mean the missing check is a false positive.
+    You MUST NOT use "downstream code handles it" as the sole basis for DISPUTED_FP.
+    If the 01e property requires a specific validation and the code omits it, that is a real
+    finding even if another layer compensates.
   </review_approach>
 
   <instructions>
@@ -113,6 +124,14 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
          9. Library trust: code correctly delegates to a well-tested library and the library's
             current version handles the edge case properly
 
+         **Anti-pattern — NOT valid FP reasons:**
+         10. "Downstream layer catches it": A missing check at the SPECIFIED layer is a real
+             finding per defense-in-depth, even if another layer currently compensates.
+             Only use this reasoning if the 01e property explicitly allows delegation to another layer.
+         11. Severity-based dismissal: Do NOT downgrade a Low finding to Informational and
+             then DISPUTED_FP it. Low severity findings with confirmed code issues are real.
+             Use DOWNGRADED (not DISPUTED_FP) when severity adjustment is the only change.
+
        Step E. **Calibrate Severity** (MANDATORY):
          Determine `adjusted_severity` by strictly applying `BUG_BOUNTY_SCOPE.json`:
 
@@ -144,9 +163,12 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
       reachable with CURRENT code and dependencies, severity calibrated
     - CONFIRMED_POTENTIAL: Uncertainty is genuine (ambiguous spec, complex concurrency),
       but exploitability cannot be confirmed or denied
-         - DISPUTED_FP: Code misread, spec-compliant, defensive pattern exists, unreachable attack,
-           latent issue not exploitable with current dependencies, by-design trust boundary,
-      or out-of-scope per program rules
+         - DISPUTED_FP: Code misread, spec EXPLICITLY permits the behavior, defensive pattern
+           exists AT THE SAME LAYER, unreachable attack path, latent issue not exploitable
+           with current dependencies, by-design trust boundary, or out-of-scope per program rules.
+           **Threshold**: DISPUTED_FP requires POSITIVE evidence that the finding is wrong,
+           not merely that the system appears safe. "Downstream defense compensates" alone
+           is INSUFFICIENT — see defense-in-depth principle above.
     - DOWNGRADED: Real issue but lower severity than claimed (adjust severity and explain why)
     - NEEDS_MANUAL_REVIEW: Cannot determine with available information
 
