@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""RQ1 matching logic (stage1/2/3)."""
+"""RQ1 matching logic — LLM-based issue recall measurement.
+
+For each known H/M/L issue from the CSV, ask the LLM whether any audit
+finding across all branches detected the same root cause.
+"""
 
 from __future__ import annotations
 
-import difflib
 import json
 import os
 import re
-import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,133 +21,54 @@ class Issue:
     issue_id: str
     title: str
     description: str
-    text: str
-    normalized: str
-    tokens: set[str]
+    severity: str
 
 
 @dataclass
 class AuditItem:
     item_id: str
-    description: str
-    snippet: str
-    file: str
-    line: str
     text: str
-    normalized: str
-    tokens: set[str]
     classification: str | None = None
+    branch: str = ""
 
 
-def normalize_text(text: str) -> str:
-    lowered = text.lower()
-    lowered = re.sub(r"[^a-z0-9_]+", " ", lowered)
-    lowered = re.sub(r"\s+", " ", lowered).strip()
-    return lowered
-
-
-def tokenize(text: str) -> set[str]:
-    if not text:
-        return set()
-    return set(re.findall(r"[a-z0-9_]+", text.lower()))
-
-
-def similarity(a: str, b: str) -> float:
-    if not a or not b:
-        return 0.0
-    return difflib.SequenceMatcher(None, a, b).ratio()
-
-
-def jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
-
-
-def load_csv_issues(path: Path) -> list[Issue]:
+def load_csv_issues(
+    path: Path,
+    severity_filter: set[str] | None = None,
+) -> list[Issue]:
     import csv
 
     issues: list[Issue] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
+            severity = (row.get("submitted_severity") or "").strip().lower()
+            if severity_filter and severity not in severity_filter:
+                continue
             title = (row.get("title") or "").strip()
             description = (row.get("description") or "").strip()
             issue_id = str(row.get("number") or "").strip()
-            text = f"{title}\n{description}".strip()
-            normalized = normalize_text(text)
-            tokens = tokenize(text)
-            issues.append(Issue(issue_id, title, description, text, normalized, tokens))
+            issues.append(Issue(issue_id, title, description, severity))
     return issues
 
 
-def build_audit_text(raw: dict) -> tuple[str, str, str, str, str, str | None]:
-    item_id = str(raw.get("id") or raw.get("check_id") or "")
-    description = str(raw.get("description") or raw.get("summary") or "")
-    snippet = str(raw.get("snippet") or "")
-    file = str(raw.get("file") or "")
-    line = str(raw.get("line") or "")
-
-    code_scope = raw.get("code_scope") if isinstance(raw.get("code_scope"), dict) else {}
-    scope_desc = str(code_scope.get("description") or "")
-
-    text_parts = [description, scope_desc, snippet, file, line]
-    text = "\n".join(part for part in text_parts if part).strip()
-    classification = None
-    for key in ("final_classification", "classification", "verdict", "risk_classification"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            classification = value.strip()
-            break
-    return item_id, description, snippet, file, line if line else "", text, classification
-
-
-def extract_classifications(raw: dict) -> set[str]:
-    values: set[str] = set()
-    for key in (
-        "final_classification",
-        "classification",
-        "verdict",
-        "risk_classification",
-        "exploitability_classification",
-    ):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            values.add(value.strip().lower())
-    severity = raw.get("severity")
-    if isinstance(severity, str) and severity.strip():
-        values.add(severity.strip().lower())
-    severity_hint = raw.get("severity_hint")
-    if isinstance(severity_hint, str) and severity_hint.strip():
-        values.add(severity_hint.strip().lower())
-    severity_class = raw.get("severity_classification")
-    if isinstance(severity_class, dict):
-        for key in ("bug_bounty_severity", "severity", "classification"):
-            value = severity_class.get(key)
-            if isinstance(value, str) and value.strip():
-                values.add(value.strip().lower())
-    return values
-
-
-def is_selected_audit_item(
-    raw: dict,
-    classification_filter: set[str] | None,
-    include_bug_bounty: bool,
-) -> bool:
-    if classification_filter is None and not include_bug_bounty:
-        return True
-    if include_bug_bounty and raw.get("bug_bounty_eligible") is True:
-        return True
-    if classification_filter is None:
-        return False
-    classifications = extract_classifications(raw)
-    return bool(classifications & classification_filter)
+def _build_audit_text(raw: dict) -> tuple[str, str, str]:
+    """Return (item_id, text, classification) from a Phase 03 audit item."""
+    item_id = str(raw.get("property_id") or "")
+    classification = str(raw.get("classification") or "")
+    parts = [
+        str(raw.get("proof_trace") or ""),
+        str(raw.get("attack_scenario") or ""),
+        str(raw.get("code_path") or ""),
+    ]
+    text = "\n".join(p for p in parts if p).strip()
+    return item_id, text, classification
 
 
 def extract_audit_items(
     files: Iterable[Path],
     classification_filter: set[str] | None = None,
-    include_bug_bounty: bool = False,
+    branch: str = "",
 ) -> list[AuditItem]:
     items: list[AuditItem] = []
     for path in files:
@@ -153,83 +76,42 @@ def extract_audit_items(
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-
         raw_items: list[dict] = []
         if isinstance(payload, dict) and isinstance(payload.get("audit_items"), list):
-            raw_items = [item for item in payload.get("audit_items") if isinstance(item, dict)]
-        elif isinstance(payload, list):
-            raw_items = [item for item in payload if isinstance(item, dict)]
-
-        if not raw_items:
-            continue
-
+            raw_items = [item for item in payload["audit_items"] if isinstance(item, dict)]
         for raw in raw_items:
-            if not is_selected_audit_item(raw, classification_filter, include_bug_bounty):
-                continue
-            item_id, description, snippet, file, line, text, classification = build_audit_text(raw)
-            normalized = normalize_text(text)
-            tokens = tokenize(text)
-            items.append(
-                AuditItem(
-                    item_id,
-                    description,
-                    snippet,
-                    file,
-                    line,
-                    text,
-                    normalized,
-                    tokens,
-                    classification=classification,
-                )
-            )
+            cls = raw.get("classification")
+            if classification_filter:
+                if not isinstance(cls, str) or cls.strip().lower() not in classification_filter:
+                    continue
+            item_id, text, classification = _build_audit_text(raw)
+            items.append(AuditItem(item_id, text, classification=classification, branch=branch))
     return items
 
 
-def select_keyword_candidates(
-    audit_item: AuditItem,
-    issues: list[Issue],
-    top_k: int,
-    min_overlap: int,
-) -> list[Issue]:
-    scored: list[tuple[int, float, Issue]] = []
-    for issue in issues:
-        overlap = len(audit_item.tokens & issue.tokens)
-        if overlap < min_overlap:
-            continue
-        score = jaccard(audit_item.tokens, issue.tokens)
-        scored.append((overlap, score, issue))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return [issue for overlap, score, issue in scored[:top_k]]
+# ── LLM helpers ──────────────────────────────────────────────────────
 
 
 def call_llm(prompt: str) -> str:
-    command_override = os.environ.get("LLM_COMMAND")
-    if command_override:
-        base = shlex.split(command_override)
-        command = base + [prompt]
-    else:
-        provider = os.environ.get("LLM_PROVIDER", "claude").strip().lower()
-        if provider == "codex":
-            command = [
-                "codex",
-                "exec",
-                "--sandbox",
-                "read-only",
-                "--ask-for-approval",
-                "never",
-                prompt,
-            ]
-        else:
-            command = ["claude", "--output-format", "json", "-p", prompt]
+    env = os.environ.copy()
+    for var in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):
+        env.pop(var, None)
+
+    model = env.get("RQ1_MODEL", "haiku")
+    command = ["claude", "--output-format", "json", "--model", model, "-p", prompt]
 
     result = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
+        command, check=False, capture_output=True, text=True, env=env,
     )
     if result.returncode != 0:
+        print(f"[rq1] call_llm failed (rc={result.returncode}): {result.stderr[:300] if result.stderr else ''}")
         return ""
+    try:
+        envelope = json.loads(result.stdout)
+        if isinstance(envelope, dict) and "result" in envelope:
+            return str(envelope["result"])
+    except (json.JSONDecodeError, TypeError):
+        pass
     return result.stdout
 
 
@@ -244,7 +126,7 @@ def extract_json_from_text(text: str) -> dict | None:
             return payload[0] if isinstance(payload[0], dict) else None
     except json.JSONDecodeError:
         pass
-
+    # Nested envelope
     try:
         wrapper = json.loads(text)
         if isinstance(wrapper, dict) and "content" in wrapper:
@@ -257,8 +139,8 @@ def extract_json_from_text(text: str) -> dict | None:
             if match:
                 return json.loads(match.group(0))
     except Exception:
-        return None
-
+        pass
+    # Regex fallback
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if match:
         try:
@@ -268,114 +150,196 @@ def extract_json_from_text(text: str) -> dict | None:
     return None
 
 
-def llm_match(audit_item: AuditItem, candidates: list[Issue], llm_id: str) -> tuple[bool, str | None, float]:
-    if not candidates:
-        return False, None, 0.0
+def _truncate(text: str, max_chars: int = 300) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
 
-    candidate_block = []
-    for idx, issue in enumerate(candidates):
-        candidate_block.append(
-            f"[{idx}] ID={issue.issue_id}\nTitle: {issue.title}\nDescription: {issue.description}\n"
-        )
 
-    prompt = (
-        "You are matching security findings. Decide if the audit finding matches any candidate issue."
-        ' Respond with JSON only: {"match": true|false, "candidate_index": number|null, "confidence": 0-1}.\n\n'
-        "Audit finding:\n"
-        f"{audit_item.text}\n\n"
-        "Candidates:\n"
-        + "\n".join(candidate_block)
-        + "\n"
-    )
+# ── Core matching ────────────────────────────────────────────────────
 
-    print(f"[rq1] {llm_id}: llm_match start (candidates={len(candidates)})")
-    raw = call_llm(prompt)
-    print(f"[rq1] {llm_id}: llm_match done (bytes={len(raw) if raw else 0})")
+
+def _parse_response(raw: str, candidate_ids: list[str], index_key: str = "finding_index") -> tuple[bool, str | None, float]:
+    """Parse LLM response → (matched, candidate_id, confidence)."""
     payload = extract_json_from_text(raw) or {}
-    match = bool(payload.get("match"))
-    idx = payload.get("candidate_index")
+    matched = bool(payload.get("match"))
+    # Try the specific key first, then common fallbacks
+    idx = payload.get(index_key)
+    if idx is None:
+        for fallback in ("finding_index", "issue_index", "candidate_index"):
+            if fallback != index_key and fallback in payload:
+                idx = payload[fallback]
+                break
     confidence = payload.get("confidence")
     try:
-        confidence = float(confidence)
+        confidence = float(confidence)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         confidence = 0.0
-    if match and isinstance(idx, int) and 0 <= idx < len(candidates):
-        return True, candidates[idx].issue_id, confidence
+    if matched:
+        cid = None
+        if isinstance(idx, int) and 0 <= idx < len(candidate_ids):
+            cid = candidate_ids[idx]
+        return True, cid, confidence
     return False, None, confidence
 
 
-def match_items(
-    audit_items: list[AuditItem],
+def match_issues(
     issues: list[Issue],
-    use_llm: bool,
-    llm_max: int,
-    stage1_threshold: float,
-    stage2_threshold: float,
-    keyword_min_overlap: int,
-    candidate_top_k: int,
-) -> tuple[dict[str, dict], dict, int]:
+    audit_items: list[AuditItem],
+    cache_path: Path | None = None,
+) -> tuple[dict[str, dict], int]:
+    """For each issue, ask LLM if any audit finding detected it."""
+    # Build shared findings block
+    finding_lines = []
+    finding_ids = []
+    for idx, item in enumerate(audit_items):
+        finding_lines.append(f"[{idx}] {item.item_id} ({item.branch}): {_truncate(item.text)}")
+        finding_ids.append(item.item_id)
+    findings_text = "\n".join(finding_lines)
+
     matches: dict[str, dict] = {}
-    stage_counts = {"stage1": 0, "stage2": 0, "stage3": 0}
-    llm_calls = 0
+    cache_handle = None
+    if cache_path:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_handle = cache_path.open("w", encoding="utf-8")
 
-    for item in audit_items:
-        best_score = 0.0
-        best_issue = None
+    try:
         for issue in issues:
-            score = similarity(item.normalized, issue.normalized)
-            if score > best_score:
-                best_score = score
-                best_issue = issue
-        if best_issue and best_score >= stage1_threshold:
-            matches[item.item_id] = {
-                "stage": "stage1",
-                "issue_id": best_issue.issue_id,
-                "score": best_score,
-            }
-            stage_counts["stage1"] += 1
-
-    for item in audit_items:
-        if item.item_id in matches:
-            continue
-        best_score = 0.0
-        best_issue = None
-        for issue in issues:
-            overlap = len(item.tokens & issue.tokens)
-            score = jaccard(item.tokens, issue.tokens)
-            if score > best_score and overlap >= 3:
-                best_score = score
-                best_issue = issue
-        if best_issue and best_score >= stage2_threshold:
-            matches[item.item_id] = {
-                "stage": "stage2",
-                "issue_id": best_issue.issue_id,
-                "score": best_score,
-            }
-            stage_counts["stage2"] += 1
-
-    if use_llm:
-        for item in audit_items:
-            if item.item_id in matches:
-                continue
-            if llm_calls >= llm_max:
-                break
-            candidates = select_keyword_candidates(
-                item,
-                issues,
-                top_k=candidate_top_k,
-                min_overlap=keyword_min_overlap,
+            prompt = (
+                "Was the following known vulnerability detected by any of the audit findings below?\n"
+                'Respond with JSON only: {"match": true|false, "finding_index": number|null, "confidence": 0.0-1.0}\n\n'
+                f"KNOWN VULNERABILITY (Issue #{issue.issue_id}, {issue.severity}):\n"
+                f"Title: {issue.title}\n"
+                f"Description: {_truncate(issue.description, 500)}\n\n"
+                f"AUDIT FINDINGS ({len(audit_items)} total):\n{findings_text}\n"
             )
-            if not candidates:
-                continue
-            llm_calls += 1
-            llm_id = item.item_id or f"item_{llm_calls}"
-            matched, issue_id, confidence = llm_match(item, candidates, llm_id)
-            if matched and issue_id:
-                matches[item.item_id] = {
-                    "stage": "stage3",
-                    "issue_id": issue_id,
-                    "score": confidence,
-                }
-                stage_counts["stage3"] += 1
 
-    return matches, stage_counts, llm_calls
+            print(f"[rq1] issue #{issue.issue_id}: start (findings={len(audit_items)}, prompt={len(prompt)} chars)")
+            raw = call_llm(prompt)
+            print(f"[rq1] issue #{issue.issue_id}: done ({len(raw)} bytes)")
+
+            if cache_handle:
+                cache_handle.write(json.dumps({
+                    "issue_id": issue.issue_id,
+                    "raw": raw,
+                    "finding_ids": finding_ids,
+                }, ensure_ascii=False) + "\n")
+                cache_handle.flush()
+
+            matched, finding_id, confidence = _parse_response(raw, finding_ids)
+            if matched:
+                matches[issue.issue_id] = {"finding_id": finding_id, "confidence": confidence}
+                print(f"[rq1] issue #{issue.issue_id}: MATCHED -> {finding_id} (conf={confidence})")
+            else:
+                print(f"[rq1] issue #{issue.issue_id}: no match (conf={confidence})")
+    finally:
+        if cache_handle:
+            cache_handle.close()
+
+    return matches, len(issues)
+
+
+def reparse_cache(cache_path: Path) -> tuple[dict[str, dict], int]:
+    """Re-parse cached LLM responses without calling LLM."""
+    matches: dict[str, dict] = {}
+    total = 0
+    for line in cache_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        total += 1
+        issue_id = record.get("issue_id", "")
+        raw = record.get("raw", "")
+        finding_ids = record.get("finding_ids", [])
+
+        matched, finding_id, confidence = _parse_response(raw, finding_ids)
+        if matched:
+            matches[issue_id] = {"finding_id": finding_id, "confidence": confidence}
+        print(f"[rq1] reparse #{issue_id}: matched={matched}, finding={finding_id}, conf={confidence}")
+
+    return matches, total
+
+
+# ── FP detection (finding → issues) ─────────────────────────────────
+
+
+def check_findings_fp(
+    findings: list[AuditItem],
+    issues: list[Issue],
+    cache_path: Path | None = None,
+) -> dict[str, dict]:
+    """For each finding, check if it matches any issue. Returns {finding_id: {issue_id, severity, title, confidence}}."""
+    issue_lines = []
+    issue_ids = []
+    issue_map = {i.issue_id: i for i in issues}
+    for idx, issue in enumerate(issues):
+        issue_lines.append(f"[{idx}] #{issue.issue_id} ({issue.severity}): {issue.title}")
+        issue_ids.append(issue.issue_id)
+    issues_text = "\n".join(issue_lines)
+
+    results: dict[str, dict] = {}
+    cache_handle = None
+    if cache_path:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_handle = cache_path.open("w", encoding="utf-8")
+
+    try:
+        for finding in findings:
+            prompt = (
+                "Does the following audit finding describe the same vulnerability as any known issue below?\n"
+                'Respond with JSON only: {"match": true|false, "issue_index": number|null, "confidence": 0.0-1.0}\n\n'
+                f"AUDIT FINDING ({finding.item_id}, {finding.branch}):\n"
+                f"{_truncate(finding.text, 400)}\n\n"
+                f"KNOWN ISSUES ({len(issues)}):\n{issues_text}\n"
+            )
+            print(f"[rq1] fp-check {finding.item_id}: start ({len(issues)} issues)")
+            raw = call_llm(prompt)
+            print(f"[rq1] fp-check {finding.item_id}: done ({len(raw)} bytes)")
+
+            if cache_handle:
+                cache_handle.write(json.dumps({
+                    "finding_id": finding.item_id,
+                    "raw": raw,
+                    "issue_ids": issue_ids,
+                }, ensure_ascii=False) + "\n")
+                cache_handle.flush()
+
+            matched, issue_id, confidence = _parse_response(raw, issue_ids, index_key="issue_index")
+            if matched and issue_id:
+                issue = issue_map.get(issue_id)
+                results[finding.item_id] = {
+                    "issue_id": issue_id,
+                    "severity": issue.severity if issue else "",
+                    "title": issue.title if issue else "",
+                    "confidence": confidence,
+                }
+                print(f"[rq1] fp-check {finding.item_id}: -> #{issue_id} ({issue.severity if issue else '?'})")
+            else:
+                print(f"[rq1] fp-check {finding.item_id}: no match")
+    finally:
+        if cache_handle:
+            cache_handle.close()
+
+    return results
+
+
+def reparse_fp_cache(cache_path: Path) -> dict[str, dict]:
+    """Re-parse FP detection cache."""
+    results: dict[str, dict] = {}
+    for line in cache_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        finding_id = record.get("finding_id", "")
+        raw = record.get("raw", "")
+        issue_ids = record.get("issue_ids", [])
+        matched, issue_id, confidence = _parse_response(raw, issue_ids, index_key="issue_index")
+        if matched and issue_id:
+            results[finding_id] = {"issue_id": issue_id, "confidence": confidence}
+    return results
