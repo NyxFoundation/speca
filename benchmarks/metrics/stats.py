@@ -20,6 +20,12 @@ def mcnemar_exact(b: int, c: int) -> float:
 
 
 def effect_size_cliffs_delta(b: int, c: int, n: int) -> tuple[float, str]:
+    """Compute paired proportion difference (b-c)/n with magnitude labels.
+
+    Note: This is *not* Cliff's Delta (which uses pairwise comparisons);
+    it is the difference in proportions from a paired/McNemar-style table.
+    The name is kept for backward-compatibility of the call-sites.
+    """
     if n == 0:
         return 0.0, "none"
     delta = (b - c) / n
@@ -46,8 +52,8 @@ def bootstrap_rate(values: list[bool], samples: int, seed: int, ci_level: float)
     rates.sort()
     ci_low = (1 - ci_level) / 2
     ci_high = 1 - ci_low
-    low_idx = int(ci_low * (len(rates) - 1))
-    high_idx = int(ci_high * (len(rates) - 1))
+    low_idx = round(ci_low * (len(rates) - 1))
+    high_idx = round(ci_high * (len(rates) - 1))
     return {"mean": sum(rates) / len(rates), "ci": [rates[low_idx], rates[high_idx]]}
 
 
@@ -79,8 +85,8 @@ def bootstrap_metric_diffs(
     out: dict[str, dict] = {}
     for key, values in diffs.items():
         values.sort()
-        low_idx = int(ci_low * (len(values) - 1))
-        high_idx = int(ci_high * (len(values) - 1))
+        low_idx = round(ci_low * (len(values) - 1))
+        high_idx = round(ci_high * (len(values) - 1))
         out[key] = {
             "mean": sum(values) / len(values),
             "ci": [values[low_idx], values[high_idx]],

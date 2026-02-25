@@ -132,9 +132,9 @@ class ResumeManager:
         partial_pattern = str(self.output_dir / f"{self.config.phase_id}_PARTIAL_*.json")
         referenced_prefixes: set[str] = set()
         for filepath in glob.glob(partial_pattern):
-            match = re.search(r"(W\d+B\d+)", Path(filepath).name)
+            match = re.search(r"(W\d+B\d+)", Path(filepath).name, re.IGNORECASE)
             if match:
-                referenced_prefixes.add(match.group(1))
+                referenced_prefixes.add(match.group(1).upper())
 
         incomplete: list[Path] = []
         for batch_dir in graphs_dir.iterdir():
@@ -143,8 +143,8 @@ class ResumeManager:
             has_mmd = any(batch_dir.rglob("*.mmd"))
             if not has_mmd:
                 continue
-            dir_prefix_match = re.search(r"(W\d+B\d+)", batch_dir.name)
-            dir_prefix = dir_prefix_match.group(1) if dir_prefix_match else ""
+            dir_prefix_match = re.search(r"(W\d+B\d+)", batch_dir.name, re.IGNORECASE)
+            dir_prefix = dir_prefix_match.group(1).upper() if dir_prefix_match else ""
             if dir_prefix not in referenced_prefixes:
                 incomplete.append(batch_dir)
 
@@ -252,12 +252,14 @@ class ResumeManager:
         """
         Delete ALL output files and logs for this phase.
         Used when --force is specified to ensure a clean run.
-        
+
         Returns:
             Number of files/directories deleted.
         """
         count = 0
-        
+        # Track already-counted log files to avoid double-counting
+        counted_logs: set[str] = set()
+
         # 1. Delete PARTIAL files (file mode)
         pattern = str(self.output_dir / f"{self.config.phase_id}_PARTIAL_*.json")
         for filepath in glob.glob(pattern):
@@ -278,25 +280,29 @@ class ResumeManager:
                      if not batch_dir.is_dir(): continue
                      logs = self._get_log_files_for_batch(batch_dir)
                      # correct phase logs exist for this batch?
-                     if logs: 
+                     if logs:
                          if dry_run:
                              print(f"Would delete batch: {batch_dir}")
                              for log in logs:
                                  print(f"  Would delete log: {log}")
+                                 counted_logs.add(str(log))
                          else:
                              shutil.rmtree(batch_dir)
                              print(f"Deleted batch: {batch_dir}")
                              for log in logs:
+                                 counted_logs.add(str(log))
                                  log.unlink()
                                  print(f"Deleted log: {log}")
                              count += 1
-        
+
         # 3. Delete leftover logs (file mode or orphaned)
         # _get_log_files_for_batch handles directory mode logs.
         # For file mode, logs are: {phase_id}_w{worker}b{batch}_{timestamp}.log.jsonl
         log_pattern = str(self.logs_dir / f"{self.config.phase_id}_*.log.jsonl")
         for logpath in glob.glob(log_pattern):
-             if Path(logpath).exists(): # Check exists because directory mode loop might have deleted it
+             if str(Path(logpath)) in counted_logs:
+                 continue  # Already counted/deleted in directory mode
+             if Path(logpath).exists():
                 if dry_run:
                     print(f"Would delete log: {logpath}")
                 else:

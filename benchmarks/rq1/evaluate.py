@@ -175,7 +175,8 @@ def generate_labels_csv(
     # Summary
     labels = [r["auto_label"] for r in rows]
     print(f"[rq1] labels CSV: {out_path}")
-    print(f"[rq1]   tp={labels.count('tp')} tp_info={labels.count('tp_info')} fp_invalid={labels.count('fp_invalid')} unknown={labels.count('unknown')}")
+    _dont_care_count = labels.count('potential-info') + labels.count('fixed') + labels.count('partially_fixed')
+    print(f"[rq1]   tp={labels.count('tp')} tp_info={labels.count('tp_info')} fp_invalid={labels.count('fp_invalid')} dont_care={_dont_care_count} unknown={labels.count('unknown')}")
     return out_path
 
 
@@ -183,7 +184,21 @@ def generate_labels_csv(
 
 
 def compute_precision(labels_csv_path: Path) -> dict:
-    """Compute precision metrics from findings_labels.csv."""
+    """Compute precision metrics from findings_labels.csv.
+
+    Label semantics (TP/FP classification):
+      tp              — matched a H/M/L contest issue → TP
+      tp_info         — matched an info-level contest issue → TP
+      potential-info  — real issue rejected on contest rules (dup, not fixed) → TP
+      fixed           — real issue already fixed before audit → TP
+      partially_fixed — real issue partially fixed → TP
+      fp_invalid      — matched an invalid contest issue → FP
+      unknown         — no contest match found
+
+    Precision variants:
+      auto         — unknown excluded from denominator (only labeled findings)
+      conservative — unknown treated as FP
+    """
     rows: list[dict] = []
     with labels_csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -194,25 +209,23 @@ def compute_precision(labels_csv_path: Path) -> dict:
     auto_tp = sum(1 for r in rows if r.get("auto_label") == "tp")
     auto_fp_invalid = sum(1 for r in rows if r.get("auto_label") == "fp_invalid")
     auto_tp_info = sum(1 for r in rows if r.get("auto_label") == "tp_info")
+    auto_tp_other = sum(1 for r in rows if r.get("auto_label") in {"potential-info", "fixed", "partially_fixed"})
     auto_unknown = sum(1 for r in rows if r.get("auto_label") == "unknown")
 
     # Human labels (if filled in)
     human_tp = sum(1 for r in rows if (r.get("human_label") or "").strip().lower() in ("tp", "true", "1", "yes"))
     human_fp = sum(1 for r in rows if (r.get("human_label") or "").strip().lower() in ("fp", "false", "0", "no"))
-    human_unlabeled = total - auto_tp - auto_fp_invalid - auto_tp_info - human_tp - human_fp
+    human_unlabeled = auto_unknown - human_tp - human_fp
 
-    # tp_info = info-level finding (real issue, low severity) → counts as TP
-    auto_tp_total = auto_tp + auto_tp_info
-
-    # Precision calculations
-    auto_labeled = auto_tp_total + auto_fp_invalid
-    precision_auto = auto_tp_total / auto_labeled if auto_labeled else 0.0
-
-    all_labeled = auto_labeled + human_tp + human_fp
+    # All TP: tp + tp_info + potential-info + fixed + partially_fixed + human_tp
+    auto_tp_total = auto_tp + auto_tp_info + auto_tp_other
     total_tp = auto_tp_total + human_tp
-    precision_full = total_tp / all_labeled if all_labeled else 0.0
 
-    # Conservative (treat unknown as FP)
+    # Auto precision (unknown excluded from denominator)
+    auto_labeled = auto_tp_total + auto_fp_invalid
+    precision_auto = total_tp / auto_labeled if auto_labeled else 0.0
+
+    # Conservative precision (unknown treated as FP)
     precision_conservative = total_tp / total if total else 0.0
 
     return {
@@ -220,12 +233,12 @@ def compute_precision(labels_csv_path: Path) -> dict:
         "auto_tp": auto_tp,
         "auto_fp_invalid": auto_fp_invalid,
         "auto_tp_info": auto_tp_info,
+        "auto_tp_other": auto_tp_other,
         "auto_unknown": auto_unknown,
         "human_tp": human_tp,
         "human_fp": human_fp,
         "human_unlabeled": human_unlabeled,
         "precision_auto": round(precision_auto, 4),
-        "precision_full": round(precision_full, 4),
         "precision_conservative": round(precision_conservative, 4),
         "total_tp": total_tp,
     }
@@ -295,12 +308,13 @@ def evaluate(
     if labels_csv.exists():
         prec = compute_precision(labels_csv)
         summary["precision"] = prec
-        # F1
-        if prec["precision_full"] > 0 and recall > 0:
-            summary["f1"] = round(2 * prec["precision_full"] * recall / (prec["precision_full"] + recall), 4)
+        # F1 (using auto precision — unknown excluded from denominator)
+        p = prec["precision_auto"]
+        if p > 0 and recall > 0:
+            summary["f1"] = round(2 * p * recall / (p + recall), 4)
         else:
             summary["f1"] = 0.0
-        print(f"[rq1] precision={prec['precision_full']:.1%} f1={summary['f1']:.3f}")
+        print(f"[rq1] precision_auto={p:.1%} precision_conservative={prec['precision_conservative']:.1%} f1={summary['f1']:.3f}")
 
     if metadata_path and metadata_path.exists():
         try:
