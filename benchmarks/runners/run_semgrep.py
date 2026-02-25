@@ -3,11 +3,16 @@
 
 import argparse
 import json
+import logging
 import subprocess
 from pathlib import Path
 
-from benchmarks.bench_utils import extract_id
+from benchmarks.bench_utils import extract_id, guess_extension
 from benchmarks.runners.base_runner import CommandSpec, write_metadata
+
+logger = logging.getLogger(__name__)
+
+CODE_KEYS = ["func", "before", "after", "code"]
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "benchmarks" / "data"
@@ -33,10 +38,27 @@ def run_semgrep_on_primevul(dataset_path: Path, output_path: Path, config: str, 
         for idx, line in enumerate(f):
             sample = json.loads(line)
             func_id = extract_id(sample, idx)
-            code = sample.get("func")
 
-            # Create a temporary file to scan
-            temp_file = Path(f"/tmp/{func_id}.c")
+            # BUG-BEN08: Try multiple code keys for CVEfixes compat
+            code = None
+            for key in CODE_KEYS:
+                code = sample.get(key)
+                if code is not None:
+                    break
+
+            # BUG-BEN05: Skip samples with no code
+            if code is None:
+                logger.warning("Sample %s has no code (tried keys: %s), skipping", func_id, CODE_KEYS)
+                results.append({
+                    "func_id": func_id,
+                    "semgrep_findings": [],
+                    "error": "missing_code",
+                })
+                continue
+
+            # BUG-BEN04: Use correct extension based on language
+            ext = guess_extension(sample)
+            temp_file = Path(f"/tmp/{func_id}.{ext}")
             temp_file.write_text(code)
 
             # Run Semgrep
@@ -56,7 +78,18 @@ def run_semgrep_on_primevul(dataset_path: Path, output_path: Path, config: str, 
                 temp_file.unlink()
                 continue
             
-            semgrep_output = json.loads(process.stdout) if process.stdout else {}
+            # BUG-BEN06: Handle non-JSON output from Semgrep gracefully
+            try:
+                semgrep_output = json.loads(process.stdout) if process.stdout else {}
+            except json.JSONDecodeError:
+                results.append({
+                    "func_id": func_id,
+                    "semgrep_findings": [],
+                    "error": "semgrep_json_parse_failed",
+                    "raw_output": (process.stdout or "")[:500],
+                })
+                temp_file.unlink(missing_ok=True)
+                continue
             results.append({
                 "func_id": func_id,
                 "semgrep_findings": semgrep_output.get("results", []),

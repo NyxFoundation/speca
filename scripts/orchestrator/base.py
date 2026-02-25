@@ -23,6 +23,11 @@ from .queue import QueueManager
 from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
 from .runner import ClaudeRunner, CircuitBreaker, CircuitBreakerTripped, BudgetExceeded
 from .watchdog import CostTracker
+
+
+class PhaseAbortError(Exception):
+    """Raised when a phase must abort (replaces sys.exit calls)."""
+    pass
 from .collector import ResultCollector
 from .resume import ResumeManager
 from .schemas import (
@@ -137,7 +142,7 @@ class BaseOrchestrator(ABC):
         self.config = get_phase_config(phase_id)
         self.num_workers = max(1, num_workers)
         self.max_concurrent = max(1, max_concurrent)
-        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.semaphore: asyncio.Semaphore | None = None
         
         # Shared circuit breaker for all workers in this phase
         self.circuit_breaker = CircuitBreaker(self.config)
@@ -149,15 +154,10 @@ class BaseOrchestrator(ABC):
                 max_budget_usd=self.config.max_budget_usd,
             )
 
-        # Components
+        # Components (runner is created lazily in run() after event loop starts)
         self.queue_manager = QueueManager(self.config)
         self.batch_strategy = self._create_batch_strategy()
-        self.runner = ClaudeRunner(
-            self.config,
-            self.semaphore,
-            circuit_breaker=self.circuit_breaker,
-            cost_tracker=self.cost_tracker,
-        )
+        self.runner: ClaudeRunner | None = None
         self.collector = ResultCollector(self.config)
         self.resume_manager = ResumeManager(self.config)
         
@@ -191,10 +191,19 @@ class BaseOrchestrator(ABC):
         5. Collect and save results
         6. Report circuit breaker / validation statistics
         """
+        # Lazily create asyncio primitives now that the event loop is running
+        self.semaphore = asyncio.Semaphore(self.max_concurrent)
+        self.runner = ClaudeRunner(
+            self.config,
+            self.semaphore,
+            circuit_breaker=self.circuit_breaker,
+            cost_tracker=self.cost_tracker,
+        )
+
         print(f"\n{'='*60}")
         print(f"Phase {self.config.phase_id}: {self.config.name}")
         print(f"{'='*60}")
-        
+
         start_time = time.time()
         
         # Step 1: Load items
@@ -221,7 +230,11 @@ class BaseOrchestrator(ABC):
         early_exit_results, items_to_process = self.apply_early_exit(all_items)
         print(f"Early exit: {len(early_exit_results)} items")
         print(f"To process: {len(items_to_process)} items")
-        
+
+        # Persist early-exit results so resume sees them
+        if early_exit_results:
+            self.collector.save_partial(early_exit_results, 0, 0)
+
         # Step 3: Enrich items (phase-specific)
         enriched_items = self.enrich_items(items_to_process)
         
@@ -247,7 +260,9 @@ class BaseOrchestrator(ABC):
                 file=sys.stderr,
             )
             print(f"   Saved results so far: {total_results}")
-            sys.exit(2)
+            raise PhaseAbortError(
+                f"Phase {self.config.phase_id} ABORTED — budget exceeded after {duration:.1f}s"
+            )
 
         if self._circuit_breaker_tripped:
             print(
@@ -256,14 +271,18 @@ class BaseOrchestrator(ABC):
                 file=sys.stderr,
             )
             print(f"   Saved results so far: {total_results}")
-            sys.exit(2)
+            raise PhaseAbortError(
+                f"Phase {self.config.phase_id} ABORTED by circuit breaker after {duration:.1f}s"
+            )
 
         if self.failed_batches:
             print(f"\n⚠️  {len(self.failed_batches)} batch(es) failed (successful results saved as partials)", file=sys.stderr)
             for worker_id, batch_index in self.failed_batches:
                 print(f"  - Worker {worker_id}, Batch {batch_index}", file=sys.stderr)
             print(f"   Saved results: {total_results}")
-            sys.exit(1)
+            raise PhaseAbortError(
+                f"Phase {self.config.phase_id}: {len(self.failed_batches)} batch(es) failed"
+            )
         
         print(f"\n✅ Phase {self.config.phase_id} completed in {duration:.1f}s")
         print(f"   Total results: {total_results}")
@@ -455,14 +474,21 @@ class BaseOrchestrator(ABC):
             batch_index: int,
         ) -> tuple[list[dict[str, Any]] | None, int, int, int]:
             """Wrap runner call to carry metadata through asyncio.as_completed."""
-            result = await self.runner.run_batch(batch, worker_id, batch_index)
+            try:
+                result = await self.runner.run_batch(batch, worker_id, batch_index)
+            except (CircuitBreakerTripped, BudgetExceeded):
+                raise  # Propagate immediately with original traceback
+            except Exception as e:
+                raise RuntimeError(
+                    f"W{worker_id}B{batch_index}: {e}"
+                ) from e
             return result, worker_id, batch_index, len(batch)
 
         tasks: list[asyncio.Task] = []
         for batch in batches:
             worker_id = self._batch_counter % self.num_workers
-            self._batch_counter += 1
             batch_index = self._batch_counter
+            self._batch_counter += 1
 
             tasks.append(asyncio.create_task(
                 _run_with_meta(batch, worker_id, batch_index)
@@ -513,7 +539,12 @@ class BaseOrchestrator(ABC):
                     break
                 except Exception as e:
                     print(f"Task failed with error: {e}", file=sys.stderr)
-                    self.failed_batches.append((0, 0))
+                    # Extract worker/batch from RuntimeError message (W{id}B{idx}: ...)
+                    _m = re.match(r"W(\d+)B(\d+):", str(e))
+                    if _m:
+                        self.failed_batches.append((int(_m.group(1)), int(_m.group(2))))
+                    else:
+                        self.failed_batches.append((0, 0))
                 finally:
                     pbar.update(batch_size)
 
@@ -709,24 +740,20 @@ class Phase01Orchestrator(BaseOrchestrator):
         """
         scope_path = Path("outputs/BUG_BOUNTY_SCOPE.json")
         if not scope_path.exists():
-            print(
-                f"ERROR: {scope_path} not found. "
+            raise PhaseAbortError(
+                f"{scope_path} not found. "
                 f"bug_bounty_scope is required for Phase 01e. "
-                f"Create the file before running this phase.",
-                file=sys.stderr,
+                f"Create the file before running this phase."
             )
-            sys.exit(1)
 
         try:
             with open(scope_path) as f:
                 scope_data = json.load(f)
             print(f"  Injected bug_bounty_scope from {scope_path}")
         except Exception as e:
-            print(
-                f"ERROR: Failed to parse {scope_path}: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            raise PhaseAbortError(
+                f"Failed to parse {scope_path}: {e}"
+            ) from e
 
         for item in items:
             item["bug_bounty_scope"] = scope_data
@@ -738,12 +765,17 @@ class Phase01Orchestrator(BaseOrchestrator):
     ) -> list[dict[str, Any]]:
         """Add subgraph data to items."""
         subgraph_cache: dict[str, dict] = {}
-        
+
         enriched = []
         for item in items:
             enriched_item = item.copy()
-            
+
             subgraph_file = item.get("subgraph_file")
+
+            # Fallback for Phase 01e items: use file_path if subgraph_file is absent
+            if not subgraph_file and item.get("file_path"):
+                subgraph_file = item["file_path"]
+
             if subgraph_file:
                 # SEC-C02: Guard against path traversal in LLM-supplied subgraph_file
                 if not _is_safe_output_path(subgraph_file):
@@ -758,16 +790,21 @@ class Phase01Orchestrator(BaseOrchestrator):
                             subgraph_cache[subgraph_file] = json.load(f)
                     except Exception:
                         subgraph_cache[subgraph_file] = {}
-                
+
                 subgraph_id = item.get("subgraph_id")
                 if subgraph_id:
                     for sg in subgraph_cache[subgraph_file].get("sub_graphs", []):
                         if sg.get("id") == subgraph_id:
                             enriched_item["subgraph"] = sg
                             break
-            
+                elif subgraph_file in subgraph_cache:
+                    # No subgraph_id — attach all subgraphs from the file as context
+                    all_sgs = subgraph_cache[subgraph_file].get("sub_graphs", [])
+                    if all_sgs:
+                        enriched_item["subgraphs"] = all_sgs
+
             enriched.append(enriched_item)
-        
+
         return enriched
 
 
@@ -1063,10 +1100,25 @@ class Phase03Orchestrator(BaseOrchestrator):
                     "counterexample_found": False,
                     "counterexample": None,
                 },
+                "phase2_5_reachability_analysis": {
+                    "summary": "Not performed due to early exit.",
+                    "entry_points": [],
+                    "data_flow_path": "",
+                    "validation_layers": [],
+                    "attacker_controlled": False,
+                    "classification": "unreachable",
+                    "notes": "",
+                },
                 "phase3_invariant_proving": {
                     "summary": "Not performed due to early exit.",
                     "proof_successful": False,
                     "guard_identified": None,
+                },
+                "phase3_5_scope_filtering": {
+                    "bug_bounty_eligible": False,
+                    "reason": f"Early exit: {reason}.",
+                    "recommendation": "",
+                    "notes": "",
                 },
             },
         }
@@ -1088,14 +1140,12 @@ class Phase04Orchestrator(BaseOrchestrator):
         # Verify required context files exist before processing
         for path in self._REQUIRED_FILES:
             if not Path(path).exists():
-                print(
-                    f"ERROR: {path} not found. "
-                    f"Phase 04 requires this file for severity calibration and spec cross-reference.",
-                    file=sys.stderr,
+                raise PhaseAbortError(
+                    f"{path} not found. "
+                    f"Phase 04 requires this file for severity calibration and spec cross-reference."
                 )
-                sys.exit(1)
 
-        items = []
+        items_dict: dict[str, dict] = {}  # keyed by property_id for dedup
         validation_warnings = 0
         for filepath in sorted(glob.glob("outputs/03_PARTIAL_*.json")):
             try:
@@ -1122,11 +1172,11 @@ class Phase04Orchestrator(BaseOrchestrator):
                                 f"    ⚠️  {filepath} item {prop_id}: {err}",
                                 file=sys.stderr,
                             )
-                    items.append({
+                    items_dict[prop_id] = {
                         "property_id": prop_id,
                         "audit_result": item,
                         "source_file": filepath,
-                    })
+                    }
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
 
@@ -1136,6 +1186,7 @@ class Phase04Orchestrator(BaseOrchestrator):
                 file=sys.stderr,
             )
 
+        items = list(items_dict.values())
         return items
 
     # Only these classifications need LLM review.

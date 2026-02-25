@@ -204,7 +204,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         context_fields=["property_id", "text", "type", "assertion", "severity",
                          "covers", "reachability", "exploitability", "_id_prefix"],
         output_fields=["property_id", "text", "type", "assertion", "severity",
-                        "covers", "reachability", "exploitability", "code_scope"],
+                        "covers", "reachability", "exploitability", "code_scope", "code_excerpt"],
     ),
 
     "03": PhaseConfig(

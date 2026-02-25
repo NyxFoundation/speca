@@ -726,7 +726,7 @@ class ClaudeRunner:
                         obj = json.loads(line)
                         if isinstance(obj, dict) and obj.get("type") == "result":
                             last_result = obj
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         continue
         except Exception:
             return None
@@ -774,7 +774,14 @@ class ClaudeRunner:
         """Build the prompt content with arguments."""
         with open(self.config.prompt_path) as f:
             prompt_content = f.read()
-        args = " ".join(f"{k.upper()}={v}" for k, v in kwargs.items())
+
+        def _quote(v: Any) -> str:
+            s = str(v)
+            if " " in s or '"' in s:
+                return f'"{s}"'
+            return s
+
+        args = " ".join(f"{k.upper()}={_quote(v)}" for k, v in kwargs.items())
         return f"{prompt_content}\n\n{args}"
 
     def _build_env(self, **kwargs) -> dict[str, str]:
@@ -789,9 +796,17 @@ class ClaudeRunner:
         for var in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):
             env.pop(var, None)
 
+        # Use batch-specific debug directory to avoid race conditions
+        # across parallel workers writing to .claude/debug/latest
+        w_id = kwargs.get("worker_id", 0)
+        b_idx = kwargs.get("iteration", 0)
+        debug_dir = Path(f".claude/debug/W{w_id}B{b_idx}")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
         env.update({
             "CLAUDE_CODE_PERMISSIONS": "bypassPermissions",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
+            "CLAUDE_CODE_DEBUG_DIR": str(debug_dir),
         })
         for key, value in kwargs.items():
             env[key.upper()] = str(value)
@@ -855,7 +870,7 @@ class ClaudeRunner:
         # Ensure prompt doesn't start with '-' which Claude CLI would
         # misinterpret as an option flag (e.g. YAML frontmatter '---').
         if prompt_content.lstrip().startswith("-"):
-            prompt_content = "\n" + prompt_content.lstrip()
+            prompt_content = "\n" + prompt_content
         cmd = [
             "claude",
             "--dangerously-skip-permissions",
@@ -895,10 +910,21 @@ class ClaudeRunner:
         stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
         debug_text = ""
-        debug_latest = Path(".claude/debug/latest")
+        debug_dir = Path(f".claude/debug/W{worker_id}B{batch_index}")
+        if not debug_dir.exists():
+            # Fall back to shared latest if batch-specific dir doesn't exist
+            debug_dir = Path(".claude/debug/latest")
         try:
-            if debug_latest.exists():
-                debug_text = debug_latest.read_text(errors="replace")
+            if debug_dir.exists():
+                if debug_dir.is_dir():
+                    # Read all files in the debug directory
+                    parts = []
+                    for p in sorted(debug_dir.iterdir()):
+                        if p.is_file():
+                            parts.append(p.read_text(errors="replace"))
+                    debug_text = "\n".join(parts)
+                else:
+                    debug_text = debug_dir.read_text(errors="replace")
         except Exception:
             pass
 
@@ -918,15 +944,6 @@ class ClaudeRunner:
         Handles both raw lists and wrapper dicts with a known result key
         (e.g. {"sub_graphs": [...]}).
         """
-        if self.config.phase_id == "02":
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
-            if isinstance(data, dict):
-                if self.config.result_key in data and isinstance(data[self.config.result_key], list):
-                    return [item for item in data[self.config.result_key] if isinstance(item, dict)]
-                return []
-            return []
-
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
 
@@ -970,7 +987,7 @@ class ClaudeRunner:
                         msg = json.loads(line)
                         if msg.get("type") == "result" and msg.get("result"):
                             result_text = msg["result"]
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         continue
         except Exception:
             return []
