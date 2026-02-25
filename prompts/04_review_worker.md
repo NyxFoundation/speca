@@ -41,11 +41,11 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     **Scope of defense-in-depth:** This principle applies to INPUT VALIDATION paths — code that
     processes data from external or untrusted sources (P2P messages, public RPC, gossip).
     For INTERNAL CONSTRUCTION code (functions that assemble/build data structures from
-    locally-computed values), the principle is weaker: a spec deviation in assembly logic
-    is a correctness bug whose security impact depends on whether an attacker can control
+    locally-computed values), the principle does not apply: a spec deviation in assembly logic
+    is a correctness bug, not a security vulnerability, because no attacker can control
     the construction inputs. Similarly, semi-trusted boundary issues (e.g., local IPC,
     internal engine APIs) require a compromised local component as a prerequisite, which
-    reduces severity.
+    places them outside the security model.
   </review_approach>
 
   <instructions>
@@ -127,20 +127,18 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
                the spec deviation. → Eligible for CONFIRMED_VULNERABILITY.
             b. **Code-intrinsic deviation**: The deviation is caused by the code's own
                construction/assembly logic regardless of attacker input. The code would produce
-               incorrect output even with perfectly valid input. → Use DOWNGRADED (severity
-               capped at Low; Medium only if the deviation causes deterministic data corruption
-               or state divergence independent of attacker action).
+               incorrect output even with perfectly valid input. → DISPUTED_FP. This is a
+               correctness bug, not a security vulnerability.
             c. **Semi-trusted boundary**: The deviation requires input from a semi-trusted
                source (local engine API, local IPC, co-located service). Exploitation requires
-               compromising a co-located component first. → Use DOWNGRADED (severity reduced
-               by 1-2 levels).
+               compromising a co-located component first. → DISPUTED_FP. The prerequisite
+               attack is outside the security model.
          4. **Record in reviewer_notes**:
             "Attacker control: [direct/none/indirect]. Path type: [attacker-triggered /
              code-intrinsic / semi-trusted]. [1 sentence justification]."
 
-         IMPORTANT: This step does NOT dismiss findings. A real spec deviation remains a finding
-         even on an internal path — but its VERDICT depends on attacker causation.
-         Code-intrinsic and semi-trusted deviations → DOWNGRADED (not DISPUTED_FP).
+         IMPORTANT: A spec deviation without attacker causation is a correctness bug, not a
+         security finding. Code-intrinsic and semi-trusted deviations → DISPUTED_FP.
 
        Step D. **Check Common FP Patterns**:
          1. Phantom concurrency bugs: Phase 03 claims unguarded access but synchronization exists
@@ -201,7 +199,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
          use DOWNGRADED or CONFIRMED_POTENTIAL instead.)
        - YES, but spec deviation is ambiguous → CONFIRMED_POTENTIAL
     6. Is the deviation code-intrinsic (Step C2 type b) or semi-trusted (Step C2 type c)?
-       → DOWNGRADED (real finding, reduced severity per Step C2 classification)
+       → DISPUTED_FP (correctness bug without attacker causation, not a security finding)
     7. Otherwise → CONFIRMED_POTENTIAL
     8. Cannot determine with available information → NEEDS_MANUAL_REVIEW
 
@@ -210,8 +208,9 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
       or "not exploitable" → verdict MUST be DISPUTED_FP.
       Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
     - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
-    - If 01e states a required behavior and the code violates it, DISPUTED_FP is forbidden
-      (use DOWNGRADED if the deviation is code-intrinsic or semi-trusted).
+    - If 01e states a required behavior and the code violates it via an attacker-triggered
+      path, DISPUTED_FP is forbidden. Code-intrinsic and semi-trusted deviations are
+      DISPUTED_FP regardless of 01e requirement (correctness bug, not security finding).
 
   4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
        ```json
@@ -255,8 +254,8 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     8. CONFIRMED_VULNERABILITY requires a concrete attacker-triggered attack path in
        reviewer_notes: "An attacker can trigger this via [entry point] by [action],
        causing [impact]." Absence of this sentence invalidates the verdict.
-    9. For code-intrinsic construction/assembly deviations: CONFIRMED_VULNERABILITY is
-       forbidden. Use DOWNGRADED (spec deviation is real but not attacker-triggered).
+    9. For code-intrinsic or semi-trusted deviations: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL,
+       and DOWNGRADED are all forbidden. Use DISPUTED_FP (correctness bug, not security finding).
   </quality_gates>
 </task>
 
