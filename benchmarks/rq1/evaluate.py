@@ -1,413 +1,328 @@
 #!/usr/bin/env python3
-"""RQ1 evaluation orchestration and aggregation."""
+"""RQ1 evaluation — recall + precision measurement.
+
+Recall  = (H/M/L issues detected by audit) / (total H/M/L issues in CSV).
+Precision = (true positive findings) / (total findings flagged as vuln).
+"""
 
 from __future__ import annotations
 
+import csv
 import json
-import random
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from benchmarks.bench_utils import normalize_bool
-from benchmarks.rq1.matchers import AuditItem, Issue, extract_audit_items, load_csv_issues, match_items
-from benchmarks.metrics.stats import bootstrap_rate, effect_size_cliffs_delta, mcnemar_exact
+from benchmarks.rq1.matchers import (
+    AuditItem,
+    Issue,
+    _truncate,
+    check_findings_fp,
+    extract_audit_items,
+    load_csv_issues,
+    match_issues,
+    reparse_cache,
+    reparse_fp_cache,
+)
 
 
 def parse_branches(value: str) -> list[str]:
-    parts = [item.strip() for item in value.split(",")]
-    return [p for p in parts if p]
+    return [p.strip() for p in value.split(",") if p.strip()]
 
 
 def sanitize_branch(branch: str) -> str:
     return branch.replace("/", "__")
 
 
-_CLIENT_ALIASES = {
-    "nimbus-eth2": ["nimbus", "nimbus-eth2", "status-im"],
-    "lighthouse": ["lighthouse", "sigp"],
-    "lodestar": ["lodestar", "chainsafe"],
-    "teku": ["teku", "consensys"],
-    "prysm": ["prysm", "prysmatic"],
-    "grandine": ["grandine"],
-}
-
-
-def load_target_info(results_dir: Path, sanitized_branch: str) -> dict:
-    target_path = results_dir / sanitized_branch / "TARGET_INFO.json"
-    if not target_path.exists():
-        return {}
-    try:
-        payload = json.loads(target_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def infer_client_keywords(branch: str, target_info: dict) -> list[str]:
-    keywords: set[str] = set()
-    match = re.match(r"^audit_([^_]+)", branch)
-    if match:
-        slug = match.group(1).strip().lower()
-        if slug:
-            keywords.add(slug)
-            keywords.update(re.split(r"[-_.]+", slug))
-            keywords.update(_CLIENT_ALIASES.get(slug, []))
-
-    repo = target_info.get("target_repo") if isinstance(target_info, dict) else None
-    if isinstance(repo, str) and repo:
-        repo_name = repo.split("/")[-1].strip().lower()
-        if repo_name:
-            keywords.add(repo_name)
-            keywords.update(re.split(r"[-_.]+", repo_name))
-            keywords.update(_CLIENT_ALIASES.get(repo_name, []))
-
-    keywords.discard("")
-    return sorted(keywords)
-
-
-def filter_issues_by_keywords(issues: list[Issue], keywords: list[str]) -> list[Issue]:
-    if not keywords:
-        return issues
-    lowered = [kw.lower() for kw in keywords if kw]
-    filtered: list[Issue] = []
-    for issue in issues:
-        text = f"{issue.title}\n{issue.description}".lower()
-        if any(kw in text for kw in lowered):
-            filtered.append(issue)
-    return filtered
-
-
-def extract_human_label(record: dict) -> bool | None:
-    for key in (
-        "label",
-        "is_valid_bug",
-        "is_bug",
-        "is_true_positive",
-        "valid",
-        "bug",
-        "verdict",
-    ):
-        if key in record:
-            value = normalize_bool(record.get(key))
-            if value is not None:
-                return value
-    return None
-
-
-def match_branch(
-    branch: str,
-    issues: list[Issue],
+def _load_all_findings(
+    branches: list[str],
     results_dir: Path,
-    use_llm: bool,
-    llm_max: int,
-    stage1_threshold: float,
-    stage2_threshold: float,
-    keyword_min_overlap: int,
-    candidate_top_k: int,
     audit_classifications: set[str] | None,
-    audit_include_bug_bounty: bool,
-) -> tuple[dict, list[AuditItem]]:
-    sanitized = sanitize_branch(branch)
-    branch_dir = results_dir / sanitized
-    files = sorted(branch_dir.glob("03_*.json"))
-    print(f"[rq1] {branch}: {len(files)} audit files found")
-    audit_items = extract_audit_items(
-        files,
-        classification_filter=audit_classifications,
-        include_bug_bounty=audit_include_bug_bounty,
-    )
-    print(f"[rq1] {branch}: {len(audit_items)} audit items after filter")
+) -> list[AuditItem]:
+    all_items: list[AuditItem] = []
+    for branch in branches:
+        sanitized = sanitize_branch(branch)
+        files = sorted((results_dir / sanitized).glob("03_*.json"))
+        items = extract_audit_items(files, classification_filter=audit_classifications, branch=branch)
+        all_items.extend(items)
+        print(f"[rq1] {branch}: {len(items)} findings")
+    print(f"[rq1] total findings: {len(all_items)}")
+    return all_items
 
-    matches, stage_counts, llm_calls = match_items(
-        audit_items,
-        issues,
-        use_llm,
-        llm_max,
-        stage1_threshold,
-        stage2_threshold,
-        keyword_min_overlap,
-        candidate_top_k,
-    )
 
-    total = len(audit_items)
-    matched_total = len(matches)
-    new_total = total - matched_total
-    overlap_rate = matched_total / total if total else 0.0
-    new_rate = new_total / total if total else 0.0
-    matched_issue_ids = {match["issue_id"] for match in matches.values() if match.get("issue_id")}
-    issues_matched_total = len(matched_issue_ids)
-    issue_recall = issues_matched_total / len(issues) if issues else 0.0
+def _run_recall(
+    csv_path: Path,
+    severity_filter: set[str],
+    all_items: list[AuditItem],
+    results_dir: Path,
+    reparse: bool,
+) -> tuple[dict[str, dict], int, list[Issue]]:
+    issues = load_csv_issues(csv_path, severity_filter=severity_filter)
+    print(f"[rq1] {len(issues)} H/M/L issues")
 
-    detail = {
-        "branch": branch,
-        "sanitized_branch": sanitized,
-        "items_total": total,
-        "matched_total": matched_total,
-        "new_total": new_total,
-        "overlap_rate": overlap_rate,
-        "new_rate": new_rate,
-        "issues_matched_total": issues_matched_total,
-        "issue_recall": issue_recall,
-        "stage_counts": stage_counts,
-        "llm_used": use_llm,
-        "llm_calls": llm_calls,
-        "matches": matches,
+    cache_path = results_dir / "llm_cache.jsonl"
+    if reparse and cache_path.exists():
+        matches, llm_calls = reparse_cache(cache_path)
+    else:
+        matches, llm_calls = match_issues(issues, all_items, cache_path)
+
+    return matches, llm_calls, issues
+
+
+def _invert_recall_matches(recall_matches: dict[str, dict]) -> dict[str, list[str]]:
+    """Invert {issue_id: {finding_id}} → {finding_id: [issue_ids]}."""
+    tp_by_finding: dict[str, list[str]] = {}
+    for issue_id, info in recall_matches.items():
+        fid = info.get("finding_id")
+        if fid:
+            tp_by_finding.setdefault(fid, []).append(issue_id)
+    return tp_by_finding
+
+
+# ── Label CSV generation ─────────────────────────────────────────────
+
+
+def _load_target_info(results_dir: Path) -> dict[str, dict]:
+    """Load TARGET_INFO.json per branch → {branch: {repo, commit}}."""
+    info: dict[str, dict] = {}
+    for sub in sorted(results_dir.iterdir()):
+        ti = sub / "TARGET_INFO.json"
+        if sub.is_dir() and ti.exists():
+            try:
+                data = json.loads(ti.read_text(encoding="utf-8"))
+                commit = str(data.get("target_commit") or "")
+                info[sub.name] = {
+                    "repo": str(data.get("target_repo") or ""),
+                    "commit": commit[:10] if commit else "",
+                }
+            except (json.JSONDecodeError, OSError):
+                pass
+    return info
+
+
+def generate_labels_csv(
+    all_items: list[AuditItem],
+    recall_matches: dict[str, dict],
+    csv_path: Path,
+    results_dir: Path,
+    reparse: bool,
+) -> Path:
+    """Generate findings_labels.csv with auto_label for each finding."""
+    tp_by_finding = _invert_recall_matches(recall_matches)
+    tp_finding_ids = set(tp_by_finding.keys())
+
+    # Unmatched findings need FP check
+    unmatched = [f for f in all_items if f.item_id not in tp_finding_ids]
+    print(f"[rq1] {len(tp_finding_ids)} TP findings, {len(unmatched)} to check for FP")
+
+    # Load ALL CSV issues (no severity filter) for FP detection
+    all_issues = load_csv_issues(csv_path)
+    non_hml = [i for i in all_issues if i.severity not in ("high", "medium", "low")]
+    print(f"[rq1] {len(non_hml)} non-H/M/L issues for FP check (invalid={sum(1 for i in non_hml if i.severity == 'invalid')}, info={sum(1 for i in non_hml if i.severity == 'info')})")
+
+    fp_cache = results_dir / "llm_cache_fp.jsonl"
+    if reparse and fp_cache.exists():
+        fp_matches = reparse_fp_cache(fp_cache)
+    else:
+        fp_matches = check_findings_fp(unmatched, non_hml, cache_path=fp_cache)
+
+    # Build issue lookup + target info
+    issue_map = {i.issue_id: i for i in all_issues}
+    target_info = _load_target_info(results_dir)
+
+    # Write CSV
+    out_path = results_dir / "findings_labels.csv"
+    rows: list[dict] = []
+    for item in all_items:
+        branch_info = target_info.get(sanitize_branch(item.branch), {})
+        row: dict[str, str] = {
+            "finding_id": item.item_id,
+            "repo": branch_info.get("repo", ""),
+            "commit": branch_info.get("commit", ""),
+            "classification": item.classification or "",
+            "text": _truncate(item.text, 200),
+            "auto_label": "",
+            "csv_issue_id": "",
+            "csv_severity": "",
+            "csv_title": "",
+            "human_label": "",
+        }
+        if item.item_id in tp_finding_ids:
+            issue_ids = tp_by_finding[item.item_id]
+            issue = issue_map.get(issue_ids[0])
+            row["auto_label"] = "tp"
+            row["csv_issue_id"] = issue_ids[0]
+            row["csv_severity"] = issue.severity if issue else ""
+            row["csv_title"] = issue.title if issue else ""
+        elif item.item_id in fp_matches:
+            fp = fp_matches[item.item_id]
+            issue = issue_map.get(fp["issue_id"])
+            severity = issue.severity if issue else fp.get("severity", "")
+            row["auto_label"] = f"tp_{severity}" if severity == "info" else f"fp_{severity}" if severity else "fp"
+            row["csv_issue_id"] = fp["issue_id"]
+            row["csv_severity"] = severity
+            row["csv_title"] = issue.title if issue else fp.get("title", "")
+        else:
+            row["auto_label"] = "unknown"
+        rows.append(row)
+
+    fieldnames = ["finding_id", "repo", "commit", "classification", "text", "auto_label",
+                  "csv_issue_id", "csv_severity", "csv_title", "human_label"]
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    # Summary
+    labels = [r["auto_label"] for r in rows]
+    print(f"[rq1] labels CSV: {out_path}")
+    _dont_care_count = labels.count('potential-info') + labels.count('fixed') + labels.count('partially_fixed')
+    print(f"[rq1]   tp={labels.count('tp')} tp_info={labels.count('tp_info')} fp_invalid={labels.count('fp_invalid')} dont_care={_dont_care_count} unknown={labels.count('unknown')}")
+    return out_path
+
+
+# ── Precision from labels CSV ────────────────────────────────────────
+
+
+def compute_precision(labels_csv_path: Path) -> dict:
+    """Compute precision metrics from findings_labels.csv.
+
+    Label semantics (TP/FP classification):
+      tp              — matched a H/M/L contest issue → TP
+      tp_info         — matched an info-level contest issue → TP
+      potential-info  — real issue rejected on contest rules (dup, not fixed) → TP
+      fixed           — real issue already fixed before audit → TP
+      partially_fixed — real issue partially fixed → TP
+      fp_invalid      — matched an invalid contest issue → FP
+      unknown         — no contest match found
+
+    Precision variants:
+      auto         — unknown excluded from denominator (only labeled findings)
+      conservative — unknown treated as FP
+    """
+    rows: list[dict] = []
+    with labels_csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+
+    total = len(rows)
+    auto_tp = sum(1 for r in rows if r.get("auto_label") == "tp")
+    auto_fp_invalid = sum(1 for r in rows if r.get("auto_label") == "fp_invalid")
+    auto_tp_info = sum(1 for r in rows if r.get("auto_label") == "tp_info")
+    auto_tp_other = sum(1 for r in rows if r.get("auto_label") in {"potential-info", "fixed", "partially_fixed"})
+    auto_unknown = sum(1 for r in rows if r.get("auto_label") == "unknown")
+
+    # Human labels (if filled in)
+    human_tp = sum(1 for r in rows if (r.get("human_label") or "").strip().lower() in ("tp", "true", "1", "yes"))
+    human_fp = sum(1 for r in rows if (r.get("human_label") or "").strip().lower() in ("fp", "false", "0", "no"))
+    human_unlabeled = auto_unknown - human_tp - human_fp
+
+    # All TP: tp + tp_info + potential-info + fixed + partially_fixed + human_tp
+    auto_tp_total = auto_tp + auto_tp_info + auto_tp_other
+    total_tp = auto_tp_total + human_tp
+
+    # Auto precision (unknown excluded from denominator)
+    auto_labeled = auto_tp_total + auto_fp_invalid
+    precision_auto = total_tp / auto_labeled if auto_labeled else 0.0
+
+    # Conservative precision (unknown treated as FP)
+    precision_conservative = total_tp / total if total else 0.0
+
+    return {
+        "total_findings": total,
+        "auto_tp": auto_tp,
+        "auto_fp_invalid": auto_fp_invalid,
+        "auto_tp_info": auto_tp_info,
+        "auto_tp_other": auto_tp_other,
+        "auto_unknown": auto_unknown,
+        "human_tp": human_tp,
+        "human_fp": human_fp,
+        "human_unlabeled": human_unlabeled,
+        "precision_auto": round(precision_auto, 4),
+        "precision_conservative": round(precision_conservative, 4),
+        "total_tp": total_tp,
     }
 
-    detail_path = results_dir / f"evaluation_{sanitized}.json"
-    detail_path.write_text(json.dumps(detail, indent=2), encoding="utf-8")
-    print(
-        f"[rq1] {branch}: matched {matched_total}/{total} items "
-        f"(issues matched {issues_matched_total}/{len(issues)})"
-    )
-    return detail, audit_items
+
+# ── Main evaluation ─────────────────────────────────────────────────
 
 
-def evaluate_branches(
+def evaluate(
     branches: list[str],
     csv_path: Path,
     results_dir: Path,
-    use_llm: bool,
-    llm_max: int,
-    stage1_threshold: float,
-    stage2_threshold: float,
-    keyword_min_overlap: int,
-    candidate_top_k: int,
-    baseline_dir: Path | None,
-    bootstrap_samples: int,
-    bootstrap_seed: int,
-    ci_level: float,
-    human_scope: str,
-    human_sample_size: int,
-    human_sample_out: Path | None,
-    human_labels: Path | None,
-    human_labels_report: Path | None,
-    metadata_path: Path | None,
+    severity_filter: set[str],
     audit_classifications: set[str] | None,
-    audit_include_bug_bounty: bool,
-    client_filter: str,
-    client_keywords: list[str],
+    metadata_path: Path | None = None,
+    reparse: bool = False,
+    label: bool = False,
 ) -> dict:
-    issues = load_csv_issues(csv_path)
-    issue_map = {issue.issue_id: issue for issue in issues}
+    all_items = _load_all_findings(branches, results_dir, audit_classifications)
+    recall_matches, llm_calls, issues = _run_recall(
+        csv_path, severity_filter, all_items, results_dir, reparse,
+    )
 
-    summary = {
-        "dataset": {"path": str(csv_path), "issues": len(issues)},
+    # Severity breakdown
+    severity_breakdown = {}
+    for sev in sorted(severity_filter):
+        sev_issues = [i for i in issues if i.severity == sev]
+        sev_matched = sum(1 for i in sev_issues if i.issue_id in recall_matches)
+        severity_breakdown[sev] = {
+            "total": len(sev_issues),
+            "matched": sev_matched,
+            "recall": round(sev_matched / len(sev_issues), 4) if sev_issues else 0.0,
+        }
+
+    recall = round(len(recall_matches) / len(issues), 4) if issues else 0.0
+
+    summary: dict = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "branches": {},
-        "match_config": {
-            "stage1_threshold": stage1_threshold,
-            "stage2_threshold": stage2_threshold,
-            "keyword_min_overlap": keyword_min_overlap,
-            "candidate_top_k": candidate_top_k,
-            "llm_max": llm_max,
-            "llm_used": use_llm,
-        },
-        "audit_item_filter": {
-            "classifications": sorted(audit_classifications) if audit_classifications else None,
-            "include_bug_bounty": audit_include_bug_bounty,
-        },
-        "issue_filter": {
-            "mode": client_filter,
-            "keywords": client_keywords if client_keywords else None,
-        },
+        "dataset": {"path": str(csv_path), "issues_csv_total": len(load_csv_issues(csv_path))},
+        "severity_filter": sorted(severity_filter),
+        "audit_classifications": sorted(audit_classifications) if audit_classifications else None,
+        "branches": [sanitize_branch(b) for b in branches],
+        "audit_items_total": len(all_items),
+        "issues_total": len(issues),
+        "issues_matched": len(recall_matches),
+        "recall": recall,
+        "severity_breakdown": severity_breakdown,
+        "llm_calls": llm_calls,
+        "matches": recall_matches,
+        "missed_issues": [
+            {
+                "issue_id": i.issue_id,
+                "severity": i.severity,
+                "title": i.title,
+            }
+            for i in issues
+            if i.issue_id not in recall_matches
+        ],
     }
+
+    # Generate labels CSV (FP detection)
+    if label:
+        generate_labels_csv(all_items, recall_matches, csv_path, results_dir, reparse)
+
+    # Compute precision if labels CSV exists
+    labels_csv = results_dir / "findings_labels.csv"
+    if labels_csv.exists():
+        prec = compute_precision(labels_csv)
+        summary["precision"] = prec
+        # F1 (using auto precision — unknown excluded from denominator)
+        p = prec["precision_auto"]
+        if p > 0 and recall > 0:
+            summary["f1"] = round(2 * p * recall / (p + recall), 4)
+        else:
+            summary["f1"] = 0.0
+        print(f"[rq1] precision_auto={p:.1%} precision_conservative={prec['precision_conservative']:.1%} f1={summary['f1']:.3f}")
+
     if metadata_path and metadata_path.exists():
         try:
             summary["run_metadata"] = json.loads(metadata_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            summary["run_metadata"] = {"error": "invalid_json", "path": str(metadata_path)}
-
-    human_candidates: list[dict] = []
-    human_lookup: dict[tuple[str, str], dict] = {}
-
-    overall_matched_issue_ids: set[str] = set()
-    overall_issue_candidates: set[str] = set()
-
-    for branch in branches:
-        sanitized = sanitize_branch(branch)
-        target_info = load_target_info(results_dir, sanitized)
-        branch_keywords = client_keywords
-        if client_filter == "auto" and not client_keywords:
-            branch_keywords = infer_client_keywords(branch, target_info)
-
-        filtered_issues = issues
-        if client_filter != "none" and branch_keywords:
-            filtered_issues = filter_issues_by_keywords(issues, branch_keywords)
-        print(f"[rq1] {branch}: issues in scope {len(filtered_issues)} (filter={client_filter})")
-
-        overall_issue_candidates.update(issue.issue_id for issue in filtered_issues)
-        detail, audit_items = match_branch(
-            branch,
-            filtered_issues,
-            results_dir,
-            use_llm,
-            llm_max,
-            stage1_threshold,
-            stage2_threshold,
-            keyword_min_overlap,
-            candidate_top_k,
-            audit_classifications,
-            audit_include_bug_bounty,
-        )
-
-        matched_flags = [item.item_id in detail["matches"] for item in audit_items]
-        overlap_ci = bootstrap_rate(matched_flags, samples=bootstrap_samples, seed=bootstrap_seed, ci_level=ci_level)
-        new_ci = bootstrap_rate(
-            [not flag for flag in matched_flags],
-            samples=bootstrap_samples,
-            seed=bootstrap_seed,
-            ci_level=ci_level,
-        )
-
-        baseline_stats = {}
-        if baseline_dir:
-            baseline_path = baseline_dir / f"evaluation_{detail['sanitized_branch']}.json"
-            if baseline_path.exists():
-                baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-                baseline_matches = baseline.get("matches", {})
-                b = c = 0
-                n = 0
-                for item in audit_items:
-                    current_matched = item.item_id in detail["matches"]
-                    baseline_matched = item.item_id in baseline_matches
-                    n += 1
-                    if current_matched and not baseline_matched:
-                        b += 1
-                    elif not current_matched and baseline_matched:
-                        c += 1
-                p_value = mcnemar_exact(b, c)
-                delta, magnitude = effect_size_cliffs_delta(b, c, n)
-                baseline_stats = {
-                    "baseline_path": str(baseline_path),
-                    "n": n,
-                    "discordant": {"current_only_matched": b, "baseline_only_matched": c},
-                    "mcnemar_p": p_value,
-                    "effect_size": {"cliffs_delta": delta, "magnitude": magnitude},
-                }
-
-        summary["branches"][branch] = {
-            "items_total": detail["items_total"],
-            "matched_total": detail["matched_total"],
-            "new_total": detail["new_total"],
-            "overlap_rate": detail["overlap_rate"],
-            "new_rate": detail["new_rate"],
-            "issues_matched_total": detail["issues_matched_total"],
-            "issue_recall": detail["issue_recall"],
-            "issues_total": len(filtered_issues),
-            "overlap_rate_ci": overlap_ci,
-            "new_rate_ci": new_ci,
-            "stage_counts": detail["stage_counts"],
-            "llm_used": detail["llm_used"],
-            "llm_calls": detail["llm_calls"],
-            "issue_filter": {
-                "mode": client_filter,
-                "keywords": branch_keywords if branch_keywords else None,
-                "target_repo": target_info.get("target_repo") if isinstance(target_info, dict) else None,
-            },
-        }
-        if baseline_stats:
-            summary["branches"][branch]["baseline_comparison"] = baseline_stats
-
-        overall_matched_issue_ids.update(
-            match["issue_id"] for match in detail["matches"].values() if match.get("issue_id")
-        )
-
-        for item in audit_items:
-            matched = item.item_id in detail["matches"]
-            if human_scope == "new_only" and matched:
-                continue
-            issue_id = detail["matches"].get(item.item_id, {}).get("issue_id")
-            issue = issue_map.get(issue_id) if issue_id else None
-            record = {
-                "branch": branch,
-                "item_id": item.item_id,
-                "matched": matched,
-                "stage": detail["matches"].get(item.item_id, {}).get("stage") if matched else None,
-                "issue_id": issue_id,
-                "issue_title": issue.title if issue else None,
-                "issue_description": issue.description if issue else None,
-                "description": item.description,
-                "snippet": item.snippet,
-                "file": item.file,
-                "line": item.line,
-                "text": item.text,
-            }
-            human_candidates.append(record)
-            human_lookup[(branch, item.item_id)] = record
-
-    summary["issues_matched_total"] = len(overall_matched_issue_ids)
-    summary["issues_total"] = len(overall_issue_candidates) if overall_issue_candidates else len(issues)
-    summary["issue_recall"] = (
-        len(overall_matched_issue_ids) / summary["issues_total"] if summary["issues_total"] else 0.0
-    )
+            summary["run_metadata"] = {"error": "invalid_json"}
 
     summary_path = results_dir / "evaluation_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-
-    if human_sample_size > 0 and human_candidates:
-        rng = random.Random(bootstrap_seed)
-        sample_size = min(human_sample_size, len(human_candidates))
-        sampled = rng.sample(human_candidates, k=sample_size)
-        out_path = human_sample_out or results_dir / "human_eval_sample.jsonl"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as handle:
-            for record in sampled:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    if human_labels and human_labels.exists():
-        labeled = 0
-        positives = 0
-        labels = []
-        invalid = []
-        for line in human_labels.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                invalid.append({"reason": "invalid_json"})
-                continue
-            branch = record.get("branch")
-            item_id = record.get("item_id")
-            if not branch or not item_id:
-                invalid.append({"reason": "missing_branch_or_item_id", "record": record})
-                continue
-            label = extract_human_label(record)
-            if label is None:
-                invalid.append({"reason": "missing_or_invalid_label", "record": record})
-                continue
-            if (branch, item_id) not in human_lookup:
-                invalid.append({"reason": "unknown_item_id", "record": record})
-                continue
-            labeled += 1
-            if label:
-                positives += 1
-            labels.append(label)
-        human_stats = {
-            "scope": human_scope,
-            "labeled_total": labeled,
-            "true_bug": positives,
-            "precision": positives / labeled if labeled else 0.0,
-            "precision_ci": bootstrap_rate(labels, bootstrap_samples, bootstrap_seed, ci_level),
-            "bootstrap": {
-                "samples": bootstrap_samples,
-                "ci_level": ci_level,
-                "seed": bootstrap_seed,
-            },
-            "invalid_label_rows": len(invalid),
-        }
-        summary["human_eval"] = human_stats
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        if human_labels_report:
-            report_path = human_labels_report
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report = {
-                "labels_path": str(human_labels),
-                "invalid_count": len(invalid),
-                "invalid_samples": invalid[:50],
-            }
-            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
+    print(f"[rq1] recall: {len(recall_matches)}/{len(issues)} = {recall:.1%}")
     return summary

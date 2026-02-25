@@ -22,20 +22,24 @@ def fmt_seconds(value: float | int | None) -> str:
         return "n/a"
     if seconds < 60:
         return f"{seconds:.0f}s"
-    minutes = seconds / 60
-    return f"{minutes:.1f}m"
+    return f"{seconds / 60:.1f}m"
 
 
-def build_branch_env_table(summary: dict, collection: dict) -> list[str]:
+def build_branch_env_table(branches: list[str], collection: dict) -> list[str]:
     manifests = {entry.get("branch"): entry for entry in collection.get("branches", [])}
     lines = [
-        "| Branch | Commit | Phase 03 Runtime | Tokens (in/out/total) | Num Turns | Files |",
+        "| Branch | Commit | Phase 03 Runtime | Tokens (in/out/total) | Turns | Files |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for branch in summary.get("branches", {}).keys():
+    for branch in branches:
         manifest = manifests.get(branch, {})
         target_info = manifest.get("target_info") or {}
-        commit = target_info.get("target_commit_short") or manifest.get("commit_short") or manifest.get("commit") or "n/a"
+        commit = (
+            target_info.get("target_commit_short")
+            or manifest.get("commit_short")
+            or manifest.get("commit")
+            or "n/a"
+        )
         timing = manifest.get("phase_log_timing") or {}
         runtime = fmt_seconds(timing.get("estimated_total_seconds"))
         num_turns = timing.get("num_turns")
@@ -51,115 +55,141 @@ def build_branch_env_table(summary: dict, collection: dict) -> list[str]:
     return lines
 
 
-def build_results_table(summary: dict) -> list[str]:
-    lines = [
-        "| Branch | Items | Matched | Overlap | Issues | Issues Matched | Issue Recall | New | LLM Calls |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ]
-    for branch, stats in summary.get("branches", {}).items():
-        overlap = f"{stats.get('overlap_rate', 0.0):.3f}"
-        recall = f"{stats.get('issue_recall', 0.0):.3f}"
-        lines.append(
-            "| {branch} | {items_total} | {matched_total} | {overlap} | {issues_total} | {issues_matched_total} | {recall} | {new_total} | {llm_calls} |".format(
-                branch=branch,
-                items_total=stats.get("items_total", 0),
-                matched_total=stats.get("matched_total", 0),
-                overlap=overlap,
-                issues_total=stats.get("issues_total", 0),
-                issues_matched_total=stats.get("issues_matched_total", 0),
-                recall=recall,
-                new_total=stats.get("new_total", 0),
-                llm_calls=stats.get("llm_calls", 0),
-            )
-        )
-    return lines
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate markdown summary for RQ1 evaluation")
     parser.add_argument("--summary", required=True, help="Path to evaluation_summary.json")
     parser.add_argument("--collection", default="", help="Path to collection_summary.json")
+    parser.add_argument("--labels-csv", default="", help="Path to findings_labels.csv (recomputes precision)")
     parser.add_argument("--output", required=True, help="Output markdown path")
     args = parser.parse_args()
 
-    summary = load_json(Path(args.summary))
+    summary_path = Path(args.summary)
+    summary = load_json(summary_path)
     collection = load_json(Path(args.collection)) if args.collection else {}
     metadata = summary.get("run_metadata", {})
-    match_config = summary.get("match_config", {})
 
-    lines = []
+    # Recompute precision from labels CSV (picks up human labels)
+    if args.labels_csv:
+        labels_path = Path(args.labels_csv)
+        if labels_path.exists():
+            from benchmarks.rq1.evaluate import compute_precision
+
+            prec = compute_precision(labels_path)
+            summary["precision"] = prec
+            recall = summary.get("recall", 0.0)
+            if prec["precision_full"] > 0 and recall > 0:
+                summary["f1"] = round(
+                    2 * prec["precision_full"] * recall / (prec["precision_full"] + recall), 4,
+                )
+            else:
+                summary["f1"] = 0.0
+            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    lines: list[str] = []
     lines.append("# RQ1 Evaluation Report")
     lines.append("")
     lines.append(f"- Generated at (UTC): {summary.get('generated_at', 'unknown')}")
     dataset = summary.get("dataset", {})
-    lines.append(f"- Dataset: {dataset.get('path', 'unknown')} ({dataset.get('issues', 0)} issues)")
-    filtered_total = summary.get("issues_total")
-    if filtered_total and filtered_total != dataset.get("issues", 0):
-        lines.append(f"- Filtered issues (union of branches): {filtered_total}")
-    audit_filter = summary.get("audit_item_filter", {})
-    if audit_filter:
-        lines.append(
-            "- Audit item filter: "
-            + ", ".join(
-                f"{key}={value}"
-                for key, value in audit_filter.items()
-                if value is not None and value != ""
-            )
-        )
-    issue_filter = summary.get("issue_filter", {})
-    if issue_filter:
-        lines.append(
-            "- Issue filter: "
-            + ", ".join(
-                f"{key}={value}"
-                for key, value in issue_filter.items()
-                if value is not None and value != ""
-            )
-        )
+    lines.append(f"- Dataset: {dataset.get('path', 'unknown')} ({dataset.get('issues_csv_total', '?')} issues in CSV)")
+    lines.append(f"- Severity filter: {', '.join(summary.get('severity_filter', []))}")
+    lines.append(f"- Audit classifications: {', '.join(summary.get('audit_classifications', []))}")
+    lines.append(f"- Branches: {len(summary.get('branches', []))}")
+    lines.append(f"- Audit findings: {summary.get('audit_items_total', 0)}")
+    lines.append(f"- LLM calls: {summary.get('llm_calls', 0)}")
     lines.append("")
 
+    # Environment
     lines.append("## Experiment Environment")
     ai = metadata.get("ai", {})
     ai_name = ai.get("name") or metadata.get("ai_name") or "unknown"
     ai_version = ai.get("version") or metadata.get("ai_version") or "unknown"
     lines.append(f"- AI: {ai_name} ({ai_version})")
+    branches = summary.get("branches", [])
     if collection:
-        lines.extend(build_branch_env_table(summary, collection))
-    else:
-        lines.append("- Targets: collection_summary.json not provided")
+        lines.extend(build_branch_env_table(branches, collection))
     lines.append("")
 
-    lines.append("## Matching & Recall")
-    lines.append(
-        "- Keyword matching against CSV issues selects candidate issues; LLM judges semantic similarity for final match."
-    )
-    lines.append(
-        "- Recall definition: issue_recall = unique_issue_ids_matched / total_issues_in_scope (per branch)."
-    )
-    lines.append(
-        "- unique_issue_ids_matched is computed from matched audit items' issue_id values."
-    )
-    if match_config:
-        lines.append(
-            "- Match config: "
-            + ", ".join(
-                f"{key}={value}"
-                for key, value in match_config.items()
-                if value is not None and value != ""
-            )
-        )
+    # Recall
+    issues_total = summary.get("issues_total", 0)
+    issues_matched = summary.get("issues_matched", 0)
+    recall = summary.get("recall", 0.0)
+    lines.append("## Recall")
+    lines.append(f"**{issues_matched}/{issues_total} = {recall:.1%}**")
     lines.append("")
 
-    lines.append("## Results")
-    lines.extend(build_results_table(summary))
-    lines.append("")
-    if "issue_recall" in summary:
-        lines.append(
-            f"- Overall issue recall (union of branches): {summary.get('issue_recall', 0.0):.3f} "
-            f"({summary.get('issues_matched_total', 0)}/{summary.get('issues_total', dataset.get('issues', 0))})"
-        )
-    lines.append("")
+    # Severity breakdown
+    breakdown = summary.get("severity_breakdown", {})
+    if breakdown:
+        lines.append("| Severity | Total | Matched | Recall |")
+        lines.append("| --- | --- | --- | --- |")
+        for sev in ["high", "medium", "low"]:
+            stats = breakdown.get(sev, {})
+            total = stats.get("total", 0)
+            matched = stats.get("matched", 0)
+            sev_recall = stats.get("recall", 0.0)
+            lines.append(f"| {sev.capitalize()} | {total} | {matched} | {sev_recall:.1%} |")
+        lines.append("")
 
+    # Match details
+    matches = summary.get("matches", {})
+    if matches:
+        lines.append("## Matched Issues")
+        lines.append("| Issue # | Finding | Confidence |")
+        lines.append("| --- | --- | --- |")
+        for issue_id, info in sorted(matches.items(), key=lambda x: x[0]):
+            finding_id = info.get("finding_id") or "?"
+            confidence = info.get("confidence", 0.0)
+            lines.append(f"| #{issue_id} | {finding_id} | {confidence:.2f} |")
+        lines.append("")
+
+    # Precision
+    prec = summary.get("precision", {})
+    if prec:
+        lines.append("## Precision")
+        total_findings = prec.get("total_findings", 0)
+        auto_tp = prec.get("auto_tp", 0)
+        auto_fp_invalid = prec.get("auto_fp_invalid", 0)
+        auto_tp_info = prec.get("auto_tp_info", 0)
+        auto_unknown = prec.get("auto_unknown", 0)
+        human_tp = prec.get("human_tp", 0)
+        human_fp = prec.get("human_fp", 0)
+        precision_full = prec.get("precision_full", 0.0)
+        precision_conservative = prec.get("precision_conservative", 0.0)
+        lines.append(f"**Precision (labeled): {precision_full:.1%}** | Conservative (unknown=FP): {precision_conservative:.1%}")
+        lines.append("")
+        lines.append("| Category | Count | Precision role |")
+        lines.append("| --- | --- | --- |")
+        lines.append(f"| Total findings | {total_findings} | |")
+        lines.append(f"| TP — H/M/L match (auto) | {auto_tp} | TP |")
+        lines.append(f"| TP — info match (auto) | {auto_tp_info} | TP |")
+        lines.append(f"| FP — invalid match (auto) | {auto_fp_invalid} | FP |")
+        lines.append(f"| TP (human) | {human_tp} | TP |")
+        lines.append(f"| FP (human) | {human_fp} | FP |")
+        lines.append(f"| Unknown (unlabeled) | {auto_unknown} | — |")
+        lines.append("")
+
+    # F1
+    f1 = summary.get("f1")
+    if f1 is not None:
+        lines.append("## F1 Score")
+        lines.append(f"**F1 = {f1:.3f}** (recall={recall:.1%}, precision={prec.get('precision_full', 0.0):.1%})")
+        lines.append("")
+
+    # Missed issues
+    missed = summary.get("missed_issues", [])
+    if missed:
+        lines.append("## Missed Issues")
+        lines.append("| Issue # | Severity | Title |")
+        lines.append("| --- | --- | --- |")
+        for m in missed:
+            lines.append(f"| #{m.get('issue_id', '?')} | {(m.get('severity') or '').capitalize()} | {m.get('title', '')} |")
+        lines.append("")
+    elif issues_total > issues_matched:
+        lines.append("## Missed Issues")
+        lines.append(f"{issues_total - issues_matched} issue(s) not matched by any audit finding.")
+        lines.append("")
+
+    # Metadata
     lines.append("## Raw Metadata")
     lines.append("```json")
     lines.append(json.dumps(metadata, indent=2))

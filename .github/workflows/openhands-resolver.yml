@@ -64,6 +64,10 @@ permissions:
 
 jobs:
   auto-fix:
+    # NOTE: 'workflow_call' bypass: when this workflow is invoked via workflow_call,
+    # github.event_name == 'workflow_call' is true, which bypasses the label/comment
+    # checks below (workflow_call events don't carry labels or comments).
+    # This is intentional — it allows the caller workflow to trigger unconditionally.
     if: |
       github.event_name == 'workflow_call' ||
       github.event.label.name == 'fix-me' ||
@@ -119,22 +123,34 @@ jobs:
         env:
           REVIEW_BODY: ${{ github.event.review.body || '' }}
         run: |
+          ISSUE_NUMBER=""
+          ISSUE_TYPE=""
+
           # PR events
           if [ -n "${{ github.event.pull_request.number }}" ]; then
-            echo "ISSUE_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+            ISSUE_NUMBER="${{ github.event.pull_request.number }}"
+            ISSUE_TYPE="pr"
           # PR review events
           elif [ -n "$REVIEW_BODY" ]; then
-            echo "ISSUE_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+            ISSUE_NUMBER="${{ github.event.pull_request.number }}"
+            ISSUE_TYPE="pr"
           # Issue comment that references a PR
           elif [ -n "${{ github.event.issue.pull_request }}" ]; then
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
-            echo "ISSUE_TYPE=pr" >> $GITHUB_ENV
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TYPE="pr"
           else
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_ENV
-            echo "ISSUE_TYPE=issue" >> $GITHUB_ENV
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TYPE="issue"
           fi
+
+          # Guard against empty/missing issue number (e.g. workflow_call without event context)
+          if [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "" ]; then
+            echo "::error::Could not determine issue/PR number from event context."
+            exit 1
+          fi
+
+          echo "ISSUE_NUMBER=${ISSUE_NUMBER}" >> $GITHUB_ENV
+          echo "ISSUE_TYPE=${ISSUE_TYPE}" >> $GITHUB_ENV
 
           if [ -n "$REVIEW_BODY" ]; then
             echo "COMMENT_ID=${{ github.event.review.id || 'None' }}" >> $GITHUB_ENV
@@ -281,7 +297,7 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_API_VERSION: ${{ inputs.LLM_API_VERSION }}
           PYTHONPATH: ""
-          SSL_CERT_FILE: /etc/ssl/certs/ca-bundle.crt
+          # Let the system use its default SSL cert path (Ubuntu vs RHEL differ)
         run: |
           cd "$RUN_DIR"
           uvx --python 3.12 --from openhands-ai \
@@ -303,7 +319,7 @@ jobs:
           fi
 
       - name: Upload output.jsonl as artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: resolver-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.ISSUE_NUMBER }}-${{ env.RUN_KEY }}
@@ -324,7 +340,7 @@ jobs:
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_API_VERSION: ${{ inputs.LLM_API_VERSION }}
           PYTHONPATH: ""
-          SSL_CERT_FILE: /etc/ssl/certs/ca-bundle.crt
+          # Let the system use its default SSL cert path (Ubuntu vs RHEL differ)
         run: |
           set +e
           cd "$RUN_DIR"
@@ -369,7 +385,7 @@ jobs:
           script: |
             const fs = require('fs');
             const issueNumber = Number(process.env.ISSUE_NUMBER);
-            const resolutionSuccess = process.env.RESOLUTION_SUCCESS === 'true';
+            const resolutionSuccess = '${{ steps.check_result.outputs.RESOLUTION_SUCCESS }}' === 'true';
             const prNumberFile = process.env.PR_NUMBER_TXT;
             const branchNameFile = process.env.BRANCH_NAME_TXT;
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field, model_validator
 class Severity(str, Enum):
     """Severity levels used across the pipeline.
 
-    Members are ordered from most to least severe so that numeric
-    comparison works:  ``Severity.CRITICAL < Severity.HIGH`` is ``True``.
+    Members are ordered from most to least severe so that severity
+    comparison works:  ``Severity.CRITICAL > Severity.HIGH`` is ``True``.
     The ``rank`` property returns a numeric value (lower = more severe)
     for use in threshold comparisons.
     """
@@ -100,11 +100,18 @@ class BugBountyScope(str, Enum):
 
 
 class AuditClassification(str, Enum):
-    """Final classification from the formal audit."""
+    """Final classification from the formal audit.
+
+    Includes both the original schema values and the Phase 03 prompt output values.
+    """
     VULNERABLE = "vulnerable"
+    VULNERABILITY = "vulnerability"
     SAFE = "safe"
+    NOT_A_VULNERABILITY = "not-a-vulnerability"
     INCONCLUSIVE = "inconclusive"
+    POTENTIAL_VULNERABILITY = "potential-vulnerability"
     OUT_OF_SCOPE = "out-of-scope"
+    INFORMATIONAL = "informational"
 
 
 class ReviewVerdict(str, Enum):
@@ -360,7 +367,14 @@ class Phase02Partial(BaseModel):
     @model_validator(mode="after")
     def _merge_checklist_keys(self) -> "Phase02Partial":
         """Merge checklist_items into checklist for consistency."""
-        if self.checklist_items and not self.checklist:
+        if self.checklist_items and self.checklist:
+            # Merge both lists, deduplicating by check_id
+            seen_ids = {item.check_id for item in self.checklist}
+            for item in self.checklist_items:
+                if item.check_id not in seen_ids:
+                    self.checklist.append(item)
+                    seen_ids.add(item.check_id)
+        elif self.checklist_items and not self.checklist:
             self.checklist = self.checklist_items
         return self
 
@@ -435,20 +449,30 @@ class AuditTrail(BaseModel):
 
 class AuditMapItem(BaseModel):
     """A single audit result from Phase 03."""
+    model_config = ConfigDict(populate_by_name=True)
+
     property_id: str
-    check_id: str = ""  # Kept for downstream compatibility (populated with property_id)
-    code_scope: CodeScope = Field(default_factory=CodeScope)  # Type-safe code scope
-    code_snippet: str = ""
+    check_id: str = Field(default="", alias="checklist_id")  # Accepts both check_id and checklist_id
+    code_scope: CodeScope | str = Field(default_factory=CodeScope, alias="code_path")  # Accepts CodeScope or code_path string
+    code_snippet: str = Field(default="", alias="proof_trace")  # Accepts both code_snippet and proof_trace
     classification: str = ""
     bug_bounty_eligible: bool = False
     summary: str = ""
+    attack_scenario: str = ""  # Additional field from Phase 03 prompt output
     audit_trail: AuditTrail = Field(default_factory=AuditTrail)
 
     @model_validator(mode="after")
-    def _sync_check_id(self) -> "AuditMapItem":
-        """Populate check_id from property_id for downstream compatibility."""
+    def _sync_fields(self) -> "AuditMapItem":
+        """Populate check_id from property_id and coerce code_scope string to CodeScope."""
         if not self.check_id and self.property_id:
             self.check_id = self.property_id
+        # Coerce code_path string into a CodeScope object
+        if isinstance(self.code_scope, str):
+            path_str = self.code_scope
+            self.code_scope = CodeScope(
+                locations=[CodeLocation(file=path_str, symbol="", line_range=LineRange(start=0, end=0))] if path_str else [],
+                resolution_status="resolved" if path_str else "",
+            )
         return self
 
 
@@ -473,7 +497,7 @@ class ReviewedItem(BaseModel):
     property_id: str = ""
     check_id: str = ""  # Kept for downstream compatibility
     original_finding: OriginalFinding = Field(default_factory=OriginalFinding)
-    review_verdict: str = ""
+    review_verdict: ReviewVerdict | str = ""
     adjusted_severity: str = ""
     reviewer_notes: str = ""
     final_recommendation: str = ""

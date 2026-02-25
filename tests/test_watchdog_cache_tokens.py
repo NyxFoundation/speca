@@ -36,7 +36,8 @@ def test_extract_token_usage_with_cache_fields(tmp_path: Path):
     assert usage["cache_read_tokens"] == 250  # 100 + 150
     assert usage["cache_creation_tokens"] == 75  # 50 + 25
     assert usage["output_tokens"] == 12       # 5 + 7
-    assert usage["num_turns"] == 2
+    # BUG-ORC15: turns = messages // 2 (a turn is a request-response pair)
+    assert usage["num_turns"] == 1
 
 
 def test_extract_token_usage_dedup_same_message(tmp_path: Path):
