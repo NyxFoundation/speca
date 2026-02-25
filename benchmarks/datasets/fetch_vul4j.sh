@@ -54,19 +54,21 @@ if [ -n "${JSON_FOUND}" ]; then
   echo "Found JSON (not JSONL): ${JSON_FOUND}"
   echo "Attempting to convert to JSONL..."
   # If it's a JSON array, convert each element to a line
-  python3 -c "
+  python3 - "${JSON_FOUND}" "${EXPORT_JSONL}" <<'PYEOF'
 import json, sys
-with open('${JSON_FOUND}') as f:
+json_path = sys.argv[1]
+export_path = sys.argv[2]
+with open(json_path) as f:
     data = json.load(f)
 if isinstance(data, list):
-    with open('${EXPORT_JSONL}', 'w') as out:
+    with open(export_path, 'w') as out:
         for item in data:
             out.write(json.dumps(item) + '\n')
-    print(f'Converted {len(data)} records to ${EXPORT_JSONL}')
+    print(f'Converted {len(data)} records to {export_path}')
 else:
     print('JSON is not an array, cannot auto-convert.', file=sys.stderr)
     sys.exit(1)
-" 2>&1
+PYEOF
   if [ -f "${EXPORT_JSONL}" ]; then
     mkdir -p "$(dirname "${CACHE_EXPORT}")"
     cp -f "${EXPORT_JSONL}" "${CACHE_EXPORT}"

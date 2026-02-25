@@ -65,6 +65,13 @@ def extract_ground_truth(record: dict) -> bool | None:
         normalized = normalize_bool(value)
         if normalized is not None:
             return normalized
+        # BUG-BEN14: Handle unexpected non-0/1 integer values explicitly
+        import logging
+        logging.getLogger(__name__).warning(
+            "vul_type has unexpected value %r (type=%s), treating as unknown",
+            value, type(value).__name__,
+        )
+        return None
     return extract_label(record)
 
 
@@ -354,7 +361,7 @@ def evaluate_dataset(dataset_name: str, dataset_path: Path) -> dict:
                 "n": n,
                 "discordant": {"security_agent_only_correct": b, "baseline_only_correct": c},
                 "mcnemar_p": p_value,
-                "effect_size": {"cliffs_delta": delta, "magnitude": magnitude},
+                "effect_size": {"paired_proportion_diff": delta, "magnitude": magnitude},
                 "metric_diffs": diffs,
                 "bootstrap": {
                     "samples": BOOTSTRAP_SAMPLES,

@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from orchestrator import create_orchestrator
+from orchestrator.base import PhaseAbortError
 from orchestrator.config import get_phase_config, get_phase_chain, PHASE_CONFIGS
 from orchestrator.resume import ResumeManager
 
@@ -186,6 +187,9 @@ async def run_phase(
 
         await orchestrator.run()
         return True
+    except PhaseAbortError as e:
+        print(f"Phase {phase_id} aborted: {e}", file=sys.stderr)
+        return False
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -202,12 +206,15 @@ async def run_pipeline(
     target_layer: str | None = None,
     out_of_scope_layers: list[str] | None = None,
     min_severity: str | None = None,
+    target_phase: str | None = None,
 ) -> dict[str, bool]:
     """Run a pipeline of multiple phases."""
     results = {}
     for phase_id in phases:
+        # When --target + --force, only force-clean the target phase, not upstream
+        phase_force = force and (target_phase is None or phase_id == target_phase)
         success = await run_phase(
-            phase_id, num_workers, max_concurrent, force,
+            phase_id, num_workers, max_concurrent, phase_force,
             target_layer=target_layer,
             out_of_scope_layers=out_of_scope_layers,
             min_severity=min_severity,
@@ -291,6 +298,7 @@ def main():
             target_layer=args.target_layer,
             out_of_scope_layers=args.out_of_scope_layers,
             min_severity=args.min_severity,
+            target_phase=args.target if args.target else None,
         )
     )
     

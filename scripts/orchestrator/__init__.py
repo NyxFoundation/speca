@@ -24,7 +24,7 @@ Usage:
     await orchestrator.run()
 """
 
-from .base import BaseOrchestrator
+from .base import BaseOrchestrator, PhaseAbortError
 from .config import PhaseConfig, PHASE_CONFIGS
 from .queue import QueueManager
 from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
@@ -37,6 +37,7 @@ from . import schemas
 
 __all__ = [
     "BaseOrchestrator",
+    "PhaseAbortError",
     "PhaseConfig",
     "PHASE_CONFIGS",
     "QueueManager",

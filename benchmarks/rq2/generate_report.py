@@ -123,7 +123,7 @@ def main() -> int:
                     baseline=baseline,
                     n=stats.get("n", 0),
                     p=format_metric(stats.get("mcnemar_p")),
-                    delta=format_metric(stats.get("effect_size", {}).get("cliffs_delta")),
+                    delta=format_metric(stats.get("effect_size", {}).get("paired_proportion_diff", stats.get("effect_size", {}).get("cliffs_delta"))),
                     effect=stats.get("effect_size", {}).get("magnitude", "n/a"),
                     acc_ci=format_ci(diffs.get("accuracy")),
                     f1_ci=format_ci(diffs.get("f1")),
@@ -284,7 +284,7 @@ def main() -> int:
                 "{branch}: p={p}, delta={d} ({m})".format(
                     branch=branch,
                     p=format_metric(baseline.get("mcnemar_p")),
-                    d=format_metric(baseline.get("effect_size", {}).get("cliffs_delta")),
+                    d=format_metric(baseline.get("effect_size", {}).get("paired_proportion_diff", baseline.get("effect_size", {}).get("cliffs_delta"))),
                     m=baseline.get("effect_size", {}).get("magnitude", "n/a"),
                 )
             )

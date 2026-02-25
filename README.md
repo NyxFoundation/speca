@@ -40,7 +40,7 @@ scripts/
 flowchart TB
     subgraph "Preparation (Spec → Properties)"
         A["01a: Spec Discovery"] --> B["01b: Subgraph Extraction"]
-        B --> E["01e: Property Generation<br/>(Trust Model + STRIDE + Formal Properties)"]
+        B --> E["01e: Property Generation<br/>(Trust Model + STRIDE/CWE + Formal Properties)"]
     end
 
     subgraph "Code Resolution"
@@ -48,8 +48,8 @@ flowchart TB
     end
 
     subgraph "Audit"
-        F --> G["03: Audit Map (3-Phase Formal Audit)"]
-        G --> H["04: Audit Review"]
+        F --> G["03: Audit Map (Proof-Based Formal Audit)"]
+        G --> H["04: FP Filter (6-Gate Pipeline)"]
     end
 
     subgraph "Reporting (Manual)"
@@ -98,7 +98,7 @@ Extracts formal **Program Graphs** (following Nielson & Nielson's definition) fr
 
 Performs inline trust model analysis and generates formal security properties from subgraphs. Combines former phases 01d (Trust Model) and property generation into a single inlined prompt. Key features:
 
-- **Ethereum-specific STRIDE threat model**: Peer/validator spoofing, block/state tampering, slashable offenses, MEV/timing leaks, eclipse/blob spam DoS, fork choice manipulation
+- **Domain-agnostic STRIDE + CWE Top 25**: General STRIDE thinking framework augmented with CWE Top 25 patterns (CWE-22/78/89/94/200/502/639/770/862). No domain-specific hardcoding.
 - **Reachability classification**: `external-reachable`, `internal-only`, `api-only`
 - **Bug bounty scope determination**: Uses `severity_classification` from `BUG_BOUNTY_SCOPE.json` as authoritative severity definitions
 - **Slim output**: `covers` is a string (primary element ID), `reachability` has 4 fields only (`classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope`)
@@ -124,28 +124,36 @@ Reduces token consumption in Phase 03 by ~40-60%.
 |---|---|
 | **Prompt** | `prompts/03_auditmap_worker_inline.md` (inlined — no skill fork) |
 | **Input** | `outputs/02c_PARTIAL_*.json` + Target codebase (auto-cloned from `TARGET_INFO.json`) |
-| **Output** | `outputs/03_AUDITMAP_PARTIAL_*.json` |
+| **Output** | `outputs/03_PARTIAL_*.json` |
 | **Model** | Sonnet |
 
-Performs a three-phase adversarial formal audit for each property against the target codebase:
+Performs a proof-based 3-phase formal audit for each property against the target codebase. The core method: **try to prove the property holds; where the proof breaks, that is the bug.**
 
-1. **Phase 1 (Abstract Interpretation):** State anomaly identification with adversarial focus — cache inconsistencies, TOCTOU, race conditions, overflow.
-2. **Phase 2 (Symbolic Execution):** Concrete exploit construction from attacker-controlled entry points.
-3. **Phase 3 (Invariant Proving):** Guard sufficiency analysis with skepticism — challenges whether guards cover all scenarios.
-4. **Phase 3.5 (Scope Filtering):** Bug bounty eligibility with conservative bias toward reporting.
+1. **Phase 1 (Map):** Identify exactly how the codebase enforces the property — guards, locks, type constraints, trust boundaries, spec-mandated behavior.
+2. **Phase 2 (Prove):** Construct a proof that the property holds. Checks input coverage, path coverage, concurrency safety, temporal validity, and implementation pattern obligations (cache keys, dedup keys, derived state, multi-path construction, return value completeness).
+3. **Phase 3 (Stress-Test):** Challenge the proof or verify the finding — list and validate all assumptions, re-read cited code, check for intentional design, construct concrete attack paths.
 
-Compact 6-field output per item: `id`, `classification`, `code_path`, `proof_trace`, `attack_scenario`, `checklist_id`.
+Compact 6-field output per item: `property_id`, `classification`, `code_path`, `proof_trace`, `attack_scenario`, `checklist_id`.
 
 ### Phase 04: Audit Review
 
 | | |
 |---|---|
-| **Prompt** | `prompts/04_review_worker.md` (inlined) |
-| **Skill** | None (inlined in worker prompt) |
-| **Input** | `outputs/03_PARTIAL_*.json` |
+| **Prompt** | `prompts/04_review_worker.md` (inlined — no skill fork) |
+| **Input** | `outputs/03_PARTIAL_*.json` + `outputs/BUG_BOUNTY_SCOPE.json` + `outputs/TARGET_INFO.json` + `outputs/01e_PARTIAL_*.json` |
 | **Output** | `outputs/04_PARTIAL_*.json` |
+| **Model** | Sonnet |
 
-Reviews and validates audit findings with spec cross-reference and code verification. Early-exits non-findings (not-a-vulnerability, out-of-scope, informational). Verdict system: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW.
+Filters false positives from Phase 03 findings via a priority-ordered 6-gate pipeline with early exit:
+
+1. **Gate 1 (Dead Code):** Grep for callers — zero non-test callers → DISPUTED_FP.
+2. **Gate 2 (Trust Boundary):** Cross-reference `trust_assumptions` from BUG_BOUNTY_SCOPE.json — attack path requires compromised trusted component → DISPUTED_FP.
+3. **Gate 3 (Code Verification):** Re-read code at flagged location — Phase 03's description factually wrong, or validation exists elsewhere → DISPUTED_FP.
+4. **Gate 4 (Exploitability):** Attacker causation check — code-intrinsic correctness bug (exception: protocol violations still pass) or mitigated by defensive mechanism → DISPUTED_FP.
+5. **Gate 5 (Spec Cross-Reference):** Look up 01e property — code is spec-compliant or 01e doesn't require the flagged behavior → DISPUTED_FP.
+6. **Gate 6 (Scope Check):** Out-of-scope categories from BUG_BOUNTY_SCOPE.json → DISPUTED_FP.
+
+Items that pass all gates undergo severity calibration against `severity_classification` thresholds. Non-findings (not-a-vulnerability, out-of-scope, informational) early-exit as PASS_THROUGH. Verdicts: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW, PASS_THROUGH.
 
 ### Phase 05: PoC Generation (Manual)
 
@@ -184,8 +192,8 @@ All pipeline phases are executed via **GitHub Actions workflows** with `workflow
 | 01b. Subgraph Extraction | `01b-subgraph.yml` | Extract program graphs |
 | 01e. Properties | `01e-properties.yml` | Trust model + property generation |
 | 02c. Code Resolution | `02c-enrich-code.yml` | Pre-resolve code locations |
-| 03. Audit Map | `03-audit-map.yml` | Formal 3-phase code audit |
-| 04. Audit Review | `04-audit-review.yml` | Review and validate findings |
+| 03. Audit Map | `03-audit-map.yml` | Proof-based 3-phase formal audit |
+| 04. Audit Review | `04-audit-review.yml` | 6-gate FP filter + severity calibration |
 
 Each workflow:
 1. Checks out the repository and syncs the latest `scripts/`, `prompts/`, `.claude/` from the base branch.
@@ -220,10 +228,10 @@ The following MCP servers are registered by `scripts/setup_mcp.sh`:
 | Server | Command | Used In |
 |---|---|---|
 | `tree_sitter` | `uvx mcp-server-tree-sitter` | 02c |
-| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | 01b, 02c, 04 |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | 01b, 02c |
 | `fetch` | `uvx mcp-server-fetch` | 01a |
 
-Note: Phase 01e and 03 use inlined prompts with no MCP servers (only built-in Read/Write/Grep/Glob tools).
+Note: Phases 01e, 03, and 04 use inlined prompts with no MCP servers (only built-in Read/Write/Grep/Glob tools).
 
 ## Benchmarks
 
