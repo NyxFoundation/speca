@@ -236,10 +236,11 @@ class LogWatcher:
             try:
                 size = self.log_path.stat().st_size
                 if size > offset:
-                    with open(self.log_path, "r", errors="replace") as f:
+                    with open(self.log_path, "rb") as f:
                         f.seek(offset)
-                        new_data = f.read()
+                        raw_data = f.read()
                         offset = f.tell()
+                    new_data = raw_data.decode("utf-8", errors="replace")
 
                     for line in new_data.splitlines():
                         self._scan_line(line)
@@ -257,6 +258,20 @@ class LogWatcher:
                 pass  # don't crash the watcher on unexpected errors
 
             await asyncio.sleep(self.cfg.poll_interval)
+
+        # Final read after stop to capture any remaining data
+        try:
+            size = self.log_path.stat().st_size
+            if size > offset:
+                with open(self.log_path, "rb") as f:
+                    f.seek(offset)
+                    raw_data = f.read()
+                new_data = raw_data.decode("utf-8", errors="replace")
+                for line in new_data.splitlines():
+                    self._scan_line(line)
+                    self.lines_scanned += 1
+        except Exception:
+            pass
 
     def _scan_line(self, line: str) -> None:
         """
@@ -614,5 +629,5 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
         "output_tokens": output_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,
-        "num_turns": len(msg_order),
+        "num_turns": max(1, len(msg_order) // 2) if msg_order else 0,
     }

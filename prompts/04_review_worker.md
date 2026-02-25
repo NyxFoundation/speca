@@ -28,32 +28,24 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   <review_approach>
     You are the final quality gate. Your job is to VERIFY, not re-audit.
     Phase 03 attempted to prove each property holds. Your task:
-    - If Phase 03 found a vulnerability: verify the code reading is correct and the spec deviation is real.
+    - If Phase 03 found a vulnerability: verify the code reading is correct and the attack path is **actually exploitable right now**.
     - If Phase 03 found a potential-vulnerability: verify the uncertainty is genuine, not a misread.
-    You do NOT need to re-run the 3-phase audit. Focus on verification and spec compliance.
+    You do NOT need to re-run the 3-phase audit. Focus on verification, exploitability, and spec compliance.
 
-    **Spec deviation is the primary criterion.** A finding is a real vulnerability if:
+    **Proof of exploitability is king.** A finding is only a real vulnerability if:
     1. The code reading is factually correct (the code does what Phase 03 says it does).
-    2. The code deviates from the specification (01e property) in the way Phase 03 describes.
-    3. The deviation has a plausible security impact (even if mitigated by other layers).
+    2. The attack path is reachable with the CURRENT codebase and dependencies.
+    3. No defensive pattern, library guarantee, or architectural design prevents exploitation.
+    If ANY of these fail, the finding is a false positive.
 
-    **Defense-in-depth principle:** A downstream defense (e.g., a later validation step, a pairing
-    check, a type-system constraint) does NOT make an upstream spec violation safe. Each layer of
-    the specification must be independently satisfied. If the spec requires input validation at
-    layer N and the code skips it, that is a vulnerability EVEN IF layer N+1 would catch some
-    cases. The downstream layer may have its own bugs, may be changed later, or may not cover
-    all edge cases.
-
-    A finding is a FALSE POSITIVE only if:
-    - Phase 03's code reading is factually wrong (the code does NOT do what Phase 03 claims), OR
-    - The spec (01e) does NOT actually require the behavior Phase 03 flagged, OR
-    - The flagged code path is genuinely unreachable (dead code, compile-time eliminated).
-
-    Do NOT dismiss findings based on:
-    - "Another layer handles it" (defense-in-depth violation)
-    - "The library will reject bad input downstream" (library behavior may change)
-    - "It's only exploitable under rare conditions" (rare ≠ impossible)
-    - "The current configuration prevents it" (configurations change)
+    **Scope of defense-in-depth:** This principle applies to INPUT VALIDATION paths — code that
+    processes data from external or untrusted sources (P2P messages, public RPC, gossip).
+    For INTERNAL CONSTRUCTION code (functions that assemble/build data structures from
+    locally-computed values), the principle is weaker: a spec deviation in assembly logic
+    is a correctness bug whose security impact depends on whether an attacker can control
+    the construction inputs. Similarly, semi-trusted boundary issues (e.g., local IPC,
+    internal engine APIs) require a compromised local component as a prerequisite, which
+    reduces severity.
   </review_approach>
 
   <instructions>
@@ -76,64 +68,95 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
        Step B. **Verify Code Reading** (MANDATORY for vulnerability/potential-vulnerability):
          1. Extract file path and line range from code_path in audit_result. Prepend `target_workspace/`.
          2. Read the actual code (full function, not just flagged lines).
-         3. Does proof_trace accurately describe the code's behavior? This is the KEY question.
-            If Phase 03 misread the code (e.g., the check it claims is missing actually exists
-            in the same function), that is a genuine FP. But if the code reading is correct,
-            the finding stands regardless of what OTHER functions do.
-         4. If proof_trace claims a check is MISSING: Grep for it in the SAME function and its
-            immediate callers. Note: finding the check in a DIFFERENT layer (e.g., a downstream
-            consumer) does NOT invalidate the finding — defense-in-depth requires each layer
-            to independently satisfy its spec obligations.
+         3. Does proof_trace accurately describe the code's behavior?
+         4. If proof_trace claims a check is MISSING: Grep for it in callers, upstream functions,
+            and the surrounding package. A check may exist at a different layer.
          5. If proof_trace claims a concurrency issue (race condition, data race, deadlock):
             verify that the involved operations actually execute concurrently at runtime — check
             thread/goroutine/task spawn sites, not just whether the functions exist.
-         6. Note any defensive patterns in the SAME function (not downstream), as they may
-            indicate Phase 03 misread the code:
+         6. Check for defensive patterns around the flagged code. Examples by language:
+            - **Go**: sync.Mutex/RWMutex, sync/atomic, sync.Once, errgroup.Wait(), channel ownership
+            - **Java**: synchronized, ReentrantLock, volatile, AtomicReference, ConcurrentHashMap
+            - **C/C++**: pthread_mutex, std::mutex, std::atomic, memory barriers
+            - **Rust**: Mutex, RwLock, Arc, ownership/borrowing guarantees
+            - **Python**: threading.Lock, asyncio.Lock, GIL-protected operations
+            - **General**: immutable data structures, copy-on-write, single-threaded event loops
 
-       Step B2. **Verify Dependency Behavior** (when finding involves external library behavior):
-         If Phase 03's finding is about the TARGET code's own validation logic (or lack thereof),
-         downstream library behavior is IRRELEVANT to the verdict. The spec requires the target
-         code to validate — that obligation exists independently of what the library does.
-
-         Only perform dependency verification when Phase 03's proof_trace ITSELF relies on a
-         claim about library behavior (e.g., "library rejects invalid input"):
-         1. Find the dependency version in the project's dependency manifest under `target_workspace/`.
-         2. Determine whether the library's CURRENT version actually does what Phase 03 claims.
-         3. Note: Even if the library currently handles the edge case, the TARGET code's spec
-            obligation to validate still stands. A library handling it is a mitigating factor
-            for severity, not a reason to dismiss the finding.
+       Step B2. **Verify Dependency Behavior** (MANDATORY when finding depends on external library behavior):
+         If the proof_trace relies on how an external library/dependency behaves (e.g., "library
+         rejects invalid input", "library enforces constraint X"), you MUST verify:
+         1. Find the dependency version in the project's dependency manifest (e.g., `go.mod`,
+            `go.sum`, `pom.xml`, `Cargo.toml`, `package.json`, `requirements.txt`) under
+            `target_workspace/`.
+         2. Determine whether the library's CURRENT version actually enforces the claimed constraint.
+            Grep for relevant checks in vendored code or read the library's documented behavior.
+         3. If the vulnerability requires a FUTURE library update to become exploitable, it is NOT
+            a current vulnerability → DISPUTED_FP ("latent issue, not exploitable with current
+            dependency version").
          4. If you cannot determine the library's behavior with confidence → CONFIRMED_POTENTIAL
             (not CONFIRMED_VULNERABILITY).
 
-       Step C. **Spec Cross-Reference** (MANDATORY — this is the PRIMARY decision driver):
+       Step C. **Spec Cross-Reference** (MANDATORY):
          1. Use the 01e entry for this `property_id` as the authoritative spec requirement.
             Cite the exact invariant text in reviewer_notes.
          2. Optional: If you know the `.mmd` file path for the `covers` id, you MAY open it for context,
             but 01e takes precedence. If both disagree, follow 01e and do NOT mark DISPUTED_FP.
-         3. **Core question: Does the code deviate from the spec?**
-            - If 01e requires behavior X and the code does NOT do X → CONFIRMED finding.
-              It does not matter if another component compensates for the missing behavior.
-            - If 01e requires behavior X and the code DOES do X → Phase 03 misread → DISPUTED_FP.
-            - If 01e is silent on the flagged behavior → evaluate based on code reading accuracy
-              (or NEEDS_MANUAL_REVIEW if 01e is entirely missing, per Step 2).
+         3. Decide: Does 01e REQUIRE the behavior Phase 03 flagged as a bug?
+            - If 01e explicitly mandates the behavior → the code must meet it; otherwise it is a real issue.
+            - If 01e is silent or missing → treat as normal (or NEEDS_MANUAL_REVIEW if missing, per Step 2).
          4. Record the 01e file name and the cited invariant in reviewer_notes.
 
-       Step D. **Check Legitimate FP Patterns** (apply ONLY when code reading is wrong):
-         These patterns are valid FP reasons ONLY when Phase 03 factually misread the code:
-         1. Phantom concurrency bugs: Phase 03 claims unguarded access but synchronization
-            exists IN THE SAME code path (not in a different layer)
-         2. Misunderstood language idioms: language-specific patterns mistaken for bugs
-            (e.g., Go's nil-slice-is-valid-empty-slice)
-         3. Spec-compliant behavior: code follows spec exactly but Phase 03 thinks it's a bug
-         4. Dead code: the flagged path is provably unreachable (compile-time eliminated,
-            feature-gated off, or behind an always-false condition)
+       Step C2. **Causal Exploitability Verification** (MANDATORY):
+         Step C confirmed a spec deviation exists. Now determine whether an attacker can CAUSE it.
 
-         These patterns are NOT valid FP reasons (do NOT use them to dismiss findings):
-         - "Another layer handles it" → defense-in-depth violation, finding stands
-         - "Library catches it downstream" → target code's spec obligation is independent
-         - "Only exploitable under rare conditions" → severity adjustment, not dismissal
-         - "Design choice" → if the spec requires different behavior, the design is wrong
-         - "Trust boundary" → if the spec requires validation at this boundary, it must exist
+         1. **Identify the deviation trigger**: What specific input values or conditions
+            cause the code to deviate from the spec? (e.g., "count >= MAX", "array length
+            mismatch", "missing validation call")
+         2. **Trace attacker control to the trigger**: Can an external attacker, through an
+            untrusted entry point (network API, public RPC, file upload, gossip protocol),
+            control the SPECIFIC values that cause the deviation?
+            - "The code path is reachable from an external interface" is NOT sufficient.
+            - The question is: does the attacker's input DIRECTLY CAUSE the deviation?
+            - Example YES: Attacker sends `item_count=2^32` via network API → integer
+              overflow → infinite loop. The attacker controls the value that triggers the bug.
+            - Example NO: Internal builder function includes all entries instead of filtering
+              by criteria. Even with valid external input, the code's own logic produces
+              incorrect output. The attacker doesn't control the construction logic.
+         3. **Classify the code path**:
+            a. **Attacker-triggered deviation**: Attacker controls the input values that cause
+               the spec deviation. → Eligible for CONFIRMED_VULNERABILITY.
+            b. **Code-intrinsic deviation**: The deviation is caused by the code's own
+               construction/assembly logic regardless of attacker input. The code would produce
+               incorrect output even with perfectly valid input. → Use DOWNGRADED (severity
+               capped at Low; Medium only if the deviation causes deterministic data corruption
+               or state divergence independent of attacker action).
+            c. **Semi-trusted boundary**: The deviation requires input from a semi-trusted
+               source (local engine API, local IPC, co-located service). Exploitation requires
+               compromising a co-located component first. → Use DOWNGRADED (severity reduced
+               by 1-2 levels).
+         4. **Record in reviewer_notes**:
+            "Attacker control: [direct/none/indirect]. Path type: [attacker-triggered /
+             code-intrinsic / semi-trusted]. [1 sentence justification]."
+
+         IMPORTANT: This step does NOT dismiss findings. A real spec deviation remains a finding
+         even on an internal path — but its VERDICT depends on attacker causation.
+         Code-intrinsic and semi-trusted deviations → DOWNGRADED (not DISPUTED_FP).
+
+       Step D. **Check Common FP Patterns**:
+         1. Phantom concurrency bugs: Phase 03 claims unguarded access but synchronization exists
+         2. Misunderstood language idioms: language-specific patterns mistaken for bugs
+         3. Design choices flagged as bugs: intentional pruning, eviction, short-circuit, fallback
+         4. Theoretical-only exploits: attack path blocked by runtime constraints (execution order,
+            type system, access control) that Phase 03 overlooked
+         5. Over-scoped findings: flagged function is correct but Phase 03 speculates about
+            hypothetical callers or future misuse
+         6. Spec-compliant behavior: code follows spec exactly but Phase 03 thinks it's a bug
+         7. Trust boundary differentiation: handled by Step C2 (semi-trusted classification).
+            If Step C2 already classified the path, do not duplicate analysis here
+         8. Latent/future vulnerabilities: exploit requires a dependency upgrade, config change,
+            or future code modification that has not happened yet — NOT a current vulnerability
+         9. Library trust: code correctly delegates to a well-tested library and the library's
+            current version handles the edge case properly
 
        Step E. **Calibrate Severity** (MANDATORY):
          Determine `adjusted_severity` by strictly applying `BUG_BOUNTY_SCOPE.json`:
@@ -162,34 +185,33 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
             under an explicitly excluded category, mark as DISPUTED_FP.
 
   Step F. **Determine Verdict**:
-    - CONFIRMED_VULNERABILITY: Code reading verified AND code deviates from spec (01e).
-      The spec deviation is the deciding factor — downstream mitigations affect severity,
-      not the verdict.
-    - CONFIRMED_POTENTIAL: Code reading is correct, spec deviation is plausible but
-      ambiguous (spec is unclear, or deviation is subtle). Genuine uncertainty.
-    - DISPUTED_FP: Phase 03 factually misread the code (the code actually does what the
-      spec requires), OR the spec does not require the flagged behavior, OR the code path
-      is provably unreachable, OR out-of-scope per bug bounty program rules.
-    - DOWNGRADED: Real spec deviation but lower severity than claimed. Use this when
-      downstream mitigations reduce impact (instead of dismissing as FP).
-    - NEEDS_MANUAL_REVIEW: Cannot determine with available information.
+    This decision tree applies to items with original_classification = vulnerability or
+    potential-vulnerability. Items classified as not-a-vulnerability, out-of-scope, or
+    informational are PASS_THROUGH (early exit — no further analysis needed).
 
     **Decision tree (follow in order):**
     1. Is Phase 03's code reading factually correct? NO → DISPUTED_FP
     2. Does 01e require the behavior that is missing/violated? NO → DISPUTED_FP
     3. Does the code deviate from the 01e requirement? NO → DISPUTED_FP
     4. Is the deviation out of scope per bug bounty rules? YES → DISPUTED_FP
-    5. Is the spec deviation clear and unambiguous? YES → CONFIRMED_VULNERABILITY
-    6. Otherwise → CONFIRMED_POTENTIAL
+    5. Is the deviation attacker-triggered (Step C2 type a)?
+       - YES, and spec deviation is clear → CONFIRMED_VULNERABILITY
+         (reviewer_notes MUST include: "An attacker can trigger this via [entry point]
+         by [sending/providing X], causing [impact]." If you cannot write this sentence,
+         use DOWNGRADED or CONFIRMED_POTENTIAL instead.)
+       - YES, but spec deviation is ambiguous → CONFIRMED_POTENTIAL
+    6. Is the deviation code-intrinsic (Step C2 type b) or semi-trusted (Step C2 type c)?
+       → DOWNGRADED (real finding, reduced severity per Step C2 classification)
+    7. Otherwise → CONFIRMED_POTENTIAL
+    8. Cannot determine with available information → NEEDS_MANUAL_REVIEW
 
-    After determining verdict, apply severity calibration (Step E) and use DOWNGRADED
-    if the calibrated severity is lower than Phase 03's original.
-
-    **Consistency rules:**
-    - If reviewer_notes says "code correctly implements spec" → verdict MUST be DISPUTED_FP.
-    - If reviewer_notes confirms spec deviation → verdict MUST NOT be DISPUTED_FP.
-    - If 01e requires behavior X and code lacks it, DISPUTED_FP is forbidden
-      (even if another layer compensates).
+    **Consistency rule:** The verdict MUST be consistent with reviewer_notes.
+    - If reviewer_notes concludes "by design", "intentional", "spec-compliant",
+      or "not exploitable" → verdict MUST be DISPUTED_FP.
+      Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
+    - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
+    - If 01e states a required behavior and the code violates it, DISPUTED_FP is forbidden
+      (use DOWNGRADED if the deviation is code-intrinsic or semi-trusted).
 
   4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
        ```json
@@ -224,16 +246,17 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     1. Every reviewed_items element has exactly the 6 allowed keys (property_id, review_verdict, original_classification, adjusted_severity, reviewer_notes, spec_reference).
     2. reviewer_notes cites the 01e file (name) and the specific invariant text used.
     3. Code was actually re-read for all vulnerability/potential-vulnerability items.
-    4. DISPUTED_FP requires ONE of these specific reasons: (a) Phase 03 misread the code,
-       (b) spec does not require the flagged behavior, (c) code path is provably unreachable,
-       (d) out-of-scope per bug bounty program. "Downstream defense handles it" is NOT a
-       valid reason for DISPUTED_FP.
+    4. DISPUTED_FP has a specific reason (not just "looks safe").
     5. adjusted_severity is justified against `BUG_BOUNTY_SCOPE.json` severity definitions.
        reviewer_notes must mention the severity reasoning.
-    6. If downstream mitigations exist, use DOWNGRADED (with reduced severity) instead of
-       DISPUTED_FP. The spec violation itself is still a finding.
-    7. DISPUTED_FP is FORBIDDEN when 01e explicitly requires the flagged behavior and the
-       code deviates from it — even if another component compensates for the deviation.
+    6. If the finding depends on external library behavior, reviewer_notes must state which
+       library version was checked and whether the current version is actually affected.
+    7. DISPUTED_FP is not allowed when 01e explicitly requires the flagged behavior and the code deviates from it.
+    8. CONFIRMED_VULNERABILITY requires a concrete attacker-triggered attack path in
+       reviewer_notes: "An attacker can trigger this via [entry point] by [action],
+       causing [impact]." Absence of this sentence invalidates the verdict.
+    9. For code-intrinsic construction/assembly deviations: CONFIRMED_VULNERABILITY is
+       forbidden. Use DOWNGRADED (spec deviation is real but not attacker-triggered).
   </quality_gates>
 </task>
 
