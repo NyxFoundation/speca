@@ -13,5 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir semgrep
 
+RUN groupadd -r bench && useradd -r -g bench -m bench
+
 WORKDIR /app
 ENV PYTHONPATH=/app
+
+USER bench

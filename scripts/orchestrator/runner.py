@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,7 @@ class CircuitBreaker:
 
     def _check_thresholds(self) -> None:
         """Raise if any threshold is exceeded.  Called under lock."""
-        stats = self.get_stats()
+        stats = self._get_stats_unlocked()
 
         if self.consecutive_failures >= self.config.circuit_breaker_threshold:
             raise CircuitBreakerTripped(
@@ -130,8 +131,8 @@ class CircuitBreaker:
                 stats,
             )
 
-    def get_stats(self) -> dict[str, int]:
-        """Return a snapshot of all counters."""
+    def _get_stats_unlocked(self) -> dict[str, int]:
+        """Return a snapshot of all counters (caller must hold lock)."""
         return {
             "consecutive_failures": self.consecutive_failures,
             "total_retries": self.total_retries,
@@ -139,6 +140,11 @@ class CircuitBreaker:
             "total_successes": self.total_successes,
             "total_failures": self.total_failures,
         }
+
+    async def get_stats(self) -> dict[str, int]:
+        """Return a snapshot of all counters (thread-safe)."""
+        async with self._lock:
+            return self._get_stats_unlocked()
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +517,7 @@ class ClaudeRunner:
                     + "; ".join(a for a in anomalies if any(
                         a.startswith(f"{fn}:") for fn in LogAnomalyDetector._FATAL_PATTERNS
                     )),
-                    self.circuit_breaker.get_stats(),
+                    self.circuit_breaker._get_stats_unlocked(),
                 )
 
         # --- Cost tracking: extract token usage from log ---
@@ -525,7 +531,7 @@ class ClaudeRunner:
                 f"cache_read_tokens {usage['cache_read_tokens']:,} "
                 f"exceeds limit {self.config.max_cache_read_tokens:,} "
                 f"(batch {batch_index}, worker {worker_id})",
-                self.circuit_breaker.get_stats(),
+                self.circuit_breaker._get_stats_unlocked(),
             )
 
         if self.cost_tracker:
@@ -580,8 +586,8 @@ class ClaudeRunner:
                     f"recovered {len(results)} result(s)",
                     file=sys.stderr,
                 )
-                if not directory_mode and result_parse_path.exists():
-                    result_parse_path.unlink()
+                if not directory_mode:
+                    result_parse_path.unlink(missing_ok=True)
                 return results
             # No output — retrying won't help (max_turns is deterministic)
             raise MaxTurnsExhausted(
@@ -624,8 +630,8 @@ class ClaudeRunner:
                 )
 
         # Clean up: delete intermediate file only in file mode
-        if not directory_mode and result_parse_path.exists():
-            result_parse_path.unlink()
+        if not directory_mode:
+            result_parse_path.unlink(missing_ok=True)
 
         return results
 
@@ -689,8 +695,8 @@ class ClaudeRunner:
                 file=sys.stderr,
             )
             # Clean up intermediate file
-            if not directory_mode and result_parse_path.exists():
-                result_parse_path.unlink()
+            if not directory_mode:
+                result_parse_path.unlink(missing_ok=True)
             return results
 
         print(
@@ -720,7 +726,7 @@ class ClaudeRunner:
                         obj = json.loads(line)
                         if isinstance(obj, dict) and obj.get("type") == "result":
                             last_result = obj
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         continue
         except Exception:
             return None
@@ -768,7 +774,14 @@ class ClaudeRunner:
         """Build the prompt content with arguments."""
         with open(self.config.prompt_path) as f:
             prompt_content = f.read()
-        args = " ".join(f"{k.upper()}={v}" for k, v in kwargs.items())
+
+        def _quote(v: Any) -> str:
+            s = str(v)
+            if " " in s or '"' in s:
+                return f'"{s}"'
+            return s
+
+        args = " ".join(f"{k.upper()}={_quote(v)}" for k, v in kwargs.items())
         return f"{prompt_content}\n\n{args}"
 
     def _build_env(self, **kwargs) -> dict[str, str]:
@@ -783,9 +796,17 @@ class ClaudeRunner:
         for var in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID"):
             env.pop(var, None)
 
+        # Use batch-specific debug directory to avoid race conditions
+        # across parallel workers writing to .claude/debug/latest
+        w_id = kwargs.get("worker_id", 0)
+        b_idx = kwargs.get("iteration", 0)
+        debug_dir = Path(f".claude/debug/W{w_id}B{b_idx}")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
         env.update({
             "CLAUDE_CODE_PERMISSIONS": "bypassPermissions",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "100000",
+            "CLAUDE_CODE_DEBUG_DIR": str(debug_dir),
         })
         for key, value in kwargs.items():
             env[key.upper()] = str(value)
@@ -797,12 +818,16 @@ class ClaudeRunner:
         Reads the project ``.mcp.json``, keeps only the servers listed in
         ``self.config.mcp_servers``, and writes the result to a deterministic
         path so it can be reused across workers of the same phase.
+
+        Uses atomic write (tempfile + os.replace) to avoid TOCTOU races
+        when multiple workers start concurrently.
         """
         config_dir = Path("outputs/.mcp_configs")
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / f"mcp_{self.config.phase_id}.json"
 
-        # Reuse if already generated (deterministic per phase)
+        # Reuse if already generated (deterministic per phase).
+        # Safe because the file is always written atomically via os.replace().
         if config_path.exists():
             return config_path
 
@@ -822,8 +847,21 @@ class ClaudeRunner:
             }
         }
 
-        with open(config_path, "w") as f:
-            json.dump(filtered, f, indent=2)
+        # Atomic write: write to temp file then rename to avoid partial reads
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(config_dir), suffix=".json.tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(filtered, f, indent=2)
+            os.replace(tmp_path, str(config_path))
+        except BaseException:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         return config_path
 
@@ -832,7 +870,7 @@ class ClaudeRunner:
         # Ensure prompt doesn't start with '-' which Claude CLI would
         # misinterpret as an option flag (e.g. YAML frontmatter '---').
         if prompt_content.lstrip().startswith("-"):
-            prompt_content = "\n" + prompt_content.lstrip()
+            prompt_content = "\n" + prompt_content
         cmd = [
             "claude",
             "--dangerously-skip-permissions",
@@ -872,10 +910,21 @@ class ClaudeRunner:
         stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
         debug_text = ""
-        debug_latest = Path(".claude/debug/latest")
+        debug_dir = Path(f".claude/debug/W{worker_id}B{batch_index}")
+        if not debug_dir.exists():
+            # Fall back to shared latest if batch-specific dir doesn't exist
+            debug_dir = Path(".claude/debug/latest")
         try:
-            if debug_latest.exists():
-                debug_text = debug_latest.read_text(errors="replace")
+            if debug_dir.exists():
+                if debug_dir.is_dir():
+                    # Read all files in the debug directory
+                    parts = []
+                    for p in sorted(debug_dir.iterdir()):
+                        if p.is_file():
+                            parts.append(p.read_text(errors="replace"))
+                    debug_text = "\n".join(parts)
+                else:
+                    debug_text = debug_dir.read_text(errors="replace")
         except Exception:
             pass
 
@@ -895,15 +944,6 @@ class ClaudeRunner:
         Handles both raw lists and wrapper dicts with a known result key
         (e.g. {"sub_graphs": [...]}).
         """
-        if self.config.phase_id == "02":
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
-            if isinstance(data, dict):
-                if self.config.result_key in data and isinstance(data[self.config.result_key], list):
-                    return [item for item in data[self.config.result_key] if isinstance(item, dict)]
-                return []
-            return []
-
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
 
@@ -914,6 +954,23 @@ class ClaudeRunner:
             return [data]
 
         return []
+
+    @staticmethod
+    def _validate_result_item(item: dict[str, Any]) -> dict[str, Any]:
+        """Best-effort Pydantic validation of a result item.
+
+        Warns on validation errors but returns the item regardless,
+        consistent with the project's lenient validation approach.
+        """
+        # Minimal structural validation: must have at least one expected key
+        expected_keys = {"property_id", "check_id", "checklist_id", "spec_id", "id", "subgraph_id"}
+        if not any(k in item for k in expected_keys):
+            print(
+                f"Warning: result item missing expected identifier key "
+                f"(has: {list(item.keys())[:5]})",
+                file=sys.stderr,
+            )
+        return item
 
     def _parse_results_from_log(self, log_file: Path) -> list[dict[str, Any]]:
         """
@@ -930,7 +987,7 @@ class ClaudeRunner:
                         msg = json.loads(line)
                         if msg.get("type") == "result" and msg.get("result"):
                             result_text = msg["result"]
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         continue
         except Exception:
             return []
@@ -946,7 +1003,8 @@ class ClaudeRunner:
                 data = json.loads(block.strip())
             except json.JSONDecodeError:
                 continue
-            results.extend(self._normalize_result_data(data))
+            normalized = self._normalize_result_data(data)
+            results.extend(self._validate_result_item(item) for item in normalized)
 
         return results
 
@@ -959,4 +1017,5 @@ class ClaudeRunner:
                 data = json.load(f)
         except Exception:
             return []
-        return self._normalize_result_data(data)
+        normalized = self._normalize_result_data(data)
+        return [self._validate_result_item(item) for item in normalized]

@@ -146,10 +146,11 @@ class TestIdPrefixAssignment:
     def test_assigns_prefix_from_partial(self):
         """Items should get _id_prefix based on 01b partial data."""
         orch = Phase01Orchestrator("01e")
-        # Create a temp 01b partial file
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        # Create a temp 01b partial file inside outputs/ (required by path
+        # traversal guard SEC-C02)
+        os.makedirs("outputs", exist_ok=True)
+        partial_file = os.path.join("outputs", "_test_prefix_partial.json")
+        with open(partial_file, "w") as f:
             json.dump({
                 "specs": [
                     {
@@ -159,7 +160,6 @@ class TestIdPrefixAssignment:
                     }
                 ]
             }, f)
-            partial_file = f.name
 
         try:
             items = [{"file_path": partial_file}]
@@ -171,9 +171,10 @@ class TestIdPrefixAssignment:
     def test_disambiguation_on_slug_collision(self):
         """Duplicate slugs should get a numeric disambiguator."""
         orch = Phase01Orchestrator("01e")
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        # Create temp file inside outputs/ (required by path traversal guard SEC-C02)
+        os.makedirs("outputs", exist_ok=True)
+        partial_file = os.path.join("outputs", "_test_disambiguation_partial.json")
+        with open(partial_file, "w") as f:
             json.dump({
                 "specs": [
                     {
@@ -183,7 +184,6 @@ class TestIdPrefixAssignment:
                     }
                 ]
             }, f)
-            partial_file = f.name
 
         try:
             items = [
@@ -368,7 +368,11 @@ class TestEnums:
 
     def test_audit_classification_values(self):
         assert AuditClassification.VULNERABLE == "vulnerable"
+        assert AuditClassification.VULNERABILITY == "vulnerability"
         assert AuditClassification.SAFE == "safe"
+        assert AuditClassification.NOT_A_VULNERABILITY == "not-a-vulnerability"
+        assert AuditClassification.POTENTIAL_VULNERABILITY == "potential-vulnerability"
+        assert AuditClassification.INFORMATIONAL == "informational"
 
     def test_review_verdict_values(self):
         assert ReviewVerdict.CONFIRMED == "Confirmed"
@@ -533,17 +537,19 @@ class TestTrustModelSchemas:
         stride = StrideAnalysisItem(
             threat_type="Spoofing",
             description="Attacker spoofs identity",
-            affected_boundary="tb-001",
+            trust_boundary_id="tb-001",
         )
         assert stride.threat_type == "Spoofing"
+        assert stride.trust_boundary_id == "tb-001"
 
     def test_trust_model_valid(self):
         tm = TrustModel(
             actors=[{"id": "a1", "name": "User"}],
             trust_boundaries=[{"id": "tb-001", "from_actor": "a1", "to_actor": "a2"}],
-            trust_assumptions=[{"id": "ta-001", "description": "Users are untrusted"}],
+            assumptions=[{"id": "ta-001", "text": "Users are untrusted"}],
         )
         assert len(tm.actors) == 1
+        assert tm.assumptions[0].text == "Users are untrusted"
 
     def test_phase01d_partial_valid(self):
         partial = Phase01dPartial(
@@ -627,6 +633,67 @@ class TestPhase02:
             ]
         )
         assert len(partial.checklist) == 1
+
+
+class TestPhase02PartialMergeValidator:
+    """Tests for Phase02Partial merge validator edge cases (BUG-SCH14)."""
+
+    def test_both_checklist_and_checklist_items_merged(self):
+        """When both checklist and checklist_items are provided, they should be merged."""
+        partial = Phase02Partial(
+            checklist=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+            ],
+            checklist_items=[
+                {"check_id": "CHK-002", "property_id": "PROP-002"},
+            ],
+        )
+        assert len(partial.checklist) == 2
+        ids = {item.check_id for item in partial.checklist}
+        assert ids == {"CHK-001", "CHK-002"}
+
+    def test_both_with_duplicates_deduplicates(self):
+        """Duplicate check_ids across checklist and checklist_items should be deduplicated."""
+        partial = Phase02Partial(
+            checklist=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+            ],
+            checklist_items=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+                {"check_id": "CHK-002", "property_id": "PROP-002"},
+            ],
+        )
+        assert len(partial.checklist) == 2
+        ids = {item.check_id for item in partial.checklist}
+        assert ids == {"CHK-001", "CHK-002"}
+
+    def test_only_checklist_provided(self):
+        """When only checklist is provided, it should be used as-is."""
+        partial = Phase02Partial(
+            checklist=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+            ],
+        )
+        assert len(partial.checklist) == 1
+        assert partial.checklist[0].check_id == "CHK-001"
+
+    def test_only_checklist_items_provided(self):
+        """When only checklist_items is provided, it should be copied to checklist."""
+        partial = Phase02Partial(
+            checklist_items=[
+                {"check_id": "CHK-001", "property_id": "PROP-001"},
+                {"check_id": "CHK-002", "property_id": "PROP-002"},
+            ],
+        )
+        assert len(partial.checklist) == 2
+        ids = {item.check_id for item in partial.checklist}
+        assert ids == {"CHK-001", "CHK-002"}
+
+    def test_neither_provided(self):
+        """When neither checklist nor checklist_items is provided, checklist should be empty."""
+        partial = Phase02Partial()
+        assert len(partial.checklist) == 0
+        assert len(partial.checklist_items) == 0
 
 
 # =========================================================================
@@ -896,6 +963,12 @@ class TestCrossPhaseDataFlow:
         parsed, errs = validate_property(entry)
         assert parsed is not None
         assert errs == []
+        # Validate with PropertyWithCode to ensure code_scope is preserved (BUG-SCH07)
+        pwc_parsed = PropertyWithCode.model_validate(entry)
+        assert pwc_parsed.code_scope is not None
+        assert pwc_parsed.code_scope.resolution_status == "resolved"
+        assert len(pwc_parsed.code_scope.locations) == 1
+        assert pwc_parsed.code_scope.locations[0].file == "test.go"
 
     def test_03_audit_to_04_review(self):
         """Audit item from 03 should be parseable as Phase04 input."""
@@ -937,7 +1010,7 @@ class TestCircuitBreaker:
 
     def test_initial_state(self):
         cb = CircuitBreaker(self._make_config())
-        stats = cb.get_stats()
+        stats = cb._get_stats_unlocked()
         assert stats["consecutive_failures"] == 0
         assert stats["total_retries"] == 0
         assert stats["empty_results"] == 0
@@ -1026,7 +1099,7 @@ class TestCircuitBreaker:
         try:
             loop.run_until_complete(cb.record_success())
             loop.run_until_complete(cb.record_retry())
-            stats = cb.get_stats()
+            stats = cb._get_stats_unlocked()
             assert stats == {
                 "consecutive_failures": 0,
                 "total_retries": 1,
@@ -1179,8 +1252,8 @@ class TestResultCollector:
                 config = self._make_config("03")
                 collector = ResultCollector(config)
                 results = [
-                    {"check_id": "CHK-001", "classification": "safe"},
-                    {"check_id": "CHK-002", "classification": "vulnerable"},
+                    {"property_id": "PROP-001", "check_id": "CHK-001", "classification": "safe"},
+                    {"property_id": "PROP-002", "check_id": "CHK-002", "classification": "vulnerable"},
                 ]
                 path = collector.save_partial(results, worker_id=0, batch_index=1)
                 assert path.exists()
@@ -1189,6 +1262,11 @@ class TestResultCollector:
                 assert "audit_items" in data
                 assert len(data["audit_items"]) == 2
                 assert "metadata" in data
+                # BUG-SCH11: Verify processed_ids are tracked in metadata
+                assert "processed_ids" in data["metadata"]
+                assert "PROP-001" in data["metadata"]["processed_ids"]
+                assert "PROP-002" in data["metadata"]["processed_ids"]
+                assert len(data["metadata"]["processed_ids"]) == 2
             finally:
                 os.chdir(old_cwd)
 
@@ -1823,7 +1901,8 @@ class TestExtractTokenUsage:
         assert usage["output_tokens"] == 3
         assert usage["cache_read_tokens"] == 9200
         assert usage["cache_creation_tokens"] == 1800
-        assert usage["num_turns"] == 2
+        # BUG-ORC15: turns = messages // 2 (a turn is a request-response pair)
+        assert usage["num_turns"] == 1
 
     def test_extract_from_empty_log(self):
         """Empty log should return zero tokens."""
@@ -1891,11 +1970,11 @@ class TestCostTrackerIntegration:
     """Test CostTracker with real PhaseConfig values."""
 
     def test_phase03_budget(self):
-        """Phase 03 should have max_budget_usd=100.0."""
+        """Phase 03 should have max_budget_usd=200.0."""
         config = get_phase_config("03")
-        assert config.max_budget_usd == 100.0
+        assert config.max_budget_usd == 200.0
         tracker = CostTracker(max_budget_usd=config.max_budget_usd)
-        assert tracker.max_budget_usd == 100.0
+        assert tracker.max_budget_usd == 200.0
 
     def test_phase03_log_anomaly_threshold(self):
         """Phase 03 should have log_anomaly_threshold=3."""
@@ -1938,7 +2017,7 @@ class TestGitHubStepSummary:
         old = os.environ.pop("GITHUB_STEP_SUMMARY", None)
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             # Should not raise
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
@@ -1953,7 +2032,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(60.0, 10, cb_stats, val_stats, None)
 
@@ -1975,7 +2054,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             cost_stats = {
                 "total_input_tokens": 100000,
@@ -2006,7 +2085,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2024,7 +2103,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2043,7 +2122,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch._circuit_breaker_tripped = True
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 3, cb_stats, val_stats, None)
 
@@ -2062,7 +2141,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch._budget_exceeded = True
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 2, cb_stats, val_stats, None)
 
@@ -2081,7 +2160,7 @@ class TestGitHubStepSummary:
         try:
             orch = _MockOrchestrator("03")
             orch.failed_batches = [(0, 3), (1, 7)]
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 
@@ -2101,7 +2180,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             cost_stats = {
                 "total_input_tokens": 500000,
@@ -2129,7 +2208,7 @@ class TestGitHubStepSummary:
         os.environ["GITHUB_STEP_SUMMARY"] = summary_file
         try:
             orch = _MockOrchestrator("03")
-            cb_stats = orch.circuit_breaker.get_stats()
+            cb_stats = orch.circuit_breaker._get_stats_unlocked()
             val_stats = orch.collector.get_validation_summary()
             orch._write_github_step_summary(10.0, 5, cb_stats, val_stats, None)
 

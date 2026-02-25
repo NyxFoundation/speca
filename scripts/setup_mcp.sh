@@ -79,6 +79,7 @@ check_prerequisites() {
 
 build_filesystem_args() {
   local args=""
+  # shellcheck disable=SC2086 -- Intentional word splitting: FILESYSTEM_DIRS is a space-separated list
   for dir in ${FILESYSTEM_DIRS}; do
     # Resolve to absolute path
     local abs_dir
@@ -185,6 +186,7 @@ for i in "${!SERVERS[@]}"; do
   if [ "${SERVER_NAME}" = "github" ] && [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
     ENV_FLAGS="--env GITHUB_PERSONAL_ACCESS_TOKEN=${GITHUB_PERSONAL_ACCESS_TOKEN}"
   fi
+  # shellcheck disable=SC2086 -- Intentional word splitting: ENV_FLAGS and SERVER_COMMAND contain multiple arguments
   if ! ADD_OUTPUT=$(claude mcp add --scope project --transport stdio ${ENV_FLAGS} "${SERVER_NAME}" -- ${SERVER_COMMAND} 2>&1); then
     if echo "${ADD_OUTPUT}" | grep -qi "already exists"; then
       echo "  ✓ Already exists; skipping."

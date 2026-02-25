@@ -100,11 +100,13 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
          - Can network partitioning or eclipse attacks isolate the node from legitimate peers?
          - Can a slow client, slow loris connection, or incomplete request starve the worker/connection pool?
          - Can malformed serialized payloads cause excessive deserialization, parsing, or regex backtracking cost?
+         - Can malformed, truncated, or structurally invalid input cause an unhandled exception (index-out-of-bounds, null dereference, assertion failure, stack overflow) that crashes the process? For every deserialization or parsing entry point reachable from untrusted sources, the system must reject invalid input gracefully without terminating. This is distinct from resource exhaustion — even an O(1) crash is a critical DoS vector.
          - Can an attacker trigger excessive recomputation of derived state (re-indexing, cache rebuilding, state replays)?
          - Can pub/sub, broadcast, or fan-out mechanisms be manipulated to cause message amplification?
          - Can an externally-supplied numeric value control a loop bound or allocation size without an upper-bound check? If the domain of valid values is smaller than the type's range, an attacker can force unbounded iteration or memory allocation (CWE-770).
          - Can the same mutable external state be read multiple times within one call without caching the first result? If so, an attacker who changes the state between reads can cause the function to operate on inconsistent snapshots (TOCTOU across repeated reads).
          - Can an attacker cause deadlock or livelock by acquiring resources in an unexpected order?
+         - Can a remote peer or external source advertise a metadata value (capability count, version, feature flags) that the implementation trusts without validation? If the system uses peer-reported metadata to size data structures, select loop bounds, or gate feature paths, an attacker-controlled value outside the valid domain can cause unbounded iteration, oversized allocation, or incorrect feature activation.
 
        - **Elevation of Privilege (Authorization / Access Control)**:
          - Can an attacker escalate from an unprivileged role to an administrative or system role?
@@ -119,7 +121,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   <phase_b title="Property Generation">
     Using the trust model from Phase A, generate formal properties. Work through each source below in order — do not skip any.
 
-    1. **STRIDE Threat Properties** (from Phase A step 4): For each concrete threat identified in the Ethereum-specific STRIDE analysis, create a property that, if verified, would mitigate that threat. Each of the 6 STRIDE categories that produced threats in Phase A must yield at least one property. If a category produced no relevant threats for this subgraph, skip it — do not force irrelevant properties.
+    1. **STRIDE Threat Properties** (from Phase A step 4): For each concrete threat identified in the STRIDE analysis, create a property that, if verified, would mitigate that threat. Each of the 6 STRIDE categories that produced threats in Phase A must yield at least one property. If a category produced no relevant threats for this subgraph, skip it — do not force irrelevant properties.
 
     2. **Trust Boundary Properties**: For each trust boundary identified in Phase A, formulate properties that must hold true for the boundary to be secure. **Prioritize boundaries marked as `in-scope` and `attacker_controlled: true`.**
 
@@ -127,11 +129,14 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     4. **Invariant Properties**: Ensure every invariant identified in the subgraphs (from `.mmd` `note` blocks with `INV-NNN:` labels) is represented as a formal property. Additionally:
        - When the specification defines a data structure with ordering, uniqueness, or completeness constraints, consider that implementations may construct the same structure via multiple code paths (config loaders, constructors, deserializers). Generate an invariant asserting that the constraint holds regardless of which construction path is taken.
-       - When the specification describes a data structure with both declared metadata (counts, lengths, hashes) and actual data arrays, generate an invariant asserting their consistency (e.g., `len(declared_hashes) == len(actual_data)`). Mismatches between declared and actual fields cause indexing errors or silent data corruption.
+       - **[CRITICAL — commonly missed]** When the specification describes a data structure with both declared metadata (counts, lengths, hashes) and actual data arrays, you MUST generate an invariant asserting their consistency. Specifically:
+         - Every structure where a count/list of identifiers is declared separately from the actual data MUST have: `len(declared) == len(actual)` (e.g., `len(tx.hashes) == len(wrapper.data_items)`, `len(header.field_count) == len(body.fields)`).
+         - Each pair of parallel arrays that are iterated together MUST have a length equality property. If code iterates one array using the other's length as the loop bound, a mismatch causes index-out-of-bounds crashes or silent data truncation.
+         - This applies to wrapper/envelope patterns where an outer object declares identifiers (hashes, keys, counts) and an inner object or sidecar carries the actual data.
 
-    5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after. Pay special attention to **lifecycle events** (fork transitions, epoch boundaries, validator set changes): any derived or cached state that depends on the pre-transition configuration must be invalidated or refreshed before post-transition operations that consume it.
+    5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after. Pay special attention to **mode transitions** (version upgrades, feature flag activation, configuration reloads, protocol upgrades, fork transitions, epoch boundaries, validator set changes): any cached or derived value that depends on the pre-transition state — including peer metadata, capability caches, connection state, and routing tables — must be invalidated or refreshed within a bounded time after the transition. If the refresh mechanism is periodic (e.g., heartbeat-based), verify that the refresh interval is short enough that stale state cannot cause incorrect behavior during the transition window.
 
-    6. **Optimization Correctness Properties**: When the specification describes an operation whose correctness is critical (verification, validation, proof checking, uniqueness enforcement), consider that implementations commonly cache, deduplicate, or precompute results for performance. For each such operation, generate a property asserting that any such optimization must preserve the original correctness guarantee — i.e., the optimized path must produce the same accept/reject decision as the unoptimized path for all inputs. Mark these as `type: "invariant"`, severity based on blast radius if violated.
+    6. **Optimization Correctness Properties**: When the specification describes an operation whose correctness is critical (verification, validation, proof checking, uniqueness enforcement), consider that implementations commonly cache, deduplicate, or precompute results for performance. For each such operation, generate a property asserting that any such optimization must preserve the original correctness guarantee — i.e., the optimized path must produce the same accept/reject decision as the unoptimized path for all inputs. Additionally, if the implementation caches or memoizes the result of a multi-input verification, generate a property asserting that the cache key includes ALL inputs that affect the outcome. If the spec lists the inputs to a verification function (e.g., `verify(a, b, c)`), the cache key must be `(a, b, c)` — omitting any input allows cache poisoning where a stale result from one input combination is incorrectly reused for a different one. Mark these as `type: "invariant"`, severity based on blast radius if violated.
 
     7. **Classify Reachability**: For each property, determine:
        - `entry_points`: List of entry points that can trigger this property (e.g., `["P2P", "EngineAPI"]`)
@@ -229,6 +234,8 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
     - [ ] Properties are prioritized by `bug_bounty_scope` (in-scope first)
     - [ ] **Every property has a `property_id` field** — IDs follow the `{_id_prefix}-{type_abbrev}-{seq:03d}` format
     - [ ] `metadata.total_properties` == actual length of `properties` array, `sum(by_severity.values()) == total_properties`
+    - [ ] **Crash safety**: For each deserialization/parsing path from untrusted sources, at least one property asserts graceful rejection of malformed input (not just resource bounds)
+    - [ ] **Declared-vs-actual consistency**: For each data structure with declared metadata (counts, hashes, keys) and separate actual data arrays, a `len(declared) == len(actual)` invariant exists
   </quality_checklist>
 
   <data_sources>
