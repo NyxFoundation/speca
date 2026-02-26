@@ -18,8 +18,12 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     2. After processing, write JSON to <ref id="results"/>. **FAILURE TO WRITE IS A CRITICAL ERROR.**
     3. The JSON file MUST be written even if all items are disputed.
     4. **RECALL PROTECTION**: Only the 3 gates below may produce DISPUTED_FP.
+       Each gate has a narrow, specific check — do NOT expand the scope of a gate.
+       - Gate 1: caller count only (grep result). No code logic analysis.
+       - Gate 2: data source trust level only (lookup in trust_assumptions). No code analysis.
+       - Gate 3: scope exclusion list only (lookup in BUG_BOUNTY_SCOPE). No code analysis.
        If none of the 3 gates triggers, the finding MUST survive (CONFIRMED_* or NEEDS_MANUAL_REVIEW).
-       Do NOT invent additional reasons to dispute findings.
+       Reasoning about code correctness, design intent, or security impact is NOT a gate check.
   </critical_requirements>
 
   <instructions>
@@ -51,21 +55,22 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   ---
 
-  ### Gate 2: Trust Boundary (catches findings that require compromised/faulty trusted component)
+  ### Gate 2: Trust Boundary (catches findings whose attack path relies on a trusted data source)
 
-  Read `trust_assumptions` from BUG_BOUNTY_SCOPE.json. Identify which data source
-  Phase 03's attack path relies on (e.g., Engine API, local IPC, P2P gossip).
+  Read `trust_assumptions` from BUG_BOUNTY_SCOPE.json.
+  Look up the **data source name** that Phase 03's attack path depends on
+  (e.g., "Engine API", "local IPC", "P2P gossip", "execution layer").
 
-  - Attack path relies **solely** on a `TRUSTED` or `SEMI_TRUSTED` source being
-    compromised, faulty, or returning malicious data → DISPUTED_FP:
-    "requires compromised/faulty [source], outside security model"
-  - This includes Engine API / EL responses: if the finding assumes the EL returns
-    incorrect or malicious data and there is no untrusted (e.g., P2P) path that
-    triggers the same issue → DISPUTED_FP: "EL-only path, EL is trusted"
-  - The property may be reachable via BOTH untrusted (P2P) and trusted (EL) paths.
-    If Phase 03's violation is **only** on the trusted/semi-trusted path while the
-    untrusted path is correctly validated → DISPUTED_FP for this specific violation.
-    If the untrusted path is **also** vulnerable → passes gate (the EL trust is irrelevant).
+  **Decision is purely a lookup — match Phase 03's entry point against trust_assumptions:**
+  1. Find which data source Phase 03 lists as the entry point / attack vector.
+  2. Look up that source in `trust_assumptions`.
+  3. If trust level is `TRUSTED` or `SEMI_TRUSTED` **and** no untrusted (e.g., P2P) path
+     also reaches the same code → DISPUTED_FP: "entry point [source] is [TRUSTED|SEMI_TRUSTED]"
+  4. If an untrusted path also reaches the same code → passes gate.
+
+  **This gate does NOT read or analyze source code.** Do not reason about whether
+  the code is "correct", "by design", or "a misinterpretation". The only question is:
+  does the attack path go through a trusted data source? Yes/no.
 
   ---
 
