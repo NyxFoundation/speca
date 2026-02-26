@@ -8,7 +8,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 ---
 
 <task>
-  <goal>Filter false positives from Phase 03 findings, verify exploitability, calibrate severity.</goal>
+  <goal>Filter false positives from Phase 03 findings, calibrate severity.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
@@ -17,6 +17,13 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     1. Process ALL items in the batch.
     2. After processing, write JSON to <ref id="results"/>. **FAILURE TO WRITE IS A CRITICAL ERROR.**
     3. The JSON file MUST be written even if all items are disputed.
+    4. **RECALL PROTECTION**: Only the 3 gates below may produce DISPUTED_FP.
+       Each gate has a narrow, specific check — do NOT expand the scope of a gate.
+       - Gate 1: caller count only (grep result). No code logic analysis.
+       - Gate 2: data source trust level only (lookup in trust_assumptions). No code analysis.
+       - Gate 3: scope exclusion list only (lookup in BUG_BOUNTY_SCOPE). No code analysis.
+       If none of the 3 gates triggers, the finding MUST survive (CONFIRMED_* or NEEDS_MANUAL_REVIEW).
+       Reasoning about code correctness, design intent, or security impact is NOT a gate check.
   </critical_requirements>
 
   <instructions>
@@ -27,14 +34,15 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   Then read and cache these files:
   - `outputs/BUG_BOUNTY_SCOPE.json` — scope rules, `trust_assumptions`, severity thresholds. **Required.**
   - `outputs/TARGET_INFO.json` — target repo metadata. **Required.**
-  - For each `property_id`, locate its 01e entry in `outputs/01e_PARTIAL_*.json`.
 
-  ## 2. For each item — FP Filter Pipeline
+  ## 2. For each item — FP Filter Pipeline (3 gates)
 
   Process each item through the gates below **in order**. If a gate triggers DISPUTED_FP,
   record the reason and **skip remaining gates**. This is a filter — exit early when possible.
 
   Items with `classification` = not-a-vulnerability, out-of-scope, or informational → **PASS_THROUGH** (skip all gates).
+
+  **Only these 3 gates may produce DISPUTED_FP. No other reasoning may dispute a finding.**
 
   ---
 
@@ -47,78 +55,30 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   ---
 
-  ### Gate 2: Trust Boundary (catches findings that require compromised trusted component)
+  ### Gate 2: Trust Boundary (catches findings whose attack path relies on a trusted data source)
 
-  Read `trust_assumptions` from BUG_BOUNTY_SCOPE.json. Identify which data source
-  Phase 03's attack path relies on (e.g., Engine API, local IPC, P2P gossip).
+  Read `trust_assumptions` from BUG_BOUNTY_SCOPE.json.
+  Look up the **data source name** that Phase 03's attack path depends on
+  (e.g., "Engine API", "local IPC", "P2P gossip", "execution layer").
 
-  - Attack path requires data from a `SEMI_TRUSTED` or `TRUSTED` source to be
-    corrupted/malicious → DISPUTED_FP: "requires compromised [source], outside security model"
-  - The property may be reachable via BOTH untrusted (P2P) and trusted (EL) paths.
-    If Phase 03's violation is **only** on the trusted path while the untrusted path
-    is correctly validated → DISPUTED_FP for this specific violation.
+  **Decision is purely a lookup — match Phase 03's entry point against trust_assumptions:**
+  1. Find which data source Phase 03 lists as the entry point / attack vector.
+  2. Look up that source in `trust_assumptions`.
+  3. If trust level is `TRUSTED` or `SEMI_TRUSTED` **and** no untrusted (e.g., P2P) path
+     also reaches the same code → DISPUTED_FP: "entry point [source] is [TRUSTED|SEMI_TRUSTED]"
+  4. If an untrusted path also reaches the same code → passes gate.
 
-  ---
-
-  ### Gate 3: Code Verification (catches **factually incorrect** code readings only)
-
-  Read the actual code at the flagged location (prepend `target_workspace/`).
-  Read the **full function**, not just the flagged lines.
-
-  **This gate may ONLY trigger DISPUTED_FP for objective, verifiable factual errors:**
-  - The file/function Phase 03 references does not exist → DISPUTED_FP: "code does not exist"
-  - The line numbers are wrong and the actual code does something completely different
-    (different function, different logic) → DISPUTED_FP: "incorrect code reading — actual code at [file:line] is [what]"
-  - Phase 03 claims a function calls X, but it calls Y (verifiable from source) → DISPUTED_FP: "incorrect call graph"
-
-  **These are NOT grounds for DISPUTED_FP (record observations in reviewer_notes instead):**
-  - Validation exists at a different layer / in a caller / in a parallel path → passes gate
-    (note: "validation may exist at [location]" in reviewer_notes for downstream consideration)
-  - Phase 03's code reading is factually correct but you disagree about security impact → passes gate
-  - The behavior seems "by design" or "consistent across nodes" → passes gate
-  - Defensive patterns exist (mutexes, rate limiters, etc.) → passes gate
-    (note the pattern in reviewer_notes; Gate 4 handles mitigation assessment)
-  - Phase 03 claims a concurrency bug and you believe it's single-threaded → passes gate
-    (note the threading observation in reviewer_notes)
+  **This gate does NOT read or analyze source code.** Do not reason about whether
+  the code is "correct", "by design", or "a misinterpretation". The only question is:
+  does the attack path go through a trusted data source? Yes/no.
 
   ---
 
-  ### Gate 4: Exploitability (catches findings without attacker causation)
-
-  Determine whether an attacker can **cause** the deviation through an untrusted entry point.
-
-  - **Attacker-triggered**: attacker controls the input that causes the deviation → passes gate.
-  - **Code-intrinsic**: the code's own logic produces incorrect output regardless of input.
-    No attacker action needed → DISPUTED_FP: "correctness bug, not security vulnerability"
-    **Exception**: bugs that cause protocol violations (invalid blocks, wrong state transitions,
-    consensus splits, data loss) ARE security vulnerabilities even without attacker input → passes gate.
-  - **Defensive mitigation**: a surrounding mechanism (rate limiter, connection cap, resource
-    bound) already neutralizes the attack's impact → DISPUTED_FP: "mitigated by [mechanism]"
-    **Strict requirement**: The mitigation must be a **dedicated, explicit guard** (e.g., rate
-    limiter with configured threshold, connection cap constant, resource pool with hard limit).
-    "Validation exists at another layer" or "the crypto layer rejects it" is NOT a mitigation —
-    that is defense-in-depth, which does not eliminate the underlying bug. When uncertain,
-    use CONFIRMED_POTENTIAL instead of DISPUTED_FP.
-
-  Record: "Attacker control: [direct/none]. Path: [attacker-triggered / code-intrinsic / semi-trusted]."
-
-  ---
-
-  ### Gate 5: Spec Cross-Reference
-
-  Look up the 01e entry for this `property_id`. Read `text` and `assertion`.
-  - 01e does NOT require the flagged behavior → DISPUTED_FP: "not a spec requirement"
-  - Code does NOT deviate from the 01e requirement → DISPUTED_FP: "code is spec-compliant"
-  - 01e entry missing → NEEDS_MANUAL_REVIEW: "01e missing"
-
-  Record the 01e file name and invariant text in reviewer_notes.
-
-  ---
-
-  ### Gate 6: Scope Check
+  ### Gate 3: Scope Check
 
   Check `out_of_scope`, `conditional_scope`, and `in_scope.scope_restriction` in BUG_BOUNTY_SCOPE.json.
   - Finding falls under an excluded category → DISPUTED_FP: "[category] is out of scope"
+  - Issue predates the audit scope (e.g., not introduced in the target fork) → DISPUTED_FP: "pre-existing, out of scope"
 
   ---
 
@@ -142,8 +102,7 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   **Consistency rule**: The verdict must be consistent with the gate outcomes.
   - If a gate triggered DISPUTED_FP, the verdict is DISPUTED_FP.
-  - If all gates passed, the verdict MUST NOT be DISPUTED_FP — even if reviewer_notes
-    contain observations like "may be by design" or "defense-in-depth exists".
+  - If all gates passed, the verdict MUST NOT be DISPUTED_FP.
     Use CONFIRMED_POTENTIAL or NEEDS_MANUAL_REVIEW for uncertain cases that passed all gates.
 
   ## 5. Write Output
@@ -157,8 +116,8 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
         "review_verdict": "CONFIRMED_VULNERABILITY | CONFIRMED_POTENTIAL | DISPUTED_FP | DOWNGRADED | NEEDS_MANUAL_REVIEW | PASS_THROUGH",
         "original_classification": "vulnerability | potential-vulnerability",
         "adjusted_severity": "Critical | High | Medium | Low | Informational",
-        "reviewer_notes": "3-5 sentences: gate that triggered + evidence + 01e reference + severity reasoning",
-        "spec_reference": "01e invariant text or empty string"
+        "reviewer_notes": "2-3 sentences: gate that triggered + evidence, or severity reasoning",
+        "spec_reference": ""
       }
     ],
     "metadata": { "phase": "04", "worker_id": "{{WORKER_ID}}", "item_count": N, "timestamp": N, "processed_ids": [...] }
@@ -171,11 +130,10 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   <quality_gates>
     1. Every item has exactly the 6 keys shown in the schema.
-    2. DISPUTED_FP always states WHICH gate triggered and WHY (not just "looks safe").
+    2. DISPUTED_FP always states WHICH gate (1, 2, or 3) triggered and WHY.
     3. CONFIRMED_VULNERABILITY always includes a concrete attack sentence.
-    4. reviewer_notes cites 01e file name and invariant text.
-    5. adjusted_severity is justified against BUG_BOUNTY_SCOPE.json thresholds.
-    6. Verdict is consistent with reviewer_notes (no self-contradiction).
+    4. adjusted_severity is justified against BUG_BOUNTY_SCOPE.json thresholds.
+    5. Verdict is consistent with gate outcomes — no DISPUTED_FP if all 3 gates passed.
   </quality_gates>
 </task>
 
