@@ -104,14 +104,16 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   ---
 
-  ### Gate 5: Spec Cross-Reference
+  ### Gate 5: Spec Cross-Reference (informational only — NO DISPUTED_FP)
 
   Look up the 01e entry for this `property_id`. Read `text` and `assertion`.
-  - 01e does NOT require the flagged behavior → DISPUTED_FP: "not a spec requirement"
-  - Code does NOT deviate from the 01e requirement → DISPUTED_FP: "code is spec-compliant"
-  - 01e entry missing → NEEDS_MANUAL_REVIEW: "01e missing"
+  Record the 01e file name and invariant text in reviewer_notes for context.
 
-  Record the 01e file name and invariant text in reviewer_notes.
+  **This gate NEVER produces DISPUTED_FP.** 01e properties are LLM-generated and may
+  themselves be inaccurate. Observations go into reviewer_notes only:
+  - 01e does not require the flagged behavior → note: "01e does not cover this behavior"
+  - Code appears to comply with 01e → note: "code may be 01e-compliant"
+  - 01e entry missing → note: "01e entry not found"
 
   ---
 

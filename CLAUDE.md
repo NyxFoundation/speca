@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SPECA (Specification-to-Property Agentic Auditing) — an automated security audit pipeline that uses Claude Code CLI to analyze codebases for vulnerabilities. The pipeline transforms specifications into formal program graphs, generates security properties, pre-resolves code locations, performs proof-based formal audits against target code, and filters false positives via a 6-gate review pipeline.
+SPECA (Specification-to-Property Agentic Auditing) — an automated security audit pipeline that uses Claude Code CLI to analyze codebases for vulnerabilities. The pipeline transforms specifications into formal program graphs, generates security properties, pre-resolves code locations, performs proof-based formal audits against target code, and filters false positives via a 6-gate review pipeline (5 filtering gates + 1 informational-only gate).
 
 ## Commands
 
@@ -55,7 +55,7 @@ Phase IDs: `01a` → `01b` → `01e` → `02c` → `03` → `04`
 - **01e** Property Generation: trust model analysis (domain-agnostic STRIDE + CWE Top 25) + formal security properties from subgraphs (depends on 01b). **Requires** `outputs/BUG_BOUNTY_SCOPE.json` — orchestrator calls `sys.exit(1)` if missing. Logic inlined in worker prompt (no skill fork). Slim output: `covers` is a string (primary element ID), `reachability` has 4 fields only.
 - **02c** Code Pre-resolution: pre-resolve code locations (`code_scope`) for properties against target repository using Tree-sitter MCP. Requires `outputs/TARGET_INFO.json` (created by 02c workflow before phase runs). Also builds `outputs/01b_SUBGRAPH_INDEX.json` from 01b partials for spec-level context. Severity gate drops `Informational` properties. Model: Sonnet.
 - **03** Audit Map: proof-based 3-phase formal audit (Map → Prove → Stress-Test) against target codebase. Tries to prove properties hold; gaps in proof are findings. Reads `outputs/TARGET_INFO.json` to auto-clone same target repository/commit. Inlined prompt (no skill fork). Model: Sonnet. Tools: Read/Write/Grep/Glob only.
-- **04** Review: 6-gate FP filter pipeline with early exit (Dead Code → Trust Boundary → Code Verification → Exploitability → Spec Cross-Reference → Scope Check), then severity calibration. Verdicts: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW, PASS_THROUGH. Model: Sonnet. Tools: Read/Write/Grep/Glob only (no MCP).
+- **04** Review: 6-gate FP filter pipeline with early exit (Dead Code → Trust Boundary → Code Verification → Exploitability → Spec Cross-Reference [informational only] → Scope Check), then severity calibration. Gate 3 restricted to factual code errors only; Gate 5 never produces DISPUTED_FP (notes only). Verdicts: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW, PASS_THROUGH. Model: Sonnet. Tools: Read/Write/Grep/Glob only (no MCP).
 
 Manual (not orchestrated): `05` PoC Generation, `06` Bug-Bounty Report, `06b` Full Audit Report.
 
