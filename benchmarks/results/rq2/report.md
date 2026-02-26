@@ -1,13 +1,13 @@
 # Benchmark Report
 
-Generated: 2026-02-22T05:24:32.848389+00:00
+Generated: 2026-02-26T15:13:24.829977+00:00
 
 ## Dataset
 
 - Path: benchmarks/data/primevul/primevul_test_paired.jsonl
 - Ground-truth samples: 868
 - Total samples: 868
-- Pair groups: 0 (eligible: 0, skipped: 0)
+- Pair groups: 412 (eligible: 386, skipped: 26)
 
 ## Tool Metrics
 
@@ -34,10 +34,10 @@ Generated: 2026-02-22T05:24:32.848389+00:00
 
 | Tool | Accuracy | Correct | Scored | Total | Skipped |
 | ---- | -------- | ------- | ------ | ----- | ------- |
-| semgrep | 0.000 | 0 | 0 | 0 | 0 |
+| semgrep | 0.000 | 0 | 386 | 386 | 0 |
 | codeql | n/a | 0 | 0 | 0 | 0 |
 | security_agent | n/a | 0 | 0 | 0 | 0 |
-| llm_baseline | 0.000 | 0 | 0 | 0 | 0 |
+| llm_baseline | 0.000 | 0 | 0 | 386 | 386 |
 | static_baseline | n/a | 0 | 0 | 0 | 0 |
 
 ## Unique Detections (Security Agent)
