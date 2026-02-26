@@ -1,19 +1,23 @@
 import sys
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Add workspace root to sys.path
-sys.path.append(os.getcwd())
+# Add workspace root to sys.path using absolute path calculation (BUG-SCH13)
+_WORKSPACE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _WORKSPACE_ROOT not in sys.path:
+    sys.path.insert(0, _WORKSPACE_ROOT)
 
-# Mock dependencies before importing scripts
-sys.modules["tqdm"] = MagicMock()
-sys.modules["aiofiles"] = MagicMock()
-sys.modules["anthropic"] = MagicMock()
-sys.modules["tenacity"] = MagicMock()
+# Mock dependencies before importing scripts, using patch.dict for proper cleanup (BUG-SCH12)
+_MOCK_MODULES = {"tqdm": MagicMock(), "aiofiles": MagicMock(), "anthropic": MagicMock(), "tenacity": MagicMock()}
+_patcher = patch.dict(sys.modules, _MOCK_MODULES)
+_patcher.start()
 
 from scripts.orchestrator.base import Phase03Orchestrator
 from scripts.orchestrator.config import get_phase_config
+
+_patcher.stop()
 
 
 class TestPhase03EarlyExit(unittest.TestCase):
