@@ -50,6 +50,9 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - Use pre-resolved data from Phase 02c
           - Primary location is first item with `role == "primary"` in locations array
           - Related locations (callers, callees, state management) are available for context
+          - **Read the `note` field on each location** — notes encode Phase 02c observations
+            about discrepancies (e.g., which function variant a caller actually invokes).
+            Treat each note as a hypothesis to verify or refute in Phase 2.
           - Use `item.code_excerpt` if available, which contains all relevant code sections
 
        b. **Fallback resolution**: If not pre-resolved, use Read/Grep/Glob to find code from `item.text` and `item.assertion`. Identify which code elements are responsible for enforcing this property. Extract relevant lines as `code_excerpt`.
@@ -132,8 +135,12 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
             from the key, the cache can return wrong results for different inputs.
           - **Deduplication/Seen-set**: List every field that makes items semantically
             distinct. Verify each is part of the dedup key.
-          - **Derived/Precomputed state**: Verify the derived value is invalidated
-            or recomputed when the source state changes.
+          - **Derived/Precomputed state**: (a) Verify the derived value is invalidated
+            or recomputed when the source state changes. (b) When code has BOTH a
+            cached accessor and a recompute-from-current-state function, verify
+            callers use the correct one — using recompute where the spec requires
+            the cached value (or vice versa) produces wrong results when the
+            underlying state mutates between precomputation and use.
           - **Multi-path construction**: Verify ALL construction paths enforce the
             same invariants (ordering, bounds, uniqueness).
           - **Repeated accessor reads**: If the same getter is called multiple times
@@ -159,6 +166,9 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
           - "Config is immutable at runtime" → Search for Override/Set/Update methods
           - "This lock protects the data" → Verify the lock is held at EVERY access
           - "The spec mandates this behavior" → Re-read the spec comment to confirm
+          - "Function A and function B compute the same result" → Read BOTH implementations;
+            verify they use the same state source, same inputs, and same algorithm.
+            Similar names do not imply equivalence.
        2. If any assumption is wrong, re-do Phase 2 with corrected understanding.
 
        **If your proof failed (you found a potential bug):**
@@ -235,6 +245,8 @@ Execution hint: This worker prompt is invoked by the phase-03 async orchestrator
     - "Guards exist → safe" — Prove guards are sufficient for ALL paths and states
     - "No counterexample found → safe" — Revisit your proof assumptions
     - "Code looks simple → skip analysis" — Complex bugs hide in simple code
+    - "Function A and B produce same result → safe" — Verify same state source;
+      cached/precomputed vs recomputed from mutable state are NOT equivalent
 
     False positives (reporting non-bugs):
     - "Check X is missing from this function" — Grep for it in callers/upstream first

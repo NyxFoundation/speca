@@ -1,6 +1,6 @@
 
 ---
-Description: "[WORKER] Inline proof-based review of Phase 03 audit findings with spec cross-reference."
+Description: "[WORKER] Review Phase 03 audit findings — filter FPs, verify exploitability, calibrate severity."
 Usage: /04_review_worker WORKER_ID=... QUEUE_FILE=... [TIMESTAMP=...] [ITERATION=...] [BATCH_SIZE=...] [OUTPUT_FILE=...]
 Example: /04_review_worker WORKER_ID=0 QUEUE_FILE=outputs/04_QUEUE_0.json TIMESTAMP=1700000000 ITERATION=1 BATCH_SIZE=5 OUTPUT_FILE=outputs/04_PARTIAL_W0_1700000000_1.json
 Language: English only.
@@ -8,192 +8,176 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 ---
 
 <task>
-  <goal>Review and validate Phase 03 findings. Verify code claims, cross-reference with spec subgraphs, filter FPs, and calibrate severity.</goal>
+  <goal>Filter false positives from Phase 03 findings, verify exploitability, calibrate severity.</goal>
   <input type="file" id="queue">{{QUEUE_FILE}}</input>
   <input type="file" id="context">{{CONTEXT_FILE}}</input>
   <output type="file" id="results">{{OUTPUT_FILE}}</output>
 
   <critical_requirements>
-    **YOU MUST COMPLETE ALL OF THE FOLLOWING:**
-    1. Process ALL items in the batch (up to BATCH_SIZE).
-    2. Verify every claim against actual code — re-read the exact lines cited.
-    3. Cross-reference with specification subgraph to check design intent.
-    4. Calibrate severity against `BUG_BOUNTY_SCOPE.json` and `TARGET_INFO.json`.
-    5. After processing ALL items, write a JSON file to <ref id="results"/>.
-    6. The JSON file MUST be written even if all items are disputed.
-
-    **FAILURE TO WRITE THE JSON FILE IS A CRITICAL ERROR.**
+    1. Process ALL items in the batch.
+    2. After processing, write JSON to <ref id="results"/>. **FAILURE TO WRITE IS A CRITICAL ERROR.**
+    3. The JSON file MUST be written even if all items are disputed.
   </critical_requirements>
 
-  <review_approach>
-    You are the final quality gate. Your job is to VERIFY, not re-audit.
-    Phase 03 attempted to prove each property holds. Your task:
-    - If Phase 03 found a vulnerability: verify the code reading is correct and the attack path is **actually exploitable right now**.
-    - If Phase 03 found a potential-vulnerability: verify the uncertainty is genuine, not a misread.
-    You do NOT need to re-run the 3-phase audit. Focus on verification, exploitability, and spec compliance.
-
-    **Proof of exploitability is king.** A finding is only a real vulnerability if:
-    1. The code reading is factually correct (the code does what Phase 03 says it does).
-    2. The attack path is reachable with the CURRENT codebase and dependencies.
-    3. No defensive pattern, library guarantee, or architectural design prevents exploitation.
-    If ANY of these fail, the finding is a false positive.
-  </review_approach>
-
   <instructions>
-    1. **Read Queue**: Read <ref id="queue"/> to get `item_ids` and `context_file` path. Read <ref id="context"/> to get item data (keyed by ID). For each ID in `item_ids`, look up the item data in context.
 
-    2. **Read Context Files** (do this ONCE at the start of the batch):
-       a. Read `outputs/01b_SUBGRAPH_INDEX.json` — spec subgraph index for cross-reference.
-       b. Read `outputs/BUG_BOUNTY_SCOPE.json` — severity definitions, scope rules, and
-          domain-specific context (e.g., deployment share, trust model, out-of-scope components).
-       c. Read `outputs/TARGET_INFO.json` — target repository/project metadata.
-       All three files are **required**. If any file is missing, stop and report the error.
-       Cache all files for use across all items in the batch.
+  ## 1. Setup (once per batch)
 
-    3. **For Each Item** (property_id, audit_result, text, assertion, covers, severity):
+  Read <ref id="queue"/> for `item_ids` and `context_file`. Read <ref id="context"/> for item data.
+  Then read and cache these files:
+  - `outputs/BUG_BOUNTY_SCOPE.json` — scope rules, `trust_assumptions`, severity thresholds. **Required.**
+  - `outputs/TARGET_INFO.json` — target repo metadata. **Required.**
+  - For each `property_id`, locate its 01e entry in `outputs/01e_PARTIAL_*.json`.
 
-       Step A. **Parse Phase 03 Output**: Extract classification, code_path, proof_trace, attack_scenario from `audit_result`.
+  ## 2. For each item — FP Filter Pipeline
 
-       Step B. **Verify Code Reading** (MANDATORY for vulnerability/potential-vulnerability):
-         1. Extract file path and line range from code_path in audit_result. Prepend `target_workspace/`.
-         2. Read the actual code (full function, not just flagged lines).
-         3. Does proof_trace accurately describe the code's behavior?
-         4. If proof_trace claims a check is MISSING: Grep for it in callers, upstream functions,
-            and the surrounding package. A check may exist at a different layer.
-         5. If proof_trace claims a concurrency issue (race condition, data race, deadlock):
-            verify that the involved operations actually execute concurrently at runtime — check
-            thread/goroutine/task spawn sites, not just whether the functions exist.
-         6. Check for defensive patterns around the flagged code. Examples by language:
-            - **Go**: sync.Mutex/RWMutex, sync/atomic, sync.Once, errgroup.Wait(), channel ownership
-            - **Java**: synchronized, ReentrantLock, volatile, AtomicReference, ConcurrentHashMap
-            - **C/C++**: pthread_mutex, std::mutex, std::atomic, memory barriers
-            - **Rust**: Mutex, RwLock, Arc, ownership/borrowing guarantees
-            - **Python**: threading.Lock, asyncio.Lock, GIL-protected operations
-            - **General**: immutable data structures, copy-on-write, single-threaded event loops
+  Process each item through the gates below **in order**. If a gate triggers DISPUTED_FP,
+  record the reason and **skip remaining gates**. This is a filter — exit early when possible.
 
-       Step B2. **Verify Dependency Behavior** (MANDATORY when finding depends on external library behavior):
-         If the proof_trace relies on how an external library/dependency behaves (e.g., "library
-         rejects invalid input", "library enforces constraint X"), you MUST verify:
-         1. Find the dependency version in the project's dependency manifest (e.g., `go.mod`,
-            `go.sum`, `pom.xml`, `Cargo.toml`, `package.json`, `requirements.txt`) under
-            `target_workspace/`.
-         2. Determine whether the library's CURRENT version actually enforces the claimed constraint.
-            Grep for relevant checks in vendored code or read the library's documented behavior.
-         3. If the vulnerability requires a FUTURE library update to become exploitable, it is NOT
-            a current vulnerability → DISPUTED_FP ("latent issue, not exploitable with current
-            dependency version").
-         4. If you cannot determine the library's behavior with confidence → CONFIRMED_POTENTIAL
-            (not CONFIRMED_VULNERABILITY).
+  Items with `classification` = not-a-vulnerability, out-of-scope, or informational → **PASS_THROUGH** (skip all gates).
 
-       Step C. **Spec Cross-Reference** (MANDATORY):
-         1. From the item's `covers` field (element ID like "FN-001"), find the matching
-            subgraph in the 01b index (search subgraph entries for the element ID).
-         2. Read the corresponding `.mmd` file (path from index, prepend `outputs/graphs/`
-            or use the full path from index).
-         3. Check: Does the spec REQUIRE the behavior that Phase 03 flagged as a bug?
-            - If the spec explicitly mandates this behavior → DISPUTED_FP (spec-compliant)
-            - If the spec defines different requirements for different contexts (e.g., internal
-              vs external callers, different protocol versions) → DISPUTED_FP (by-design)
-            - If the spec is silent on this → finding remains valid
-         4. Record the spec reference in reviewer_notes.
+  ---
 
-       Step D. **Check Common FP Patterns**:
-         1. Phantom concurrency bugs: Phase 03 claims unguarded access but synchronization exists
-         2. Misunderstood language idioms: language-specific patterns mistaken for bugs
-         3. Design choices flagged as bugs: intentional pruning, eviction, short-circuit, fallback
-         4. Theoretical-only exploits: attack path blocked by runtime constraints (execution order,
-            type system, access control) that Phase 03 overlooked
-         5. Over-scoped findings: flagged function is correct but Phase 03 speculates about
-            hypothetical callers or future misuse
-         6. Spec-compliant behavior: code follows spec exactly but Phase 03 thinks it's a bug
-         7. Trust boundary differentiation: different trust levels for different interfaces are
-            by design (e.g., local APIs vs network-facing APIs)
-         8. Latent/future vulnerabilities: exploit requires a dependency upgrade, config change,
-            or future code modification that has not happened yet — NOT a current vulnerability
-         9. Library trust: code correctly delegates to a well-tested library and the library's
-            current version handles the edge case properly
+  ### Gate 1: Dead Code (catches bugs in unreachable code)
 
-       Step E. **Calibrate Severity** (MANDATORY):
-         Determine `adjusted_severity` by strictly applying `BUG_BOUNTY_SCOPE.json`:
+  Grep for call sites of the flagged function (exclude `*_test.*` / `test_*.*` files).
+  - **Zero non-test callers** → DISPUTED_FP: "dead/unreachable code"
+  - Function no longer exists in the file → DISPUTED_FP: "code removed"
+  - Skip this gate for "missing validation" findings (the issue is that something is NOT called).
 
-         1. Read the `severity_classification` section. Each severity level has an explicit
-            impact threshold (e.g., ">33% of network", ">5% of network"). These thresholds
-            are the ONLY criteria — do not invent your own severity reasoning.
-         2. Read `deployment_context.client_diversity` to find the target project's share.
-            Match the target from `TARGET_INFO.json` (e.g., repo name) to a client entry.
-            This share is the MAXIMUM network-wide impact for a single-component bug.
-         3. Determine the severity cap:
-            - Compare the target's share against EACH threshold in `severity_classification`.
-            - The highest severity whose threshold the share EXCEEDS is the cap.
-            - Example: share=31%, thresholds are Critical >50%, High >33%, Medium >5%
-              → 31% > 5% but 31% < 33% → cap is **Medium**.
-         4. Apply the cap:
-            - If the bug affects ALL nodes of the target component → severity = cap.
-            - If the bug only triggers under specific conditions (certain configurations,
-              specific timing, specific roles, requires attacker-controlled input beyond
-              normal operation), the effective impact is LOWER than the cap.
-            - Do NOT inflate severity by speculating about multi-client composition,
-              widespread propagation, or cascading effects. Evaluate the single-component
-              impact as-is.
-         5. If the item's original severity exceeds the calibrated result → DOWNGRADE.
-         6. Check `out_of_scope` and `conditional_scope` sections — if the finding falls
-            under an explicitly excluded category, mark as DISPUTED_FP.
+  ---
 
-       Step F. **Determine Verdict**:
-         - CONFIRMED_VULNERABILITY: Code reading verified, no spec justification, attack path
-           reachable with CURRENT code and dependencies, severity calibrated
-         - CONFIRMED_POTENTIAL: Uncertainty is genuine (ambiguous spec, complex concurrency),
-           but exploitability cannot be confirmed or denied
-         - DISPUTED_FP: Code misread, spec-compliant, defensive pattern exists, unreachable attack,
-           latent issue not exploitable with current dependencies, by-design trust boundary,
-           or out-of-scope per program rules
-         - DOWNGRADED: Real issue but lower severity than claimed (adjust severity and explain why)
-         - NEEDS_MANUAL_REVIEW: Cannot determine with available information
+  ### Gate 2: Trust Boundary (catches findings that require compromised trusted component)
 
-         **Consistency rule:** The verdict MUST be consistent with reviewer_notes.
-         - If reviewer_notes concludes "by design", "intentional", "trust boundary",
-           "spec-compliant", or "not exploitable" → verdict MUST be DISPUTED_FP.
-           Do NOT use CONFIRMED_VULNERABILITY or CONFIRMED_POTENTIAL with such conclusions.
-         - If reviewer_notes confirms exploitability → verdict MUST NOT be DISPUTED_FP.
+  Read `trust_assumptions` from BUG_BOUNTY_SCOPE.json. Identify which data source
+  Phase 03's attack path relies on (e.g., Engine API, local IPC, P2P gossip).
 
-    4. **Write Output**: After ALL items are processed, write a **single JSON object** to <ref id="results"/>:
-       ```json
-       {
-         "reviewed_items": [ ...all reviewed items... ],
-         "metadata": { "phase": "04", "worker_id": N, "batch_index": N,
-                        "item_count": N, "timestamp": N, "processed_ids": [...] }
-       }
-       ```
-       - The top-level structure MUST be a **JSON object** (dict), NOT a JSON array.
-       - `"reviewed_items"` MUST be the key containing the flat list of all reviewed item objects.
-       - This step is **MANDATORY**.
+  - Attack path requires data from a `SEMI_TRUSTED` or `TRUSTED` source to be
+    corrupted/malicious → DISPUTED_FP: "requires compromised [source], outside security model"
+  - The property may be reachable via BOTH untrusted (P2P) and trusted (EL) paths.
+    If Phase 03's violation is **only** on the trusted path while the untrusted path
+    is correctly validated → DISPUTED_FP for this specific violation.
 
-    5. **Confirm**: Print a summary and end with: `Output File: {{OUTPUT_FILE}}`
+  ---
+
+  ### Gate 3: Code Verification (catches **factually incorrect** code readings only)
+
+  Read the actual code at the flagged location (prepend `target_workspace/`).
+  Read the **full function**, not just the flagged lines.
+
+  **This gate may ONLY trigger DISPUTED_FP for objective, verifiable factual errors:**
+  - The file/function Phase 03 references does not exist → DISPUTED_FP: "code does not exist"
+  - The line numbers are wrong and the actual code does something completely different
+    (different function, different logic) → DISPUTED_FP: "incorrect code reading — actual code at [file:line] is [what]"
+  - Phase 03 claims a function calls X, but it calls Y (verifiable from source) → DISPUTED_FP: "incorrect call graph"
+
+  **These are NOT grounds for DISPUTED_FP (record observations in reviewer_notes instead):**
+  - Validation exists at a different layer / in a caller / in a parallel path → passes gate
+    (note: "validation may exist at [location]" in reviewer_notes for downstream consideration)
+  - Phase 03's code reading is factually correct but you disagree about security impact → passes gate
+  - The behavior seems "by design" or "consistent across nodes" → passes gate
+  - Defensive patterns exist (mutexes, rate limiters, etc.) → passes gate
+    (note the pattern in reviewer_notes; Gate 4 handles mitigation assessment)
+  - Phase 03 claims a concurrency bug and you believe it's single-threaded → passes gate
+    (note the threading observation in reviewer_notes)
+
+  ---
+
+  ### Gate 4: Exploitability (catches findings without attacker causation)
+
+  Determine whether an attacker can **cause** the deviation through an untrusted entry point.
+
+  - **Attacker-triggered**: attacker controls the input that causes the deviation → passes gate.
+  - **Code-intrinsic**: the code's own logic produces incorrect output regardless of input.
+    No attacker action needed → DISPUTED_FP: "correctness bug, not security vulnerability"
+    **Exception**: bugs that cause protocol violations (invalid blocks, wrong state transitions,
+    consensus splits, data loss) ARE security vulnerabilities even without attacker input → passes gate.
+  - **Defensive mitigation**: a surrounding mechanism (rate limiter, connection cap, resource
+    bound) already neutralizes the attack's impact → DISPUTED_FP: "mitigated by [mechanism]"
+    **Strict requirement**: The mitigation must be a **dedicated, explicit guard** (e.g., rate
+    limiter with configured threshold, connection cap constant, resource pool with hard limit).
+    "Validation exists at another layer" or "the crypto layer rejects it" is NOT a mitigation —
+    that is defense-in-depth, which does not eliminate the underlying bug. When uncertain,
+    use CONFIRMED_POTENTIAL instead of DISPUTED_FP.
+
+  Record: "Attacker control: [direct/none]. Path: [attacker-triggered / code-intrinsic / semi-trusted]."
+
+  ---
+
+  ### Gate 5: Spec Cross-Reference (informational only — NO DISPUTED_FP)
+
+  Look up the 01e entry for this `property_id`. Read `text` and `assertion`.
+  Record the 01e file name and invariant text in reviewer_notes for context.
+
+  **This gate NEVER produces DISPUTED_FP.** 01e properties are LLM-generated and may
+  themselves be inaccurate. Observations go into reviewer_notes only:
+  - 01e does not require the flagged behavior → note: "01e does not cover this behavior"
+  - Code appears to comply with 01e → note: "code may be 01e-compliant"
+  - 01e entry missing → note: "01e entry not found"
+
+  ---
+
+  ### Gate 6: Scope Check
+
+  Check `out_of_scope`, `conditional_scope`, and `in_scope.scope_restriction` in BUG_BOUNTY_SCOPE.json.
+  - Finding falls under an excluded category → DISPUTED_FP: "[category] is out of scope"
+
+  ---
+
+  ## 3. Severity Calibration (for items that passed all gates)
+
+  Apply `severity_classification` from BUG_BOUNTY_SCOPE.json:
+  1. Read impact thresholds for each severity level.
+  2. If `deployment_context.client_diversity` exists, find the target's network share.
+     This share caps the maximum severity for a single-component bug.
+  3. If original severity exceeds the cap → DOWNGRADED.
+
+  ## 4. Verdict
+
+  For items that passed all gates:
+  - Clear spec deviation + attacker-triggered + concrete attack path
+    → **CONFIRMED_VULNERABILITY**
+    (reviewer_notes MUST include: "An attacker can trigger this via [entry point]
+    by [action], causing [impact].")
+  - Spec deviation exists but attack path is uncertain → **CONFIRMED_POTENTIAL**
+  - Cannot determine → **NEEDS_MANUAL_REVIEW**
+
+  **Consistency rule**: The verdict must be consistent with the gate outcomes.
+  - If a gate triggered DISPUTED_FP, the verdict is DISPUTED_FP.
+  - If all gates passed, the verdict MUST NOT be DISPUTED_FP — even if reviewer_notes
+    contain observations like "may be by design" or "defense-in-depth exists".
+    Use CONFIRMED_POTENTIAL or NEEDS_MANUAL_REVIEW for uncertain cases that passed all gates.
+
+  ## 5. Write Output
+
+  Write a single JSON object to <ref id="results"/>:
+  ```json
+  {
+    "reviewed_items": [
+      {
+        "property_id": "...",
+        "review_verdict": "CONFIRMED_VULNERABILITY | CONFIRMED_POTENTIAL | DISPUTED_FP | DOWNGRADED | NEEDS_MANUAL_REVIEW | PASS_THROUGH",
+        "original_classification": "vulnerability | potential-vulnerability",
+        "adjusted_severity": "Critical | High | Medium | Low | Informational",
+        "reviewer_notes": "3-5 sentences: gate that triggered + evidence + 01e reference + severity reasoning",
+        "spec_reference": "01e invariant text or empty string"
+      }
+    ],
+    "metadata": { "phase": "04", "worker_id": "{{WORKER_ID}}", "item_count": N, "timestamp": N, "processed_ids": [...] }
+  }
+  ```
+
+  Print summary and end with: `Output File: {{OUTPUT_FILE}}`
+
   </instructions>
 
-  <output_schema>
-    Each element of `reviewed_items`:
-    ```json
-    {
-      "property_id": "...",
-      "review_verdict": "CONFIRMED_VULNERABILITY | CONFIRMED_POTENTIAL | DISPUTED_FP | DOWNGRADED | NEEDS_MANUAL_REVIEW",
-      "original_classification": "vulnerability | potential-vulnerability",
-      "adjusted_severity": "Critical | High | Medium | Low | Informational",
-      "reviewer_notes": "Concise explanation of verification result + spec reference + severity justification (3-5 sentences)",
-      "spec_reference": "Brief spec citation if relevant, else empty string"
-    }
-    ```
-  </output_schema>
-
   <quality_gates>
-    1. Every reviewed_items element has exactly the 6 allowed keys (property_id, review_verdict, original_classification, adjusted_severity, reviewer_notes, spec_reference).
-    2. reviewer_notes includes spec cross-reference result (even if "spec silent on this").
-    3. Code was actually re-read for all vulnerability/potential-vulnerability items.
-    4. DISPUTED_FP has a specific reason (not just "looks safe").
-    5. adjusted_severity is justified against `BUG_BOUNTY_SCOPE.json` severity definitions.
-       reviewer_notes must mention the severity reasoning.
-    6. If the finding depends on external library behavior, reviewer_notes must state which
-       library version was checked and whether the current version is actually affected.
+    1. Every item has exactly the 6 keys shown in the schema.
+    2. DISPUTED_FP always states WHICH gate triggered and WHY (not just "looks safe").
+    3. CONFIRMED_VULNERABILITY always includes a concrete attack sentence.
+    4. reviewer_notes cites 01e file name and invariant text.
+    5. adjusted_severity is justified against BUG_BOUNTY_SCOPE.json thresholds.
+    6. Verdict is consistent with reviewer_notes (no self-contradiction).
   </quality_gates>
 </task>
 

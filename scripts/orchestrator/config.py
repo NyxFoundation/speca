@@ -204,7 +204,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         context_fields=["property_id", "text", "type", "assertion", "severity",
                          "covers", "reachability", "exploitability", "_id_prefix"],
         output_fields=["property_id", "text", "type", "assertion", "severity",
-                        "covers", "reachability", "exploitability", "code_scope"],
+                        "covers", "reachability", "exploitability", "code_scope", "code_excerpt"],
     ),
 
     "03": PhaseConfig(
@@ -228,7 +228,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         circuit_breaker_threshold=5,
         max_total_retries=20,
         max_empty_results=15,
-        max_budget_usd=100.0,
+        max_budget_usd=200.0,
         log_anomaly_threshold=3,
         max_turns_per_batch=50,  # Complex properties need 25-30 turns; median ~19
         max_cache_read_tokens=0,  # Disabled — 25-turn audit reads substantial code

@@ -119,7 +119,8 @@ Language: English only.
                   "file": "relative/path/from/workspace/root.go",
                   "symbol": "FunctionOrTypeName",
                   "line_range": { "start": 42, "end": 78 },
-                  "role": "primary" | "caller" | "callee" | "related"
+                  "role": "primary" | "caller" | "callee" | "related",
+                  "note": ""  // optional: observation about this location (e.g., "calls recompute function instead of cached accessor")
                 }
               ],
               "resolution_status": "resolved" | "out_of_scope" | "not_found" | "error",
