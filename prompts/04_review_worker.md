@@ -76,10 +76,16 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     (note: "validation may exist at [location]" in reviewer_notes for downstream consideration)
   - Phase 03's code reading is factually correct but you disagree about security impact → passes gate
   - The behavior seems "by design" or "consistent across nodes" → passes gate
+  - You believe Phase 03 "misunderstood the purpose" or "confused X with Y" — if the code
+    path Phase 03 describes exists and behaves as described, that is NOT a factual error.
+    Disagreeing about **why** the code does something is a security judgment, not a fact check → passes gate
   - Defensive patterns exist (mutexes, rate limiters, etc.) → passes gate
     (note the pattern in reviewer_notes; Gate 4 handles mitigation assessment)
   - Phase 03 claims a concurrency bug and you believe it's single-threaded → passes gate
     (note the threading observation in reviewer_notes)
+
+  **Litmus test**: Can you point to a specific line where Phase 03 says "line N does X" but
+  line N actually does Y? If not, the code reading is factually correct and this gate passes.
 
   ---
 
