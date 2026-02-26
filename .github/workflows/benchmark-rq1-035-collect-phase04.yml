@@ -1,0 +1,166 @@
+name: "RQ1 Benchmark 3.5: Collect Phase 04 & Compare"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  collect-phase04:
+    runs-on: self-hosted
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RESULTS_DIR: benchmarks/results/rq1/sherlock_ethereum_audit_contest
+
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Fetch Remote Branches
+        run: git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+      - name: Setup Python (uv)
+        run: uv sync --python 3.11
+
+      - name: Discover Branches
+        run: |
+          BRANCHES=$(ls -d "${RESULTS_DIR}"/*/ 2>/dev/null | xargs -n1 basename | paste -sd, -)
+          if [ -z "$BRANCHES" ]; then
+            echo "No branch directories found in ${RESULTS_DIR}. Run 01-setup first."
+            exit 1
+          fi
+          echo "BRANCHES=${BRANCHES}" >> "$GITHUB_ENV"
+          echo "Discovered branches: ${BRANCHES}"
+
+      - name: Reset Phase 04 Data
+        run: |
+          echo "Removing existing Phase 04 files from branch directories..."
+          for dir in "${RESULTS_DIR}"/*/; do
+            rm -f "${dir}"04_*.json "${dir}"04_PARTIAL_*.json "${dir}"manifest_04.json
+            branch=$(basename "$dir")
+            removed=$(ls "${dir}"04_*.json 2>/dev/null | wc -l || echo 0)
+            echo "  ${branch}: cleaned"
+          done
+          rm -f "${RESULTS_DIR}/collection_summary_04.json"
+          rm -f "${RESULTS_DIR}/phase_comparison.json"
+          echo "Phase 04 data reset complete."
+
+      - name: Collect Phase 04 Outputs (merge into existing dirs)
+        run: |
+          uv run python benchmarks/scripts/collect_branch_outputs.py \
+            --branches "${BRANCHES}" \
+            --output-globs "04_PARTIAL_*.json,04_*.json" \
+            --logs-dir "outputs/logs" \
+            --log-phase "04" \
+            --output-root "${RESULTS_DIR}" \
+            --merge
+
+      - name: Compare Phase 03 vs Phase 04 Metrics
+        run: |
+          uv run python benchmarks/rq1/collect_phase04.py \
+            --results-dir "${RESULTS_DIR}" \
+            --collection-summary "${RESULTS_DIR}/collection_summary_04.json"
+
+      - name: Write Job Summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          results_dir = os.environ["RESULTS_DIR"]
+          path = f"{results_dir}/phase_comparison.json"
+          if not os.path.exists(path):
+              print("phase_comparison.json not found, skipping summary", file=sys.stderr)
+              sys.exit(0)
+
+          data = json.load(open(path))
+          vb = data.get("verdict_breakdown", {})
+          cmp = data.get("comparison", {})
+          p03 = cmp.get("phase_03", {})
+          p04 = cmp.get("phase_04", {})
+          delta = cmp.get("delta", {})
+
+          def pct(v):
+              return f"{v:.1%}" if isinstance(v, (int, float)) else str(v)
+
+          def delta_str(v):
+              if not isinstance(v, (int, float)):
+                  return str(v)
+              sign = "+" if v > 0 else ""
+              if isinstance(v, float) and abs(v) < 10:
+                  return f"{sign}{v:.4f}"
+              return f"{sign}{v}"
+
+          by_verdict = vb.get("by_verdict", {})
+          verdict_rows = "\n".join(
+              f"| {v} | {c} |" for v, c in sorted(by_verdict.items(), key=lambda x: -x[1])
+          )
+
+          lost = p04.get("lost_recall_issues", [])
+          lost_str = ", ".join(lost) if lost else "-"
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if summary_path:
+              f = open(summary_path, "a")
+          else:
+              print("GITHUB_STEP_SUMMARY not set, printing to stdout")
+              f = sys.stdout
+
+          with_04 = vb.get("branches_with_04", [])
+          without_04 = vb.get("branches_without_04", [])
+
+          with f:
+              f.write("## RQ1 Phase 03 vs Phase 04 Comparison\n\n")
+
+              # Branch coverage
+              f.write("### Branch Coverage\n\n")
+              f.write(f"| Status | Branches |\n")
+              f.write(f"|--------|------:|\n")
+              f.write(f"| With Phase 04 | {len(with_04)} |\n")
+              f.write(f"| Without Phase 04 (as-is) | {len(without_04)} |\n\n")
+              if without_04:
+                  f.write(f"> Branches without Phase 04: `{'`, `'.join(without_04)}`\n")
+                  f.write(f"> Their findings are counted as-is (survived).\n\n")
+
+              # Verdict breakdown
+              f.write("### Verdict Breakdown\n\n")
+              f.write(f"| Metric | Count |\n")
+              f.write(f"|--------|------:|\n")
+              f.write(f"| Total findings (Phase 03) | {vb.get('total_findings', 0)} |\n")
+              f.write(f"| Reviewed by Phase 04 | {vb.get('total_reviewed', 0)} |\n")
+              f.write(f"| Unreviewed (as-is) | {vb.get('unreviewed', 0)} |\n")
+              f.write(f"| **Survived (reviewed)** | {vb.get('survived', 0)} |\n")
+              f.write(f"| **Filtered** | {vb.get('filtered', 0)} |\n")
+              f.write(f"| **Survived total** | {vb.get('survived_total', 0)} |\n\n")
+
+              if verdict_rows:
+                  f.write("| Verdict | Count |\n")
+                  f.write("|---------|------:|\n")
+                  f.write(verdict_rows + "\n\n")
+
+              # Metrics comparison
+              f.write("### Metrics Comparison\n\n")
+              f.write("| Metric | Phase 03 | Phase 04 | Delta |\n")
+              f.write("|--------|----------|----------|-------|\n")
+              f.write(f"| Findings | {p03.get('total_findings', '-')} | {p04.get('total_findings', '-')} | {delta_str(delta.get('findings_removed', '-'))} removed |\n")
+              f.write(f"| Recall | {pct(p03.get('recall', 0))} | {pct(p04.get('recall', 0))} | {delta_str(delta.get('recall_delta', 0))} |\n")
+              f.write(f"| Precision (auto) | {pct(p03.get('precision_auto', 0))} | {pct(p04.get('precision_auto', 0))} | {delta_str(delta.get('precision_auto_delta', 0))} |\n")
+              f.write(f"| F1 | {p03.get('f1', 0):.3f} | {p04.get('f1', 0):.3f} | {delta_str(delta.get('f1_delta', 0))} |\n\n")
+
+              if lost:
+                  f.write(f"**Lost recall issues:** {lost_str}\n")
+          PY
+
+      - name: Push Phase 04 Results
+        if: always()
+        run: |
+          git add "${RESULTS_DIR}/"
+          if ! git diff --staged --quiet; then
+            git commit -m "benchmark: rq1 035-collect-phase04"
+            git push origin "${{ github.ref_name }}" --force-with-lease
+          fi

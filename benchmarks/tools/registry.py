@@ -52,7 +52,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "security_agent": ToolSpec(
         name="security_agent",
-        patterns=("security_agent_results.json", "security_agent_results.jsonl", "security_agent.jsonl"),
+        patterns=("security_agent_results.jsonl", "security_agent.jsonl"),
         loader=load_jsonl_predictions,
         metadata_filename="security_agent_metadata.json",
     ),

@@ -63,6 +63,7 @@ class ResultCollector:
         results: list[dict[str, Any]],
         worker_id: int,
         batch_index: int,
+        timestamp: int | None = None,
     ) -> Path:
         """
         Save partial results from a single batch.
@@ -70,8 +71,13 @@ class ResultCollector:
         The output file is validated against the phase-specific Pydantic model.
         Validation failures are logged as warnings but do **not** prevent saving,
         because partial / degraded results are still valuable for resume.
+
+        Args:
+            timestamp: Optional timestamp from the batch execution context.
+                       Falls back to ``int(time.time())`` if not provided.
         """
-        timestamp = int(time.time())
+        if timestamp is None:
+            timestamp = int(time.time())
         # Always use simple {phase_id}_PARTIAL_* naming - no prefix needed
         partial_base = f"{self.config.phase_id}_PARTIAL"
 

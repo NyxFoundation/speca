@@ -49,6 +49,11 @@ on:
         required: false
         type: number
         default: 64
+      force_execute:
+        description: 'Force re-execution (bypass resume state)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -108,6 +113,11 @@ jobs:
 
           echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
           echo "TARGET_MODE=${TARGET_MODE}" >> "$GITHUB_ENV"
+          # checkout_ref is intentionally left empty for both modes:
+          # - latest_default_branch: uses the repository's default branch
+          # - fusaka-audit: checks out default branch first, then the
+          #   "Resolve Target Ref" step switches to the specific as-of commit.
+          # actions/checkout with an empty ref defaults to the repo's default branch.
           echo "checkout_ref=" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Target Repository
@@ -214,14 +224,15 @@ jobs:
           git config --local user.name "Security Agent Bot"
           git config --local user.email "bot@nyxfoundation.org"
 
-      - name: Ensure master merged into branch
+      - name: Ensure default branch merged into branch
         run: |
           set -euo pipefail
-          git fetch origin master
-          if git merge-base --is-ancestor origin/master HEAD; then
-            echo "Branch already contains origin/master"
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          if git merge-base --is-ancestor "origin/${DEFAULT_BRANCH}" HEAD; then
+            echo "Branch already contains origin/${DEFAULT_BRANCH}"
           else
-            git merge --no-edit origin/master
+            git merge --no-edit "origin/${DEFAULT_BRANCH}"
           fi
 
       - name: Clean previous code pre-resolution outputs
@@ -263,12 +274,12 @@ jobs:
           TARGET_COMMIT_SHORT: ${{ steps.target_info.outputs.short_sha }}
 
       - name: "Step 02c: Code Pre-resolution"
-        run: uv run python3 scripts/run_phase.py --phase 02c --workers ${{ inputs.workers }} --max-concurrent ${{ inputs.max_concurrent }}
+        run: uv run python3 scripts/run_phase.py --phase 02c --workers ${{ inputs.workers }} --max-concurrent ${{ inputs.max_concurrent }} ${{ inputs.force_execute == true && '--force' || '' }}
         env:
           GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push Results
-        if: always()
+        if: success() || failure()
         run: |
           git add outputs/ ':!outputs/logs/'
           if ! git diff --staged --quiet; then
