@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -50,11 +51,15 @@ def parse_args() -> argparse.Namespace:
 def call_claude(prompt: str) -> tuple[str, str | None]:
     if shutil.which("claude") is None:
         return "", "claude_not_found"
+    # Remove CLAUDECODE env var to allow nested invocation from within
+    # a Claude Code session (e.g. when running benchmarks in CI).
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     result = subprocess.run(
         ["claude", "--output-format", "json", "-p", prompt],
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
     if result.returncode != 0:
         return "", (result.stderr or "claude_error").strip()

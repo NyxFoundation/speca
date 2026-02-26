@@ -127,7 +127,7 @@ def main():
         default=DATA_DIR / "primevul" / "primevul_test_paired.jsonl",
     )
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--config", type=str, default="p/c-audit")
+    parser.add_argument("--config", type=str, default="auto")
     parser.add_argument("--timeout", type=int, default=0, help="Per-sample timeout in seconds (0 = no timeout)")
     args = parser.parse_args()
     output_path = args.output or default_output_path(args.dataset)

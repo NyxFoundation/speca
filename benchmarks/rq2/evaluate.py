@@ -112,6 +112,12 @@ def extract_pair_id(record: dict) -> str | None:
         value = record.get(key)
         if value is not None and value != "":
             return str(value)
+    # Fallback: PrimeVul uses CVE-ID as implicit pair grouping.
+    # Records sharing the same CVE-ID with different vul_type form pairs.
+    for key in CVE_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 

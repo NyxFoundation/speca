@@ -52,6 +52,9 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   - **Zero non-test callers** → DISPUTED_FP: "dead/unreachable code"
   - Function no longer exists in the file → DISPUTED_FP: "code removed"
   - Skip this gate for "missing validation" findings (the issue is that something is NOT called).
+  - **Public/exported API exception**: If the function is `pub`, `public`, `exported`, or part
+    of a library's public interface → passes gate regardless of internal caller count.
+    External consumers may call it even if the current repo does not.
 
   ---
 

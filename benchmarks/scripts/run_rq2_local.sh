@@ -77,6 +77,7 @@ run_semgrep() {
       python3 /app/benchmarks/runners/run_semgrep.py \
         --dataset "/app/${DATASET_PATH}" \
         --output "/app/${RESULTS_DIR}/semgrep_results.json" \
+        --config auto \
         --timeout 60
   else
     echo "Docker not found; skipping Semgrep." >&2
@@ -104,6 +105,8 @@ run_llm() {
     echo "LLM baseline results exist; skipping."
     return
   fi
+  # Unset CLAUDECODE to allow nested claude CLI invocation
+  unset CLAUDECODE
   uv run python benchmarks/runners/run_llm_baseline.py \
     --dataset "${DATASET_PATH}" \
     --output "${RESULTS_DIR}/llm_baseline_results.jsonl" \
