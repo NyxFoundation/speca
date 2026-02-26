@@ -322,7 +322,15 @@ def sanitize_branch(branch: str) -> str:
     return branch.replace("/", "__")
 
 
-def collect_branch(branch: str, output_root: Path, globs: list[str], logs_dir: str, log_phase: str) -> dict:
+def collect_branch(
+    branch: str,
+    output_root: Path,
+    globs: list[str],
+    logs_dir: str,
+    log_phase: str,
+    merge: bool = False,
+    manifest_suffix: str = "",
+) -> dict:
     ref = resolve_branch(branch)
     sanitized = sanitize_branch(branch)
     dest_dir = output_root / sanitized
@@ -331,8 +339,12 @@ def collect_branch(branch: str, output_root: Path, globs: list[str], logs_dir: s
     files = list_output_files(ref)
     files = filter_output_files(files, globs)
     collected = []
+    skipped = []
     for name in files:
         dest = dest_dir / name
+        if merge and dest.exists():
+            skipped.append(name)
+            continue
         write_file(ref, name, dest)
         collected.append(name)
 
@@ -363,7 +375,11 @@ def collect_branch(branch: str, output_root: Path, globs: list[str], logs_dir: s
         "phase_timing": estimate_phase_timing(collected),
         "phase_log_timing": collect_phase_logs(ref, logs_dir, log_phase),
     }
-    (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if merge:
+        manifest["skipped_existing"] = skipped
+
+    manifest_name = f"manifest_{manifest_suffix}.json" if manifest_suffix else "manifest.json"
+    (dest_dir / manifest_name).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
 
@@ -387,17 +403,32 @@ def main() -> None:
         default=str(ROOT_DIR / "benchmarks" / "results" / "rq1" / "sherlock_ethereum_audit_contest"),
         help="Output root directory",
     )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        default=False,
+        help="Merge new files into existing branch dirs (skip existing files, write manifest_{phase}.json)",
+    )
     args = parser.parse_args()
     globs = [g.strip() for g in args.output_globs.split(",") if g.strip()]
 
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # When merging, derive a suffix from the log-phase for manifest/summary filenames
+    manifest_suffix = args.log_phase if args.merge else ""
+
     manifests = []
     for branch in parse_branches(args.branches):
-        manifests.append(collect_branch(branch, output_root, globs, args.logs_dir, args.log_phase))
+        manifests.append(
+            collect_branch(
+                branch, output_root, globs, args.logs_dir, args.log_phase,
+                merge=args.merge, manifest_suffix=manifest_suffix,
+            )
+        )
 
-    summary_path = output_root / "collection_summary.json"
+    summary_name = f"collection_summary_{args.log_phase}.json" if args.merge else "collection_summary.json"
+    summary_path = output_root / summary_name
     summary_path.write_text(
         json.dumps(
             {"branches": manifests, "output_globs": globs, "logs_dir": args.logs_dir, "log_phase": args.log_phase},

@@ -60,18 +60,26 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
 
   ---
 
-  ### Gate 3: Code Verification (catches incorrect code readings)
+  ### Gate 3: Code Verification (catches **factually incorrect** code readings only)
 
   Read the actual code at the flagged location (prepend `target_workspace/`).
   Read the **full function**, not just the flagged lines.
 
-  - Phase 03's description of the code is factually wrong → DISPUTED_FP: "incorrect code reading"
-  - Phase 03 claims a check is MISSING: Grep for it across the **entire package/module**,
-    in callers, callees, and parallel execution paths. If validation exists at any layer
-    that runs before observable impact → DISPUTED_FP: "validation exists at [location]"
-  - Phase 03 claims a concurrency bug: verify the operations actually run concurrently
-    (check goroutine/thread spawn sites). If single-threaded → DISPUTED_FP.
-  - Check for defensive patterns (mutexes, atomics, immutable structures, rate limiters).
+  **This gate may ONLY trigger DISPUTED_FP for objective, verifiable factual errors:**
+  - The file/function Phase 03 references does not exist → DISPUTED_FP: "code does not exist"
+  - The line numbers are wrong and the actual code does something completely different
+    (different function, different logic) → DISPUTED_FP: "incorrect code reading — actual code at [file:line] is [what]"
+  - Phase 03 claims a function calls X, but it calls Y (verifiable from source) → DISPUTED_FP: "incorrect call graph"
+
+  **These are NOT grounds for DISPUTED_FP (record observations in reviewer_notes instead):**
+  - Validation exists at a different layer / in a caller / in a parallel path → passes gate
+    (note: "validation may exist at [location]" in reviewer_notes for downstream consideration)
+  - Phase 03's code reading is factually correct but you disagree about security impact → passes gate
+  - The behavior seems "by design" or "consistent across nodes" → passes gate
+  - Defensive patterns exist (mutexes, rate limiters, etc.) → passes gate
+    (note the pattern in reviewer_notes; Gate 4 handles mitigation assessment)
+  - Phase 03 claims a concurrency bug and you believe it's single-threaded → passes gate
+    (note the threading observation in reviewer_notes)
 
   ---
 
@@ -86,6 +94,11 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
     consensus splits, data loss) ARE security vulnerabilities even without attacker input → passes gate.
   - **Defensive mitigation**: a surrounding mechanism (rate limiter, connection cap, resource
     bound) already neutralizes the attack's impact → DISPUTED_FP: "mitigated by [mechanism]"
+    **Strict requirement**: The mitigation must be a **dedicated, explicit guard** (e.g., rate
+    limiter with configured threshold, connection cap constant, resource pool with hard limit).
+    "Validation exists at another layer" or "the crypto layer rejects it" is NOT a mitigation —
+    that is defense-in-depth, which does not eliminate the underlying bug. When uncertain,
+    use CONFIRMED_POTENTIAL instead of DISPUTED_FP.
 
   Record: "Attacker control: [direct/none]. Path: [attacker-triggered / code-intrinsic / semi-trusted]."
 
@@ -127,8 +140,11 @@ Execution hint: This worker prompt is invoked by the phase-04 async orchestrator
   - Spec deviation exists but attack path is uncertain → **CONFIRMED_POTENTIAL**
   - Cannot determine → **NEEDS_MANUAL_REVIEW**
 
-  **Consistency rule**: If reviewer_notes says "by design", "intentional", "not exploitable",
-  or "spec-compliant" → verdict MUST be DISPUTED_FP. Never confirm what you've just disputed.
+  **Consistency rule**: The verdict must be consistent with the gate outcomes.
+  - If a gate triggered DISPUTED_FP, the verdict is DISPUTED_FP.
+  - If all gates passed, the verdict MUST NOT be DISPUTED_FP — even if reviewer_notes
+    contain observations like "may be by design" or "defense-in-depth exists".
+    Use CONFIRMED_POTENTIAL or NEEDS_MANUAL_REVIEW for uncertain cases that passed all gates.
 
   ## 5. Write Output
 
