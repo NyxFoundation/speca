@@ -324,6 +324,11 @@ happy --yolo -p "docs/hiro/templates/06_final_sweep.md を読み込み実行し�
 ```
 
 ```bash
+# 重複チェック (全 agent マージ後に実行)
+happy --yolo -p "docs/hiro/templates/09_dedup_reports.md を読み込み実行して。"
+```
+
+```bash
 # 一括起動 (10個)
 bash docs/hiro/templates/07_mass_launch.sh 10
 ```
@@ -348,3 +353,4 @@ bash docs/hiro/templates/08_codex_launch.sh
 | `06_final_sweep.md` | 最終洗い出し | AI |
 | `07_mass_launch.sh` | N 個セッション一括起動 | スクリプト |
 | `08_codex_launch.sh` | Codex 12 並列起動 | スクリプト |
+| `09_dedup_reports.md` | マージ後の重複チェック・統合 | AI |

@@ -6,29 +6,60 @@ Sherlock Bug Bounty コンテストに対して、AI エージェントを大量
 
 ---
 
+## ブランチ戦略
+
+```
+main (master)
+  SPECA のソースコードのみ。レポートは置かない。
+      |
+      +-- hiro/<CONTEST_BRANCH> (作業ベースブランチ)
+            レポートを溜める場所。各 agent ブランチの PR マージ先。
+            |
+            +-- <CONTEST_BRANCH>-agent-1  → PR → マージ
+            +-- <CONTEST_BRANCH>-agent-2  → PR → マージ
+            +-- <CONTEST_BRANCH>-agent-N  → PR → マージ
+            |
+            (マージ後)
+            +-- テンプレート 09 で重複チェック → 統合 or 削除
+```
+
+- **main**: コードだけ。監査の成果物は入れない
+- **作業ブランチ**: コンテストごとに 1 本。全レポートが集約される場所
+- **agent ブランチ**: エージェントが作業して PR → 作業ブランチにマージ → 自動削除
+- **重複チェック**: 全 agent マージ後にテンプレート 09 を実行し、重複レポートを統合/削除
+
+---
+
 ## 全体フロー
 
 ```
 Phase 0: 準備 (人間)
-  ターゲット情報収集、コードクローン
+  ターゲット情報収集、コードクローン、作業ブランチ作成
       |
 Phase 1: 初回並列監査 (AI x N)
   テンプレート 01 を N 個のセッションに投入
+  各 agent → PR → 作業ブランチにマージ
+      |
+Phase 1.5: 重複チェック (AI x 1)
+  テンプレート 09 で重複レポート統合/削除
       |
 Phase 2: オーケストレーター監査 (AI x 1)
-  テンプレート 02 を 1 セッションに投入 → 内部で 12 並列エージェント起動
+  テンプレート 02 → 内部で 12 並列エージェント → PR → マージ
       |
-Phase 3: Codex クロスバリデーション (AI x 1 or スクリプト)
-  テンプレート 03 を 1 セッションに投入、または 08 のスクリプト直接実行
+Phase 3: Codex クロスバリデーション (スクリプト)
+  テンプレート 08 のスクリプト直接実行
       |
 Phase 4: 深堀りラウンド 2 (AI x 1)
-  テンプレート 04 を 1 セッションに投入 → Phase 1-3 の結果を踏まえた深堀り
+  テンプレート 04 → PR → マージ
       |
 Phase 5: クロスバリデーション比較 (AI x 1)
-  テンプレート 05 を 1 セッションに投入 → 全結果を比較、新規発見を特定
+  テンプレート 05 → PR → マージ
       |
 Phase 6: 最終洗い出し (AI x 1)
-  テンプレート 06 を 1 セッションに投入 → 漏れなく全ファインディングをレポート化
+  テンプレート 06 → PR → マージ
+      |
+Phase 6.5: 最終重複チェック (AI x 1)
+  テンプレート 09 で最終整理
 ```
 
 ---
@@ -167,15 +198,16 @@ claude -p "docs/hiro/templates/06_final_sweep.md を読み込み実行してく�
 
 ```
 docs/hiro/templates/
-  00_human_guide.md        ← この文書 (人間用ガイド)
-  01_single_agent_audit.md ← AI に食わせる: 単体監査プロンプト
-  02_orchestrator_12_agents.md ← AI に食わせる: 12 並列オーケストレーター
-  03_codex_12_agents.md    ← AI に食わせる: Codex 12 並列起動
-  04_deep_dive_round2.md   ← AI に食わせる: 深堀りラウンド 2
-  05_cross_validation.md   ← AI に食わせる: クロスバリデーション比較
-  06_final_sweep.md        ← AI に食わせる: 最終洗い出し
-  07_mass_launch.sh        ← スクリプト: N 個の happy セッション一括起動
-  08_codex_launch.sh       ← スクリプト: 12 Codex エージェント起動
+  00_human_guide.md            ← この文書 (人間用ガイド)
+  01_single_agent_audit.md     ← AI用: 単体監査プロンプト (量産用)
+  02_orchestrator_12_agents.md ← AI用: 12 並列オーケストレーター
+  03_codex_12_agents.md        ← AI用: Codex 12 並列起動
+  04_deep_dive_round2.md       ← AI用: 深堀りラウンド 2
+  05_cross_validation.md       ← AI用: クロスバリデーション比較
+  06_final_sweep.md            ← AI用: 最終洗い出し
+  07_mass_launch.sh            ← スクリプト: N 個のセッション一括起動
+  08_codex_launch.sh           ← スクリプト: 12 Codex エージェント起動
+  09_dedup_reports.md          ← AI用: マージ後の重複チェック・統合
 ```
 
 ---
