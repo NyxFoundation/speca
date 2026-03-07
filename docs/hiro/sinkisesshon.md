@@ -294,38 +294,57 @@ gh pr merge --squash --delete-branch
 | 最終洗い出し | 1 | 14 追加 | ~20分 |
 | **合計** | — | **27 レポート** | **~85分** |
 
-### 3. コピペ用 個別起動コマンド (10個)
+### 3. コピペ用 個別起動コマンド
 
-ターミナルを新しく開き、1つずつ実行してください。番号も自動取得するためすべて同じコマンドでOKです。
+ターミナルを新しく開き、1つずつ実行してください。番号は自動取得されるため全部同じコマンドでOK。
 
 ```bash
-# Agent 1
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 2
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 3
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 4
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 5
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 6
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 7
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 8
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 9
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
-
-# Agent 10
-happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+# 単体エージェント (好きな数だけ貼る)
+happy --yolo -p "docs/hiro/templates/01_single_agent_audit.md を読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
 ```
+
+```bash
+# オーケストレーター (1つのセッションで 12 並列エージェント)
+happy --yolo -p "docs/hiro/templates/02_orchestrator_12_agents.md を読み込み実行して。"
+```
+
+```bash
+# 深堀りラウンド 2
+happy --yolo -p "docs/hiro/templates/04_deep_dive_round2.md を読み込み実行して。"
+```
+
+```bash
+# クロスバリデーション
+happy --yolo -p "docs/hiro/templates/05_cross_validation.md を読み込み実行して。"
+```
+
+```bash
+# 最終洗い出し
+happy --yolo -p "docs/hiro/templates/06_final_sweep.md を読み込み実行して。"
+```
+
+```bash
+# 一括起動 (10個)
+bash docs/hiro/templates/07_mass_launch.sh 10
+```
+
+```bash
+# Codex 12 並列
+bash docs/hiro/templates/08_codex_launch.sh
+```
+
+### 4. テンプレート一覧
+
+全テンプレートは `docs/hiro/templates/` にあります:
+
+| ファイル | 用途 | 対象 |
+|---------|------|------|
+| `00_human_guide.md` | 人間用ワークフロー全体ガイド | 人間 |
+| `01_single_agent_audit.md` | 単体監査 (量産用) | AI |
+| `02_orchestrator_12_agents.md` | 12 並列オーケストレーター | AI |
+| `03_codex_12_agents.md` | Codex 12 並列起動 | AI |
+| `04_deep_dive_round2.md` | 深堀りラウンド 2 | AI |
+| `05_cross_validation.md` | クロスバリデーション比較 | AI |
+| `06_final_sweep.md` | 最終洗い出し | AI |
+| `07_mass_launch.sh` | N 個セッション一括起動 | スクリプト |
+| `08_codex_launch.sh` | Codex 12 並列起動 | スクリプト |
