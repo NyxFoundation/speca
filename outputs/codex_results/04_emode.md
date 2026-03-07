@@ -1,0 +1,34 @@
+1. **EMode borrow cap can be bypassed via untracked interest on other obligations** (High)  
+Root cause:
+- Group borrow tracking is incremental per touched obligation: `new_total = current + new_value - old_value` in [`emode.move:183`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/emode.move#L183)-[`emode.move:191`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/emode.move#L191).
+- Borrow path only refreshes interest for the current obligation before updating group total ([`market.move:404`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L404)-[`market.move:421`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L421), refresh helper at [`market.move:886`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L886)).
+Attack path:
+- Let many obligations in the same eMode group accrue interest without interacting.
+- Stored `assets_borrows` remains stale for those inactive obligations.
+- Borrower interacts on one obligation; check at [`market.move:421`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L421)-[`market.move:422`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L422) can pass while real group debt (with accrued interest) is already above intended cap.
+Impact:
+- Effective eMode `max_borrow_amount` enforcement is bypassable.
+- ADL/limit logic using this tracked value can be delayed or inaccurate.
+
+2. **Admin eMode parameter changes are immediate (no timelock), enabling instant liquidation regime shifts** (High governance risk)  
+Root cause:
+- Admin update writes parameters directly with no delay/activation timestamp in [`entry_points/admin/emode.move:135`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/entry_points/admin/emode.move#L135)-[`entry_points/admin/emode.move:150`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/entry_points/admin/emode.move#L150), applied immediately in [`internal/market/emode.move:280`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/emode.move#L280)-[`internal/market/emode.move:310`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/emode.move#L310).
+- Safety/liquidation checks consume live eMode params (borrow weight, liquidation factor) at runtime ([`market.move:1160`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L1160), [`market.move:1109`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L1109), [`market.move:1226`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L1226)-[`market.move:1248`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L1248), [`market.move:953`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L953)-[`market.move:980`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L980)).
+Attack path:
+- Compromised/malicious admin lowers collateral/liquidation factors or raises borrow weights.
+- Positions can become instantly liquidatable in subsequent transactions.
+Impact:
+- Immediate liquidation shock and trust-centralization risk; no user reaction window.
+
+3. **Flash-loan fee arbitrage across eMode groups for the same asset** (Medium)  
+Root cause:
+- Flash-loan borrow takes caller-chosen `emode_group` and reads fee from that group config ([`market.move:795`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L795)-[`market.move:814`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L814)).
+- Entry point forwards arbitrary `emode_group` parameter ([`flash_loan.move:42`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/entry_points/lending/flash_loan.move#L42), [`flash_loan.move:134`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/entry_points/lending/flash_loan.move#L134)).
+Attack path:
+- If asset exists in multiple groups with different `flash_loan_fee_rate`, authorized flash-loan caller picks the cheapest group while borrowing from the same reserve.
+Impact:
+- Fee segmentation by eMode group is bypassed economically; protocol can be underpaid.
+
+Targeted checks you asked:
+- `update_asset_borrow` old/new ordering: `old_value` is captured **before** interest refresh and `new_value` after refresh in borrow flow ([`market.move:404`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L404), [`market.move:407`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L407), [`market.move:416`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/market.move#L416)).  
+- `saturating_sub` drift: clamp-at-zero behavior exists in [`emode.move:188`](/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/sources/internal/market/emode.move#L188); I did not find a direct user-triggered path that reliably forces underflow on demand, but it can mask accounting inconsistencies once they occur.
