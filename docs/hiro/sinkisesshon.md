@@ -22,7 +22,7 @@ hiro/elegant-wiles (ベースブランチ: 既存レポート + ターゲット�
 
 ## セッションに渡す指示 (コピペ用)
 
-以下のプロンプトを新規 Claude Code セッションにそのまま貼り付ける。`AGENT_NUMBER` だけ変える。
+以下のプロンプトを新規 Claude Code セッション（または happy セッション）にそのまま貼り付けてください。エージェントが自身で空いている番号を判断して開始します。
 
 ---
 
@@ -36,9 +36,11 @@ hiro/elegant-wiles (ベースブランチ: 既存レポート + ターゲット�
 1. SPECA リポジトリに移動:
    cd /Users/hiro/Documents/security-agent
 
-2. elegant-wiles ブランチから新規ブランチを作成:
+2. エージェント番号の自動決定とブランチ作成:
    git fetch origin
-   git checkout -b hiro/elegant-wiles-agent-AGENT_NUMBER origin/hiro/elegant-wiles
+   # リモートブランチ（git branch -r）等を確認し `hiro/elegant-wiles-agent-*` でまだ使われていない最も若い番号（1, 2, 3...）をあなた自身の AGENT_NUMBER として決定してください。
+   # 決定した AGENT_NUMBER を用いて新規ブランチを作成します:
+   git checkout -b hiro/elegant-wiles-agent-<決定したAGENT_NUMBER> origin/hiro/elegant-wiles
 
 3. ターゲットコードの場所を確認:
    /Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/
@@ -136,14 +138,14 @@ Manual Review + Automated Analysis
 5. 全レポート作成後、コミットして PR を送り、即マージする:
 
    git add outputs/reports/
-   git commit -m "feat: agent-AGENT_NUMBER audit findings for Current Finance"
-   git push origin hiro/elegant-wiles-agent-AGENT_NUMBER
+   git commit -m "feat: agent-<決定したAGENT_NUMBER> audit findings for Current Finance"
+   git push origin hiro/elegant-wiles-agent-<決定したAGENT_NUMBER>
 
    gh pr create \
      --base hiro/elegant-wiles \
-     --head hiro/elegant-wiles-agent-AGENT_NUMBER \
-     --title "Agent AGENT_NUMBER: Current Finance audit findings" \
-     --body "Automated audit findings from agent session AGENT_NUMBER"
+     --head hiro/elegant-wiles-agent-<決定したAGENT_NUMBER> \
+     --title "Agent <決定したAGENT_NUMBER>: Current Finance audit findings" \
+     --body "Automated audit findings from agent session <決定したAGENT_NUMBER>"
 
    # 作成した PR を即座にマージ
    gh pr merge --squash --delete-branch
@@ -166,11 +168,11 @@ Manual Review + Automated Analysis
 ### 1. 手動起動の場合
 
 ```bash
-# ターミナルを N 個開いて、それぞれに:
+# ターミナルを任意の数だけ開いて、それぞれに:
 cd /Users/hiro/Documents/security-agent
-claude
+claude # または happy
 
-# 上記プロンプトを貼り付け (AGENT_NUMBER を 1, 2, 3, ... に変更)
+# 上記プロンプトを貼り付けるだけで、自動で番号が採番され実行されます。
 ```
 
 ### 2. スクリプト一括起動の場合
@@ -185,8 +187,8 @@ NUM_AGENTS=${1:-5}
 
 for i in $(seq 1 $NUM_AGENTS); do
   AGENT_PROMPT=$(cat <<PROMPT
-上記の docs/hiro/sinkisesshon.md のプロンプトを実行してください。
-AGENT_NUMBER=$i です。
+上記の docs/hiro/sinkisesshon.md の「プロンプト開始」の指示を実行してください。
+リモートブランチを確認し、まだ使われていない最も若い番号を自身の番号として決定してください。
 PROMPT
   )
 
@@ -264,7 +266,7 @@ GitHub Actions は不要。エージェント側で完結する。
 ```bash
 git fetch origin hiro/elegant-wiles
 git rebase origin/hiro/elegant-wiles
-git push --force-with-lease origin hiro/elegant-wiles-agent-AGENT_NUMBER
+git push --force-with-lease origin hiro/elegant-wiles-agent-<決定したAGENT_NUMBER>
 gh pr merge --squash --delete-branch
 ```
 
@@ -290,3 +292,39 @@ gh pr merge --squash --delete-branch
 | Codex | 12 | 3 新規 + 9 確認 | ~15分 |
 | 最終洗い出し | 1 | 14 追加 | ~20分 |
 | **合計** | — | **27 レポート** | **~85分** |
+
+### 3. コピペ用 個別起動コマンド (10個)
+
+ターミナルを新しく開き、1つずつ実行してください。番号も自動取得するためすべて同じコマンドでOKです。
+
+```bash
+# Agent 1
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 2
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 3
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 4
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 5
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 6
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 7
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 8
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 9
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+
+# Agent 10
+happy --yolo -p "docs/hiro/sinkisesshon.mdのプロンプトを読み込み、リモートブランチを確認して空いている最も若い番号を自身のエージェント番号として監査を実行して。既存レポートとの重複は避けること。"
+```
