@@ -1,246 +1,292 @@
-# 新規セッション用 — Sherlock Bug Bounty 監査手順書
+# AI エージェント並列監査セッション手順書
 
-## 概要
+## 目的
 
-この文書は、Sherlock Bug Bounty コンテストに対して SPECA パイプライン + 並列エージェント分析 + Codex クロスバリデーションを実行するための手順書です。新しいセッションでそのまま実行できます。
+このドキュメントを新規 Claude Code セッションに食わせるだけで、自動的にブランチ作成 → 監査 → レポート生成 → PR 作成まで完了する。大量のセッションを並列起動して脆弱性発見数を最大化する。
 
-## 前提条件
-
-- Claude Code CLI がインストール済み
-- Codex CLI がインストール済み (`npm i -g @openai/codex`)
-- `uv` がインストール済み
-- SPECA リポジトリ: `/Users/hiro/Documents/security-agent`
-- Tree-sitter MCP サーバーが設定済み
-
-## ステップ 1: ターゲット情報収集
+## アーキテクチャ
 
 ```
-Sherlock のコンテストページから以下を取得:
-- コンテスト番号 (例: #1256)
-- プロトコル名 (例: Current Finance / Pebble)
-- ターゲットリポジトリ URL
-- コンテスト期間
-- 賞金プール
-- スコープ (対象コントラクト)
+hiro/elegant-wiles (ベースブランチ: 既存レポート + ターゲット情報)
+  |
+  +-- hiro/elegant-wiles-agent-1  → PR → auto-merge
+  +-- hiro/elegant-wiles-agent-2  → PR → auto-merge
+  +-- hiro/elegant-wiles-agent-3  → PR → auto-merge
+  +-- ...
+  +-- hiro/elegant-wiles-agent-N  → PR → auto-merge
 ```
 
-## ステップ 2: ターゲットコードのクローン
+各エージェントブランチは `outputs/reports/` にレポートを追加し、PR を送ると GitHub Actions が自動マージする。
 
-```bash
-# ターゲットリポジトリをクローン
-cd /Users/hiro/Documents
-git clone <TARGET_REPO_URL>
-cd <TARGET_DIR>
+---
 
-# コントラクトの構造を確認
-find . -name "*.move" -o -name "*.sol" -o -name "*.rs" | head -50
-```
+## セッションに渡す指示 (コピペ用)
 
-## ステップ 3: ワークツリー作成
+以下のプロンプトを新規 Claude Code セッションにそのまま貼り付ける。`AGENT_NUMBER` だけ変える。
 
-SPECA リポジトリでワークツリーを作成し、ブランチを切る。
+---
 
-```bash
-cd /Users/hiro/Documents/security-agent
-git worktree add .claude/worktrees/<BRANCH_NAME> -b hiro/<BRANCH_NAME>
-cd .claude/worktrees/<BRANCH_NAME>
-```
-
-## ステップ 4: 攻撃面の特定
-
-ターゲットのコードを読み、以下の攻撃面リストを作成する:
-
-### DeFi レンディングプロトコルの場合の典型的な攻撃面:
-1. Flash Loan — 再入、手数料、ホットポテト
-2. Oracle — 価格操作、EMA vs Spot、staleness
-3. Liquidation — 清算ロジック、インセンティブ、閾値
-4. eMode — グループ間の不整合、パラメータ
-5. Interest — 金利計算、複利、accrual タイミング
-6. Access Control — 権限管理、CapabilityパターンRate Limiter — レート制限、バイパス
-8. Deposit/Withdraw — exchange rate、ゼロミント
-9. Referral — Sybil、閾値バイパス
-10. ADL (Auto-Deleverage) — 発動条件、停止条件
-11. Math/Precision — 丸め誤差、オーバーフロー
-12. Reserve/Revenue — 収益管理、準備金
-
-### スマートコントラクト一般の場合:
-1. 再入攻撃
-2. アクセス制御
-3. 整数オーバーフロー/アンダーフロー
-4. 価格操作
-5. フラッシュローン攻撃
-6. フロントランニング/MEV
-7. ストレージ衝突
-8. 初期化問題
-9. 委任呼び出し
-10. ガスグリーフィング
-
-## ステップ 5: 並列 Claude エージェント起動 (ラウンド 1)
-
-12個の並列エージェントを起動する。各エージェントに1つの攻撃面を割り当て。
+### プロンプト開始
 
 ```
-以下の形式で Agent ツールを使い、12個を同時起動:
+あなたは Current Finance (Sherlock #1256) の Sui Move DeFi レンディングプロトコルのセキュリティ監査人です。
 
-Agent(
-  description="Audit <ATTACK_SURFACE>",
-  prompt="""
-  あなたはスマートコントラクトセキュリティ監査人です。
+## 作業環境セットアップ
 
-  ターゲット: <TARGET_PATH>
-  攻撃面: <ATTACK_SURFACE>
+1. SPECA リポジトリに移動:
+   cd /Users/hiro/Documents/security-agent
 
-  以下の手順で分析してください:
+2. elegant-wiles ブランチから新規ブランチを作成:
+   git fetch origin
+   git checkout -b hiro/elegant-wiles-agent-AGENT_NUMBER origin/hiro/elegant-wiles
 
-  1. 対象コードの全ファイルを読む
-  2. <ATTACK_SURFACE> に関連する脆弱性を探す
-  3. STRIDE フレームワーク + CWE Top 25 を適用
-  4. 各発見について:
-     - 脆弱性タイトル
-     - 深刻度 (HIGH/MEDIUM/LOW)
-     - 根本原因 (ファイル名:行番号 + コードスニペット)
-     - 攻撃シナリオ
-     - 影響
-     - 修正案
+3. ターゲットコードの場所を確認:
+   /Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract/contracts/protocol/
 
-  結果を JSON 形式で出力:
-  {
-    "attack_surface": "<ATTACK_SURFACE>",
-    "findings": [
-      {
-        "title": "...",
-        "severity": "HIGH|MEDIUM|LOW",
-        "root_cause": "file.move:123",
-        "description": "...",
-        "impact": "...",
-        "recommendation": "..."
-      }
-    ]
-  }
-  """,
-  subagent_type="general-purpose"
-)
-```
+## ターゲット概要
 
-## ステップ 6: ラウンド 1 結果の整理
+- プロトコル: Current Finance (旧 Pebble) — Sui Move DeFi レンディングプロトコル
+- チェーン: Sui (Move 言語)
+- 主要コントラクト: contracts/protocol/sources/ 配下
+- 主要モジュール:
+  - market/market.move — 中核ロジック (deposit, withdraw, borrow, repay, liquidation, flash loan)
+  - market/reserve.move — 準備金、金利計算、cToken exchange rate
+  - market/obligation.move — ユーザー債務管理
+  - market/limiter.move — レート制限 (sliding window)
+  - market/interest.move — 金利モデル (kink model)
+  - market/adl.move — Auto-Deleverage (自動デレバレッジ)
+  - internal/emode.move — Enhanced Mode グループ
+  - internal/app.move — PackageCallerCap アクセス制御
+  - internal/referral.move — リファラルシステム
+  - oracle/user.move — 価格オラクル (Pyth/Switchboard, EMA/Spot)
+  - entry_points/ — 外部公開エントリポイント
+- 数学ライブラリ: contracts/math/sources/float.move (Decimal型、WAD = 10^18)
 
-1. 全エージェントの結果を収集
-2. 重複排除 — 複数エージェントが同じ脆弱性を発見した場合は独立確認としてカウント
-3. HIGH/MEDIUM の発見に対して Sherlock 形式のレポートを作成
+## 既存レポート (重複しないこと)
 
-### Sherlock レポート形式:
+outputs/reports/ に既に以下のレポートがある。これらと重複しない新規発見のみをレポートせよ:
 
-```markdown
-# <タイトル>
+001: ADL Borrow が担保を差し押さえる (HIGH)
+002: 静的 close_factor 過剰清算 (HIGH)
+003: 清算 Spot vs EMA 価格不一致 (HIGH)
+004: ADL borrow グローバル debt チェック (HIGH)
+005: eMode borrow tracking desync (MEDIUM)
+006: Flash loan referral バイパス (MEDIUM)
+007: burn_whitelist に AdminCap なし (MEDIUM)
+008: 清算がレートリミッター回避 (MEDIUM)
+009: Oracle deviation 非対称 (MEDIUM)
+010: Flash loan deposit リミッター操作 (MEDIUM)
+011: 清算手数料バイパス (チャンキング) (MEDIUM)
+012: 同一秒ゼロ金利借入 (MEDIUM)
+013: PackageCallerCap transferable (MEDIUM)
+014: take_revenue 金利未反映 (MEDIUM)
+015: eMode admin timelock なし (MEDIUM)
+016: リミッター token量 USD非対応 (MEDIUM)
+017: 利用率 1.0 超過可能 (MEDIUM)
+018: Cross-eMode flash loan fee 回避 (MEDIUM)
+019: Sybil 自己紹介 (MEDIUM)
+020: ゼロミント deposit griefing (MEDIUM)
+021: クロスセグメント limiter 不具合 (MEDIUM)
+022: Oracle staleness 悪用可能 (MEDIUM)
+023: Borrow off-by-one (LOW)
+024: 単利 (複利ではない) (LOW)
+025: Admin eMode 更新で limiter リセット (MEDIUM)
+026: Pyth adapter 起動時 underflow (LOW)
+027: Repay 丸め過剰請求 (LOW)
+
+## 作業手順
+
+1. ターゲットコードを徹底的に読む
+   - contracts/protocol/sources/ 配下の全 .move ファイル
+   - contracts/math/sources/ 配下の全 .move ファイル
+   - 特に entry_points/ の公開関数から攻撃面を辿る
+
+2. 以下の観点で脆弱性を探す:
+   - STRIDE フレームワーク (Spoofing, Tampering, Repudiation, Information Disclosure, DoS, Elevation of Privilege)
+   - CWE Top 25 (CWE-22/78/89/94/200/502/639/770/862)
+   - DeFi 固有: 価格操作、フラッシュローン、再入、MEV、オラクル操作、ガバナンス攻撃
+   - Move 言語固有: ability 制約、hot-potato パターン、shared object 競合
+
+3. 新規発見ごとに outputs/reports/ に Sherlock 形式でレポートを作成:
+   - ファイル名: report_NNN_<snake_case_title>.md (NNN は 028 から連番)
+   - 既存レポートの番号 (001-027) は使わないこと
+
+4. レポート形式:
+
+# <タイトル (英語)>
 
 ## Summary
 <1-2文の要約>
 
 ## Vulnerability Detail
-<技術的詳細、コードスニペット付き>
+<技術的詳細、コードスニペット付き。根本原因のファイル名:行番号を明記>
 
 ## Impact
 <影響の説明>
 
 ## Code Snippet
-<ファイル名:行番号のリンク>
+<ファイル名:行番号のリスト>
 
 ## Tool used
 Manual Review + Automated Analysis
 
 ## Recommendation
 <修正案、コードスニペット付き>
+
+5. 全レポート作成後、コミットして PR を送り、即マージする:
+
+   git add outputs/reports/
+   git commit -m "feat: agent-AGENT_NUMBER audit findings for Current Finance"
+   git push origin hiro/elegant-wiles-agent-AGENT_NUMBER
+
+   gh pr create \
+     --base hiro/elegant-wiles \
+     --head hiro/elegant-wiles-agent-AGENT_NUMBER \
+     --title "Agent AGENT_NUMBER: Current Finance audit findings" \
+     --body "Automated audit findings from agent session AGENT_NUMBER"
+
+   # 作成した PR を即座にマージ
+   gh pr merge --squash --delete-branch
+
+## 重要な注意
+
+- 既存 27 レポートと重複するものは書かない
+- HIGH/MEDIUM 優先。LOW も書いてよいが量より質を重視
+- コードスニペットは必ずファイル名と行番号を含める
+- 推測ではなく、実際のコードを読んで確認した脆弱性のみ報告
+- レポートは outputs/reports/ フォルダに配置 (outputs/ 直下ではない)
 ```
 
-## ステップ 7: ラウンド 2 深堀り分析
+### プロンプト終了
 
-ラウンド 1 で発見された攻撃面のうち、特に複雑なものを再度12個の並列エージェントで深堀り。各エージェントには:
-- ラウンド 1 の発見内容を渡す
-- 「これ以外に見落としがないか」を明示的に指示
-- より具体的なコードパスを指定
+---
 
-## ステップ 8: Codex クロスバリデーション
+## セッション起動手順
 
-同じ12の攻撃面を Codex CLI で並列実行:
+### 1. 手動起動の場合
 
 ```bash
-# 12個の Codex エージェントを並列起動
-for i in 01_flash_loan 02_oracle 03_liquidation 04_emode 05_interest 06_access_control 07_rate_limiter 08_deposit_withdraw 09_referral 10_adl 11_math_precision 12_reserve_revenue; do
+# ターミナルを N 個開いて、それぞれに:
+cd /Users/hiro/Documents/security-agent
+claude
+
+# 上記プロンプトを貼り付け (AGENT_NUMBER を 1, 2, 3, ... に変更)
+```
+
+### 2. スクリプト一括起動の場合
+
+```bash
+#!/bin/bash
+# launch_agents.sh — N 個の Claude Code セッションを並列起動
+
+SPECA_DIR="/Users/hiro/Documents/security-agent"
+PROMPT_FILE="docs/hiro/sinkisesshon.md"
+NUM_AGENTS=${1:-5}
+
+for i in $(seq 1 $NUM_AGENTS); do
+  AGENT_PROMPT=$(cat <<PROMPT
+上記の docs/hiro/sinkisesshon.md のプロンプトを実行してください。
+AGENT_NUMBER=$i です。
+PROMPT
+  )
+
+  # 新しいターミナルタブで起動 (macOS)
+  osascript -e "
+    tell application \"Terminal\"
+      do script \"cd $SPECA_DIR && claude --print '$AGENT_PROMPT'\"
+    end tell
+  " &
+done
+
+echo "$NUM_AGENTS 個のエージェントセッションを起動しました"
+```
+
+### 3. Codex 並列起動の場合
+
+```bash
+#!/bin/bash
+# launch_codex_agents.sh
+
+TARGET="/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract"
+OUTPUT_DIR="outputs/codex_results"
+mkdir -p $OUTPUT_DIR
+
+SURFACES=(
+  "flash_loan"
+  "oracle_price"
+  "liquidation"
+  "emode_groups"
+  "interest_rate"
+  "access_control"
+  "rate_limiter"
+  "deposit_withdraw"
+  "referral_system"
+  "auto_deleverage"
+  "math_precision"
+  "reserve_revenue"
+)
+
+for surface in "${SURFACES[@]}"; do
   codex exec \
     --skip-git-repo-check \
     -s read-only \
     -q \
-    "あなたはスマートコントラクトセキュリティ監査人です。
-    ターゲット: <TARGET_PATH>
-    攻撃面: $(echo $i | sed 's/[0-9]*_//; s/_/ /g')
+    "あなたは Sui Move スマートコントラクトセキュリティ監査人です。
+    ターゲット: $TARGET
+    攻撃面: $(echo $surface | tr '_' ' ')
 
-    この攻撃面に関連する全てのコードファイルを読み、
-    脆弱性を見つけてください。
+    contracts/protocol/sources/ と contracts/math/sources/ の全コードを読み、
+    この攻撃面に関連する脆弱性を全て見つけてください。
 
     各発見について:
-    - タイトル
+    - タイトル (英語)
     - 深刻度 (HIGH/MEDIUM/LOW)
-    - 根本原因 (ファイル名:行番号)
+    - 根本原因 (ファイル名:行番号 + コードスニペット)
     - 攻撃シナリオ
+    - 影響
     - 修正案
-    を報告してください。" \
-    > outputs/codex_results/${i}.md &
+    を詳細に報告してください。" \
+    > ${OUTPUT_DIR}/${surface}.md &
 done
+
 wait
+echo "全 Codex エージェント完了"
 ```
 
-## ステップ 9: クロスバリデーション比較
+---
 
-1. Claude の発見と Codex の発見を比較
-2. 両方が確認した発見 → 信頼度 HIGH
-3. 片方のみの発見 → ソースコードで手動検証
-4. Codex のみの新規発見 → 追加レポート作成
+## PR マージ方式
 
-## ステップ 10: コミットとプッシュ
+各エージェントが自身の PR を作成し、`gh pr merge --squash --delete-branch` で即座にマージする。
+GitHub Actions は不要。エージェント側で完結する。
 
+コンフリクトが発生した場合:
 ```bash
-cd /Users/hiro/Documents/security-agent/.claude/worktrees/<BRANCH_NAME>
-git add outputs/
-git commit -m "feat: <PROTOCOL_NAME> (Sherlock #XXXX) full audit results"
-git push origin hiro/<BRANCH_NAME>
+git fetch origin hiro/elegant-wiles
+git rebase origin/hiro/elegant-wiles
+git push --force-with-lease origin hiro/elegant-wiles-agent-AGENT_NUMBER
+gh pr merge --squash --delete-branch
 ```
 
 ---
 
-## 前回の実行例 (Current Finance / Sherlock #1256)
+## ベストプラクティス
 
-### ターゲット
-- プロトコル: Current Finance (旧 Pebble)
-- チェーン: Sui (Move 言語)
-- 種別: DeFi レンディングプロトコル
-- リポジトリ: `/Users/hiro/Documents/2026-03-currentsui-contest-march-2026-grandchildrice-main/sui-move-contract`
-- ブランチ: `hiro/elegant-wiles`
-
-### 成果物
-- 合計 27 レポート (report_001 〜 report_027)
-- HIGH: 4件 (001-004)
-- MEDIUM: 17件 (005-025 の大部分)
-- LOW: 6件 (023, 024, 026, 027 等)
-
-### 確認方法
-- Claude ラウンド 1: 12並列エージェント → 7件発見
-- Claude ラウンド 2: 12並列エージェント → 3件追加
-- Codex 12並列エージェント → 3件新規 + 既存9件確認
-- 最終洗い出し → 14件追加
-
-### タイムライン
-1. SPECA パイプラインで初期2件 (001, 002)
-2. Claude ラウンド 1 → 003-007
-3. Claude ラウンド 2 → 008-010
-4. Codex クロスバリデーション → 011-013
-5. 全ファインディング洗い出し → 014-027
+1. **エージェント数**: 5-12 個が最適。それ以上は重複発見が増える
+2. **多様性**: 各エージェントに異なる攻撃面フォーカスを与えると効率的
+3. **クロスバリデーション**: 2つ以上のエージェントが独立発見した脆弱性は信頼度が高い
+4. **Codex 併用**: Claude と Codex で異なるモデルの視点を得る
+5. **レポート番号**: 028 から開始、重複しないよう注意。エージェント間で番号が被る可能性あるが PR マージ時に解決
 
 ---
 
-## 注意事項
+## 前回実績 (Current Finance / Sherlock #1256)
 
-- Codex は `o3` モデル非対応 (ChatGPT アカウント使用時)。デフォルトモデルを使用
-- `--skip-git-repo-check` フラグが必要 (ターゲットディレクトリが信頼済みでない場合)
-- Codex は `-s read-only` で読み取り専用サンドボックスを使用
-- レポートファイル名: `outputs/report_XXX_<snake_case_title>.md`
-- Codex 結果: `outputs/codex_results/<NN>_<attack_surface>.md`
+| 方法 | エージェント数 | 発見数 | 所要時間 |
+|------|-------------|--------|---------|
+| SPECA Pipeline | 1 | 2 (HIGH) | ~30分 |
+| Claude Round 1 | 12 | 5 (HIGH x1, MEDIUM x4) | ~10分 |
+| Claude Round 2 | 12 | 3 (MEDIUM x3) | ~10分 |
+| Codex | 12 | 3 新規 + 9 確認 | ~15分 |
+| 最終洗い出し | 1 | 14 追加 | ~20分 |
+| **合計** | — | **27 レポート** | **~85分** |
