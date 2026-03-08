@@ -1,8 +1,8 @@
-# Borrower will avoid liquidation during price spikes due to asymmetric oracle deviation check
+# Asymmetric oracle deviation check allows dangerous operations during debt token price spikes
 
 ## Summary
 
-`get_price_with_check` computes the EMA-spot deviation by always dividing by `spot_price_value`, creating an asymmetry where price spikes (spot > EMA) produce smaller deviation values than price crashes (EMA > spot) of equal magnitude, allowing operations to proceed during dangerous divergence periods when the check should revert.
+`get_price_with_check` computes the EMA-spot deviation by always dividing by `spot_price_value`, creating an asymmetry where upward price spikes (spot > EMA) produce smaller deviation values than downward crashes (EMA > spot) of equal magnitude. This allows borrowing/withdrawal operations to proceed during dangerous debt token spike periods when the deviation check should revert.
 
 ## Root Cause
 
@@ -30,21 +30,23 @@ For a `max_diff_allowed` of 50%, a 2x price spike passes the check while a 2x pr
 
 ## External Pre-conditions
 
-1. Market conditions need to create a significant spot price spike for a collateral or debt token (e.g., LST depeg upward, flash crash recovery).
+1. Market conditions need to create a significant spot price spike for a debt token (e.g., stablecoin depeg upward, volatile asset spike).
 
 ## Attack Path
 
-1. Token X's spot price spikes to 2x its EMA (e.g., from oracle manipulation or volatile market).
-2. A borrower has deposited Token X as collateral with outstanding debt.
-3. The borrower calls `withdraw` or `borrow` — these paths use `get_price_with_check`.
-4. The deviation check computes `(2x - 1x) / 2x = 50%`. With default `max_diff_allowed` set at a reasonable tolerance, this passes.
-5. The EMA price (1x) is used for the health check, making the obligation appear healthy at the old (lower) collateral value.
-6. The borrower withdraws collateral or borrows more, leaving the obligation undercollateralized when the EMA catches up to the actual price.
-7. Conversely, when the spot price reverts, the EMA (still lagging high) prevents timely liquidation of the now-underwater position.
+1. Debt Token Y's spot price spikes to 2x its EMA (e.g., from volatile market conditions or oracle lag).
+2. A borrower has an obligation with Debt Token Y. The EMA-based health check in `debts_value_usd_non_liquidation` (line 1198) uses `get_price_with_check` to value the debt.
+3. Because the deviation check divides by the large spot price, the computed divergence is only 50% instead of the true 100%. With default tolerance of 10% (`DEFAULT_EMA_SPOT_DIFF_TOLERANCE_BPS = 1000`), a spike above 10% should revert — but the asymmetry means a ~22% spike (spot/EMA = 1.22) computes as only ~18% divergence, passing a 20% tolerance.
+4. The EMA price (lower than spot) is used for debt valuation in the health check, **understating the true debt obligation**.
+5. The borrower's position appears healthier than it actually is, allowing them to borrow more or withdraw collateral.
+6. When EMA catches up to the true (higher) debt value, the position becomes undercollateralized.
+7. The protocol accumulates bad debt from positions that should have been blocked during the spike.
+
+**Note on collateral spikes**: When a collateral token's spot price spikes upward, EMA undervalues the collateral — this makes the position appear *less* healthy, which is conservative and safe. The dangerous direction is debt token spikes, where EMA undervalues the debt obligation.
 
 ## Impact
 
-The deviation check is more lenient during price spikes — exactly when it should be strictest. A borrower can take additional risk (withdraw collateral or borrow more) during transient price spikes because the asymmetric check underestimates the true divergence. When the spike reverts, the borrower's position becomes undercollateralized.
+The deviation check is more lenient during upward price spikes — specifically dangerous for debt tokens where EMA undervaluation allows excessive borrowing against understated obligations. When the EMA catches up or the price reverts, these positions become undercollateralized.
 
 The severity scales with the magnitude of the divergence: at 3x spot/EMA ratio, the computed deviation is only 67% instead of the true 200%, making the check 3x more lenient than intended.
 

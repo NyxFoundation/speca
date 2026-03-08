@@ -17,10 +17,10 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 | Category | Count |
 |----------|-------|
 | Total Reports Verified | 63 |
-| VALID (Medium+) | 20 |
+| VALID (Medium+) | 18 |
 | VALID (Low — below Sherlock threshold) | 14 |
 | VALID (Informational/QA) | 3 |
-| INVALID | 25 |
+| INVALID | 27 |
 | DUPLICATE | 1 |
 
 ---
@@ -39,16 +39,14 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 | 8 | report_035 (ADL LTV) | ADL LTV degrades to zero via `saturating_sub` — all positions liquidatable | Medium |
 | 9 | report_036 (min borrow) | Liquidation skips `min_borrow_amount` check — creates unclearable dust positions | Medium |
 | 10 | report_038 (zero collateral) | ADL division-by-zero abort on zero-collateral obligations | Medium |
-| 11 | report_040 (emode removal) | Admin removing asset from emode permanently freezes affected obligations | Medium |
-| 12 | report_041 | `deposit_limit_breached` u64 underflow blocks all deposits | Medium |
-| 13 | report_044 (liquidation limiter) | Liquidation repay does not reduce borrow rate-limiter — artificial saturation | Medium |
-| 14 | report_044 (non-collateral) | Non-collateral interest skip on withdraw — stale exchange rate | Medium |
-| 15 | report_046 | `cancel_pool_reward` underflow from rounding — admin path bricked | Medium |
-| 16 | report_048 (close factor) | Close factor bypass via per-debt-type threshold — full liquidation possible | Medium |
-| 17 | report_049 (liquidity mining) | Pool close griefing by unclaimed obligation trackers | Medium |
-| 18 | report_049 (emode stale) | eMode borrow tracking uses stale debt in repay/liquidation — upward drift | Medium |
-| 19 | report_050 | Flash loan fees bypass `reserve_factor` split — depositors get nothing | Medium |
-| 20 | report_052 | Non-collateral withdraw blocked by unrelated oracle staleness (code has TODO) | Medium |
+| 11 | report_041 | `deposit_limit_breached` u64 underflow blocks all deposits | Medium |
+| 12 | report_044 (liquidation limiter) | Liquidation repay does not reduce borrow rate-limiter — artificial saturation | Medium |
+| 13 | report_044 (non-collateral) | Non-collateral interest skip on withdraw — stale exchange rate | Medium |
+| 14 | report_048 (close factor) | Close factor bypass via per-debt-type threshold — full liquidation possible | Medium |
+| 15 | report_049 (liquidity mining) | Pool close griefing by unclaimed obligation trackers | Medium |
+| 16 | report_049 (emode stale) | eMode borrow tracking uses stale debt in repay/liquidation — upward drift | Medium |
+| 17 | report_050 | Flash loan fees bypass `reserve_factor` split — depositors get nothing | Medium |
+| 18 | report_052 | Non-collateral withdraw blocked by unrelated oracle staleness (code has TODO) | Medium |
 
 ---
 
@@ -112,6 +110,8 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 | 23 | report_042 | Post-liquidation health check not required; close factor limits damage; standard DeFi design |
 | 24 | report_043 | Phantom debt from rounding is < 10^-18 per accrual; economically negligible |
 | 25 | report_045 | ADL incentive is intentional to motivate operators; capped by normal liquidation incentive |
+| 26 | report_040 (emode removal) | No admin entry point exists to remove asset from eMode group; `onboard_asset_to_emode_group` and `update_asset_in_emode_group` exist but no removal function — entire premise is fabricated |
+| 27 | report_046 | `float::mul` and `float::div` both truncate DOWN (floor division); sum of truncated increments ≤ total, so `allocated_rewards` can never exceed `total_rewards` — underflow is mathematically impossible |
 
 ---
 
@@ -134,11 +134,10 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 - **report_048** (Medium): Close factor bypass via per-debt-type threshold
 - **report_009** (Medium): Asymmetric oracle deviation enables operations during dangerous divergence
 
-### ADL (Auto-Deleverage) (4 findings)
+### ADL (Auto-Deleverage) (3 findings)
 - **report_004** (Medium): Global vs emode-specific debt check mismatch
 - **report_035** (Medium): LTV degrades to zero over time
 - **report_038** (Medium): Division-by-zero on zero-collateral positions
-- **report_040** (Medium): eMode removal freezes obligations
 
 ### Rate Limiter / Deposit Limits (2 findings)
 - **report_032** (Medium): Double-subtraction of cash_reserve in deposit limit
@@ -148,8 +147,7 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 - **report_044b** (Medium): Non-collateral interest skip on withdraw
 - **report_049b** (Medium): Stale eMode borrow tracking in repay/liquidation
 
-### Liquidity Mining / Rewards (2 findings)
-- **report_046** (Medium): cancel_pool_reward underflow from rounding
+### Liquidity Mining / Rewards (1 finding)
 - **report_049a** (Medium): Pool close griefing by unclaimed obligations
 
 ### Oracle (1 finding)
@@ -165,7 +163,7 @@ All 63 report files in `outputs/reports/` were verified against the target codeb
 
 ## Recommendation
 
-Of the 20 Medium-severity valid findings, the highest-impact for Sherlock submission are:
+Of the 18 Medium-severity valid findings, the highest-impact for Sherlock submission are:
 1. **report_003**: Exploitable by any liquidator, direct excess collateral extraction
 2. **report_032**: Allows deposit limits to be bypassed by cash_reserve amount
 3. **report_052**: User funds locked by unrelated oracle (devs acknowledged with TODO)

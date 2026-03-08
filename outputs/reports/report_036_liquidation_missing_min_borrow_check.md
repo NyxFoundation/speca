@@ -1,8 +1,8 @@
-# Liquidation Skips min_borrow_amount Check, Creating Unclearable Dust Positions
+# Liquidation Skips min_borrow_amount Check, Creating Economically Unclearable Dust Positions
 
 ## Summary
 
-The `liquidation_inner` function does not enforce the `min_borrow_amount` invariant after partial debt repayment, allowing liquidators to leave borrowers with dust debt positions below the minimum threshold. These positions become effectively unclearable and accumulate bad debt.
+The `liquidation_inner` function does not enforce the `min_borrow_amount` invariant after partial debt repayment, allowing liquidators to leave borrowers with dust debt positions below the minimum threshold. These positions become economically unclearable (full repay is technically possible but not incentivized) and accumulate bad debt.
 
 ## Vulnerability Detail
 
@@ -44,10 +44,10 @@ Note: This is distinct from report 028 (dust obligations unliquidatable due to s
 ## Impact
 
 1. A liquidator can partially liquidate an obligation, leaving debt below `min_borrow_amount` (e.g., `min_borrow_amount = 100 USDC`, remaining debt = 5 USDC)
-2. The borrower cannot partially repay this position (the `enforce_post_borrow_repay_invariant` in `handle_repay` would reject it unless the full remaining amount is repaid)
+2. The borrower cannot partially repay this position (the `enforce_post_borrow_repay_invariant` in `handle_repay` would reject it unless the full remaining amount is repaid). Note: full repay IS technically possible, but economically irrational for underwater dust positions.
 3. If the position is underwater, no one has economic incentive to fully repay it
 4. The dust position continues accruing interest, inflating the reserve's `debt` tracker without corresponding repayment
-5. Over many liquidations across many users, this systematically accumulates unclearable bad debt
+5. Over many liquidations across many users, this systematically accumulates economically unclearable bad debt
 
 ## Code Snippet
 
