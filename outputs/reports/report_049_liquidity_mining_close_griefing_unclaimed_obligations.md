@@ -1,8 +1,7 @@
-## Title
-Liquidity Mining Pools Can Be Permanently Grief-Locked by Unclaimed Obligation Trackers
+# Liquidity Mining Pools Can Be Grief-Locked by Unclaimed Obligation Trackers
 
 ## Summary
-`close_pool_reward` requires `num_obligation_reward_managers == 0`, but this counter is only decremented when each obligation performs a post-end `claim_rewards` call. A single obligation holder that never claims can permanently block pool closure and lock remaining reward balances.
+`close_pool_reward` requires `num_obligation_reward_managers == 0`, but this counter is only decremented when each obligation performs a post-end `claim_rewards` call. A single obligation holder that never claims can indefinitely block pool closure and lock remaining reward balances.
 
 ## Vulnerability Detail
 When an obligation participates in a reward index, `update_obligation_reward_manager` creates a reward tracker and increments `pool_reward.num_obligation_reward_managers`.
@@ -12,9 +11,24 @@ After reward end, the only code path that decrements this counter is inside `cla
 `close_pool_reward` hard-reverts unless the counter is zero:
 - `assert!(num_obligation_reward_managers == 0, error::liquidity_mining_not_all_rewards_claimed());`
 
-There is no admin force-cleanup path for inactive/unreachable obligations. Therefore, an attacker can create one or more obligations that get registered in a reward index and then simply never claim after end. This permanently blocks `close_pool_reward` for that index.
+There is no admin force-cleanup path for inactive/unreachable obligations. Therefore, an attacker can create one or more obligations that get registered in a reward index and then simply never claim after end. This indefinitely blocks `close_pool_reward` for that index.
 
 Because user claiming requires the obligation owner capability path, protocol operators cannot clear abandoned trackers themselves.
+
+## Internal Pre-conditions
+1. At least one obligation must be registered in a reward pool's index.
+2. The reward pool must have ended (past end time).
+
+## External Pre-conditions
+None.
+
+## Attack Path
+1. Attacker creates an obligation and participates in a reward pool (num_obligation_reward_managers incremented).
+2. Reward pool ends.
+3. Attacker never calls claim_rewards (the only path that decrements the counter).
+4. Admin attempts close_pool_reward.
+5. assert!(num_obligation_reward_managers == 0) fails, transaction aborts.
+6. Pool closure is blocked, remaining reward balances are stuck.
 
 ## Impact
 A single non-cooperative participant can DoS reward pool finalization:
@@ -35,7 +49,7 @@ A single non-cooperative participant can DoS reward pool finalization:
 ## Tool used
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 Add an admin-safe cleanup/finalization path after a grace period, e.g.:
 - force-prune zero-claim/zero-share trackers for ended pools,
 - or allow `close_pool_reward` to proceed by migrating residual claimable balances to a separate claim contract/table.

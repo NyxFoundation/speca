@@ -34,6 +34,22 @@ Both `cancel_collateral_adl` and `cancel_debt_adl` emit the same `ADLCancelEvent
 - Interpret the collateral cancellation as occurring ~1000x in the future (if expecting seconds)
 - Interpret all other ADL events as occurring ~1000x in the past (if expecting milliseconds)
 
+## Internal Pre-conditions
+
+1. ADL collateral mode must be active and then cancelled by admin.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Admin activates collateral ADL (emits timestamp in seconds).
+2. Admin later cancels collateral ADL via cancel_collateral_adl.
+3. ADLCancelEvent emits time = clock.timestamp_ms() (milliseconds, not divided by 1000).
+4. Off-chain indexer parsing all ADL events as seconds interprets cancellation as ~1000x in the future.
+5. Monitoring dashboard shows incorrect ADL duration and cancellation timing.
+
 ## Impact
 
 Off-chain monitoring and indexing systems that track ADL lifecycle events will misinterpret `cancel_collateral_adl` timestamps. This is particularly problematic for:
@@ -54,7 +70,7 @@ Since ADL is an emergency mechanism where timing is critical for risk assessment
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Divide by 1000 to match the convention used by all other ADL events:
 

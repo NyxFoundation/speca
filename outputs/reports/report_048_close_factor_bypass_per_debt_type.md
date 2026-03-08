@@ -52,7 +52,7 @@ Consider a concrete scenario:
 - Total incentive penalty: $120 (2x the intended amount)
 - In tighter collateralization ratios, this can push the borrower into bad debt
 
-The close factor is a core soft-liquidation protection (as stated in `liquidate.move:2`: "Liquidation amount should be no bigger than the amount that would decrease the risk level of obligation to 1"). The per-debt-type threshold subverts this protection for multi-debt obligations, causing borrowers to lose up to 2x the intended liquidation penalty. On Sui, all N liquidation calls can be composed atomically in a single PTB, preventing any intervention.
+The close factor is a core soft-liquidation protection (as stated in `liquidate.move:2`: "Liquidation amount should be no bigger than the amount that would decrease the risk level of obligation to 1"). The per-debt-type threshold bypasses this protection for multi-debt obligations, causing borrowers to lose up to 2x the intended liquidation penalty. On Sui, all N liquidation calls can be composed atomically in a single PTB, preventing any intervention.
 
 ## Code Snippet
 

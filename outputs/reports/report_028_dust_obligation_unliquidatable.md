@@ -2,7 +2,7 @@
 
 ## Summary
 
-When an obligation has a very small debt position, the `liquidate_calculate_seize_ctokens` function floors the seize amount to zero, causing `liquidate_ctokens` to revert on its `assert!(ctokens.value() > 0)` check. This makes dust obligations permanently unliquidatable, accumulating bad debt.
+When an obligation has a very small debt position, the `liquidate_calculate_seize_ctokens` function floors the seize amount to zero, causing `liquidate_ctokens` to revert on its `assert!(ctokens.value() > 0)` check. This makes dust obligations unliquidatable, accumulating bad debt.
 
 ## Vulnerability Detail
 
@@ -42,19 +42,31 @@ assert!(ctokens.value() > 0, error::reserve_zero_coin_not_allowed());
 
 This means any liquidation attempt on a dust obligation will always revert. The obligation becomes permanently underwater and unliquidatable, creating protocol-level bad debt.
 
-**Attack scenario:**
-1. A borrower creates many small obligations near the minimum borrow amount
-2. Over time, accrued interest pushes some slightly underwater
-3. If the remaining debt after partial repayment becomes dust-sized, or if price movements make the seize calculation floor to 0
-4. These positions can never be liquidated, accumulating bad debt
+## Internal Pre-conditions
+
+1. Obligation must have a very small debt position (dust amount).
+2. `seize_ctokens` calculation must floor to 0 due to small debt relative to exchange rate and liquidation incentive.
+
+## External Pre-conditions
+
+1. Price/exchange rate ratios must be such that the computed seize amount is less than 1 cToken.
+
+## Attack Path
+
+1. Borrower creates obligations near minimum borrow amount.
+2. Over time, partial repayments or price movements reduce remaining debt to dust level.
+3. Liquidator attempts to liquidate the dust obligation.
+4. `liquidate_calculate_seize_ctokens` computes `seize_ctokens` < 1.0, `floor()` returns 0.
+5. `liquidate_ctokens` asserts `ctokens.value() > 0`, transaction aborts.
+6. Dust obligation remains underwater and unliquidatable, accumulating bad debt.
 
 ## Impact
 
-- **Permanent bad debt accumulation**: Dust obligations that go underwater can never be liquidated
+- **Bad debt accumulation**: Dust obligations that go underwater cannot be liquidated
 - **Protocol insolvency risk**: Over time, many small unliquidatable positions erode the protocol's solvency
 - **Griefing vector**: An attacker can deliberately create many near-minimum positions that eventually become unliquidatable dust
 
-Severity is Medium because it requires specific conditions (very small positions and particular price/exchange rate ratios) but has a permanent, irrecoverable impact on protocol solvency.
+Severity is Medium because it requires specific conditions (very small positions and particular price/exchange rate ratios) but has an ongoing, cumulative impact on protocol solvency.
 
 ## Code Snippet
 
@@ -66,7 +78,7 @@ Severity is Medium because it requires specific conditions (very small positions
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Add a minimum seize check before calling `liquidate_ctokens`, and if the seize amount is zero, allow the protocol to socialize the bad debt or write off the dust position:
 

@@ -39,6 +39,23 @@ During the flash loan window (between `borrow_flash_loan` and `repay_flash_loan`
 3. **`borrow_amount()`** check — passes with more headroom than actually available (`self.cash - self.cash_reserve.ceil() > amount`)
 4. **`deposit_limit_breached()`** — calculates higher total deposit than reality
 
+## Internal Pre-conditions
+
+1. A flash loan must be active within a PTB (between `borrow_flash_loan` and `repay_flash_loan`).
+2. Other market operations must be composed with the flash loan in the same PTB.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. `PackageCallerCap` holder (whitelisted contract) composes a flash loan with other operations in a single PTB.
+2. `borrow_flash_loan` withdraws tokens from `underlying_balance` but does NOT update `self.cash`.
+3. A deposit operation within the same PTB sees inflated `exchange_rate` (cash is overstated).
+4. The depositor receives fewer cTokens than warranted for their deposit amount.
+5. When the flash loan is repaid, cash is restored, but the depositor has already been shortchanged.
+
 ## Impact
 
 In Sui's PTB model, multiple operations can be composed within a single transaction. If a flash loan is composed with other market operations (via whitelisted `PackageCallerCap` holders), the intermediate state is inconsistent:
@@ -64,7 +81,7 @@ assert!(reserve.cash == 1000);  // cash not updated!
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Update `self.cash` in `flash_loan_withdraw` and restore it in `repay_flash_loan`:
 

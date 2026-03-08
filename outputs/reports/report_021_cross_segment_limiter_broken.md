@@ -42,6 +42,23 @@ public(package) fun count_current_outflow(self: &Limiter, now: u64): u64 {
 }
 ```
 
+## Internal Pre-conditions
+
+1. Rate limiter must have multiple segments in its sliding window.
+2. Outflow must have been recorded in an earlier (non-current) segment.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. User withdraws 1000 tokens in segment 1 (6 hours ago), recorded in limiter.
+2. User deposits 500 tokens back in current segment 2.
+3. `reduce_outflow` only reduces segment 2's counter (which may be 0).
+4. `count_current_outflow` still sums 1000 from segment 1, limiting further withdrawals.
+5. Effective rate limit capacity is not freed by the deposit.
+
 ## Impact
 
 - **Reduced capital efficiency**: Deposits/repayments don't free up rate limiter capacity for outflows recorded in earlier segments
@@ -57,7 +74,7 @@ public(package) fun count_current_outflow(self: &Limiter, now: u64): u64 {
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Allow `reduce_outflow` to reduce across segments, starting from the oldest:
 

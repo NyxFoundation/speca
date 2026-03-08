@@ -41,6 +41,26 @@ public(package) fun enforce_post_borrow_repay_invariant<MarketType, CoinType>(
 
 Note: This is distinct from report 028 (dust obligations unliquidatable due to seize flooring to zero). Report 028 covers the case where `seize_ctokens.floor() == 0`, making the position unliquidatable. This report covers the broader case where a partial liquidation reduces debt below `min_borrow_amount`, creating a position that is stuck — it cannot be partially repaid (the invariant check in `handle_repay` blocks it) and may not be economically worth fully repaying.
 
+## Internal Pre-conditions
+
+1. Obligation must have debt that becomes partially liquidatable.
+2. Liquidation must reduce remaining debt below min_borrow_amount.
+
+## External Pre-conditions
+
+1. Price movement or interest accrual must push the obligation below its liquidation threshold.
+
+## Attack Path
+
+1. Borrower has debt of 150 USDC with min_borrow_amount = 100 USDC.
+2. Position becomes liquidatable due to price drop.
+3. Liquidator partially liquidates, repaying 100 USDC of debt.
+4. Remaining debt = 50 USDC, below min_borrow_amount.
+5. No enforce_post_borrow_repay_invariant check in liquidation_inner.
+6. Borrower cannot partially repay the 50 USDC dust (handle_repay blocks it).
+7. Full repay is possible but economically irrational for underwater dust.
+8. Dust position accumulates bad debt over time.
+
 ## Impact
 
 1. A liquidator can partially liquidate an obligation, leaving debt below `min_borrow_amount` (e.g., `min_borrow_amount = 100 USDC`, remaining debt = 5 USDC)
@@ -60,7 +80,7 @@ Note: This is distinct from report 028 (dust obligations unliquidatable due to s
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Add a `min_borrow_amount` check after liquidation debt repayment, or force full repayment when remaining debt would fall below the minimum:
 
