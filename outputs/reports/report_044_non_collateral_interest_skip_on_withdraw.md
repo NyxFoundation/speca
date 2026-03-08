@@ -45,7 +45,7 @@ Depositors of non-collateral assets lose accrued interest on withdrawal. The mag
 - The time since the reserve was last touched by any operation
 - The size of the withdrawal
 
-For assets with high utilization and infrequent interactions, the loss can be significant. In the worst case (asset not touched for days), depositors could lose multiple days' worth of interest.
+For assets with high utilization and infrequent interactions, the loss can be material. However, the practical impact is mitigated by the fact that `accrue_interest` is triggered by many operations (deposit, borrow, repay by any user on that reserve), so a reserve that has active borrows generating interest is likely also being frequently touched. The worst case occurs for non-collateral assets with few market participants and long periods between any interaction.
 
 ## PoC
 

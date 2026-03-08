@@ -23,7 +23,7 @@ public fun burn_whitelist(
 }
 ```
 
-Unlike `mint_new_whitelist` (line 9), `remove_whitelist` (line 43), and `update_permission` (line 54) which all require `_: &AdminCap`, `burn_whitelist` only requires `app: &mut ProtocolApp` (a shared object) and the `PackageCallerCap` itself. Since `PackageCallerCap` has `key, store` abilities, it can be transferred to any address.
+Unlike `mint_new_whitelist` (line 12), `remove_whitelist` (line 42), and `update_permission` (line 53) which all require `_: &AdminCap`, `burn_whitelist` only requires `app: &mut ProtocolApp` (a shared object) and the `PackageCallerCap` itself. Since `PackageCallerCap` has `key, store` abilities, it can be transferred to any address.
 
 ## Internal Pre-conditions
 

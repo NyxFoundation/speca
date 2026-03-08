@@ -7,7 +7,9 @@ The borrow rate limiter usage is increased on `borrow` and reduced on `repay`, b
 ## Vulnerability Detail
 `handle_borrow` increments the borrow limiter via `add_outflow(now, borrow_amount)`, and `handle_repay` explicitly reduces limiter usage via `reduce_outflow(now, coin.value())` after repayment.
 
-However, `liquidation_inner` also repays debt into the same reserve (`debt_reserve.repay_amount(...)`) but does not reduce borrow limiter usage for the repaid amount. The function even documents `// NOTE: disable rate limit` in this path, and no borrow-limiter reconciliation is performed before returning.
+However, `liquidation_inner` also repays debt into the same reserve (`debt_reserve.repay_amount(...)`) but does not reduce borrow limiter usage for the repaid amount. The function explicitly documents `// NOTE: disable rate limit` (market.move:745) in this path, and no borrow-limiter reconciliation is performed before returning.
+
+**Note on intentional design**: The `// NOTE: disable rate limit` comment suggests the developers may have intentionally excluded liquidation from limiter accounting. However, the resulting state divergence between economic debt levels and limiter usage still creates a functional issue: the limiter becomes artificially saturated after liquidation events, blocking legitimate new borrows even though debt has been reduced. The limiter does self-recover over its time window, but during volatile periods this can compound — exactly when new borrowing is most needed for market efficiency.
 
 This creates state divergence between:
 - Economic state: debt is repaid (partially/fully) by liquidation

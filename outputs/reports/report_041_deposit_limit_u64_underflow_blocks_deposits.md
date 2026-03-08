@@ -2,7 +2,7 @@
 
 ## Summary
 
-The `deposit_limit_breached` function in reserve.move uses u64 arithmetic that can underflow and abort when accumulated `cash_reserve` exceeds `total_deposit_plus_interest`, permanently blocking all new deposits into the affected market.
+The `deposit_limit_breached` function in reserve.move uses u64 arithmetic that can underflow and abort when accumulated `cash_reserve` exceeds `total_deposit_plus_interest`, blocking all new deposits into the affected market until an admin calls `take_revenue`.
 
 ## Vulnerability Detail
 
@@ -32,18 +32,18 @@ Example scenario:
 - A depositor tries to deposit `increment = 100`
 - `2,000 + 100 - 2,500 = -400` → u64 underflow → abort
 
-Once in this state, **all new deposits are blocked** because `deposit_limit_breached` is called in `handle_mint` (market.move:298) and always aborts.
+Once in this state, **all new deposits are blocked** because `deposit_limit_breached` is called in `handle_mint` (market.move:278) and always aborts.
 
 Note: This is distinct from report_032 (deposit limit double subtraction) which describes `cash_reserve` being subtracted twice conceptually. This finding is about the u64 arithmetic abort when the result goes negative.
 
 ## Impact
 
-New deposits into an affected market are permanently blocked until an admin calls `take_revenue` to drain `cash_reserve`. If `take_revenue` is not called frequently enough, markets with high flash loan activity and low remaining deposits can become deposit-locked, preventing new liquidity from entering.
+New deposits into an affected market are blocked until an admin calls `take_revenue` to drain `cash_reserve`. If `take_revenue` is not called frequently enough, markets with high flash loan activity and low remaining deposits can become deposit-locked, preventing new liquidity from entering.
 
 ## Code Snippet
 
 - reserve.move:87-90 (`deposit_limit_breached` with u64 underflow)
-- market.move:298 (where `deposit_limit_breached` is called)
+- market.move:278 (where `deposit_limit_breached` is called)
 
 ## Tool used
 
