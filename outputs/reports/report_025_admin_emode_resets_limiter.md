@@ -19,6 +19,23 @@ public(package) fun update(emode: &mut EMode, params: NewEMode) {
 
 The `Limiter` struct tracks sliding window segments with timestamps and cumulative values. When the admin updates eMode parameters (even for unrelated fields like collateral factor), the limiter state can be reset because the `NewEMode` struct replaces the entire configuration.
 
+## Internal Pre-conditions
+
+1. eMode group must have active rate limiter with recorded outflow segments.
+2. Admin must update any eMode parameter for the group.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Rate limiter has tracked 900/1000 capacity used in current window.
+2. Admin updates `collateral_factor` for the eMode group (routine parameter change).
+3. Limiter state is overwritten with fresh `NewEMode` config, clearing segment history.
+4. Attacker (monitoring mempool) immediately withdraws/borrows up to the full 1000 capacity.
+5. Rate limiter protection is effectively bypassed.
+
 ## Impact
 
 - **Rate limit bypass**: An attacker monitoring mempool can front-run an admin eMode update transaction, then immediately after the update executes a large withdrawal/borrow that would have been blocked by the previous limiter state
@@ -33,7 +50,7 @@ The `Limiter` struct tracks sliding window segments with timestamps and cumulati
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Separate rate limiter configuration from eMode parameter updates, or preserve existing segment data when only non-limiter parameters change:
 

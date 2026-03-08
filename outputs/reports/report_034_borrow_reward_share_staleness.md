@@ -32,6 +32,24 @@ pool_reward.cumulative_rewards_per_share =
 
 Since `total_shares` reflects stale borrow amounts, users with outdated (lower) shares receive fewer rewards per unit of actual debt.
 
+## Internal Pre-conditions
+
+1. Borrow-side liquidity mining rewards must be active.
+2. Obligations must have outstanding debt with accruing interest.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. User A and User B each borrow 1,000,000 at day 0.
+2. User B repays 1 unit and re-borrows every day, updating their reward share to reflect accrued interest.
+3. User A does not interact for 30 days.
+4. User B's share grows to ~1,008,219 while User A's remains at 1,000,000.
+5. User B earns ~0.8% more rewards daily despite identical effective positions.
+6. Over time, frequent interactors systematically extract more rewards.
+
 ## Impact
 
 **Attack scenario:**
@@ -56,7 +74,7 @@ Note: This does NOT affect deposit rewards, because cToken amounts are static â€
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Either:
 

@@ -12,8 +12,26 @@ When `collateral_total_value == 0`, this triggers arithmetic abort in `math::flo
 
 ADL entrypoints (`liquidate_adl_borrow` / `liquidate_adl_deposit`) always pass an override liquidation threshold, so they hit this branch. Therefore, obligations that have already lost all collateral but still carry debt (bad-debt tail) cannot be processed through ADL, because the pre-check aborts before liquidation logic.
 
+## Internal Pre-conditions
+
+1. Obligation must have outstanding debt but zero collateral (bad-debt tail position).
+2. ADL must be active for the relevant eMode group.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Obligation loses all collateral through liquidation but retains residual debt.
+2. Admin activates ADL to deleverage the market.
+3. ADL liquidator calls liquidate_adl_borrow targeting the zero-collateral obligation.
+4. ensure_liquidate_borrow_allowed computes user_ltv = weighted_debts / 0 (division by zero).
+5. Transaction aborts, ADL cannot process this obligation.
+6. Bad debt tail remains unresolved.
+
 ## Impact
-Protocol deleveraging automation can be blocked for zero-collateral debt positions. This creates persistent operational DoS in ADL flows and leaves tail bad debt unresolved through the intended deleverage path.
+Protocol deleveraging automation can be blocked for zero-collateral debt positions. This blocks ADL flows for affected positions and leaves tail bad debt unresolved through the intended deleverage path.
 
 ## Code Snippet
 - `contracts/protocol/sources/internal/market/market.move:964-970`
@@ -25,7 +43,7 @@ Protocol deleveraging automation can be blocked for zero-collateral debt positio
 ## Tool used
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 Add an explicit zero-collateral guard before division in the ADL threshold branch.
 
 Example patch direction:

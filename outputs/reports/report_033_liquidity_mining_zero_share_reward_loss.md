@@ -29,6 +29,25 @@ fun update_pool_reward_manager(
 
 The reward distribution (lines 295-332) calculates `time_passed_ms` based on `last_update_time_ms` and `cur_time_ms`. Since `last_update_time_ms` was already advanced during the zero-share period, the rewards for that period are never calculated or allocated.
 
+## Internal Pre-conditions
+
+1. Reward pool must be active with emissions configured.
+2. All participants must have withdrawn (`total_shares` = 0) during an active reward period.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Pool reward distributes 10,000 USDC/day over 100 days.
+2. Day 0-50: User A deposits, earns rewards.
+3. Day 50: User A fully withdraws, `total_shares` drops to 0.
+4. Day 50-70: `update_pool_reward_manager` advances `last_update_time_ms` without distributing rewards.
+5. Day 70: User B deposits.
+6. Day 70-100: User B earns rewards for only 30 days.
+7. 20 days of emissions (200,000 USDC) are stranded in the pool.
+
 ## Impact
 
 Consider a concrete scenario:
@@ -54,7 +73,7 @@ The admin can partially recover via `close_pool_reward` after all users claim, b
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Accumulate undistributed rewards instead of skipping them. When `total_shares` returns to non-zero, distribute the accumulated gap rewards to the first participants:
 

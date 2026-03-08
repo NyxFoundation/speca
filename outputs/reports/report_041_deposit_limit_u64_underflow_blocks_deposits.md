@@ -36,6 +36,24 @@ Once in this state, **all new deposits are blocked** because `deposit_limit_brea
 
 Note: This is distinct from report_032 (deposit limit double subtraction) which describes `cash_reserve` being subtracted twice conceptually. This finding is about the u64 arithmetic abort when the result goes negative.
 
+## Internal Pre-conditions
+
+1. cash_reserve must exceed total_deposit_plus_interest + increment (accumulated from reserve_factor interest and flash loan fees).
+2. Most depositors must have withdrawn, reducing total_supply to a small value.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Protocol accumulates 2,500 units of cash_reserve from interest and flash loan fees.
+2. Depositors withdraw until total_deposit_plus_interest = 2,000.
+3. New user tries to deposit 100 tokens.
+4. deposit_limit_breached computes: 2000 + 100 - 2500 = underflow (u64).
+5. Transaction aborts, blocking all new deposits.
+6. Deposits remain blocked until admin calls take_revenue to drain cash_reserve.
+
 ## Impact
 
 New deposits into an affected market are blocked until an admin calls `take_revenue` to drain `cash_reserve`. If `take_revenue` is not called frequently enough, markets with high flash loan activity and low remaining deposits can become deposit-locked, preventing new liquidity from entering.
@@ -49,7 +67,7 @@ New deposits into an affected market are blocked until an admin calls `take_reve
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Use saturating subtraction or reorder the arithmetic to avoid underflow:
 

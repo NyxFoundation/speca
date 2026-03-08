@@ -37,6 +37,21 @@ public(package) fun borrow_flash_loan<MarketType, CoinType>(
 
 There is no requirement that the borrower has an obligation or any relationship with the specified eMode group. Any user can borrow a flash loan from any group that lists the asset.
 
+## Internal Pre-conditions
+
+1. Same asset must be onboarded to multiple eMode groups with different flash loan fee rates.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Admin configures asset X in eMode group 0 with 0.1% flash loan fee and eMode group 1 with 0.05% fee.
+2. Borrower calls `borrow_flash_loan` specifying eMode group 1.
+3. Fee is computed from group 1's lower rate.
+4. Protocol collects less revenue than group 0's intended fee.
+
 ## Impact
 
 - **Revenue loss**: Admin-intended higher flash loan fees for specific eMode groups are bypassed
@@ -54,6 +69,6 @@ The admin's only mitigation is to ensure all eMode groups have identical flash l
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Either enforce the same flash loan fee across all eMode groups for a given asset, or remove the eMode group parameter from flash loans entirely (use a global per-asset flash loan fee).

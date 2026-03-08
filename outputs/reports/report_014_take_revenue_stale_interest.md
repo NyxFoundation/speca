@@ -34,6 +34,22 @@ If no user interaction (borrow, repay, deposit, withdraw) has occurred since the
 1. Takes less revenue than actually available (under-collection), or
 2. Is forced to trigger a user operation first to refresh accrual (operational burden).
 
+## Internal Pre-conditions
+
+1. Reserve must have outstanding borrows generating interest.
+2. Time must have elapsed since last user interaction (borrow/repay/deposit/withdraw) on the asset.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Interest accrues on outstanding borrows but no user interactions trigger `accrue_interest()`.
+2. Admin calls `take_revenue` to collect protocol revenue.
+3. `cash_reserve` reflects stale value from last accrual, not current earned interest.
+4. Admin receives less revenue than actually available.
+
 ## Impact
 
 Protocol revenue leakage. In low-activity markets or during periods of no user interaction, significant interest can accumulate without being reflected in `cash_reserve`. The admin cannot efficiently collect all earned revenue in a single transaction. Over time, this compounds as uncollected revenue is effectively donated to depositors via an inflated exchange rate.
@@ -47,7 +63,7 @@ Protocol revenue leakage. In low-activity markets or during periods of no user i
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Call `accrue_interest` before taking revenue:
 

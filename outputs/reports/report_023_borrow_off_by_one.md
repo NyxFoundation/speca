@@ -2,7 +2,7 @@
 
 ## Summary
 
-The borrow amount validation in `reserve.move` uses strict greater-than (`>`) instead of greater-than-or-equal (`>=`), preventing users from borrowing the exact remaining available liquidity. This locks 1 unit of each asset permanently in the reserve until new deposits arrive.
+The borrow amount validation in `reserve.move` uses strict greater-than (`>`) instead of greater-than-or-equal (`>=`), preventing users from borrowing the exact remaining available liquidity. This locks 1 unit of each asset in the reserve until new deposits arrive.
 
 ## Vulnerability Detail
 
@@ -26,9 +26,24 @@ The same pattern exists in flash loans (line 230):
 assert!(amount < self.cash, error::reserve_flash_loan_more_than_cash());
 ```
 
+## Internal Pre-conditions
+
+1. Available liquidity (`cash - ceil(cash_reserve)`) must exactly equal the desired borrow amount.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Reserve has exactly 100 units of available liquidity.
+2. User attempts to borrow 100 units.
+3. `assert!(100 > 100)` fails, transaction aborts.
+4. User can only borrow 99, leaving 1 unit locked.
+
 ## Impact
 
-- **Capital inefficiency**: 1 unit per asset per reserve is permanently locked and unusable
+- **Capital inefficiency**: 1 unit per asset per reserve is locked and unusable
 - **User confusion**: Borrowers see available liquidity but cannot borrow the full amount
 - **Compounding effect**: Across many assets and markets, the locked amounts aggregate
 
@@ -43,7 +58,7 @@ The severity is low per-asset but is a correctness issue in the liquidity model.
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Use `>=` for exact-amount borrowing:
 

@@ -33,6 +33,23 @@ if (liquidation_params.liquidation_ltv_threshold_override.is_some()) {
 
 When `liquidation_ltv = 0`, the check becomes `user_ltv > 0`, which passes for **any** obligation with non-zero debt, regardless of how well-collateralized it is.
 
+## Internal Pre-conditions
+
+1. ADL must be activated by admin for an eMode group.
+2. Sufficient time must elapse such that `liquidation_factor_hourly_drop * hours >= liquidation_factor_base`.
+
+## External Pre-conditions
+
+1. Admin must fail to cancel ADL before the LTV threshold reaches zero (key compromise, unavailability, or oversight).
+
+## Attack Path
+
+1. Admin activates ADL with `liquidation_factor_base = 0.85` and `hourly_drop = 0.01`.
+2. After 85 hours (~3.5 days), `saturating_sub` returns 0.
+3. `ensure_liquidate_borrow_allowed` checks `user_ltv > 0`, which passes for any obligation with non-zero debt.
+4. ADL liquidator can now liquidate perfectly healthy positions (e.g., 500% collateralized).
+5. Collateral is seized from solvent borrowers.
+
 ## Impact
 
 **Example scenario:**
@@ -60,7 +77,7 @@ While ADL is designed as an emergency mechanism with admin oversight, the lack o
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Add a minimum floor to `liquidation_ltv` to prevent degradation below a safe threshold:
 

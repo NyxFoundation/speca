@@ -18,11 +18,28 @@ Both functions proceed into `liquidation_inner` directly, so once ADL is active,
 
 This creates a control-plane bypass: admin pause signals are not consistently enforced across liquidation modes.
 
+## Internal Pre-conditions
+
+1. Admin must have paused liquidation for a specific asset.
+2. ADL must be active for the relevant eMode group.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Admin pauses liquidation for asset X due to oracle incident.
+2. ADL is active for the eMode group containing asset X.
+3. ADL liquidator calls liquidate_adl_borrow or liquidate_adl_deposit.
+4. handle_debt_auto_deleverage / handle_collateral_auto_deleverage proceed without checking liquidation_paused.
+5. Collateral of paused asset X is seized despite admin's pause order.
+
 ## Impact
 - Emergency liquidation pause is ineffective for ADL routes
 - Operators may assume liquidation is halted while ADL liquidations continue
 - During incident response, users can still be liquidated via ADL, increasing loss and operational risk
-- Policy mismatch undermines risk controls and governance guarantees
+- Policy mismatch undermines risk controls
 
 ## Code Snippet
 - `contracts/protocol/sources/internal/market/market.move:519-521` (normal liquidation pause check)
@@ -33,7 +50,7 @@ This creates a control-plane bypass: admin pause signals are not consistently en
 ## Tool used
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 Enforce the same `liquidation_paused` guard in ADL paths before invoking `liquidation_inner`.
 
 Example hardening:

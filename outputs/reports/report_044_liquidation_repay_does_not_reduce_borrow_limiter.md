@@ -1,5 +1,4 @@
-## Title
-Liquidation Repay Path Does Not Reduce Borrow Rate-Limiter Usage
+# Liquidation Repay Path Does Not Reduce Borrow Rate-Limiter Usage
 
 ## Summary
 The borrow rate limiter usage is increased on `borrow` and reduced on `repay`, but liquidation-driven debt repayment does not call limiter reduction at all. As a result, successful liquidations can reduce real debt while limiter usage remains elevated, causing new borrows to be blocked until the time window expires.
@@ -17,6 +16,24 @@ This creates state divergence between:
 
 Therefore, after large or repeated liquidations, the limiter can remain artificially saturated and reject legitimate new borrows (`add_outflow` checks), despite debt being materially reduced.
 
+## Internal Pre-conditions
+
+1. Borrow rate limiter must be active for the eMode group.
+2. Borrow outflow must have been recorded in the limiter.
+
+## External Pre-conditions
+
+1. Market conditions must trigger liquidations, which repay debt into the reserve.
+
+## Attack Path
+
+1. Borrow limiter tracks 900/1000 capacity used.
+2. Price drop triggers liquidation of multiple obligations, repaying 500 units of debt.
+3. liquidation_inner calls debt_reserve.repay_amount but does NOT call reduce_outflow on borrow limiter.
+4. Limiter still shows 900/1000 used despite 500 debt reduction.
+5. New legitimate borrows are blocked (limiter reports capacity exhausted).
+6. Limiter recovers only when time window expires naturally.
+
 ## Impact
 Borrow capacity can remain incorrectly constrained after liquidation events, especially during volatile periods where liquidations are frequent. This can cause protocol-level borrowing DoS (false-positive limiter exhaustion), reduce market utilization, and delay normal market recovery even when debt has already been repaid.
 
@@ -33,5 +50,5 @@ Borrow capacity can remain incorrectly constrained after liquidation events, esp
 ## Tool used
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 When liquidation repays debt, reduce borrow-limiter usage by the actual repaid amount (excluding refunded debt coin), aligned with the `repay` path semantics. If liquidation is intentionally excluded from limiter accounting, introduce explicit compensating logic so borrow limiter usage still tracks net debt outflow/inflow consistently.

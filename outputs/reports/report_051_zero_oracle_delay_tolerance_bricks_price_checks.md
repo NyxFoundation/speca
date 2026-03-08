@@ -1,5 +1,4 @@
-## Title (English)
-Zero `price_delay_tolerance_ms` Configuration Can Brick Oracle Reads and Lending Flows
+# Zero `price_delay_tolerance_ms` Configuration Can Brick Oracle Reads and Lending Flows
 
 ## Summary
 `x_oracle::update_price_delay_tolerance_ms` allows setting delay tolerance to `0`, because it only enforces an upper bound. With `0` tolerance, `check_price` requires `age <= 0`, so almost all reads via `get_price` / `get_price_with_check` revert as stale, which propagates into core borrow/withdraw safety checks.
@@ -16,8 +15,22 @@ If tolerance is zero, any non-zero age fails. Since timestamps are sampled at ru
 
 This directly affects protocol execution paths that require oracle prices, e.g. `debts_value_usd_non_liquidation` and `collaterals_usd_non_liquidation` in `market.move`, which are used by obligation safety checks for borrow/withdraw paths.
 
+## Internal Pre-conditions
+1. Admin must set price_delay_tolerance_ms to 0 (no lower bound check prevents this).
+
+## External Pre-conditions
+None.
+
+## Attack Path
+1. Admin calls update_price_delay_tolerance_ms with value 0 (misconfiguration).
+2. Oracle read path computes age = clock.timestamp_ms() - last_updated * 1000.
+3. check_price asserts age <= 0, which fails for any non-zero age.
+4. All get_price / get_price_with_check calls revert.
+5. Borrow/withdraw safety checks (which require oracle prices) all fail.
+6. Price-dependent lending flows are blocked until admin corrects the tolerance.
+
 ## Impact
-A single admin misconfiguration (`delay_tolerance_ms = 0`) can cause a protocol-wide DoS on price-dependent lending flows (borrow/withdraw and other health-check-based operations), because oracle reads revert with stale-price errors.
+A single admin misconfiguration (`delay_tolerance_ms = 0`) can cause a DoS on price-dependent lending flows (borrow/withdraw and other health-check-based operations), because oracle reads revert with stale-price errors.
 
 ## Code Snippet (file:line)
 - `contracts/x_oracle/sources/internal/x_oracle.move:148-150`
@@ -28,7 +41,7 @@ A single admin misconfiguration (`delay_tolerance_ms = 0`) can cause a protocol-
 ## Tool used
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 Reject zero tolerance at configuration time by adding a lower bound check:
 
 ```move

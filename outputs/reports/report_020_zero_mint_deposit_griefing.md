@@ -25,6 +25,22 @@ The depositor's tokens are added to the reserve's cash balance, but zero cTokens
 
 There is no minimum deposit check or zero-mint revert in the deposit flow.
 
+## Internal Pre-conditions
+
+1. cToken exchange rate must be high enough that `deposit_amount / exchange_rate < 1` (truncates to 0 cTokens).
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Exchange rate increases over time via interest accrual (e.g., `exchange_rate = 2.0` after extended lending).
+2. User deposits a small amount (e.g., 1 unit of underlying).
+3. `mint_amount = int_mul(inverse_exchange_rate, 1) = 0` due to floor division.
+4. User's deposit is absorbed into reserve cash but zero cTokens are minted.
+5. The deposit is effectively donated to existing cToken holders.
+
 ## Impact
 
 - **Silent fund loss**: Users making small deposits (relative to the exchange rate) lose their tokens with no cTokens received
@@ -40,7 +56,7 @@ There is no minimum deposit check or zero-mint revert in the deposit flow.
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
 
-## Recommendation
+## Mitigation
 
 Revert if zero cTokens would be minted:
 

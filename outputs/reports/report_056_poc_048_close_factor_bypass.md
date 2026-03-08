@@ -22,7 +22,7 @@ Market configuration:
   borrow_weight                  = 1.10
 
 Borrower's obligation:
-  Collateral: 60,000 USDC worth of Token A (at $2.00 each = 30,000 Token A)
+  Collateral: 30,000 USDC worth of Token A (at $2.00 each = 15,000 Token A)
 
   Debts (5 different tokens, each in the same eMode group):
     Token B: $4,900 (just below $5,000 threshold)
@@ -38,22 +38,9 @@ All token prices: EMA = spot = stable (no divergence needed)
 
 ### Step 1: Verify Position is Liquidatable
 ```
-Collateral value       = $60,000
-Weighted collateral    = $60,000 × 0.85 = $51,000
+Collateral value       = $30,000
+Weighted collateral    = $30,000 × 0.85 = $25,500
 Weighted debt          = $24,500 × 1.10 = $26,950
-
-$26,950 < $51,000 → NOT liquidatable in normal conditions
-```
-
-Wait — this position is healthy. Let me adjust to make it liquidatable:
-
-```
-REVISED:
-  Collateral: $30,000 worth of Token A
-  Debts: 5 types × $4,900 = $24,500
-
-Weighted collateral = $30,000 × 0.85 = $25,500
-Weighted debt       = $24,500 × 1.10 = $26,950
 
 $26,950 > $25,500 → Liquidatable ✓
 ```

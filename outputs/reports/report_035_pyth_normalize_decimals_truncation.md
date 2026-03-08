@@ -29,6 +29,23 @@ The `register_pyth_feed` function (line 105-126) provides no validation or warni
 
 For a Pyth feed with `expo = -12` (12 decimal places), a price value of `123456789123` (representing $0.123456789123) would be divided by `10^3 = 1000`, producing `123456789` — losing 3 digits of precision. For feeds with `expo = -18` (common for Ethereum-bridged tokens), division by `10^9` can reduce a meaningful price to nearly zero or a wildly inaccurate value.
 
+## Internal Pre-conditions
+
+1. A Pyth feed with more than 9 decimal places (`expo < -9`) must be registered via `register_pyth_feed`.
+
+## External Pre-conditions
+
+None.
+
+## Attack Path
+
+1. Admin registers a Pyth feed with `expo = -12` (12 decimal places).
+2. `normalize_decimals` divides `price_value` by `10^3 = 1000`, losing 3 digits of precision.
+3. Truncated price may round UP or DOWN relative to true value.
+4. Attacker deposits token whose truncated price is higher than true value.
+5. Borrows high-value assets against inflated collateral valuation.
+6. Liquidation calculations also use truncated price, allowing undercollateralized positions to persist.
+
 ## Impact
 
 If any Pyth feed with more than 9 decimal places is onboarded:
@@ -46,7 +63,7 @@ If any Pyth feed with more than 9 decimal places is onboarded:
 
 Manual Review + Automated Analysis
 
-## Recommendation
+## Mitigation
 
 Add a maximum decimals check in `register_pyth_feed` or `normalize_decimals`:
 
