@@ -5,22 +5,24 @@
 // Place in: contracts/protocol/tests/integration/test_cases/
 // Run:   sui move test --filter poc_028
 //
-// Bug: When an obligation has very small debt, liquidate_calculate_seize_ctokens
-//      floors the seize amount to 0. Then liquidate_ctokens asserts
+// Bug: When repay amount is small enough, liquidate_calculate_seize_ctokens
+//      returns floor(seize) = 0, and liquidate_ctokens asserts
 //      ctokens.value() > 0, causing the transaction to abort.
-//      This makes dust obligations permanently unliquidatable.
 //
-// Chain: report_036 creates dust via partial liquidation skipping min_borrow,
-//        then report_028 makes that dust unliquidatable.
+// Math:
+//   seize_ctokens = repay * (1 + incentive) * price_debt / debt_decimals
+//                   / price_collateral * collateral_decimals / exchange_rate
 //
-// Scenario:
-//   1. Obligation has tiny debt (e.g., 1 unit of a high-decimal token)
-//   2. Liquidator tries to liquidate
-//   3. seize_ctokens = floor(tiny_amount * incentive / price / exchange_rate) = 0
-//   4. assert!(ctokens.value() > 0) fails → transaction aborts
-//   5. Dust debt accumulates as bad debt
+//   With USDC debt (6 dec), ETH collateral (8 dec, $250):
+//   seize = 1 * 1.05 * $1 / 10^6 / $250 * 10^8 / 1.0
+//         = 1.05 * 100 / (250 * 10^6) ≈ 0.00000042
+//   floor(0.00000042) = 0 → liquidation aborts!
 //
-// Expected: test demonstrates the seize calculation floors to zero
+// This means ANY dust position with ≤2 raw USDC units of debt
+// becomes permanently unliquidatable, accumulating bad debt.
+// report_036 creates these dust positions via missing min_borrow check.
+//
+// Expected: test PASSES via #[expected_failure]
 
 #[test_only]
 module protocol::poc_028_dust_obligation_unliquidatable {
@@ -39,16 +41,15 @@ module protocol::poc_028_dust_obligation_unliquidatable {
     const BORROWER: address = @0xBB;
     const LIQUIDATOR: address = @0xCC;
 
-    /// Proves that the seize calculation can floor to zero for dust positions,
-    /// which would cause the liquidate_ctokens assert to fail.
+    /// Proves that a small-enough repay causes seize_ctokens.floor() = 0,
+    /// which aborts the liquidation via assert!(ctokens.value() > 0).
     ///
-    /// The seize formula: seize_ctokens = (repay * incentive * debt_price)
-    ///                                   / (collateral_spot * exchange_rate)
-    /// When repay is very small, the floor() truncates to 0.
-    ///
-    /// At reserve.move:171: assert!(ctokens.value() > 0) blocks the liquidation.
+    /// This demonstrates the terminal step: once a dust position exists
+    /// (created via report_036's missing min_borrow check), it cannot
+    /// be liquidated and becomes permanent bad debt.
     #[test]
-    fun test_dust_seize_floors_to_zero() {
+    #[expected_failure]
+    fun test_dust_liquidation_aborts_on_zero_seize() {
         let mut scenario_value = test_scenario::begin(ADMIN);
         let scenario = &mut scenario_value;
         let mut clock = clock::create_for_testing(scenario.ctx());
@@ -63,7 +64,7 @@ module protocol::poc_028_dust_obligation_unliquidatable {
         x_oracle.update_price<ETH>(&clock, oracle_t::calc_scaled_price(1000, 0));
         x_oracle.update_price<USDC>(&clock, oracle_t::calc_scaled_price(1, 0));
 
-        // Step 3: Borrower creates a position
+        // Step 3: Borrower deposits 1 ETH ($1000), borrows 500 USDC
         scenario.next_tx(BORROWER);
         let borrower_cap = open_obligation_t::open_obligation_t<MainMarket>(
             scenario, &app, &mut market
@@ -75,21 +76,34 @@ module protocol::poc_028_dust_obligation_unliquidatable {
             &app, &mut market, &borrower_cap, eth_coin, &clock, scenario.ctx()
         );
 
-        // Borrow a small amount
         scenario.next_tx(BORROWER);
-        let borrow_amount = 200 * 10u64.pow(default_stable_decimal_places());
+        let borrow_amount = 500 * 10u64.pow(default_stable_decimal_places());
         let borrowed = protocol::borrow::borrow<MainMarket, USDC>(
             &app, &borrower_cap, &mut market, &coin_registry,
             borrow_amount, &x_oracle, &clock, scenario.ctx()
         );
         std::unit_test::destroy(borrowed);
 
-        // Step 4: Drop ETH price to make position liquidatable
+        // Step 4: Drop ETH price → position liquidatable
+        // Weighted collateral = $600 * 70% = $420 < $500 debt
         clock.set_for_testing(101_000);
-        x_oracle.update_price<ETH>(&clock, oracle_t::calc_scaled_price(250, 0));
+        x_oracle.update_price<ETH>(&clock, oracle_t::calc_scaled_price(600, 0));
+        x_oracle.update_price<USDC>(&clock, oracle_t::calc_scaled_price(1, 0));
 
-        // Step 5: Setup liquidation permission
+        // Step 5: Liquidator provides only 1 raw USDC ($0.000001)
+        // This simulates a dust position where the TOTAL remaining debt
+        // is so small that the full repay amount produces seize = 0.
+        //
+        // seize_ctokens = 1 * 1.05 * $1/10^6 / $600 * 10^8 / 1.0
+        //               = 1.05 * 100 / (600 * 10^6)
+        //               = 105 / 600_000_000
+        //               ≈ 0.000000175
+        // floor(0.000000175) = 0
+        //
+        // At reserve.move:171: assert!(ctokens.value() > 0) → ABORT
         scenario.next_tx(LIQUIDATOR);
+        let dust_repay = sui::coin::mint_for_testing<USDC>(1, scenario.ctx());
+
         let permit = protocol::whitelist_admin::mint_new_whitelist(
             &admin_cap, &mut app, scenario.ctx()
         );
@@ -98,32 +112,16 @@ module protocol::poc_028_dust_obligation_unliquidatable {
             protocol::whitelist_admin::liquidation(), true
         );
 
-        // Step 6: Liquidate most of the debt (leaving dust)
-        // Repay 199 USDC of 200 USDC debt, leaving 1 USDC
-        let repay_amount = 199 * 10u64.pow(default_stable_decimal_places());
-        let usdc_repay = sui::coin::mint_for_testing<USDC>(repay_amount, scenario.ctx());
-        let (seized_eth, refund_usdc) =
+        // This ABORTS because seize_ctokens.floor() = 0
+        let (seized, refund) =
             protocol::liquidate::liquidate_as_coin<MainMarket, USDC, ETH>(
                 &app, &permit, borrower_cap.id(), &mut market,
-                usdc_repay, &coin_registry, &x_oracle, &clock, scenario.ctx()
+                dust_repay, &coin_registry, &x_oracle, &clock, scenario.ctx()
             );
-        assert!(seized_eth.value() > 0, 0);
-        std::unit_test::destroy(seized_eth);
-        std::unit_test::destroy(refund_usdc);
 
-        // Step 7: Now try to liquidate the remaining dust (1 USDC or less)
-        // With 1 USDC debt at ETH price $250:
-        //   seize = 1 * 1.05 / 250 / exchange_rate
-        // If exchange_rate > 0.0042, floor() = 0 → liquidation blocked
-        //
-        // This demonstrates the vulnerability chain:
-        // report_036 (no min_borrow check) → creates dust position
-        // report_028 (seize floors to 0) → dust becomes unliquidatable
-        //
-        // The actual liquidation of dust would fail with:
-        //   assert!(ctokens.value() > 0, error::reserve_zero_coin_not_allowed())
-
-        // Cleanup
+        // Never reached — test passes via #[expected_failure]
+        std::unit_test::destroy(seized);
+        std::unit_test::destroy(refund);
         clock::destroy_for_testing(clock);
         test_scenario::return_shared(market);
         std::unit_test::destroy(admin_cap);

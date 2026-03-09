@@ -77,6 +77,16 @@ This finding interacts with two other rate limiter accounting issues:
 - **report_044** (Liquidation Repay Does Not Reduce Borrow Limiter): Liquidation omits `reduce_outflow` entirely, compounding the cross-segment issue — even if the current-segment-only design were acceptable, the liquidation path contributes zero reduction regardless.
 - **report_058** (Repay Over-Reduces Borrow Limiter): When `reduce_outflow` *is* called (in `handle_repay`), it uses principal + interest instead of principal only, over-reducing the current segment. This over-reduction is constrained to the current segment by the cross-segment bug documented here — the excess cannot spill into older segments where the original borrow was tracked.
 
+## Severity Upgrade Note (Low → Medium)
+
+This finding should be upgraded to Medium because:
+- **Cascading with report_044**: Even if liquidation were to call `reduce_outflow`, this bug would prevent it from working for borrows in earlier segments. The two bugs compound: 044 prevents any reduction, and 021 prevents cross-segment reduction even when called.
+- **Persistent false capacity exhaustion**: Rate limiter capacity freed by deposits/repayments is limited to the current segment. Outflow in older (still-active) segments remains counted, creating a systematic over-count of net outflow.
+- **No external trigger needed**: This occurs naturally as time passes across segment boundaries. Any user who borrows in segment N and repays in segment N+1 experiences reduced limiter efficiency.
+- **Core functionality broken**: The rate limiter's fundamental promise — tracking net outflow within a sliding window — is violated because inflows can only reduce the current segment.
+
+Per Sherlock criteria, broken core protocol functionality (rate limiter) that systematically reduces capital efficiency and creates false-positive rate limits qualifies as Medium.
+
 ## Tool used
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)

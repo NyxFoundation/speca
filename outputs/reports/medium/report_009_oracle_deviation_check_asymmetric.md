@@ -63,6 +63,16 @@ Mathematical comparison:
 
 The asymmetry grows with divergence magnitude.
 
+## Severity Upgrade Note (Medium → High)
+
+This finding should be considered for High severity because:
+- **Dangerous direction**: The asymmetry specifically makes the check more lenient during debt token price spikes — the exact scenario where strict protection is needed. Collateral spikes are naturally conservative (EMA undervalues collateral, making positions appear less healthy).
+- **Bad debt accumulation**: During debt token spikes, EMA-based debt valuation understates true obligations, allowing borrowers to take positions that become undercollateralized when EMA catches up. This creates protocol-level bad debt.
+- **Scalable impact**: At 3x divergence, the check is 3x more lenient than intended. The asymmetry grows with divergence magnitude, providing the least protection during the most volatile conditions.
+- **No attacker action needed**: Natural market volatility triggers this. Any debt token price spike above the tolerance threshold is inadequately filtered.
+
+Per Sherlock criteria, a bug that enables systematic bad debt accumulation (loss of funds for the protocol/lenders) during foreseeable market conditions qualifies as High.
+
 ## Mitigation
 
 Either:

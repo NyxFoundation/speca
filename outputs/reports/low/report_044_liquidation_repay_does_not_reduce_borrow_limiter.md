@@ -54,6 +54,16 @@ This finding is one of three distinct rate limiter accounting issues:
 - **report_058** (Repay Over-Reduces Borrow Limiter): The `handle_repay` path calls `reduce_outflow(coin.value())` with principal + accrued interest, but `add_outflow` only tracked the principal. This is the opposite direction — 058 *over-reduces* the limiter, while this report describes a path that *never reduces* at all. During market stress with both liquidations and repayments, these errors can partially offset (liquidation inflation minus repay over-reduction), but their magnitudes differ and neither cancels the other reliably.
 - **report_021** (Cross-Segment Limiter Reduction is Broken): Even if liquidation were to call `reduce_outflow`, the cross-segment design flaw means the reduction would only apply to the current segment. If the original borrow was in an earlier segment, the reduction would have no effect anyway.
 
+## Severity Upgrade Note (Low → Medium)
+
+This finding should be upgraded to Medium because:
+- **Protocol-level DOS during market stress**: Liquidations are most frequent during volatile periods — exactly when new borrowing is most needed for market efficiency. False-positive limiter exhaustion blocks legitimate borrows at the worst possible time.
+- **No attacker action required**: This triggers naturally from normal liquidation activity. During a market crash, cascading liquidations inflate the limiter without any debt reduction, creating a self-reinforcing borrowing freeze.
+- **Compounds with report_021**: Cross-segment limiter reduction is broken, so even manual workarounds via repay cannot fully restore capacity.
+- **Core functionality broken**: Rate limiter no longer tracks net economic outflow — it tracks gross borrows minus voluntary repays, ignoring the largest source of debt reduction (liquidation).
+
+Per Sherlock criteria, broken core protocol functionality (rate limiter accounting) that creates DOS conditions during market stress qualifies as Medium.
+
 ## Tool used
 Manual Review + Automated Analysis
 

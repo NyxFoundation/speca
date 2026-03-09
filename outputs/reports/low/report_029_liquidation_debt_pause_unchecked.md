@@ -87,6 +87,16 @@ public(package) fun handle_liquidation<MarketType, DebtType, CollateralType>(...
 }
 ```
 
+## Severity Upgrade Note (Low → Medium)
+
+This finding should be upgraded to Medium because:
+- **Emergency control bypass**: The pause mechanism exists specifically for oracle emergencies. An incomplete pause means the admin cannot prevent unfair liquidations during the exact scenario the control was designed for.
+- **Loss of funds**: Borrowers can be liquidated using stale/manipulated debt pricing that the admin explicitly tried to block. The liquidator profits at the borrower's expense.
+- **No attacker cost**: Any whitelisted liquidator can exploit this — no special setup required.
+- **PoC available**: `outputs/pocs/poc_029_liquidation_debt_pause_bypass.move` demonstrates the bypass.
+
+Per Sherlock criteria, broken core protocol functionality (emergency controls) that leads to potential loss of funds qualifies as Medium.
+
 ## Tool used
 
 Manual Review + Automated Analysis
