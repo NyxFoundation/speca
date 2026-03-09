@@ -6,8 +6,8 @@
 |----------|------|-----|
 | HIGH | 2 | 2 |
 | MEDIUM | 20 | 19 |
-| LOW | 18 | — |
-| **合計** | **40** | **21** |
+| LOW | 18 | 1 |
+| **合計** | **40** | **22** |
 
 ---
 
@@ -78,26 +78,26 @@
 
 ## LOW (18件)
 
-| # | タイトル | レポート |
-|---|---------|---------|
-| 007 | PackageCallerCap holder will disrupt protocol operations by burning their own whitelist capability | [report](reports/low/report_007_burn_whitelist_no_admin_check.md) |
-| 014 | take_revenue Does Not Accrue Interest Before Withdrawal | [report](reports/low/report_014_take_revenue_stale_interest.md) |
-| 018 | Flash Loan Fee Bypass via Cross-eMode Group Selection | [report](reports/low/report_018_cross_emode_flash_loan_fee_bypass.md) |
-| 020 | Zero-Mint Deposit Griefing via Truncating Division | [report](reports/low/report_020_zero_mint_deposit_griefing.md) |
-| 021 | Cross-Segment Rate Limiter Reduction is Broken | [report](reports/low/report_021_cross_segment_limiter_broken.md) |
-| 023 | Borrow Off-By-One Liquidity Lock | [report](reports/low/report_023_borrow_off_by_one.md) |
-| 029 | Normal Liquidation Only Checks Collateral Asset Pause State, Not Debt Asset | [report](reports/low/report_029_liquidation_debt_pause_unchecked.md) |
-| 035b | Pyth normalize_decimals Silently Truncates Price for High-Decimal Feeds | [report](reports/low/report_035_pyth_normalize_decimals_truncation.md) |
-| 038b | ADL cancel_collateral_adl Emits Timestamp in Milliseconds Instead of Seconds | [report](reports/low/report_038_adl_cancel_collateral_timestamp_unit_inconsistency.md) |
-| 044b | Liquidation Repay Path Does Not Reduce Borrow Rate-Limiter Usage | [report](reports/low/report_044_liquidation_repay_does_not_reduce_borrow_limiter.md) |
-| 047 | Referral Discount Parameters Sum Unbounded — Protocol Can Lose Nearly All Flash Loan Fee Revenue | [report](reports/low/report_047_referral_discount_sum_unbounded.md) |
-| 048b | Referral Code Generation Uses Single-Shot Randomness and Reverts on Collision | [report](reports/low/report_048_referral_code_generation_collision_dos.md) |
-| 049c | Oracle Admin Event Uses Seconds While Delay Field and Protocol Admin Events Use Milliseconds | [report](reports/low/report_049_oracle_admin_timestamp_unit_inconsistency.md) |
-| 051 | Zero `price_delay_tolerance_ms` Configuration Can Brick Oracle Reads and Lending Flows | [report](reports/low/report_051_zero_oracle_delay_tolerance_bricks_price_checks.md) |
-| 058 | Repay Reduces Borrow Rate Limiter by Interest-Inclusive Amount, Eroding Safety Margin | [report](reports/low/report_058_repay_over_reduces_borrow_limiter.md) |
-| 059 | Liquidation Residual Overpayment Silently Consumed as Protocol Revenue | [report](reports/low/report_059_liquidation_residual_consumed_as_revenue.md) |
-| 060 | eMode Liquidation Safety Check Uses Integer Division, Allowing Off-by-One bps Configurations | [report](reports/low/report_060_emode_liquidation_safety_truncation.md) |
-| 061 | `create_market_asset_config` Missing `max >= min` and `max > 0` Validation | [report](reports/low/report_061_asset_config_missing_validation.md) |
+| # | タイトル | レポート | PoC |
+|---|---------|---------|-----|
+| 007 | PackageCallerCap holder will disrupt protocol operations by burning their own whitelist capability | [report](reports/low/report_007_burn_whitelist_no_admin_check.md) | — |
+| 014 | take_revenue Does Not Accrue Interest Before Withdrawal | [report](reports/low/report_014_take_revenue_stale_interest.md) | — |
+| 018 | Flash Loan Fee Bypass via Cross-eMode Group Selection | [report](reports/low/report_018_cross_emode_flash_loan_fee_bypass.md) | — |
+| 020 | Zero-Mint Deposit Griefing via Truncating Division | [report](reports/low/report_020_zero_mint_deposit_griefing.md) | — |
+| 021 | Cross-Segment Rate Limiter Reduction is Broken | [report](reports/low/report_021_cross_segment_limiter_broken.md) | — |
+| 023 | Borrow Off-By-One Liquidity Lock | [report](reports/low/report_023_borrow_off_by_one.md) | — |
+| 029 | Normal Liquidation Only Checks Collateral Asset Pause State, Not Debt Asset | [report](reports/low/report_029_liquidation_debt_pause_unchecked.md) | [poc](pocs/poc_029_liquidation_debt_pause_bypass.move) |
+| 035b | Pyth normalize_decimals Silently Truncates Price for High-Decimal Feeds | [report](reports/low/report_035_pyth_normalize_decimals_truncation.md) | — |
+| 038b | ADL cancel_collateral_adl Emits Timestamp in Milliseconds Instead of Seconds | [report](reports/low/report_038_adl_cancel_collateral_timestamp_unit_inconsistency.md) | — |
+| 044b | Liquidation Repay Path Does Not Reduce Borrow Rate-Limiter Usage | [report](reports/low/report_044_liquidation_repay_does_not_reduce_borrow_limiter.md) | — |
+| 047 | Referral Discount Parameters Sum Unbounded — Protocol Can Lose Nearly All Flash Loan Fee Revenue | [report](reports/low/report_047_referral_discount_sum_unbounded.md) | — |
+| 048b | Referral Code Generation Uses Single-Shot Randomness and Reverts on Collision | [report](reports/low/report_048_referral_code_generation_collision_dos.md) | — |
+| 049c | Oracle Admin Event Uses Seconds While Delay Field and Protocol Admin Events Use Milliseconds | [report](reports/low/report_049_oracle_admin_timestamp_unit_inconsistency.md) | — |
+| 051 | Zero `price_delay_tolerance_ms` Configuration Can Brick Oracle Reads and Lending Flows | [report](reports/low/report_051_zero_oracle_delay_tolerance_bricks_price_checks.md) | — |
+| 058 | Repay Reduces Borrow Rate Limiter by Interest-Inclusive Amount, Eroding Safety Margin | [report](reports/low/report_058_repay_over_reduces_borrow_limiter.md) | — |
+| 059 | Liquidation Residual Overpayment Silently Consumed as Protocol Revenue | [report](reports/low/report_059_liquidation_residual_consumed_as_revenue.md) | — |
+| 060 | eMode Liquidation Safety Check Uses Integer Division, Allowing Off-by-One bps Configurations | [report](reports/low/report_060_emode_liquidation_safety_truncation.md) | — |
+| 061 | `create_market_asset_config` Missing `max >= min` and `max > 0` Validation | [report](reports/low/report_061_asset_config_missing_validation.md) | — |
 
 ---
 
@@ -114,5 +114,6 @@
 - report_036 は2件別テーマ (liquidation dust / flash loan stale cash) — 番号重複だがそれぞれ独立
 - report_049 は3件別テーマ (emode stale borrow / liquidity mining griefing / oracle timestamp) — 番号重複だがそれぞれ独立
 - PoC未作成は report_036b (flash loan stale cash) の1件のみ — PTB内の一時的状態のため単体テストでの再現が困難
+- poc_034 は2ファイル存在: `poc_034_borrow_reward_share_staleness.move` (正) + `poc_034_borrow_reward_staleness.move` (重複)
 - 全PoC配置先: `contracts/protocol/tests/integration/test_cases/`
 - テスト実行: `sui move test --filter poc_`
