@@ -41,6 +41,8 @@ public(package) fun enforce_post_borrow_repay_invariant<MarketType, CoinType>(
 
 Note: This is distinct from report 028 (dust obligations unliquidatable due to seize flooring to zero). Report 028 covers the case where `seize_ctokens.floor() == 0`, making the position unliquidatable. This report covers the broader case where a partial liquidation reduces debt below `min_borrow_amount`, creating a position that is stuck — it cannot be partially repaid (the invariant check in `handle_repay` blocks it) and may not be economically worth fully repaying.
 
+Additionally, report 059 (Liquidation Residual Consumed as Revenue) shows that ceiling rounding during liquidation causes the liquidator to overpay by 1-2 units per event. This compounds with the dust creation: the liquidator is overcharged on the very liquidation that creates the unclearable dust position.
+
 ## Internal Pre-conditions
 
 1. Obligation must have debt that becomes partially liquidatable.

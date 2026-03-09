@@ -65,6 +65,15 @@ The borrow rate limiter's safety margin is eroded by the interest accrued betwee
 - `contracts/protocol/sources/internal/market/market.move:483` — `reduce_outflow(now, coin.value())` uses principal + interest
 - `contracts/protocol/sources/internal/market/limiter.move:100-119` — saturating subtraction on current segment
 
+## Related Findings
+
+This finding is one of three distinct rate limiter accounting issues, each affecting the same `Limiter` mechanism through a different path:
+
+- **report_044** (Liquidation Repay Does Not Reduce Borrow Limiter): The liquidation path omits `reduce_outflow` entirely, causing the limiter to remain inflated after liquidations. This is the *opposite direction* — 044 under-reduces (by zero), while this report over-reduces (by the interest delta). Both distort the limiter's view of actual borrow outflow.
+- **report_021** (Cross-Segment Limiter Reduction is Broken): `reduce_outflow` only operates on the current time segment. The over-reduction described here is further bounded by 021's bug — if the original borrow was in an earlier segment, the excess reduction can only eat into *current-segment* outflow, not the original segment. Conversely, 021 means that even the *correct* reduction amount may not fully apply.
+
+Combined effect: Across a full limiter window, the net tracking error is `(interest delta from 058) - (missing liquidation reduction from 044) ± (cross-segment loss from 021)`. The three bugs partially cancel or compound depending on whether the market is in a repay-heavy or liquidation-heavy phase.
+
 ## Tool used
 
 Manual Review

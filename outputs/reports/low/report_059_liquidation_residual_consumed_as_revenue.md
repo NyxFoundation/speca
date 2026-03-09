@@ -60,6 +60,15 @@ Per-liquidation loss is typically 1-2 units (from ceiling rounding). For automat
 - `contracts/protocol/sources/internal/market/reserve.move:203-217` — excess routed to `cash_reserve`
 - `contracts/protocol/sources/internal/market/obligation.move:170-194` — `unsafe_repay_debt_only` returns residual
 
+## Related Findings
+
+This finding compounds with two other liquidation-path issues:
+
+- **report_036** (Liquidation Skips min_borrow_amount Check): Liquidation can leave dust positions below `min_borrow_amount`. When this happens, the ceiling-rounding residual described here is consumed by the protocol on the final liquidation that creates the dust — the borrower loses both the residual AND ends up with an economically unclearable position.
+- **report_028** (Dust Obligations Unliquidatable): Once a dust position is created (via 036's missing check), if the position goes underwater, `seize_ctokens.floor()` returns 0 and the liquidation aborts. The residual loss from ceiling rounding (this report) has already been taken from the liquidator on the preceding liquidation that created the dust.
+
+The three findings form a chain: 059 (over-charge on ceiling rounding) → 036 (dust position created) → 028 (dust position unliquidatable). Each is independently fixable but their compound effect is worse than any individual finding.
+
 ## Tool used
 
 Manual Review

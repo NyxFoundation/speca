@@ -68,6 +68,10 @@ This means any liquidation attempt on a dust obligation will always revert. The 
 
 Severity is Medium because it requires specific conditions (very small positions and particular price/exchange rate ratios) but has an ongoing, cumulative impact on protocol solvency.
 
+This finding is the terminal step in a chain with two related reports:
+- **report_036** (Liquidation Skips min_borrow_amount Check): Partial liquidation creates the dust position in the first place by leaving debt below `min_borrow_amount`. The borrower cannot partially repay (blocked by `enforce_post_borrow_repay_invariant` in `handle_repay`).
+- **report_059** (Liquidation Residual Consumed as Revenue): Ceiling rounding during liquidation causes the liquidator to overpay by 1-2 units, which silently becomes protocol revenue. This compounds with the dust creation — the liquidator is overcharged on the very liquidation that created the unliquidatable position.
+
 ## Code Snippet
 
 - [`market.move:1073`](contracts/protocol/sources/internal/market/market.move#L1073): `seize_ctokens.floor()` truncates to 0

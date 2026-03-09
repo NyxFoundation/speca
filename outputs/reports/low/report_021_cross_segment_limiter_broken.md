@@ -70,6 +70,13 @@ None.
 - [`limiter.move:100-119`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/limiter.move#L100-L119): Current-segment-only reduction
 - [`limiter.move:55-77`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/limiter.move#L55-L77): Cross-segment summation in `count_current_outflow`
 
+## Related Findings
+
+This finding interacts with two other rate limiter accounting issues:
+
+- **report_044** (Liquidation Repay Does Not Reduce Borrow Limiter): Liquidation omits `reduce_outflow` entirely, compounding the cross-segment issue — even if the current-segment-only design were acceptable, the liquidation path contributes zero reduction regardless.
+- **report_058** (Repay Over-Reduces Borrow Limiter): When `reduce_outflow` *is* called (in `handle_repay`), it uses principal + interest instead of principal only, over-reducing the current segment. This over-reduction is constrained to the current segment by the cross-segment bug documented here — the excess cannot spill into older segments where the original borrow was tracked.
+
 ## Tool used
 
 Manual Review + Automated Analysis (Codex + Claude cross-validation)
