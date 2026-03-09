@@ -1,310 +1,221 @@
 # Security Audit Report: NyxFoundation/audit-current
 
-**Target:** NyxFoundation/audit-current (Sui Move Lending Protocol)
+**Target:** NyxFoundation/audit-current (Current Finance — Sui Move Lending Protocol)
 **Commit:** `8a1602713ea9a44f4bddc0070601df15800477aa`
 **Date:** 2026-03-09
-**Auditor:** SPECA Security Agent
+**Auditor:** SPECA Pipeline (Phase 01a→01b→01e→02c→03→04)
+**Spec Source:** README.md (Sherlock Contest #1256 Q&A + invariants)
 
 ---
 
 ## Executive Summary
 
-Sui Move上に構築されたレンディングプロトコルの包括的セキュリティ監査を実施した。対象は math ライブラリ、protocol コントラクト（エントリーポイント + 内部ロジック）、x_oracle の全ソースファイル。
+SPECAパイプライン全6フェーズを実行。README仕様書から16の関連ドキュメントを発見し、241のセキュリティプロパティを生成、238件をコードに対して証明ベース監査、3-gate FPフィルタで最終レビューを実施。
 
-**発見数:** Critical 2件、High 8件、Medium 10件、Low 6件
-
----
-
-## Critical Findings
-
-### C-01: Flash Loan が Cash Reserve 資金にアクセス可能
-
-| 項目 | 詳細 |
-|------|------|
-| **重大度** | Critical |
-| **場所** | `protocol/sources/internal/market/reserve.move` (borrow_flash_loan / flash_loan_withdraw) |
-| **カテゴリ** | Access Control / Fund Safety |
-
-**説明:**
-`borrow_flash_loan` は `amount < self.cash` のみをチェックするが、`self.cash` にはプロトコルの `cash_reserve`（プロトコル収益として保護されるべき資金）が含まれている。`flash_loan_withdraw` は `self.cash` を更新せず、`cash - cash_reserve` を上限としたチェックも行わない。
-
-**影響:**
-Flash loan により、プロトコル準備金を一時的に引き出すことが可能。手数料計算のバグと組み合わせると、恒久的な準備金損失につながる可能性がある。
-
-**推奨:**
-`borrow_flash_loan` のチェックを `amount < self.cash - self.cash_reserve.ceil()` に変更する。
+**Pipeline Raw:** CONFIRMED 22 + POTENTIAL 8 = 30件
+**重複排除後:** ユニーク脆弱性 **14件** (High 7 / Medium 7)
 
 ---
 
-### C-02: `repay_fee_rate` が `reserve_factor` として誤用されている
+## High Findings (7件)
 
-| 項目 | 詳細 |
-|------|------|
-| **重大度** | Critical |
-| **場所** | `protocol/sources/internal/market/market.move` L1025, `reserve.move` L143 |
-| **カテゴリ** | Logic Error / Economic |
-
-**説明:**
-`market.move` の `accrue_interest` 関数で:
-```move
-reserve.accrue_interest(asset.repay_fee_rate(), interest_rate, now);
-```
-`repay_fee_rate`（返済手数料率）が `reserve_factor`（利息のうちプロトコルが受け取る割合）として渡されている。これは意味的に異なるパラメータである。さらに、実際の返済フローでは `repay_fee_rate` は一切適用されておらず、借り手は返済手数料を支払っていない。
-
-**影響:**
-1. 利息のプロトコル取り分が `repay_fee_rate` の値に基づいて計算される（本来は `reserve_factor` であるべき）
-2. 返済手数料が徴収されない → プロトコル収益損失
-
-**推奨:**
-`AssetConfig` に独立した `reserve_factor` フィールドを追加し、`accrue_interest` に正しい値を渡す。返済フローに `repay_fee_rate` の適用ロジックを実装する。
-
----
-
-## High Findings
-
-### H-01: 清算収益が `ctx.sender()` に送信される
+### H-01: `repay_fee_rate` が `reserve_factor` として誤用 — プロトコル収益損失 + マーケット凍結リスク
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `protocol/sources/entry_points/lending/liquidate.move` L159-160, L254-255, L303-304 |
-| **カテゴリ** | Access Control |
+| **場所** | `market.move:1025` → `reserve.move:accrue_interest` |
+| **関連PROP** | PROP-01b-partial-inv-008, partial3-inv-037, partial2-inv-006, partial-asm-003, partial1-inv-034, partial-inv-021 (6件が同一バグ) |
 
-**説明:**
-全清算関数で、押収された担保と返金が `ctx.sender()` に送信される。`PackageCallerCap` は呼び出しを制限するが、収益の受取人は制限しない。コンポーザブルな PTB で、攻撃者が承認済みパッケージ経由で清算を実行すると、収益が攻撃者に渡る。
-
-**推奨:**
-清算収益の受取人を `PackageCallerCap` の所有者または明示的に指定されたアドレスに限定する。
+`accrue_interest` で `asset.repay_fee_rate()` が `reserve_factor` パラメータとして渡される。これにより:
+1. **返済手数料が一切徴収されない** — `repay_fee_rate` は利息計算に流用され、返済フローでは適用されない
+2. **`cash_reserve` が不正に蓄積** — 本来の reserve_factor (例:10%) ではなく repay_fee_rate (例:0.01%) で計算
+3. **`cash_reserve > cash` 到達でマーケット凍結** — `withdraw_underlying` の `cash >= cash_reserve.ceil()` アサーションでリバート
 
 ---
 
-### H-02: Pyth confidence チェックで u64 オーバーフロー
+### H-02: First Depositor Attack — Exchange Rate Inflation による預金盗取
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `x_oracle/sources/internal/pyth_adaptor.move` L92-95 |
-| **カテゴリ** | Arithmetic Overflow |
+| **場所** | `reserve.move:mint_ctokens` (int_div truncation) |
+| **関連PROP** | PROP-01b-partial3-inv-046, partial1-inv-005, partial3-inv-003 (3件が同一バグ) |
 
-**説明:**
-```move
-let price_conf_diff = (price_conf * CONF_TOLERANCE_DENOMINATOR * 100 as u128) / (price_value as u128);
-```
-`price_conf * 10000 * 100` は `u64` として計算された後に `u128` にキャストされる。`price_conf > u64::MAX / 1_000_000` (約 1.8e13) の場合、u64 オーバーフローが発生する。
-
-**推奨:**
-キャストを先に行う: `((price_conf as u128) * (CONF_TOLERANCE_DENOMINATOR as u128) * 100) / (price_value as u128)`
+最初の預金者が exchange_rate を1以上にインフレさせると、後続の少額預金で `int_div(amount, exchange_rate) == 0` となり 0 cToken が発行される。被害者の資金はリザーブに取り込まれ、攻撃者が唯一の cToken 保持者として回収可能。`mint_amount > 0` のアサーションが欠如。
 
 ---
 
-### H-03: `register_pyth_feed` がタイムロックなしでオラクルフィードを置換
+### H-03: 清算時の Spot/EMA 価格非対称 — 過剰担保押収
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `x_oracle/sources/entry_points/admin.move` |
-| **カテゴリ** | Admin Key Risk / Oracle Manipulation |
+| **場所** | `market.move:liquidate_calculate_seize_ctokens` (L1045-1046 spot) vs `ensure_liquidate_borrow_allowed` (EMA) |
+| **関連PROP** | PROP-01b-partial1-inv-038, partial3-inv-015, partial1-post-003 (3件が同一バグ) |
 
-**説明:**
-AdminCap 保持者は、任意の資産の Pyth フィードを即座に置換可能。タイムロック、マルチシグ要件、古いフィード ID のイベント発行がない。
-
-**影響:**
-AdminCap 侵害 → 即座の価格操作 → 大量清算または借入ドレイン。
-
-**推奨:**
-オラクルフィード変更にタイムロック（最低24時間）を導入する。
+清算適格判定は EMA 価格、押収量計算は Spot 価格を使用。Spot が EMA から乖離した瞬間（担保トークン暴落時等）に、借り手から正当化を超える担保が押収される。`close_factor_bypass` (collateral ≤ 1.01 × debt) 到達後は全担保ドレインも可能。
 
 ---
 
-### H-04: 清算で Spot 価格、安全性チェックで EMA 価格を使用（非対称）
+### H-04: 自己清算によるインセンティブ窃取
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `protocol/sources/internal/market/market.move` L1045-1046 |
-| **カテゴリ** | Price Manipulation |
+| **場所** | `liquidate.move:liquidate_as_coin` — liquidator != borrower チェックなし |
+| **関連PROP** | PROP-01b-partial3-inv-013, partial-inv-025, partial2-inv-027 (3件が同一バグ) |
 
-**説明:**
-`liquidate_calculate_seize_ctokens` は `get_spot_price`（スポット価格）を使用し、`is_obligation_safe` は `get_price_with_check`（EMA 価格）を使用する。EMA で安全と判断されたポジションが、スポット価格の一時的な変動で清算される可能性がある。
-
-**推奨:**
-清算計算と安全性チェックで同一の価格ソースを使用する。
+借り手が自身のポジションを清算し、清算インセンティブ（`D × incentive`）を自身で回収可能。Flash Loan と組み合わせ、1 PTB 内で借入→自己清算→Flash Loan返済が可能。
 
 ---
 
-### H-05: Math ライブラリ — 除算ゼロのガードなし
+### H-05: `util_rate > 1` によるマーケット凍結 + 利率上限突破
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `math/sources/float.move` — `from_quotient`, `int_div`, `div` |
-| **カテゴリ** | DoS / Arithmetic |
+| **場所** | `reserve.move:util_rate` (L65-72), `interest.move:calc_interest` |
+| **関連PROP** | PROP-01b-partial-inv-026, partial1-inv-021, partial3-inv-019, partial3-inv-038 (4件が同一バグ) |
 
-**説明:**
-3つの関数で除数がゼロの場合のガードがない。レンディングプロトコルでは、交換レート、担保比率、利率がすべて `Decimal` で表現される。初期化されていないマーケット、ゼロ価格のオラクル応答、預金ゼロのリザーブがある場合、トランザクションが中断する。
+H-01 の下流影響。`cash_reserve > cash` 到達時に `util_rate = debt / (debt + cash - cash_reserve)` が1を超え、利率モデルが `max_borrow_rate` を超える値を返す。全預金者の引き出しと全借入がリバートし、マーケットが凍結。
 
-**推奨:**
-各関数にゼロ除数チェックと専用エラーコードを追加する。
+**Note:** H-01 と根本原因は同一だが、H-01 が修正されても `reserve_factor` の値が大きすぎる場合に独立して発生し得る。
 
 ---
 
-### H-06: `float::sub` — アンダーフローガードなし
+### H-06: 清算で Dust Position 残留 — 回収不能な不良債権
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `math/sources/float.move` L44 |
-| **カテゴリ** | DoS / Arithmetic |
+| **場所** | `market.move:liquidation_inner` (L691-793) |
+| **関連PROP** | PROP-01b-partial-inv-018 |
 
-**説明:**
-`sub(a, b)` で `b > a` の場合、Move の unsigned integer アンダーフローでランタイムアボートが発生する。`saturating_sub` が別途存在するが、呼び出し側が誤って `sub` を使用するリスクがある。
-
-**推奨:**
-`sub` にアサーション `a.value >= b.value` を追加し、明確なエラーコードを返す。
+債務が `min_borrow_amount` と `2 × min_borrow_amount` の間にある obligation を清算すると、`close_factor` (50%) の返済後に残留債務が `min_borrow_amount` を下回る。`enforce_post_borrow_repay_invariant` が清算パスでは呼ばれないため、dust position が恒久的に残留し不良債権化する。
 
 ---
 
-### H-07: E-Mode `update_asset_borrow` が `saturating_sub` で借入追跡を暗黙的にゼロ化
+### H-07: Borrow Fee 未徴収
 
 | 項目 | 詳細 |
 |------|------|
 | **重大度** | High |
-| **場所** | `protocol/sources/internal/market/emode.move` L188 |
-| **カテゴリ** | Accounting / Borrow Cap Bypass |
+| **場所** | `borrow.move:borrow` エントリーポイント |
+| **関連PROP** | PROP-01b-partial1-inv-033 |
 
-**説明:**
-`old_borrow > new_borrow + current` の場合、`saturating_sub` によりグループ借入追跡がゼロになり、E-Mode 借入キャップがバイパスされる。
-
-**推奨:**
-`saturating_sub` の代わりにアサーションを使用し、会計の不整合を検出する。
+借入エントリーポイントで手数料が一切差し引かれない。プロトコルの借入手数料収益が完全に失われている。
 
 ---
 
-### H-08: グローバル借入キャップが資金移転「後」にチェックされる
+## Medium Findings (7件)
+
+### M-01: `deposit_limit_breached` の `cash_reserve` 二重減算 — 預金キャップバイパス
 
 | 項目 | 詳細 |
 |------|------|
-| **重大度** | High |
-| **場所** | `protocol/sources/internal/market/market.move` L440 |
-| **カテゴリ** | Logic Order |
+| **場所** | `reserve.move:deposit_limit_breached` (L87-90) |
+| **関連PROP** | PROP-01b-partial-pre-008, partial1-pre-003, partial2-inv-028 (3件が同一バグ) |
 
-**説明:**
-`handle_borrow` で `max_borrow_amount` チェックが `reserve.borrow_amount` 呼び出しの後に実行される。Move のアトミックなトランザクション特性により実際の資金損失はないが、設計上はプレコンディションチェックであるべき。
-
-**推奨:**
-借入キャップチェックを資金移転の前に移動する。
+`total_deposit_plus_interest` は `exchange_rate × total_supply = cash + debt - cash_reserve` で既に `cash_reserve` を控除済み。チェック式で再度 `- cash_reserve` するため、実効キャップが `max_deposit_amount + cash_reserve` になる。
 
 ---
 
-## Medium Findings
-
-### M-01: Oracle staleness ウィンドウの不整合
+### M-02: Rate Limiter の `reduce_outflow` がセグメント境界で不整合
 
 | 項目 | 詳細 |
 |------|------|
-| **場所** | `pyth_adaptor.move` (30秒) vs `user.move` (`price_delay_tolerance_ms`, デフォルト5秒) |
+| **場所** | `limiter.move:reduce_outflow` |
+| **関連PROP** | PROP-01b-partial2-inv-040 |
 
-Pyth の30秒フレッシュネスチェックは `refresh_usd_price` 呼び出し時のみ適用。XOracle の staleness チェックは最後の refresh からの時間を測定し、Pyth 出版からの実際の経過時間は測定しない。
-
-### M-02: EMA/Spot 乖離チェックの分母非対称性
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `x_oracle/sources/entry_points/user.move` L50-56 |
-
-乖離率の分母にスポット価格を使用。スポット上昇時は乖離が小さく見え、下落時は大きく見える非対称性がある。
-
-### M-03: Flash Loan の `emode_group` が呼び出し元制御
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/entry_points/lending/flash_loan.move` L52 |
-
-呼び出し元が `emode_group` を指定でき、最低手数料率のグループを選択可能。
-
-### M-04: `int_mul` が常にフロア丸め（プロトコルに不利）
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `math/sources/float.move` L63 |
-
-利息や手数料の計算でフロア丸めが使用され、プロトコルが一貫して少なく受け取る。
-
-### M-05: Rate Limiter の `reduce_outflow` が現在のセグメントのみ減少
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/internal/market/limiter.move` L100-119 |
-
-預金による outflow 減少が現在のセグメントのみに適用。異なるセグメントにまたがる入出金でリミッター値が人工的に膨張する。
-
-### M-06: Limiter の `count_current_outflow` で `timestamp_index < len` 時に全セグメント合計
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/internal/market/limiter.move` L163-165 |
-
-初期サイクルで `len > timestamp_index` の場合、条件が全セグメントを含む。初期値ゼロのため無害だが、構造的に不正。
-
-### M-07: ADL パラメータ検証なし
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/internal/market/adl.move` |
-
-`close_factor > 1` や `liquidation_incentive` 上限なしが許容される。
-
-### M-08: 利率モデルのパラメータ検証なし
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/internal/market/interest.move` |
-
-`base_rate > mid_kink_rate` などの不正な設定で `float::sub` がパニックする。
-
-### M-09: Referral の self-use が Flash Loan 経路で可能
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/internal/referral.move` (`track_flash_loan_usage`) |
-
-`who != referral code owner` のチェックがなく、自身のリファラルコードで Flash Loan 手数料割引を受けられる。
-
-### M-10: `max_borrow_amount` をゼロに設定可能
-
-| 項目 | 詳細 |
-|------|------|
-| **場所** | `protocol/sources/entry_points/admin/asset.move` L79-82 |
-
-`max_borrow_amount >= min_borrow_amount` のバリデーションがない。
+預金による outflow 減少が現在のセグメントのみに適用される。異なるセグメントで行われた引き出しの outflow は減少しないため、リミッター値が人工的に膨張し、正当な引き出しがブロックされ得る。
 
 ---
 
-## Low Findings
+### M-03: Oracle Staleness の選択的悪用
 
-| ID | 場所 | 説明 |
-|----|------|------|
-| L-01 | `flash_loan.move` L161-168 | Referral qualification が Flash Loan 元本額で加算（手数料ではなく） |
-| L-02 | `admin/decimal.move` L17 | コメントが「Anyone can add」だが AdminCap 必要 |
-| L-03 | `admin/whitelist.move` L27-40 | `burn_whitelist` に AdminCap 不要 — 保持者が自己破棄可能 |
-| L-04 | `referral.move` L39-51 | `claim_referral_rebates` がサーキットブレーカーを無視 |
-| L-05 | `pyth_adaptor.move` L73-75 | `normalize_decimals` で精度 > 9 の場合に暗黙の切り捨て |
-| L-06 | `u128.move` L10 | `OVER_FLOW = 1` が他モジュールのエラーコードと衝突 |
+| 項目 | 詳細 |
+|------|------|
+| **場所** | `x_oracle/user.move:get_price_with_check` |
+| **関連PROP** | PROP-01b-partial1-inv-027 |
+
+攻撃者が PTB 内で担保トークンの `refresh_usd_price` を呼んで新鮮な価格をスタンプし、債務トークンのオラクルは最大 staleness (5秒) のまま借入を実行。債務の過小評価により、担保を超える借入が可能。
 
 ---
 
-## Architecture Notes
+### M-04: マーケット登録時の Oracle フィード未検証
 
-- **Move の線形型システム**により、従来の EVM ベースプロトコルで見られる reentrancy 攻撃は構造的に防止されている
-- **Hot Potato パターン**による Flash Loan は、ローンの返済を同一トランザクション内で強制する
-- **ObjectTable による Obligation 管理**は共有オブジェクトとして適切に設計されている
-- **PackageCallerCap によるアクセス制御**は、清算や Flash Loan などの高リスク操作に対して適切だが、収益受取人の制御が不足（H-01）
+| 項目 | 詳細 |
+|------|------|
+| **場所** | `admin/market.move:register_market` |
+| **関連PROP** | PROP-01b-partial3-asm-003 |
+
+新マーケット登録時に XOracle のフィード存在チェックがない。管理者がフィードなしで登録すると、ユーザーが預金後に引き出し不能になる（`get_price_with_check` でリバート）。
 
 ---
 
-## Recommendations Summary
+### M-05: ADL 停止条件の floor/ceil 不整合
 
-1. **即時対応（Critical）:** Flash Loan の cash reserve アクセス制限、`repay_fee_rate` / `reserve_factor` の分離
-2. **高優先度（High）:** 清算収益の受取人制御、Pyth confidence オーバーフロー修正、Oracle フィード変更のタイムロック導入、Math ライブラリのゼロ除算ガード追加
-3. **中優先度（Medium）:** Oracle staleness 整合性、丸め方向の統一、パラメータ検証の追加
-4. **低優先度（Low）:** ドキュメント整合性、エラーコード標準化
+| 項目 | 詳細 |
+|------|------|
+| **場所** | `market.move:try_stop_borrow_deleverage` (L686) |
+| **関連PROP** | PROP-01b-partial-post-007 |
+
+担保・返済パスでは `.ceil()` を使用するが、清算借入パスでは `.floor()` を使用。`target_amount` と `target_amount+1` の間にある場合、ADL が早期停止する。
+
+---
+
+### M-06: Referral パラメータの合算値未検証
+
+| 項目 | 詳細 |
+|------|------|
+| **場所** | `referral.move:update_referral_params` |
+| **関連PROP** | PROP-01b-partial-inv-034 |
+
+`referrer_bps` と `referee_bps` は個別に `< DENOMINATOR` をチェックするが、合算 `referrer_bps + referee_bps < 10000` は検証しない。管理者が両方に 9000 を設定すると、リファラル割引合計が 180% になる。
+
+---
+
+### M-07: E-Mode `collateral_factor_bps = 0` が許可される
+
+| 項目 | 詳細 |
+|------|------|
+| **場所** | `admin/emode.move:create_emode_params_inner` (L175) |
+| **関連PROP** | PROP-01b-partial1-inv-024 |
+
+`collateral_factor_bps < BPS_DENOMINATOR` のみチェックし `> 0` を検証しない。管理者が 0 を設定すると、該当資産の担保価値がゼロ扱いになり全ポジションが即座に清算可能。
+
+---
+
+## 重複マッピング (30件 → 14件)
+
+| ユニーク ID | 関連PROP (重複) | 件数 |
+|------------|-----------------|------|
+| H-01 | partial-inv-008, partial3-inv-037, partial2-inv-006, partial-asm-003, partial1-inv-034, partial-inv-021 | 6 |
+| H-02 | partial3-inv-046, partial1-inv-005, partial3-inv-003 | 3 |
+| H-03 | partial1-inv-038, partial3-inv-015, partial1-post-003 | 3 |
+| H-04 | partial3-inv-013, partial-inv-025, partial2-inv-027 | 3 |
+| H-05 | partial-inv-026, partial1-inv-021, partial3-inv-019, partial3-inv-038 | 4 |
+| H-06 | partial-inv-018 | 1 |
+| H-07 | partial1-inv-033 | 1 |
+| M-01 | partial-pre-008, partial1-pre-003, partial2-inv-028 | 3 |
+| M-02 | partial2-inv-040 | 1 |
+| M-03 | partial1-inv-027 | 1 |
+| M-04 | partial3-asm-003 | 1 |
+| M-05 | partial-post-007 | 1 |
+| M-06 | partial-inv-034 | 1 |
+| M-07 | partial1-inv-024 | 1 |
+| **合計** | | **30 → 14** |
+
+---
+
+## Pipeline Statistics
+
+| Phase | 入力 | 出力 | 所要時間概算 |
+|-------|------|------|-------------|
+| 01a Spec Discovery | README URL | 16 spec URLs | ~5min |
+| 01b Subgraph Extraction | 16 specs | 4 subgraphs + .mmd | ~15min |
+| 01e Property Generation | 4 subgraphs | 241 properties | ~10min |
+| 02c Code Pre-resolution | 241 props | 238 enriched (3 Informational dropped) | ~15min |
+| 03 Audit Map | 238 props | 9 vuln + 21 potential + 207 safe + 1 other | ~60min |
+| 04 Review (3-gate FP) | 30 non-safe | 22 CONFIRMED + 8 POTENTIAL | ~10min |
