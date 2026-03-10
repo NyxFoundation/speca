@@ -136,9 +136,33 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
 
     5. **State Transition Properties**: For critical state transitions, define precise pre-conditions that must be met before the transition and post-conditions that must be true after. Pay special attention to **mode transitions** (version upgrades, feature flag activation, configuration reloads, protocol upgrades, fork transitions, epoch boundaries, validator set changes): any cached or derived value that depends on the pre-transition state — including peer metadata, capability caches, connection state, and routing tables — must be invalidated or refreshed within a bounded time after the transition. If the refresh mechanism is periodic (e.g., heartbeat-based), verify that the refresh interval is short enough that stale state cannot cause incorrect behavior during the transition window.
 
-    6. **Optimization Correctness Properties**: When the specification describes an operation whose correctness is critical (verification, validation, proof checking, uniqueness enforcement), consider that implementations commonly cache, deduplicate, or precompute results for performance. For each such operation, generate a property asserting that any such optimization must preserve the original correctness guarantee — i.e., the optimized path must produce the same accept/reject decision as the unoptimized path for all inputs. Additionally, if the implementation caches or memoizes the result of a multi-input verification, generate a property asserting that the cache key includes ALL inputs that affect the outcome. If the spec lists the inputs to a verification function (e.g., `verify(a, b, c)`), the cache key must be `(a, b, c)` — omitting any input allows cache poisoning where a stale result from one input combination is incorrectly reused for a different one. Mark these as `type: "invariant"`, severity based on blast radius if violated.
+    6. **Historical Vulnerability Pattern Properties**: Augment property generation with knowledge from past bug bounty reports and audit findings. For each subgraph, systematically consider:
 
-    7. **Classify Reachability**: For each property, determine:
+       **a. Platform audit databases** (Sherlock, Code4rena, ImmuneFi, Cantina, Cyfrin):
+         - Identify past findings against projects with similar architecture (e.g., Compound v2 forks, Aave v3 forks, Sui Move DeFi)
+         - Extract the root cause pattern and translate it into a formal property for THIS project
+         - Examples: cToken inflation attacks (Sonne/Hundred Finance), oracle manipulation (multiple protocols), flash loan re-entrancy
+
+       **b. Similar architecture GitHub issues**:
+         - For Compound v2 derivatives: exchange rate manipulation, interest accrual rounding, liquidation threshold bypass, reserve factor accounting
+         - For Sui Move protocols: arithmetic overflow (Cetus), Hot Potato pattern misuse, object ownership confusion, PTB composability exploits
+         - For oracle-dependent protocols: Pyth confidence interval bypass, staleness exploitation, EMA vs spot divergence
+
+       **c. Known DeFi vulnerability patterns** (generate properties for each applicable pattern):
+         - **First depositor / inflation attack**: Empty pool exchange rate manipulation (Compound v2 fork classic)
+         - **Flash loan + oracle manipulation**: Borrow/deposit within same tx to manipulate price feeds or utilization
+         - **Interest rate model edge cases**: Utilization > 100%, zero-duration interest, compound vs simple interest discrepancy
+         - **Liquidation edge cases**: Self-liquidation profit, cascading liquidation, dust position unliquidatable, close factor bypass
+         - **Access control**: Missing capability checks, transferable admin caps, timelock bypass
+         - **Rounding/precision**: Truncation vs rounding direction (always round against the user), dust accumulation, decimal mismatch
+         - **Rate limiter bypass**: Cross-segment evasion, token-denominated vs USD-denominated inconsistency, admin reset
+         - **Reward distribution**: Zero-share dilution, stale index, unclaimed reward loss on position close
+
+       For each pattern, ask: "Does this subgraph's architecture make it susceptible to this known attack?" If yes, generate a property that would detect the vulnerability.
+
+    7. **Optimization Correctness Properties**: When the specification describes an operation whose correctness is critical (verification, validation, proof checking, uniqueness enforcement), consider that implementations commonly cache, deduplicate, or precompute results for performance. For each such operation, generate a property asserting that any such optimization must preserve the original correctness guarantee — i.e., the optimized path must produce the same accept/reject decision as the unoptimized path for all inputs. Additionally, if the implementation caches or memoizes the result of a multi-input verification, generate a property asserting that the cache key includes ALL inputs that affect the outcome. If the spec lists the inputs to a verification function (e.g., `verify(a, b, c)`), the cache key must be `(a, b, c)` — omitting any input allows cache poisoning where a stale result from one input combination is incorrectly reused for a different one. Mark these as `type: "invariant"`, severity based on blast radius if violated.
+
+    8. **Classify Reachability**: For each property, determine:
        - `entry_points`: List of entry points that can trigger this property (e.g., `["P2P", "EngineAPI"]`)
        - `attacker_controlled`: Can an external attacker control the inputs? (`true`/`false`)
        - `classification`: One of:
@@ -146,23 +170,44 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
          - `internal-only`: Only reachable via internal calls
          - `api-only`: Only reachable via out-of-scope APIs (JSON-RPC, Beacon API)
 
-    8. **Determine Bug Bounty Scope**: Based on reachability analysis:
+    9. **Determine Bug Bounty Scope**: Based on reachability analysis:
        - `in-scope`: Property is reachable via in-scope entry points with attacker-controlled input
        - `out-of-scope`: Property is only reachable via out-of-scope entry points
        - `conditional`: Requires specific conditions or further investigation
 
-    9. **Assign Severity**: Use the `severity_classification` from `bug_bounty_scope` as the **sole decision boundary**. For each property:
-       - Ask: **"If this property is violated, what is the blast radius on production systems?"**
-       - Start from INFORMATIONAL and escalate **only** when the violation's impact meets or exceeds the next level's `impact` threshold.
-       - A correctness property (data format, type constraint, encoding rule) is INFORMATIONAL unless you can articulate a concrete attack path where violating it causes user-facing or system-level impact (data loss, service outage, privilege escalation, etc.).
-       - Do NOT inflate severity based on "importance to correctness" — severity is about **attacker-exploitable impact**, not code criticality.
+    10. **Assign Severity**: Follow the **Sherlock judging guidelines** strictly. Sherlock focuses exclusively on **High** and **Medium** severity findings. For each property:
 
-    10. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
+       **HIGH** — Direct loss of funds without extensive limitations of external conditions:
+         - Users lose more than 1% AND more than $10 of their principal
+         - Users lose more than 1% AND more than $10 of their yield
+         - The protocol loses more than 1% AND more than $10 of fees
+         - If a single attack can cause a small loss but is replayable infinitely, treat as 100% loss
+
+       **MEDIUM** — Loss of funds requiring certain external conditions or specific states, OR breaks core contract functionality:
+         - Users lose more than 0.01% AND more than $10 of their principal/yield
+         - The protocol loses more than 0.01% AND more than $10 of fees
+         - Funds locked for more than 1 week (Medium); if also time-sensitive function impacted (High)
+         - Breaks core contract functionality rendering it useless or leading to relevant loss
+
+       **LOW** (informational / out of scope for bug bounty):
+         - Design decisions without fund loss
+         - Correctness-only properties (data format, type constraint) with no concrete attack path
+         - Gas optimizations, incorrect events, zero-address checks, user input validation
+
+       **Rules:**
+         - Likelihood is NOT considered — only impact determines severity
+         - Front-running issues are downgraded one level on chains with private mempools
+         - DoS: funds locked >1 week = Medium; locked >1 week AND time-sensitive = High
+         - Admin trust: admin functions assumed used correctly; only issues where admin unknowingly causes harm are valid
+         - If README defines invariants via "What properties/invariants do you want to hold even if breaking them has a low/unknown impact?" — breaking these is at least Medium
+         - Do NOT inflate severity — severity is about **attacker-exploitable financial impact**, not code criticality
+
+    11. **Determine Bug Bounty Eligibility**: A property is `bug_bounty_eligible: true` if:
        - `reachability.classification == "external-reachable"` AND
        - `reachability.bug_bounty_scope == "in-scope"` AND
        - `severity` is `MEDIUM` or higher
 
-    11. **Assign IDs** (**CRITICAL — every property MUST have a `property_id`**):
+    12. **Assign IDs** (**CRITICAL — every property MUST have a `property_id`**):
         - Read the `_id_prefix` field from the input context (e.g., `"PROP-txval"`)
         - Format: `{_id_prefix}-{type_abbrev}-{seq:03d}`
           - `type_abbrev`: `inv` (invariant), `pre` (pre-condition), `post` (post-condition), `asm` (assumption)
@@ -173,10 +218,20 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
   </phase_b>
 
   <severity_context>
-    The `severity_classification` object inside `bug_bounty_scope` is the **sole decision boundary** for severity assignment.
-    - Each level's `impact` field defines the minimum blast radius required. Severity is about **attacker-exploitable network impact**, not code criticality or "importance."
-    - A property that enforces a data format constraint (e.g., fixed-length fields, type bounds) is INFORMATIONAL unless violating it leads to a concrete attack path with measurable impact at the level's threshold.
+    Severity assignment follows the **Sherlock judging guidelines** (https://docs.sherlock.xyz/audits/judging/guidelines).
+    - Sherlock focuses exclusively on **High** and **Medium** severity findings. LOW/INFORMATIONAL findings are out of scope for bug bounty.
+    - Severity is about **attacker-exploitable financial impact** — not code criticality or "importance."
+    - A property that enforces a data format constraint is LOW unless violating it causes concrete fund loss meeting the severity thresholds.
     - If no `severity_classification` is present, default all properties to MEDIUM and flag for manual review.
+
+    **Invalid issue categories per Sherlock guidelines** (do NOT generate properties for these):
+    - Gas optimizations, incorrect event values, zero-address checks
+    - User/admin input validation (unless causing major protocol malfunction or significant fund loss)
+    - Design decisions without fund loss implications
+    - Front-running initializers (if protocol can redeploy)
+    - Loss of airdrops or rewards not part of original protocol design
+    - Chain re-org and network liveness issues
+    - Issues assuming future opcode gas repricing
   </severity_context>
 
   <output_schema>
@@ -204,7 +259,7 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
       "metadata": {
         "timestamp": "...",
         "total_properties": 50,
-        "by_severity": { "CRITICAL": 5, "HIGH": 12, "MEDIUM": 18, "LOW": 10, "INFORMATIONAL": 5 },
+        "by_severity": { "HIGH": 15, "MEDIUM": 25, "LOW": 10 },
         "by_scope": { "in_scope": 35, "out_of_scope": 10, "conditional": 5 },
         "bug_bounty_eligible_count": 30
       }
@@ -225,8 +280,11 @@ Execution hint: This worker prompt is invoked by the phase-01 async orchestrator
     - [ ] Trust model analysis completed: actors, boundaries, assumptions, STRIDE threat model
     - [ ] STRIDE threat properties generated first — each STRIDE category that produced threats in Phase A has at least one property
     - [ ] All properties have `reachability` with exactly 4 fields: `classification`, `entry_points`, `attacker_controlled`, `bug_bounty_scope`
-    - [ ] All properties have `severity` (one of: CRITICAL, HIGH, MEDIUM, LOW, INFORMATIONAL)
-    - [ ] Severity assigned using `severity_classification.impact` thresholds, not intuitive importance — correctness-only properties without concrete exploitable impact are INFORMATIONAL
+    - [ ] All properties have `severity` (one of: HIGH, MEDIUM, LOW) — following Sherlock judging guidelines
+    - [ ] HIGH: direct fund loss >1% AND >$10 without extensive external conditions
+    - [ ] MEDIUM: conditional fund loss >0.01% AND >$10, or core functionality broken
+    - [ ] LOW: correctness-only properties without concrete exploitable financial impact
+    - [ ] Severity assigned based on attacker-exploitable financial impact, not intuitive importance
     - [ ] All properties have `exploitability` classification
     - [ ] All properties have `bug_bounty_eligible` determination
     - [ ] `covers` is a string (primary element ID), not an object

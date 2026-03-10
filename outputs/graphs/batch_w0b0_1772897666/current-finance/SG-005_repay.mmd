@@ -1,0 +1,45 @@
+---
+title: "repay (Current Finance: Lending Protocol)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_validate: validate_market(), ensure_version_matches()
+    q_validate --> q_circuit: has_circuit_break_triggered()
+    q_circuit --> q_error_cb: circuit_break == true
+    q_circuit --> q_timestamp: circuit_break == false
+    q_error_cb --> [*]: abort market_under_circuit_break
+    q_timestamp --> q_check_zero: now = clock.timestamp_ms() / 1000
+    q_check_zero --> q_error_zero: coin.value() == 0
+    q_check_zero --> q_check_market: coin.value() > 0
+    q_error_zero --> [*]: abort no_zero_amount
+    q_check_market --> q_error_market: obligation.market_id != market.id
+    q_check_market --> q_accrue: obligation.market_id == market.id
+    q_error_market --> [*]: abort obligation_from_different_market
+    q_accrue --> q_repay_debt: accrue_interest(reserve, now)
+    q_repay_debt --> q_check_clear: obligation.repay_debt(coin.value(), borrow_index)
+    q_check_clear --> q_debt_cleared: debt_amount <= repay_amount
+    q_check_clear --> q_debt_remains: debt_amount > repay_amount
+    q_debt_cleared --> q_enforce_min: debt.cleared(), remove from debts
+    q_debt_remains --> q_enforce_min: debt.unsafe_decrease(amount)
+    q_enforce_min --> q_error_min: remaining debt > 0 and debt < min_borrow_amount
+    q_enforce_min --> q_split_refund: debt == 0 or debt >= min_borrow_amount
+    q_error_min --> [*]: abort obligation_borrow_below_min
+    q_split_refund --> q_update_emode: coin.split(residual) as refund
+    q_update_emode --> q_reduce_limiter: emode_group.update_asset_borrow(old, new)
+    q_reduce_limiter --> q_repay_reserve: emode.borrow_limiter.reduce_outflow(now, amount)
+    q_repay_reserve --> q_check_overpay: reserve.repay_amount(coin)
+    q_check_overpay --> q_overpay: repay > debt (excess becomes cash_reserve)
+    q_check_overpay --> q_normal_repay: repay <= debt
+    q_overpay --> q_try_stop_adl: cash_reserve += excess, debt = 0
+    q_normal_repay --> q_try_stop_adl: debt -= repay_amount
+    q_try_stop_adl --> q_update_mining: try_stop_borrow_deleverage()
+    q_update_mining --> q_emit: update_obligation_reward_manager()
+    q_emit --> [*]: return refund Coin
+
+    note right of q_repay_debt
+        INV-001: debt accrued to latest borrow_index before repay
+        INV-002: residual returned to caller if repay > debt
+        INV-003: if debt fully repaid, debt entry removed from obligation
+        INV-004: remaining debt (if any) >= min_borrow_amount
+        INV-005: repay_on_behalf allows any address to repay for obligation_id
+    end note
