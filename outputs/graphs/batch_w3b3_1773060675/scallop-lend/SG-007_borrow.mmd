@@ -1,0 +1,59 @@
+---
+title: "borrow - Borrow Assets Against Collateral (Scallop Lend)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_check_version: check version == current_version
+    q_check_version --> q_error_version: version mismatch
+    q_error_version --> [*]: abort error
+    q_check_version --> q_check_lock: version matches
+    q_check_lock --> q_error_locked: obligation locked
+    q_error_locked --> [*]: abort 770
+    q_check_lock --> q_check_owner: obligation not locked
+    q_check_owner --> q_error_owner: obligation_key.obligation_id != obligation.id
+    q_error_owner --> [*]: abort 0 (not owner)
+    q_check_owner --> q_check_collateral_coin: ownership verified
+    q_check_collateral_coin --> q_error_collateral: borrow_type == collateral_type in obligation
+    q_error_collateral --> [*]: abort 1284 (cannot borrow a collateral coin)
+    q_check_collateral_coin --> q_check_isolated: borrow_type != collateral_type
+    q_check_isolated --> q_error_isolated: has isolated debt and borrow_type != isolated_type
+    q_error_isolated --> [*]: abort error (isolated asset constraint)
+    q_check_isolated --> q_update_oracle: isolated asset check passed
+    q_update_oracle --> q_accrue_interest: fetch x_oracle prices
+    q_accrue_interest --> q_calc_collateral: accrue_interest(market, clock)
+    q_calc_collateral --> q_calc_debt: collateral_value = sum(collateral_i * price_i * collateral_weight_i)
+    q_calc_debt --> q_apply_fee: debt_value = sum(debt_i * price_i * borrow_weight_i)
+    q_apply_fee --> q_calc_net: borrow_fee = borrow_amount * fee_rate (0.3% main, 1% emerging/isolated)
+    q_calc_net --> q_check_amount_min: net_borrow = borrow_amount - borrow_fee
+    q_check_amount_min --> q_error_small: net_borrow too small
+    q_error_small --> [*]: abort 1282
+    q_check_amount_min --> q_check_amount_max: net_borrow valid
+    q_check_amount_max --> q_error_max: new_debt_value > collateral_value
+    q_error_max --> [*]: abort 1281 (borrow too much)
+    q_check_amount_max --> q_check_reserve: new_debt_value <= collateral_value
+    q_check_reserve --> q_error_reserve: reserve < borrow_amount
+    q_error_reserve --> [*]: abort 81924
+    q_check_reserve --> q_check_outflow: reserve >= borrow_amount
+    q_check_outflow --> q_error_outflow: outflow_limit exceeded in 24h window
+    q_error_outflow --> [*]: abort error
+    q_check_outflow --> q_update_debt: outflow within limit
+    q_update_debt --> q_update_outflow: obligation.debts[T] += borrow_amount
+    q_update_outflow --> q_withdraw_pool: update outflow tracker
+    q_withdraw_pool --> q_emit: withdraw borrow_amount from pool, fee to reserve
+    q_emit --> [*]: emit BorrowEventV3, return Coin (net_borrow)
+
+    note right of q_apply_fee
+        INV-001: borrow_fee = borrow_amount * fee_rate, deducted from loan not charged extra
+        INV-002: fee_rate = 0.3% for main assets, 1% for emerging/isolated assets
+    end note
+
+    note right of q_check_amount_max
+        INV-003: debt_value with borrow_weight <= collateral_value after borrow
+        INV-004: risk_level remains below 100% after borrow
+        INV-005: cannot borrow same coin type as deposited collateral
+    end note
+
+    note right of q_check_isolated
+        INV-006: isolated asset debt cannot coexist with other debts
+        INV-007: only one type of isolated asset can be borrowed per obligation
+    end note

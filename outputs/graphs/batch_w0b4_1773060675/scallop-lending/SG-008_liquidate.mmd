@@ -1,0 +1,56 @@
+---
+title: "liquidate - Liquidate Unhealthy Obligation (Scallop Lending)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_version_check: check version matches
+    q_version_check --> q_check_lock: version valid
+    q_version_check --> q_error_version: version mismatch
+    q_error_version --> [*]: revert
+
+    q_check_lock --> q_update_oracle: obligation not locked
+    q_check_lock --> q_error_locked: obligation locked
+    q_error_locked --> [*]: revert 770
+
+    q_update_oracle --> q_accrue_interest: x_oracle price feed updated
+    q_accrue_interest --> q_calc_risk: compound_interest(market, clock)
+
+    q_calc_risk --> q_calc_collateral_liq: risk_level = debt_weighted / collateral_liquidation_value
+    q_calc_collateral_liq --> q_check_unhealthy: collateral_liq_value = sum(collateral_i * price_i * liquidation_factor_i)
+
+    q_check_unhealthy --> q_calc_liquidation_amount: risk_level >= 100%
+    q_check_unhealthy --> q_error_healthy: position is healthy
+    q_error_healthy --> [*]: revert 1537
+
+    q_calc_liquidation_amount --> q_calc_excess: excess_debt = debt_weighted - collateral_liq_value
+    q_calc_excess --> q_calc_repay: repay_amount = min(excess_debt / price_debt, available_repay_coin.value)
+
+    q_calc_repay --> q_apply_penalty: liquidation_penalty applied (e.g. 10%)
+    q_apply_penalty --> q_calc_reward: collateral_seized = repay_amount * (1 + liquidation_penalty) / price_collateral
+    q_calc_reward --> q_split_penalty: liquidator_reward = repay_amount * liquidation_reward_rate
+    q_split_penalty --> q_protocol_reserve: protocol_reserve += repay_amount * liquidation_reserve_factor
+
+    q_protocol_reserve --> q_update_obligation_debt: obligation.debts[DebtType] -= repay_amount
+    q_update_obligation_debt --> q_update_obligation_collateral: obligation.collaterals[CollateralType] -= collateral_seized
+    q_update_obligation_collateral --> q_update_pool: pool.available += repay_amount
+
+    q_update_pool --> q_check_post_health: recalculate risk_level
+    q_check_post_health --> q_emit: risk_level brought back toward 100%
+    q_emit --> [*]: emit LiquidateEventV2, return (remaining_repay_coin, seized_collateral_coin)
+
+    note right of q_check_unhealthy
+        INV-001: liquidation only triggers when risk_level >= 100%
+        INV-002: risk_level = debt_value_weighted / collateral_liquidation_value
+    end note
+
+    note right of q_calc_repay
+        INV-003: soft liquidation - only liquidate enough to restore health (not full collateral)
+        INV-004: repay_amount is bounded by the excess debt above threshold
+    end note
+
+    note right of q_split_penalty
+        INV-005: liquidation_penalty = liquidation_reward + liquidation_reserve_factor
+        INV-006: liquidator receives collateral at discount (reward portion)
+        INV-007: protocol treasury receives reserve factor portion
+        INV-008: anyone can liquidate (no authorization required)
+    end note
