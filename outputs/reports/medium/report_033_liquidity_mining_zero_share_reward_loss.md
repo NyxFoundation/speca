@@ -1,6 +1,4 @@
-### Liquidity Mining Rewards Permanently Lost During Zero-Share Periods
-
-Reward providers will lose emitted rewards that become permanently unclaimable by any participant
+### Reward providers will lose emitted rewards that become permanently unclaimable by any participant
 
 ### Summary
 

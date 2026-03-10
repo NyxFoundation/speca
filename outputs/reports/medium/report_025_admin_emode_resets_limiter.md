@@ -1,6 +1,4 @@
-### Admin eMode Update Resets Rate Limiter State
-
-Attacker will bypass rate limiter protection to extract large amounts from the protocol by front-running admin eMode parameter updates
+### Attacker will bypass rate limiter protection to extract large amounts from the protocol by front-running admin eMode parameter updates
 
 ### Summary
 

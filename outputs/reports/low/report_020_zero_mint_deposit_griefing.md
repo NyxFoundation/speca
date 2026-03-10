@@ -1,6 +1,4 @@
-### Zero-Mint Deposit Griefing via Truncating Division
-
-Depositor will lose funds by receiving zero cTokens when depositing small amounts at a high exchange rate
+### Depositor will lose funds by receiving zero cTokens when depositing small amounts at a high exchange rate
 
 ### Summary
 

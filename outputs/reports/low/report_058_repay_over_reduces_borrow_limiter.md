@@ -1,6 +1,4 @@
-### Repay Reduces Borrow Rate Limiter by Interest-Inclusive Amount, Eroding Safety Margin
-
-Borrowers will exceed the intended borrow rate limit, degrading the safety margin for all lenders
+### Borrowers will exceed the intended borrow rate limit due to interest-inclusive repay reduction, degrading the safety margin for all lenders
 
 ### Summary
 

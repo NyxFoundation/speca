@@ -1,6 +1,4 @@
-### eMode Borrow Tracking Uses Stale Obligation Debt in `handle_repay` and `liquidation_inner`, Inflating Group Totals
-
-Stale debt reads will inflate the eMode group borrow counter, causing premature borrow limit exhaustion and incorrect ADL stop conditions for all borrowers in the eMode group
+### Stale debt reads in `handle_repay` and `liquidation_inner` will inflate the eMode group borrow counter, causing premature borrow limit exhaustion for all borrowers in the eMode group
 
 ### Summary
 

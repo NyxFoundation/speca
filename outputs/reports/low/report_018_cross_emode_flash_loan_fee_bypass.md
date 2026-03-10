@@ -1,6 +1,4 @@
-### Flash Loan Fee Bypass via Cross-eMode Group Selection
-
-Flash loan borrower will bypass higher fee configurations to reduce protocol revenue
+### Flash loan borrower will bypass higher fee configurations via cross-eMode group selection to reduce protocol revenue
 
 ### Summary
 

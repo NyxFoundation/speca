@@ -1,6 +1,4 @@
-### eMode Liquidation Safety Check Uses Integer Division, Allowing Off-by-One bps Configurations
-
-Admin will allow near-boundary eMode configurations that may leave residual bad debt for the protocol
+### Admin will allow near-boundary eMode configurations that may leave residual bad debt for the protocol due to integer division truncation
 
 ### Summary
 

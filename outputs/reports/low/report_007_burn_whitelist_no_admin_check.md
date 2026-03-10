@@ -1,6 +1,4 @@
-### PackageCallerCap Holder Will Disrupt Protocol Operations by Burning Their Own Whitelist Capability
-
-Compromised PackageCallerCap holder will disrupt liquidation, ADL, and flash loan operations for the protocol
+### Compromised PackageCallerCap holder will disrupt liquidation, ADL, and flash loan operations for the protocol by burning their own whitelist capability
 
 ### Summary
 

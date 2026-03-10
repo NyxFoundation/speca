@@ -1,6 +1,4 @@
-### Liquidation Residual Overpayment Silently Consumed as Protocol Revenue
-
-Protocol will systematically extract rounding-based overpayments from liquidators on every liquidation
+### Protocol will systematically extract rounding-based overpayments from liquidators on every liquidation
 
 ### Summary
 

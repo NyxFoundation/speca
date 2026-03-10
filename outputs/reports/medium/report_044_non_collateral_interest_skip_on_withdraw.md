@@ -1,6 +1,4 @@
-### Withdrawal of Non-Collateral Deposits Uses Stale Exchange Rate Due to Skipped Interest Accrual
-
-Depositor will lose accrued interest on withdrawal of non-collateral assets
+### Depositor will lose accrued interest on withdrawal of non-collateral assets due to skipped interest accrual
 
 ### Summary
 

@@ -1,6 +1,4 @@
-### Oracle Admin Event Uses Seconds While Delay Field and Protocol Admin Events Use Milliseconds
-
-Admin will corrupt off-chain monitoring and governance automation for the protocol operators
+### Admin will corrupt off-chain monitoring and governance automation for the protocol operators due to oracle timestamp unit inconsistency
 
 ### Summary
 

@@ -1,76 +1,60 @@
-# ADL cancel_collateral_adl Emits Timestamp in Milliseconds Instead of Seconds
+### `cancel_collateral_adl` will emit incorrect timestamp causing off-chain indexers to misinterpret ADL cancellation timing by 1000x
 
-## Summary
+### Summary
 
-The `cancel_collateral_adl` function emits the `time` field in milliseconds while all other ADL event emissions use seconds, causing off-chain indexers and monitoring systems to misinterpret the cancellation timestamp by a factor of 1000x.
+Inconsistent timestamp unit in `cancel_collateral_adl` (milliseconds instead of seconds) will cause incorrect ADL lifecycle tracking for off-chain monitoring systems as the function will emit `ADLCancelEvent` with a `time` field 1000x larger than all other ADL events.
 
-## Vulnerability Detail
+### Root Cause
 
-In `adl_admin.move`, there are four ADL event-emitting functions. Three of them consistently convert `clock.timestamp_ms()` to seconds by dividing by 1000:
-
-```move
-// enable_collateral_adl (line 100, 115):
-let now = clock.timestamp_ms() / 1000;
-// ...
-time: now,  // SECONDS
-
-// enable_debt_adl (line 164, 179):
-let now = clock.timestamp_ms() / 1000;
-// ...
-time: now,  // SECONDS
-
-// cancel_debt_adl (line 208):
-time: clock.timestamp_ms() / 1000,  // SECONDS
-```
-
-However, `cancel_collateral_adl` (line 141) emits the raw millisecond value:
+In [`adl.move:141`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/admin/adl.move#L141) `cancel_collateral_adl` emits the raw millisecond value while all other ADL functions divide by 1000:
 
 ```move
 // cancel_collateral_adl (line 141):
 time: clock.timestamp_ms(),  // MILLISECONDS — BUG!
 ```
 
-Both `cancel_collateral_adl` and `cancel_debt_adl` emit the same `ADLCancelEvent` struct, but with inconsistent time units. An off-chain system parsing these events uniformly would either:
-- Interpret the collateral cancellation as occurring ~1000x in the future (if expecting seconds)
-- Interpret all other ADL events as occurring ~1000x in the past (if expecting milliseconds)
+All three other ADL event-emitting functions consistently convert to seconds:
 
-## Internal Pre-conditions
+```move
+// enable_collateral_adl (line 100, 115):
+let now = clock.timestamp_ms() / 1000;
+time: now,  // SECONDS
 
-1. ADL collateral mode must be active and then cancelled by admin.
+// enable_debt_adl (line 164, 179):
+let now = clock.timestamp_ms() / 1000;
+time: now,  // SECONDS
 
-## External Pre-conditions
+// cancel_debt_adl (line 208):
+time: clock.timestamp_ms() / 1000,  // SECONDS
+```
+
+Both `cancel_collateral_adl` and `cancel_debt_adl` emit the same `ADLCancelEvent` struct, but with inconsistent time units.
+
+### Internal Pre-conditions
+
+1. [Admin needs to call `enable_collateral_adl` to set] ADL collateral mode to be exactly active, and then call `cancel_collateral_adl` to cancel it.
+
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
-1. Admin activates collateral ADL (emits timestamp in seconds).
-2. Admin later cancels collateral ADL via cancel_collateral_adl.
-3. ADLCancelEvent emits time = clock.timestamp_ms() (milliseconds, not divided by 1000).
-4. Off-chain indexer parsing all ADL events as seconds interprets cancellation as ~1000x in the future.
+1. Admin activates collateral ADL via `enable_collateral_adl` (emits timestamp in seconds).
+2. Admin later cancels collateral ADL by calling `cancel_collateral_adl`.
+3. `ADLCancelEvent` emits `time = clock.timestamp_ms()` (milliseconds, not divided by 1000).
+4. Off-chain indexer parsing all ADL events uniformly as seconds interprets the cancellation as occurring ~1000x in the future.
 5. Monitoring dashboard shows incorrect ADL duration and cancellation timing.
 
-## Impact
+### Impact
 
-Off-chain monitoring and indexing systems that track ADL lifecycle events will misinterpret `cancel_collateral_adl` timestamps. This is particularly problematic for:
-- ADL duration tracking (how long ADL was active before cancellation)
-- Automated alerting systems that monitor ADL state transitions
-- Historical analysis dashboards showing ADL activation/cancellation timelines
+The off-chain monitoring and indexing systems suffer incorrect ADL lifecycle tracking. Since ADL is an emergency mechanism where timing is critical for risk assessment, incorrect timestamps in monitoring can delay human intervention or cause false alerts. ADL duration tracking, automated alerting systems, and historical analysis dashboards will all misinterpret `cancel_collateral_adl` timestamps.
 
-Since ADL is an emergency mechanism where timing is critical for risk assessment, incorrect timestamps in monitoring can delay human intervention or cause false alerts.
+### PoC
 
-## Code Snippet
+_No PoC provided._
 
-- `contracts/protocol/sources/entry_points/admin/adl.move:141` — `cancel_collateral_adl` uses `clock.timestamp_ms()` (milliseconds)
-- `contracts/protocol/sources/entry_points/admin/adl.move:100` — `enable_collateral_adl` uses `clock.timestamp_ms() / 1000` (seconds)
-- `contracts/protocol/sources/entry_points/admin/adl.move:164` — `enable_debt_adl` uses `clock.timestamp_ms() / 1000` (seconds)
-- `contracts/protocol/sources/entry_points/admin/adl.move:208` — `cancel_debt_adl` uses `clock.timestamp_ms() / 1000` (seconds)
-
-## Tool used
-
-Manual Review + Automated Analysis
-
-## Mitigation
+### Mitigation
 
 Divide by 1000 to match the convention used by all other ADL events:
 

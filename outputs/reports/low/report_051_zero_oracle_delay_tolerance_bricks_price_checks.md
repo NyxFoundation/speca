@@ -1,6 +1,4 @@
-### Zero `price_delay_tolerance_ms` Configuration Can Brick Oracle Reads and Lending Flows
-
-Admin will cause a DoS on all price-dependent lending flows for all protocol users
+### Admin will cause a DoS on all price-dependent lending flows for all protocol users by setting zero `price_delay_tolerance_ms`
 
 ### Summary
 

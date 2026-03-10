@@ -1,6 +1,4 @@
-### Referral Code Generation Uses Single-Shot Randomness and Reverts on Collision
-
-Any user will be denied referral code creation due to collision-based DoS as the referral registry grows
+### Any user will be denied referral code creation due to collision-based DoS as the referral registry grows
 
 ### Summary
 

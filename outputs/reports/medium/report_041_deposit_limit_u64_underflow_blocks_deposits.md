@@ -1,6 +1,4 @@
-### `deposit_limit_breached` u64 Underflow Aborts and Blocks All Deposits
-
-Any user will be unable to deposit into an affected market, causing a DoS for all depositors
+### Any user will be unable to deposit into an affected market due to u64 underflow abort in `deposit_limit_breached`, causing a DoS for all depositors
 
 ### Summary
 

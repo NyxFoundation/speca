@@ -1,6 +1,4 @@
-### take_revenue Does Not Accrue Interest Before Withdrawal
-
-Admin will under-collect protocol revenue from reserves
+### Admin will under-collect protocol revenue from reserves due to stale interest in `take_revenue`
 
 ### Summary
 

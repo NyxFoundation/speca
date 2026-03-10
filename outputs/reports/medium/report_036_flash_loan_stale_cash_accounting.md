@@ -1,6 +1,4 @@
-### Flash Loan Withdraw Does Not Update `cash` Field, Causing Stale Reserve State Within PTB
-
-A whitelisted contract composing flash loans with other market operations will cause depositors to receive fewer cTokens than warranted due to inflated exchange rates during the flash loan window
+### Whitelisted contract composing flash loans with other market operations will cause depositors to receive fewer cTokens due to inflated exchange rates during the flash loan window
 
 ### Summary
 

@@ -1,6 +1,4 @@
-### Deposit Limit Check Double-Subtracts `cash_reserve`, Allowing Limit Bypass
-
-Depositor will bypass the configured deposit limit in any market with non-zero `cash_reserve`
+### Depositor will bypass the configured deposit limit in any market with non-zero `cash_reserve`
 
 ### Summary
 

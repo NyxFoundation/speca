@@ -1,6 +1,4 @@
-### Borrow Reward Shares Become Stale Between User Interactions, Enabling Reward Siphoning
-
-Frequent interactor will siphon disproportionate borrow rewards from passive borrowers
+### Frequent interactor will siphon disproportionate borrow rewards from passive borrowers
 
 ### Summary
 

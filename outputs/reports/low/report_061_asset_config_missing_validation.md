@@ -1,6 +1,4 @@
-### `create_market_asset_config` Missing `max >= min` and `max > 0` Validation
-
-Admin will brick an asset's borrow or deposit functionality for all users of that asset
+### Admin will brick an asset's borrow or deposit functionality for all users due to missing validation in `create_market_asset_config`
 
 ### Summary
 
