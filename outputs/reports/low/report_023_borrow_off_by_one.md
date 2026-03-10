@@ -1,12 +1,12 @@
-# Borrow Off-By-One Liquidity Lock
+### Borrower will be unable to borrow exact remaining available liquidity, locking 1 unit per asset in the reserve
 
-## Summary
+### Summary
 
-The borrow amount validation in `reserve.move` uses strict greater-than (`>`) instead of greater-than-or-equal (`>=`), preventing users from borrowing the exact remaining available liquidity. This locks 1 unit of each asset in the reserve until new deposits arrive.
+Off-by-one error in the borrow amount validation (strict `>` instead of `>=`) will cause capital inefficiency for borrowers as the protocol will reject borrows equal to the exact remaining available liquidity, permanently locking 1 unit per asset per reserve.
 
-## Vulnerability Detail
+### Root Cause
 
-In `reserve.move:196-201`:
+In [`reserve.move:199`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L199) the borrow amount check uses strict greater-than instead of greater-than-or-equal:
 
 ```move
 public(package) fun borrow_amount<MarketType, CoinType>(
@@ -19,46 +19,35 @@ public(package) fun borrow_amount<MarketType, CoinType>(
 }
 ```
 
-Available liquidity is `cash - ceil(cash_reserve)`. If this equals 100, a user trying to borrow exactly 100 will fail because `100 > 100` is false. They can only borrow 99.
-
-The same pattern exists in flash loans (line 230):
+The same pattern exists in flash loans ([`reserve.move:230`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L230)):
 ```move
 assert!(amount < self.cash, error::reserve_flash_loan_more_than_cash());
 ```
 
-## Internal Pre-conditions
+### Internal Pre-conditions
 
-1. Available liquidity (`cash - ceil(cash_reserve)`) must exactly equal the desired borrow amount.
+1. [Depositors need to deposit funds to set] available liquidity (`cash - ceil(cash_reserve)`) to be exactly equal to the desired borrow amount.
 
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Reserve has exactly 100 units of available liquidity.
-2. User attempts to borrow 100 units.
+2. User calls `borrow_amount` with `amount = 100`.
 3. `assert!(100 > 100)` fails, transaction aborts.
 4. User can only borrow 99, leaving 1 unit locked.
 
-## Impact
+### Impact
 
-- **Capital inefficiency**: 1 unit per asset per reserve is locked and unusable
-- **User confusion**: Borrowers see available liquidity but cannot borrow the full amount
-- **Compounding effect**: Across many assets and markets, the locked amounts aggregate
+The borrowers suffer an approximate loss of 1 unit per asset per reserve in locked, unusable liquidity. Across many assets and markets, the locked amounts aggregate. Borrowers see available liquidity but cannot borrow the full amount.
 
-The severity is low per-asset but is a correctness issue in the liquidity model.
+### PoC
 
-## Code Snippet
+_No PoC provided._
 
-- [`reserve.move:199`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L199): Strict `>` check
-- [`reserve.move:230`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L230): Same pattern in flash loan
-
-## Tool used
-
-Manual Review + Automated Analysis (Codex + Claude cross-validation)
-
-## Mitigation
+### Mitigation
 
 Use `>=` for exact-amount borrowing:
 

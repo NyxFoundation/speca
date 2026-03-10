@@ -1,39 +1,40 @@
-# Zero-Mint Deposit Griefing via Truncating Division
+### Zero-Mint Deposit Griefing via Truncating Division
 
-## Summary
+Depositor will lose funds by receiving zero cTokens when depositing small amounts at a high exchange rate
 
-When the cToken exchange rate is high enough (due to accumulated interest), small deposits can result in zero cTokens minted due to truncating integer division in `int_mul`. The depositor's tokens are absorbed into the reserve but they receive nothing in return, effectively donating their deposit.
+### Summary
 
-## Vulnerability Detail
+Truncating integer division in `int_mul` with no minimum mint check will cause a silent loss of deposited funds for small depositors as the deposit is absorbed into the reserve cash balance while zero cTokens are minted in return
 
-The cToken minting calculation uses `int_mul` which performs floor division:
+### Root Cause
+
+In [`float.move:63-65`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/math/sources/float.move#L63-L65) the `int_mul` function performs floor division:
 
 ```move
-// In reserve handling, mint amount = deposit / exchange_rate
+// mint amount = deposit / exchange_rate
 // exchange_rate = (cash + borrows - reserves) / total_supply
 // mint = deposit_amount * total_supply / (cash + borrows - reserves)
 ```
 
-When `exchange_rate` is high (e.g., after significant interest accrual) and `deposit_amount` is small:
+When the exchange rate is high (e.g., after significant interest accrual) and the deposit amount is small:
+
 ```
 mint_amount = int_mul(inverse_exchange_rate, deposit_amount)
             = (inverse_rate.value * deposit_amount) / WAD
             = 0  (if product < WAD)
 ```
 
-The depositor's tokens are added to the reserve's cash balance, but zero cTokens are minted. The deposit is effectively distributed pro-rata to existing cToken holders via the improved exchange rate.
+The depositor's tokens are added to the reserve's cash balance, but zero cTokens are minted. There is no minimum deposit check or zero-mint revert in the deposit flow ([`reserve.move`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move)).
 
-There is no minimum deposit check or zero-mint revert in the deposit flow.
+### Internal Pre-conditions
 
-## Internal Pre-conditions
+1. [Interest accrual over time needs to increase the exchange rate to set] the cToken exchange rate to be high enough that `deposit_amount / exchange_rate < 1` (truncates to 0 cTokens).
 
-1. cToken exchange rate must be high enough that `deposit_amount / exchange_rate < 1` (truncates to 0 cTokens).
-
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Exchange rate increases over time via interest accrual (e.g., `exchange_rate = 2.0` after extended lending).
 2. User deposits a small amount (e.g., 1 unit of underlying).
@@ -41,22 +42,15 @@ None.
 4. User's deposit is absorbed into reserve cash but zero cTokens are minted.
 5. The deposit is effectively donated to existing cToken holders.
 
-## Impact
+### Impact
 
-- **Silent fund loss**: Users making small deposits (relative to the exchange rate) lose their tokens with no cTokens received
-- **Griefing vector**: An attacker can donate small amounts to inflate the exchange rate, then subsequent small depositors lose funds
-- **First-depositor inflation variant**: While not a classic first-depositor attack (the protocol may have safeguards for initial deposits), the exchange rate drift over time creates the same effect for latecomers
+The depositors making small deposits (relative to the exchange rate) suffer a complete loss of their deposited tokens with no cTokens received. This also creates a griefing vector where an attacker can donate small amounts to inflate the exchange rate, causing subsequent small depositors to lose funds.
 
-## Code Snippet
+### PoC
 
-- [`float.move:63-65`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/math/sources/float.move#L63-L65): `int_mul` truncating division
-- [`reserve.move`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move): cToken mint calculation
+_No PoC provided._
 
-## Tool used
-
-Manual Review + Automated Analysis (Codex + Claude cross-validation)
-
-## Mitigation
+### Mitigation
 
 Revert if zero cTokens would be minted:
 

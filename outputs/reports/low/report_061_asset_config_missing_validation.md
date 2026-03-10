@@ -1,12 +1,14 @@
-# `create_market_asset_config` Missing `max >= min` and `max > 0` Validation
+### `create_market_asset_config` Missing `max >= min` and `max > 0` Validation
 
-## Summary
+Admin will brick an asset's borrow or deposit functionality for all users of that asset
 
-`create_market_asset_config` validates `min_borrow_amount > 0` and fee rates, but does not validate that `max_borrow_amount >= min_borrow_amount` or `max_deposit_amount > 0`. An admin can create a config where `max_borrow_amount < min_borrow_amount` or `max_deposit_amount = 0`, bricking the asset's borrow or deposit functionality.
+### Summary
 
-## Vulnerability Detail
+The missing validation in `create_market_asset_config` (no checks for `max_borrow_amount >= min_borrow_amount` or `max_deposit_amount > 0`) will cause bricked borrow or deposit functionality for all users of the affected asset as the admin passing misconfigured values will create an asset config where no valid borrow amount can satisfy both constraints simultaneously.
 
-At `asset.move:69-95`:
+### Root Cause
+
+In [`contracts/protocol/sources/entry_points/admin/asset.move:69-95`](contracts/protocol/sources/entry_points/admin/asset.move#L69-L95) the `create_market_asset_config` function validates `min_borrow_amount > 0` and fee rates but omits critical consistency checks:
 
 ```move
 public fun create_market_asset_config(
@@ -18,62 +20,43 @@ public fun create_market_asset_config(
     repay_fee_rate: u64,
     liquidation_fee_rate: u64,
 ): AssetConfig {
-    // Validate parameters
+    // Only these are validated:
     assert!(min_borrow_amount > 0, error::invalid_params_error());
     assert!(liquidation_fee_rate <= DECIMAL_DENOMINATOR, error::invalid_params_error());
     assert!(repay_fee_rate <= DECIMAL_DENOMINATOR, error::invalid_params_error());
-
-    self.ensure_version_matches();
-
-    let liquidation_fee = math::float::from_quotient(liquidation_fee_rate, DECIMAL_DENOMINATOR);
-    let repay_fee = math::float::from_quotient(repay_fee_rate, DECIMAL_DENOMINATOR);
-
-    protocol::asset::new_asset_config(
-        min_borrow_amount,
-        max_borrow_amount,
-        repay_fee,
-        max_deposit_amount,
-        liquidation_fee
-    )
+    // Missing: max_borrow_amount >= min_borrow_amount
+    // Missing: max_deposit_amount > 0
+    // Missing: max_borrow_amount > 0
+    // ...
 }
 ```
 
-Missing validations:
-1. `max_borrow_amount >= min_borrow_amount` — if `max_borrow_amount < min_borrow_amount`, no borrow amount can satisfy both constraints simultaneously, making borrowing impossible for this asset.
-2. `max_deposit_amount > 0` — if `max_deposit_amount = 0`, the deposit limit check will reject all deposits.
-3. `max_borrow_amount > 0` — if `max_borrow_amount = 0`, no borrows are possible.
+The [`update_market_asset_config`](contracts/protocol/sources/entry_points/admin/asset.move#L98-L118) function at line 98-118 also lacks these validations, as it accepts an already-constructed `AssetConfig` and applies it directly.
 
-The `update_market_asset_config` function (line 98-118) also lacks these validations, as it accepts an already-constructed `AssetConfig` and applies it directly.
+### Internal Pre-conditions
 
-## Internal Pre-conditions
+1. [Admin needs to call `create_market_asset_config` to set] `max_borrow_amount` to be less than `min_borrow_amount` (e.g., confusing parameter order).
 
-1. Admin must call `create_market_asset_config` with misconfigured values.
-
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Admin creates asset config with `min_borrow_amount = 1000`, `max_borrow_amount = 500` (misconfiguration, perhaps confusing parameter order).
 2. Config is applied via `onboard_new_asset` or `update_market_asset_config`.
-3. All borrow attempts for this asset fail: amounts ≥ 1000 exceed `max_borrow_amount`, amounts ≤ 500 are below `min_borrow_amount`.
+3. All borrow attempts for this asset fail: amounts >= 1000 exceed `max_borrow_amount`, amounts <= 500 are below `min_borrow_amount`.
 4. The asset is effectively bricked for borrowing until admin detects and corrects the config.
 
-## Impact
+### Impact
 
-Admin misconfiguration can brick an asset's borrow or deposit functionality. This is a defensive programming issue — the function should reject obviously invalid configurations at creation time rather than allowing them to propagate. The impact is limited by the admin-gated nature of the function, but the lack of validation creates an operational risk. Recovery requires a separate admin transaction to update the config.
+The users of the affected asset suffer a complete denial-of-service on borrow or deposit functionality until the admin corrects the misconfiguration via a separate admin transaction.
 
-## Code Snippet
+### PoC
 
-- `contracts/protocol/sources/entry_points/admin/asset.move:69-95` — `create_market_asset_config` missing `max >= min` validation
-- `contracts/protocol/sources/entry_points/admin/asset.move:98-118` — `update_market_asset_config` passes through without validation
+_No PoC provided._
 
-## Tool used
-
-Manual Review
-
-## Mitigation
+### Mitigation
 
 Add validation for parameter consistency:
 

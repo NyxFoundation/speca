@@ -1,12 +1,14 @@
-# Flash Loan Withdraw Does Not Update `cash` Field, Causing Stale Reserve State Within PTB
+### Flash Loan Withdraw Does Not Update `cash` Field, Causing Stale Reserve State Within PTB
 
-## Summary
+A whitelisted contract composing flash loans with other market operations will cause depositors to receive fewer cTokens than warranted due to inflated exchange rates during the flash loan window
 
-`flash_loan_withdraw` in `reserve.move` withdraws tokens from `underlying_balance` but does not decrement `self.cash`. During the flash loan window within a PTB (Programmable Transaction Block), other composable operations see inflated `cash` values, leading to incorrect exchange rates, utilization rates, and borrow availability checks.
+### Summary
 
-## Vulnerability Detail
+`flash_loan_withdraw` in `reserve.move` withdraws tokens from `underlying_balance` but does not decrement `self.cash` will cause an incorrect exchange rate, utilization rate, and borrow availability for depositors and borrowers as a whitelisted `PackageCallerCap` holder will compose a flash loan with other market operations in a single PTB, where the inflated `cash` value produces stale reserve state during the flash loan window
 
-In `reserve.move:318-324`, `flash_loan_withdraw` only splits the balance without updating accounting:
+### Root Cause
+
+In [`reserve.move:318-324`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L318-L324) the `flash_loan_withdraw` function only splits the balance without updating `self.cash`:
 
 ```move
 fun flash_loan_withdraw<MarketType, CoinType>(
@@ -18,7 +20,7 @@ fun flash_loan_withdraw<MarketType, CoinType>(
 }
 ```
 
-Compare with the normal `withdraw_underlying` (line 306-316), which correctly updates `self.cash`:
+Compare with the normal `withdraw_underlying` ([`reserve.move:306-316`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L306-L316)), which correctly updates `self.cash`:
 
 ```move
 fun withdraw_underlying<MarketType, CoinType>(
@@ -32,23 +34,28 @@ fun withdraw_underlying<MarketType, CoinType>(
 }
 ```
 
-During the flash loan window (between `borrow_flash_loan` and `repay_flash_loan` within the same PTB), the following reserve properties are incorrect:
+During the flash loan window, the following reserve properties are incorrect:
+1. `exchange_rate()` ([`reserve.move:92-101`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L92-L101)) -- inflated (uses `self.cash` in numerator of `cash_plus_borrows_minus_reserves`)
+2. `util_rate()` ([`reserve.move:65-72`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L65-L72)) -- deflated (inflated denominator)
+3. `borrow_amount()` check -- passes with more headroom than actually available
+4. `deposit_limit_breached()` -- calculates higher total deposit than reality
 
-1. **`exchange_rate()`** — inflated (uses `self.cash` in numerator of `cash_plus_borrows_minus_reserves`)
-2. **`util_rate()`** — deflated (inflated denominator)
-3. **`borrow_amount()`** check — passes with more headroom than actually available (`self.cash - self.cash_reserve.ceil() > amount`)
-4. **`deposit_limit_breached()`** — calculates higher total deposit than reality
+The existing test at line 785-789 confirms this behavior:
+```move
+let (borrowed_balance, loan) = reserve.borrow_flash_loan<MainMarket, BTC>(100);
+assert!(reserve.cash == 1000);  // cash not updated!
+```
 
-## Internal Pre-conditions
+### Internal Pre-conditions
 
-1. A flash loan must be active within a PTB (between `borrow_flash_loan` and `repay_flash_loan`).
-2. Other market operations must be composed with the flash loan in the same PTB.
+1. [A whitelisted contract needs to call `borrow_flash_loan` to set] a flash loan to be active within a PTB
+2. [The same PTB needs to compose additional market operations to set] other operations to execute while `cash` is stale
 
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. `PackageCallerCap` holder (whitelisted contract) composes a flash loan with other operations in a single PTB.
 2. `borrow_flash_loan` withdraws tokens from `underlying_balance` but does NOT update `self.cash`.
@@ -56,32 +63,48 @@ None.
 4. The depositor receives fewer cTokens than warranted for their deposit amount.
 5. When the flash loan is repaid, cash is restored, but the depositor has already been shortchanged.
 
-## Impact
+### Impact
 
-In Sui's PTB model, multiple operations can be composed within a single transaction. If a flash loan is composed with other market operations (via whitelisted `PackageCallerCap` holders), the intermediate state is inconsistent:
+The depositors suffer a loss of cToken value proportional to the flash loan amount relative to total reserves. A deposit during the flash loan window sees an inflated exchange rate, minting fewer cTokens for the same deposit amount. A borrow check during the window sees `cash` as available when the actual `underlying_balance` has been depleted, potentially allowing a borrow that fails at the balance level with a low-level abort instead of the intended `reserve_not_enough_error`. Interest accrual during the window computes incorrect utilization rate, leading to a lower interest rate than market conditions warrant.
 
-- A deposit during the flash loan window would see an inflated exchange rate, minting fewer cTokens for the same deposit amount (user receives less value)
-- A borrow check during the flash loan window would see `cash` as available when the actual `underlying_balance` has been depleted, potentially allowing a borrow that fails at the balance level with a low-level abort instead of the intended `reserve_not_enough_error`
-- Interest accrual during the window would compute incorrect utilization rate, leading to a lower interest rate than market conditions warrant
+### PoC
 
-The test at line 785-789 confirms this behavior — `reserve.cash` remains at 1000 after flash-borrowing 100:
-```move
-let (borrowed_balance, loan) = reserve.borrow_flash_loan<MainMarket, BTC>(100);
-assert!(reserve.cash == 1000);  // cash not updated!
-```
+No standalone PoC is possible due to PTB (Programmable Transaction Block) composition limitations in the test framework. Below is a detailed code walkthrough showing the bug path:
 
-## Code Snippet
+1. **`flash_loan_withdraw` does not update `cash`** (`reserve.move:318-324`):
+   ```move
+   fun flash_loan_withdraw<MarketType, CoinType>(
+       self: &mut Reserve<MarketType>,
+       amount: u64,
+   ): Balance<CoinType> {
+       let reserve_token_balance: &mut ReserveBalance<MarketType, CoinType> =
+           dynamic_field::borrow_mut(&mut self.id, ReserveBalanceKey{});
+       reserve_token_balance.underlying_balance.split(amount)
+       // NOTE: self.cash is NOT decremented here
+   }
+   ```
 
-- `reserve.move:318-324` — `flash_loan_withdraw` (does NOT update `self.cash`)
-- `reserve.move:306-316` — `withdraw_underlying` (correctly updates `self.cash`)
-- `reserve.move:92-101` — `exchange_rate` (uses stale `self.cash`)
-- `reserve.move:65-72` — `util_rate` (uses stale `self.cash`)
+2. **`exchange_rate` uses stale `self.cash`** (`reserve.move:92-101`):
+   ```move
+   public(package) fun exchange_rate<MarketType>(self: &Reserve<MarketType>): Decimal {
+       // cash_plus_borrows_minus_reserves uses self.cash
+       // After flash_loan_withdraw: self.cash is inflated by `amount`
+       // → exchange_rate is inflated
+   }
+   ```
 
-## Tool used
+3. **Deposit during flash loan window** receives fewer cTokens:
+   - `exchange_rate` is inflated because `self.cash` is higher than actual balance
+   - `cTokens_minted = deposit_amount / exchange_rate`
+   - Higher exchange rate -> fewer cTokens for the same deposit
 
-Manual Review + Automated Analysis
+4. **Existing test confirms the bug** (`reserve.move:785-789`):
+   ```move
+   let (borrowed_balance, loan) = reserve.borrow_flash_loan<MainMarket, BTC>(100);
+   assert!(reserve.cash == 1000);  // cash NOT updated after withdrawing 100
+   ```
 
-## Mitigation
+### Mitigation
 
 Update `self.cash` in `flash_loan_withdraw` and restore it in `repay_flash_loan`:
 

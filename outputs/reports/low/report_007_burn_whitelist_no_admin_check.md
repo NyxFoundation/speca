@@ -1,12 +1,14 @@
-# PackageCallerCap holder will disrupt protocol operations by burning their own whitelist capability
+### PackageCallerCap Holder Will Disrupt Protocol Operations by Burning Their Own Whitelist Capability
 
-## Summary
+Compromised PackageCallerCap holder will disrupt liquidation, ADL, and flash loan operations for the protocol
 
-`burn_whitelist` does not require `AdminCap` authorization unlike all other whitelist management functions, allowing any `PackageCallerCap` holder to unilaterally destroy their capability and remove themselves from the whitelist, potentially breaking critical protocol functions like liquidation and ADL.
+### Summary
 
-## Root Cause
+Missing `AdminCap` authorization on `burn_whitelist` will cause a disruption of critical protocol functions (liquidation, ADL, flash loans) for the protocol as a compromised or upgraded integration contract will call `burn_whitelist` to destroy its `PackageCallerCap` and remove itself from the whitelist without admin approval
 
-In [`whitelist.move:27-40`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/admin/whitelist.move#L27-L40):
+### Root Cause
+
+In [`whitelist.move:27-40`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/admin/whitelist.move#L27-L40) the `burn_whitelist` function does not require `AdminCap` authorization unlike all other whitelist management functions:
 
 ```move
 public fun burn_whitelist(
@@ -25,16 +27,16 @@ public fun burn_whitelist(
 
 Unlike `mint_new_whitelist` (line 12), `remove_whitelist` (line 42), and `update_permission` (line 53) which all require `_: &AdminCap`, `burn_whitelist` only requires `app: &mut ProtocolApp` (a shared object) and the `PackageCallerCap` itself. Since `PackageCallerCap` has `key, store` abilities, it can be transferred to any address.
 
-## Internal Pre-conditions
+### Internal Pre-conditions
 
-1. A `PackageCallerCap` needs to have been issued and transferred to a third-party contract or address.
-2. The cap holder (or a compromised/upgraded integration contract) needs to call `burn_whitelist`.
+1. [Admin needs to mint and transfer a `PackageCallerCap` to set] the cap to be held by a third-party contract or address.
+2. [The cap holder or a compromised/upgraded integration contract needs to call `burn_whitelist` to set] the cap to be destroyed.
 
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Admin mints a `PackageCallerCap` with liquidation permission and transfers it to a liquidation bot contract.
 2. The liquidation bot contract is upgraded or compromised.
@@ -44,16 +46,15 @@ None.
 6. Without functional liquidation, underwater positions accumulate bad debt.
 7. The admin must mint and configure a new cap and update all integrations.
 
-## Impact
+### Impact
 
-Destruction of a `PackageCallerCap` used for liquidation, ADL, or flash loans breaks the protocol functions that depend on it. During the period between cap destruction and admin remediation:
-- Liquidations cannot proceed through the affected cap, potentially causing bad debt.
-- ADL operations are blocked.
-- Flash loans through the affected integration are unavailable.
+The protocol suffers a disruption of liquidation, ADL, and flash loan operations that depend on the destroyed cap. During the period between cap destruction and admin remediation, liquidations cannot proceed through the affected cap, potentially causing bad debt accumulation. The severity depends on how many caps exist and whether redundant caps are available.
 
-The severity depends on how many caps exist and whether redundant caps are available.
+### PoC
 
-## Mitigation
+_No PoC provided._
+
+### Mitigation
 
 Add `AdminCap` requirement to `burn_whitelist`, consistent with all other whitelist management functions:
 

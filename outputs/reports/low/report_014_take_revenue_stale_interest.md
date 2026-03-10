@@ -1,12 +1,14 @@
-# take_revenue Does Not Accrue Interest Before Withdrawal
+### take_revenue Does Not Accrue Interest Before Withdrawal
 
-## Summary
+Admin will under-collect protocol revenue from reserves
 
-The admin `take_revenue` entry point withdraws accumulated protocol revenue from reserves without first calling `accrue_interest()`. This means any interest earned since the last user interaction is not reflected in `cash_reserve`, causing the protocol to systematically under-collect revenue.
+### Summary
 
-## Vulnerability Detail
+Missing `accrue_interest` call in `take_revenue` will cause an under-collection of protocol revenue for the protocol as the admin will withdraw from a stale `cash_reserve` that does not reflect interest earned since the last user interaction
 
-In `revenue.move:23-49`, the `take_revenue` function directly calls `market::take_revenue` without triggering interest accrual:
+### Root Cause
+
+In [`revenue.move:23-49`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/entry_points/admin/revenue.move#L23-L49) the `take_revenue` function directly calls `market::take_revenue` without triggering interest accrual:
 
 ```move
 public fun take_revenue<MarketType, CoinType>(
@@ -25,45 +27,39 @@ public fun take_revenue<MarketType, CoinType>(
 }
 ```
 
-The `cash_reserve` field that tracks protocol revenue is only updated during `accrue_interest()` (reserve.move:143):
+The `cash_reserve` field that tracks protocol revenue is only updated during `accrue_interest()` ([`reserve.move:143`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L143)):
+
 ```move
 self.cash_reserve = self.cash_reserve.add(reserve_factor.mul(interest_accumulated));
 ```
 
-If no user interaction (borrow, repay, deposit, withdraw) has occurred since the last accrual, the `cash_reserve` is stale. The admin either:
-1. Takes less revenue than actually available (under-collection), or
-2. Is forced to trigger a user operation first to refresh accrual (operational burden).
+If no user interaction (borrow, repay, deposit, withdraw) has occurred since the last accrual, the `cash_reserve` is stale and the admin receives less revenue than actually available.
 
-## Internal Pre-conditions
+### Internal Pre-conditions
 
-1. Reserve must have outstanding borrows generating interest.
-2. Time must have elapsed since last user interaction (borrow/repay/deposit/withdraw) on the asset.
+1. [Borrowers need to have outstanding borrows to set] the reserve to have active interest generation.
+2. [No user needs to interact with the reserve to set] time elapsed since last user interaction (borrow/repay/deposit/withdraw) on the asset.
 
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Interest accrues on outstanding borrows but no user interactions trigger `accrue_interest()`.
 2. Admin calls `take_revenue` to collect protocol revenue.
 3. `cash_reserve` reflects stale value from last accrual, not current earned interest.
 4. Admin receives less revenue than actually available.
 
-## Impact
+### Impact
 
-Protocol revenue leakage. In low-activity markets or during periods of no user interaction, significant interest can accumulate without being reflected in `cash_reserve`. The admin cannot efficiently collect all earned revenue in a single transaction. Over time, this compounds as uncollected revenue is effectively donated to depositors via an inflated exchange rate.
+The protocol suffers an under-collection of revenue. In low-activity markets or during periods of no user interaction, significant interest can accumulate without being reflected in `cash_reserve`. The admin cannot efficiently collect all earned revenue in a single transaction. Over time, this compounds as uncollected revenue is effectively donated to depositors via an inflated exchange rate.
 
-## Code Snippet
+### PoC
 
-- [`revenue.move:23-49`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/entry_points/admin/revenue.move#L23-L49): No `accrue_interest` call
-- [`reserve.move:143`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/reserve.move#L143): `cash_reserve` only updated during accrual
+_No PoC provided._
 
-## Tool used
-
-Manual Review + Automated Analysis (Codex + Claude cross-validation)
-
-## Mitigation
+### Mitigation
 
 Call `accrue_interest` before taking revenue:
 

@@ -1,12 +1,14 @@
-# Flash Loan Fee Bypass via Cross-eMode Group Selection
+### Flash Loan Fee Bypass via Cross-eMode Group Selection
 
-## Summary
+Flash loan borrower will bypass higher fee configurations to reduce protocol revenue
 
-Flash loan borrowers freely choose which eMode group to use, and the fee rate is looked up from that group. If the same asset exists in multiple eMode groups with different flash loan fee rates, borrowers always select the cheapest group, rendering higher-fee configurations in other groups ineffective.
+### Summary
 
-## Vulnerability Detail
+Unrestricted eMode group selection in `borrow_flash_loan` will cause a loss of flash loan fee revenue for the protocol as any borrower will select the eMode group with the lowest flash loan fee rate for a given asset
 
-In `flash_loan.move:36-53`, the borrower specifies `emode_group`:
+### Root Cause
+
+In [`flash_loan.move:36-53`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/entry_points/lending/flash_loan.move#L36-L53) the borrower specifies the eMode group with no restriction:
 
 ```move
 public fun borrow_flash_loan<MarketType, CoinType>(
@@ -19,7 +21,7 @@ public fun borrow_flash_loan<MarketType, CoinType>(
 }
 ```
 
-In `market.move:795-818`, the fee is taken from the specified group:
+In [`market.move:795-818`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/market.move#L795-L818) the fee is taken from the specified group without verifying the borrower's relationship to it:
 
 ```move
 public(package) fun borrow_flash_loan<MarketType, CoinType>(
@@ -35,40 +37,31 @@ public(package) fun borrow_flash_loan<MarketType, CoinType>(
 }
 ```
 
-There is no requirement that the borrower has an obligation or any relationship with the specified eMode group. Any user can borrow a flash loan from any group that lists the asset.
+There is no requirement that the borrower has an obligation or any relationship with the specified eMode group.
 
-## Internal Pre-conditions
+### Internal Pre-conditions
 
-1. Same asset must be onboarded to multiple eMode groups with different flash loan fee rates.
+1. [Admin needs to onboard the same asset to multiple eMode groups to set] the asset to have different flash loan fee rates across groups.
 
-## External Pre-conditions
+### External Pre-conditions
 
 None.
 
-## Attack Path
+### Attack Path
 
 1. Admin configures asset X in eMode group 0 with 0.1% flash loan fee and eMode group 1 with 0.05% fee.
 2. Borrower calls `borrow_flash_loan` specifying eMode group 1.
 3. Fee is computed from group 1's lower rate.
 4. Protocol collects less revenue than group 0's intended fee.
 
-## Impact
+### Impact
 
-- **Revenue loss**: Admin-intended higher flash loan fees for specific eMode groups are bypassed
-- **Fee configuration futility**: If USDC exists in eMode group 0 with 0.1% fee and eMode group 1 with 0.05% fee, all rational borrowers use group 1
-- **Competitive disadvantage**: Higher-fee groups effectively offer the same flash loan service at a higher price that no one pays
+The protocol suffers a loss of flash loan fee revenue. Admin-intended higher flash loan fees for specific eMode groups are bypassed because all rational borrowers select the cheapest group. If the same asset exists in multiple groups with different fee rates, the higher-fee configurations are rendered ineffective. The admin's only workaround is to ensure all eMode groups have identical flash loan fees for the same asset, which defeats the purpose of per-group configuration.
 
-The admin's only mitigation is to ensure all eMode groups have identical flash loan fees for the same asset, which defeats the purpose of per-group configuration.
+### PoC
 
-## Code Snippet
+_No PoC provided._
 
-- [`flash_loan.move:36-53`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/entry_points/lending/flash_loan.move#L36-L53): User chooses eMode group
-- [`market.move:795-818`](https://github.com/pebble-protocol/sui-move-contract/blob/8171fa8/contracts/protocol/sources/internal/market/market.move#L795-L818): Fee from chosen group
-
-## Tool used
-
-Manual Review + Automated Analysis (Codex + Claude cross-validation)
-
-## Mitigation
+### Mitigation
 
 Either enforce the same flash loan fee across all eMode groups for a given asset, or remove the eMode group parameter from flash loans entirely (use a global per-asset flash loan fee).
