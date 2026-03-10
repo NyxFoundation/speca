@@ -40,7 +40,9 @@ Critically, `liquidate_calculate_seize_ctokens` does **not** use `get_price_with
 
 The borrower suffers excess collateral loss proportional to the EMA-spot price divergence. With the default EMA-spot tolerance of 10% (which is NOT enforced on the liquidation seizure path), a liquidator can extract up to ~10% more collateral than what the EMA-based health check would fairly warrant.
 
-For example, on a $10,000 liquidation with a 10% EMA-spot divergence on the debt token, the liquidator seizes ~$1,000 of additional collateral beyond what the EMA valuation justifies.
+For example, on a $10,000 liquidation with a 10% EMA-spot divergence on the debt token, the liquidator seizes ~$1,000 of additional collateral beyond what the EMA valuation justifies. However, such extreme divergence is uncommon under normal market conditions; realistic excess extraction in typical volatility is in the 1-3% range.
+
+**Severity: Medium** — Per [Sherlock judging guidelines](https://docs.sherlock.xyz/audits/judging/guidelines), this falls under *"Causes a loss of funds but requires certain external conditions or specific states."* Exploitation depends on organic EMA-spot divergence driven by market volatility (attacker cannot amplify the gap without separate oracle manipulation). Additionally, the borrower is already in a legitimately liquidatable state; the bug only causes *excess* seizure, not an illegitimate liquidation.
 
 ## PoC
 
