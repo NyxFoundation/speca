@@ -26,8 +26,8 @@ The circuit breaker at [`market.move:119-124`](https://github.com/pebble-protoco
 
 ### Internal Pre-conditions
 
-1. [Admin needs to call `trigger_circuit_break`] the `CircuitBreakKey` dynamic field to be set to `true`.
-2. [Borrower positions need to be at or near their liquidation threshold] at least one obligation to have weighted collateral value close to or below debt value at the time the circuit breaker is activated.
+1. [Admin needs to call `trigger_circuit_break` to set] the `CircuitBreakKey` dynamic field to be exactly `true`.
+2. [Borrower positions need to be at or near their liquidation threshold to set] at least one obligation to have weighted collateral value at most equal to debt value at the time the circuit breaker is activated.
 
 ### External Pre-conditions
 

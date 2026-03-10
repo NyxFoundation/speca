@@ -1,8 +1,8 @@
-### Whitelisted contract composing flash loans with other market operations will cause depositors to receive fewer cTokens due to inflated exchange rates during the flash loan window
+### Whitelisted contract will cause depositors to receive fewer cTokens by composing flash loans with deposits in a single PTB
 
 ### Summary
 
-`flash_loan_withdraw` in `reserve.move` withdraws tokens from `underlying_balance` but does not decrement `self.cash` will cause an incorrect exchange rate, utilization rate, and borrow availability for depositors and borrowers as a whitelisted `PackageCallerCap` holder will compose a flash loan with other market operations in a single PTB, where the inflated `cash` value produces stale reserve state during the flash loan window
+`flash_loan_withdraw` not decrementing `self.cash` will cause an inflated exchange rate and reduced cToken minting for depositors as a whitelisted `PackageCallerCap` holder will compose a flash loan with deposit operations in a single PTB where the stale `cash` value produces incorrect reserve state during the flash loan window
 
 ### Root Cause
 
@@ -38,7 +38,7 @@ During the flash loan window, the following reserve properties are incorrect:
 3. `borrow_amount()` check -- passes with more headroom than actually available
 4. `deposit_limit_breached()` -- calculates higher total deposit than reality
 
-The existing test at line 785-789 confirms this behavior:
+The existing test at line 785-789 confirms `cash` is not updated:
 ```move
 let (borrowed_balance, loan) = reserve.borrow_flash_loan<MainMarket, BTC>(100);
 assert!(reserve.cash == 1000);  // cash not updated!
@@ -67,40 +67,7 @@ The depositors suffer a loss of cToken value proportional to the flash loan amou
 
 ### PoC
 
-No standalone PoC is possible due to PTB (Programmable Transaction Block) composition limitations in the test framework. Below is a detailed code walkthrough showing the bug path:
-
-1. **`flash_loan_withdraw` does not update `cash`** (`reserve.move:318-324`):
-   ```move
-   fun flash_loan_withdraw<MarketType, CoinType>(
-       self: &mut Reserve<MarketType>,
-       amount: u64,
-   ): Balance<CoinType> {
-       let reserve_token_balance: &mut ReserveBalance<MarketType, CoinType> =
-           dynamic_field::borrow_mut(&mut self.id, ReserveBalanceKey{});
-       reserve_token_balance.underlying_balance.split(amount)
-       // NOTE: self.cash is NOT decremented here
-   }
-   ```
-
-2. **`exchange_rate` uses stale `self.cash`** (`reserve.move:92-101`):
-   ```move
-   public(package) fun exchange_rate<MarketType>(self: &Reserve<MarketType>): Decimal {
-       // cash_plus_borrows_minus_reserves uses self.cash
-       // After flash_loan_withdraw: self.cash is inflated by `amount`
-       // → exchange_rate is inflated
-   }
-   ```
-
-3. **Deposit during flash loan window** receives fewer cTokens:
-   - `exchange_rate` is inflated because `self.cash` is higher than actual balance
-   - `cTokens_minted = deposit_amount / exchange_rate`
-   - Higher exchange rate -> fewer cTokens for the same deposit
-
-4. **Existing test confirms the bug** (`reserve.move:785-789`):
-   ```move
-   let (borrowed_balance, loan) = reserve.borrow_flash_loan<MainMarket, BTC>(100);
-   assert!(reserve.cash == 1000);  // cash NOT updated after withdrawing 100
-   ```
+_No PoC provided._
 
 ### Mitigation
 

@@ -30,8 +30,8 @@ if (segment.value <= reduced_value) {
 
 ### Internal Pre-conditions
 
-1. [Borrower needs to hold a position long enough for] interest to have accrued on the obligation's debt between borrow and repay.
-2. [Borrow and repay need to occur within the same rate limiter segment, or] the repay segment must contain other borrowers' outflow.
+1. [Borrower needs to hold a position long enough for interest to accrue to set] the obligation's debt to be at least greater than the original borrow principal.
+2. [Borrow and repay need to occur within the same rate limiter segment, or the repay segment needs to contain] other borrowers' outflow to be at least greater than `0`.
 
 ### External Pre-conditions
 

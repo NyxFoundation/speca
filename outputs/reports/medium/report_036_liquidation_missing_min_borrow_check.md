@@ -33,8 +33,8 @@ This check is enforced in `handle_borrow` and `handle_repay` but not in `liquida
 
 ### Internal Pre-conditions
 
-1. [Admin needs to have configured `min_borrow_amount`] `min_borrow_amount` to be at least a meaningful value (e.g., 100 USDC) for the invariant to matter in practice.
-2. [Borrower needs to have debt that is partially liquidatable] the obligation's debt to be above `min_borrow_amount` but close enough that a partial liquidation (limited by close_factor) will reduce it below the threshold.
+1. [Admin needs to configure to set] `min_borrow_amount` to be at least a meaningful value (e.g., 100 USDC)
+2. [Borrower needs to take on debt to set] the obligation's debt to be at least above `min_borrow_amount` but close enough that a partial liquidation (limited by close_factor) will reduce it below the threshold
 
 ### External Pre-conditions
 

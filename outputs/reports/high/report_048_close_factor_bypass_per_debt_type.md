@@ -31,8 +31,8 @@ When `debt_value <= close_factor_bypass_min_value`, the function returns early, 
 
 ### Internal Pre-conditions
 
-1. [Admin needs to configure] `close_factor_bypass_min_value` to be at least higher than each individual debt type's value in the obligation.
-2. [Borrower needs to have borrowed] multiple debt types such that each individual debt type value is at most `close_factor_bypass_min_value` but the total debt value is more than `close_factor_bypass_min_value`.
+1. [Admin needs to configure `close_factor_bypass_min_value` to set] the bypass threshold to be at least higher than each individual debt type's value in the obligation.
+2. [Borrower needs to have borrowed multiple debt types to set] each individual debt type value to be at most `close_factor_bypass_min_value` but the total debt value to be more than `close_factor_bypass_min_value`.
 
 ### External Pre-conditions
 

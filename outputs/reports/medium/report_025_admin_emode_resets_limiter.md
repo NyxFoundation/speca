@@ -2,7 +2,7 @@
 
 ### Summary
 
-The `update` function in `emode.move` overwrites the entire limiter configuration (including segment history) when any eMode parameter is updated will cause a rate limiter bypass for the protocol as an attacker monitoring the mempool will front-run an admin eMode update transaction and immediately withdraw/borrow up to the full limiter capacity that should have been blocked
+The `update` function in `emode.move` overwriting the entire limiter configuration (including segment history) when any eMode parameter is updated will cause a rate limiter bypass for the protocol as an attacker monitoring the mempool will front-run an admin eMode update transaction and immediately withdraw/borrow up to the full limiter capacity that should have been blocked.
 
 ### Root Cause
 
@@ -21,8 +21,8 @@ The `Limiter` struct tracks sliding window segments with timestamps and cumulati
 
 ### Internal Pre-conditions
 
-1. [Rate limiter needs to have recorded outflow segments to set] limiter capacity utilization to be at least near maximum (e.g., 900/1000)
-2. [Admin needs to call `update_asset_in_emode_group` to set] any eMode parameter to a new value
+1. [Rate limiter needs to have recorded outflow segments to set] limiter capacity utilization to be at least near maximum (e.g., 900/1000).
+2. [Admin needs to call `update_asset_in_emode_group` to set] any eMode parameter to a new value.
 
 ### External Pre-conditions
 

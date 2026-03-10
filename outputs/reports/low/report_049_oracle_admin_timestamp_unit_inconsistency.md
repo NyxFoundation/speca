@@ -18,7 +18,7 @@ timestamp_ms: clock::timestamp_ms(clock)
 
 ### Internal Pre-conditions
 
-1. [Admin needs to call] `update_price_delay_tolerance_ms` on `x_oracle` to emit the inconsistent event.
+1. [Admin needs to call `update_price_delay_tolerance_ms` on `x_oracle` to trigger] the `PriceDelayToleranceUpdated` event emission with seconds-based timestamp.
 
 ### External Pre-conditions
 

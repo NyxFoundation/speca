@@ -30,8 +30,8 @@ assert!(ctokens.value() > 0, error::reserve_zero_coin_not_allowed());
 
 ### Internal Pre-conditions
 
-1. [Liquidation or partial repayment needs to have reduced debt to dust level] the obligation's remaining debt to be small enough that `seize_ctokens` computes to less than 1.0 in Decimal representation before `floor()`.
-2. [The exchange rate and price ratio needs to amplify the dust effect] the collateral-to-debt price ratio to be such that the computed seize amount for the full remaining debt is less than 1 cToken.
+1. [Liquidation or partial repayment needs to have reduced debt to dust level to set] the obligation's remaining debt to be small enough that `seize_ctokens` computes to less than 1.0 in Decimal representation before `floor()`.
+2. [The exchange rate and price ratio needs to amplify the dust effect to set] the collateral-to-debt price ratio such that the computed seize amount for the full remaining debt is less than 1 cToken.
 
 ### External Pre-conditions
 
@@ -48,7 +48,7 @@ assert!(ctokens.value() > 0, error::reserve_zero_coin_not_allowed());
 
 ### Impact
 
-The protocol suffers ongoing bad debt accumulation from unliquidatable dust positions. Over time, many small underwater positions erode the protocol's solvency. An attacker can deliberately create many near-minimum positions that eventually become unliquidatable dust as a griefing vector against the protocol. This is the terminal step in a chain with report_036 (which creates the dust via missing `min_borrow_amount` check) and report_059 (which causes liquidator overpayment via ceiling rounding on the very liquidation that creates the dust).
+The protocol suffers ongoing bad debt accumulation from unliquidatable dust positions. Over time, many small underwater positions erode the protocol's solvency. An attacker can deliberately create many near-minimum positions that eventually become unliquidatable dust as a griefing vector against the protocol.
 
 ### PoC
 

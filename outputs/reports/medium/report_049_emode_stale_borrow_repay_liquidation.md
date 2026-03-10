@@ -62,8 +62,8 @@ This is distinct from report_005 which covers only the `handle_borrow` path (lin
 
 ### Internal Pre-conditions
 
-1. [Borrower needs to have borrowed to set] at least one obligation to have outstanding debt in an eMode group
-2. [Time needs to elapse since last interaction to set] the reserve `borrow_index` to be greater than the obligation's stored `borrow_index`
+1. [Borrower needs to call borrow to set] outstanding debt in the eMode group to be at least 1 for the target asset.
+2. [Time needs to elapse without interaction to set] the reserve `borrow_index` to be greater than the obligation's stored `borrow_index` (i.e., stale interest has accumulated).
 
 ### External Pre-conditions
 

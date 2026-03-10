@@ -33,8 +33,8 @@ When `liquidation_ltv = 0`, the check becomes `user_ltv > 0`, which passes for a
 
 ### Internal Pre-conditions
 
-1. [Admin needs to activate] ADL for an eMode group with `liquidation_factor_base` and `liquidation_factor_hourly_drop` set to non-zero values.
-2. [Admin needs to fail to cancel] ADL before `liquidation_factor_hourly_drop * hours >= liquidation_factor_base` (e.g., 85 hours with base=0.85 and drop=0.01).
+1. [Admin needs to activate ADL to set] `liquidation_factor_base` and `liquidation_factor_hourly_drop` to be other than 0
+2. [Admin needs to leave ADL active to set] elapsed time to be at least `liquidation_factor_base / liquidation_factor_hourly_drop` hours (e.g., 85 hours with base=0.85 and drop=0.01)
 
 ### External Pre-conditions
 

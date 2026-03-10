@@ -23,8 +23,8 @@ ADL entrypoints (`liquidate_adl_borrow` / `liquidate_adl_deposit`) always pass a
 
 ### Internal Pre-conditions
 
-1. [Obligation needs to have lost] all collateral through prior liquidation but still carry residual debt (bad-debt tail position).
-2. [Admin needs to activate] ADL for the relevant eMode group.
+1. [Prior liquidation needs to seize collateral to set] `collateral_total_value` to be exactly 0 while residual debt remains (bad-debt tail position).
+2. [Admin needs to activate ADL to set] ADL to be active for the relevant eMode group.
 
 ### External Pre-conditions
 

@@ -16,8 +16,8 @@ The counter `num_obligation_reward_managers` is incremented at [`reward_manager.
 
 ### Internal Pre-conditions
 
-1. [Attacker needs to create an obligation and participate to set] `num_obligation_reward_managers` to be at least 1 in the target reward pool
-2. [Admin needs to wait for the reward period to end to set] the pool to be past its end time
+1. [Attacker needs to create an obligation and participate to set] `num_obligation_reward_managers` to be at least 1 in the target reward pool.
+2. [Reward period needs to expire to set] the pool's current time to be at least the configured `end_time`.
 
 ### External Pre-conditions
 

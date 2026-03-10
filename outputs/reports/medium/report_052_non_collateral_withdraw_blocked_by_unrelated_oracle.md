@@ -30,8 +30,8 @@ assert!(is_obligation_safe, error::obligation_not_safe_after_operation());
 
 ### Internal Pre-conditions
 
-1. [Admin needs to configure an asset with `collateral_factor_bps = 0`] `can_be_collateral()` to be `false` for the deposited asset in the user's eMode group.
-2. [User needs to have created an obligation with at least one debt or collateral asset] the obligation to contain assets whose oracle prices can become stale.
+1. [Admin needs to configure an asset with `collateral_factor_bps = 0` to set] `can_be_collateral()` to be `false` for the deposited asset in the user's eMode group.
+2. [User needs to have created an obligation with at least one debt or collateral asset to set] the obligation to contain assets whose oracle prices can become stale.
 
 ### External Pre-conditions
 

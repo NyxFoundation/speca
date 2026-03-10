@@ -25,7 +25,7 @@ Example: `liquidation_factor_bps = 9524`, `liquidation_incentive_bps = 499`:
 
 ### Internal Pre-conditions
 
-1. [Admin needs to configure an eMode group to set] `liquidation_factor_bps` and `liquidation_incentive_bps` to values near the boundary where their product approaches `BPS_DENOMINATOR`.
+1. [Admin needs to configure an eMode group to set] `liquidation_factor_bps` and `liquidation_incentive_bps` to be at values near the boundary where their product approaches `BPS_DENOMINATOR`.
 
 ### External Pre-conditions
 

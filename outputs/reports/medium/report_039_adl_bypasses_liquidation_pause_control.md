@@ -17,8 +17,8 @@ Both ADL functions proceed directly into `liquidation_inner` without this guard,
 
 ### Internal Pre-conditions
 
-1. [Admin needs to pause] liquidation for a specific asset (e.g., due to oracle incident).
-2. [Admin needs to have activated] ADL for the relevant eMode group.
+1. [Admin needs to call pause_liquidation to set] `liquidation_paused` to be exactly `true` for a specific asset (e.g., due to oracle incident).
+2. [Admin needs to activate ADL to set] ADL to be active for the relevant eMode group.
 
 ### External Pre-conditions
 

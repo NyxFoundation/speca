@@ -6,7 +6,7 @@ The lack of retry logic in `generate_referral_code` (single random generation wi
 
 ### Root Cause
 
-In [`contracts/protocol/sources/internal/referral.move:168-170`](contracts/protocol/sources/internal/referral.move#L168-L170) the `generate_referral_code` function generates only one random 6-character code and aborts immediately on collision via `assert!(!self.code_owner.contains(referral_code), ...)` instead of implementing the documented retry loop:
+In [`referral.move:168-170`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/referral.move#L168-L170) the `generate_referral_code` function generates only one random 6-character code and aborts immediately on collision via `assert!(!self.code_owner.contains(referral_code), ...)` instead of implementing the documented retry loop:
 
 ```move
 // 1. Generate one random code

@@ -32,7 +32,7 @@ The overpayment originates from ceiling rounding at lines 738-743 and 762-766 (b
 
 ### Internal Pre-conditions
 
-1. [Liquidation needs to trigger the ceiling-based refund calculation to make] the ceiling operation produce a non-zero residual (i.e., the debt amount is not an exact integer).
+1. [Liquidation needs to trigger the ceiling-based refund calculation to set] the ceiling operation to produce a non-zero residual (i.e., the debt amount needs to be other than an exact integer).
 
 ### External Pre-conditions
 

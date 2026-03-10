@@ -21,9 +21,9 @@ The exchange rate formula is `(cash + debt - cash_reserve) / total_supply`. With
 
 ### Internal Pre-conditions
 
-1. [Admin needs to configure an eMode group to set] an asset with `can_be_collateral() == false` (i.e., `liquidation_factor == 0`).
-2. [Borrowers need to borrow the asset to set] the asset to have active borrows generating interest (otherwise exchange rate is unchanged).
-3. [No user needs to interact with the reserve to set] sufficient time elapsed since the last interaction so the stale interest is material.
+1. [Admin needs to configure an eMode group to set] `liquidation_factor` to be exactly 0 for the target asset (making `can_be_collateral()` return false).
+2. [Borrowers need to borrow the asset to set] outstanding debt to be at least 1 (generating interest that increases the exchange rate).
+3. [No user needs to interact with the reserve to set] time since last accrual to be at least a material duration so the stale interest is significant.
 
 ### External Pre-conditions
 

@@ -30,8 +30,8 @@ This inconsistency means the activation check (global) and stop check (emode-spe
 
 ### Internal Pre-conditions
 
-1. [Admin needs to register] ADL borrow deleverage for the target emode group with a `target_amount` threshold.
-2. [Borrowers need to borrow] the same debt token (e.g., USDC) across multiple emode groups such that the sum across all groups exceeds `target_amount`, even if the target group's own borrows are below it.
+1. [Admin needs to register ADL borrow deleverage to set] the `target_amount` threshold for the target emode group.
+2. [Borrowers need to borrow the same debt token across multiple emode groups to set] the sum across all groups to be at least higher than `target_amount`, even if the target group's own borrows are below it.
 
 ### External Pre-conditions
 
