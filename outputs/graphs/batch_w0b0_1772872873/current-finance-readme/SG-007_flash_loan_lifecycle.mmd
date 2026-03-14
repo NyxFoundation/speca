@@ -1,0 +1,42 @@
+---
+title: "flash_loan_lifecycle (Current Finance - Pebble Protocol Lending)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_borrow_validate: app.ensure_version_matches()
+    q_borrow_validate --> q_borrow_market: app.validate_market(market)
+    q_borrow_market --> q_borrow_permission: app.ensure_has_permission(cap_id, flash_loan_permission)
+    q_borrow_permission --> q_error_perm: permission denied
+    q_borrow_permission --> q_check_circuit: assert(!market.has_circuit_break_triggered())
+    q_check_circuit --> q_error_circuit: circuit break triggered
+    q_check_circuit --> q_borrow_inner: borrow_flash_loan_inner(market, amount, emode_group, ctx)
+    q_borrow_inner --> q_check_cash: assert(amount < reserve.cash)
+    q_check_cash --> q_error_cash: amount >= cash
+    q_check_cash --> q_withdraw: flash_loan_withdraw(amount)
+    q_withdraw --> q_create_potato: create FlashLoan hot potato
+    q_create_potato --> q_emit_borrow: emit BorrowFlashLoanEvent
+    q_emit_borrow --> q_user_logic: (caller executes arbitrary logic with borrowed coins)
+    q_user_logic --> q_repay_validate: app.ensure_version_matches()
+    q_repay_validate --> q_repay_market: app.validate_market(market)
+    q_repay_market --> q_emit_repay: emit RepayFlashLoanEvent
+    q_emit_repay --> q_repay_inner: market.repay_flash_loan(coin, loan, referral, maybe_code, ctx)
+    q_repay_inner --> q_check_amount: assert(coin.value() == loan.amount)
+    q_check_amount --> q_error_repay: coin amount != loan amount
+    q_check_amount --> q_deposit_repay: deposit underlying balance
+    q_deposit_repay --> q_handle_fee: fee > 0?
+    q_handle_fee --> q_increase_reserve: increase_reserve_only (fee to cash_reserve)
+    q_handle_fee --> q_destroy_fee: destroy_zero(fee)
+    q_increase_reserve --> [*]: FlashLoan consumed (hot potato destroyed)
+    q_destroy_fee --> [*]: FlashLoan consumed (hot potato destroyed)
+
+    note right of q_borrow_inner
+        INV-001: Flash loan amount must be < cash (not <=), reserves can be borrowed
+        INV-002: FlashLoan hot potato enforces mandatory repayment within same PTB
+        INV-003: Flash loan does NOT increase reserve.debt (not a regular borrow)
+    end note
+
+    note right of q_repay_inner
+        INV-004: Exact principal amount must be repaid; fees are additional
+        INV-005: Fee goes entirely to cash_reserve (protocol revenue)
+        INV-006: emode_group determines flash loan fee rate (fee tied to emode per design)
+    end note

@@ -1,0 +1,40 @@
+---
+title: "liquidate (Current Finance - Pebble Protocol Lending)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_pre_check: pre_liquidation_check(app, cap, market, liquidation_permission)
+    q_pre_check --> q_validate: app.validate_market(market)
+    q_validate --> q_version: app.ensure_version_matches()
+    q_version --> q_check_permission: app.ensure_has_permission(cap_id, permission)
+    q_check_permission --> q_error_perm: permission denied
+    q_check_permission --> q_check_circuit: assert(!market.has_circuit_break_triggered())
+    q_check_circuit --> q_error_circuit: circuit break triggered
+    q_check_circuit --> q_timestamp: now = clock.timestamp_ms() / 1000
+    q_timestamp --> q_capture: repay_amount = available_repay_coin.value()
+    q_capture --> q_handle_liq: market.handle_liquidation(obligation_id, repay_coin, decimals_registry, x_oracle, clock, now, ctx)
+    q_handle_liq --> q_check_eligible: check obligation risk level >= 1
+    q_check_eligible --> q_error_healthy: obligation not liquidatable
+    q_check_eligible --> q_calc_close: calculate max repay within close_factor
+    q_calc_close --> q_check_bypass: close_factor_bypass_min_value check
+    q_check_bypass --> q_seize_collateral: seize collateral ctokens from obligation
+    q_seize_collateral --> q_liquidate_ctokens: reserve.liquidate_ctokens(ctoken_amount, liq_revenue_factor)
+    q_liquidate_ctokens --> q_repay_debt: repay obligation debt
+    q_repay_debt --> q_post_liq: post_liquidation(..., LiquidationType::NormalLiquidation)
+    q_post_liq --> q_update_miner_borrow: update borrow reward manager
+    q_update_miner_borrow --> q_update_miner_deposit: update deposit reward manager
+    q_update_miner_deposit --> q_emit: emit LiquidateEvent
+    q_emit --> q_transfer: transfer collateral and refund to liquidator
+    q_transfer --> [*]: return
+
+    note right of q_handle_liq
+        INV-001: Soft liquidation - repay capped so risk level returns to exactly 1.0 after liquidation
+        INV-002: close_factor limits max repay per transaction
+        INV-003: close_factor_bypass_min_value allows full liquidation for small positions
+    end note
+
+    note right of q_liquidate_ctokens
+        INV-004: protocol_seize_amount = liq_revenue_factor * collateral_value goes to cash_reserve
+        INV-005: liquidator_seize_amount = collateral_value - protocol_seize_amount
+        INV-006: Liquidation requires PackageCallerCap with liquidation permission
+    end note

@@ -1,0 +1,68 @@
+---
+title: "borrow - Borrow Assets Against Collateral (Scallop Lending)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_version_check: check version matches
+    q_version_check --> q_check_lock: version valid
+    q_version_check --> q_error_version: version mismatch
+    q_error_version --> [*]: revert
+
+    q_check_lock --> q_check_owner: obligation not locked
+    q_check_lock --> q_error_locked: obligation locked
+    q_error_locked --> [*]: revert 770
+
+    q_check_owner --> q_check_isolated: obligation_key.obligation_id == obligation.id
+    q_check_owner --> q_error_owner: not owner
+    q_error_owner --> [*]: revert 0
+
+    q_check_isolated --> q_check_not_collateral: if isolated asset, no other debt types exist in obligation
+    q_check_isolated --> q_error_isolated: obligation already has other debt
+    q_error_isolated --> [*]: revert
+
+    q_check_not_collateral --> q_check_amount: T is not a deposited collateral type
+    q_check_not_collateral --> q_error_collateral_coin: cannot borrow deposited collateral type
+    q_error_collateral_coin --> [*]: revert 1284
+
+    q_check_amount --> q_update_oracle: borrow_amount > minimum
+    q_check_amount --> q_error_too_small: borrow amount too small
+    q_error_too_small --> [*]: revert 1282
+
+    q_update_oracle --> q_accrue_interest: x_oracle price feed updated
+    q_accrue_interest --> q_calc_fee: compound_interest(market, clock)
+    q_calc_fee --> q_calc_collateral: borrow_fee = borrow_amount * fee_rate (0.3% main, 1% isolated/emerging)
+    q_calc_collateral --> q_calc_capacity: collateral_value = sum(collateral_i * price_i * collateral_weight_i)
+    q_calc_capacity --> q_calc_new_debt: borrowing_capacity = collateral_value
+
+    q_calc_new_debt --> q_check_health: new_debt = (borrow_amount * price * borrow_weight) + existing_debt_weighted
+    q_check_health --> q_check_outflow: new_debt <= borrowing_capacity
+    q_check_health --> q_error_too_much: borrow exceeds capacity
+    q_error_too_much --> [*]: revert 1281
+
+    q_check_outflow --> q_check_reserve: borrow_amount <= outflow_limit_remaining
+    q_check_outflow --> q_error_outflow: outflow limit exceeded
+    q_error_outflow --> [*]: revert
+
+    q_check_reserve --> q_update_debt: pool reserve >= borrow_amount
+    q_check_reserve --> q_error_reserve: reserve not enough
+    q_error_reserve --> [*]: revert 81924
+
+    q_update_debt --> q_update_pool: obligation.debts[T] += borrow_amount
+    q_update_pool --> q_deduct_fee: pool.available -= borrow_amount
+    q_deduct_fee --> q_emit: actual_received = borrow_amount - borrow_fee
+    q_emit --> [*]: emit BorrowEventV3, return Coin of actual_received
+
+    note right of q_check_isolated
+        INV-001: isolated asset debt cannot coexist with other debt types in same obligation
+    end note
+
+    note right of q_check_health
+        INV-002: after borrow, debt_value_weighted <= collateral_value_weighted (position healthy)
+        INV-003: borrow_weight >= 1.0 for all assets (volatile assets have higher weight)
+    end note
+
+    note right of q_deduct_fee
+        INV-004: borrow_fee = 0.3% for main assets, 1% for isolated/emerging assets
+        INV-005: fee deducted from loan amount, not charged separately
+        INV-006: fee allocated to protocol reserve
+    end note

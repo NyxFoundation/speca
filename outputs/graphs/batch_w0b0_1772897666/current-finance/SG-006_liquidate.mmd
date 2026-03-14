@@ -1,0 +1,57 @@
+---
+title: "liquidate (Current Finance: Lending Protocol)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_pre_check: pre_liquidation_check(app, cap, market)
+    q_pre_check --> q_validate: validate_market(), ensure_version_matches()
+    q_validate --> q_permission: ensure_has_permission(cap, liquidation)
+    q_permission --> q_circuit: has_circuit_break_triggered()
+    q_circuit --> q_error_cb: circuit_break == true
+    q_circuit --> q_timestamp: circuit_break == false
+    q_error_cb --> [*]: abort market_under_circuit_break
+    q_timestamp --> q_check_market: now = clock.timestamp_ms() / 1000
+    q_check_market --> q_error_market: obligation.market_id != market.id
+    q_check_market --> q_check_collateral: obligation.market_id == market.id
+    q_error_market --> [*]: abort obligation_from_different_market
+    q_check_collateral --> q_error_not_col: can_be_collateral == false
+    q_check_collateral --> q_check_liq_paused: can_be_collateral == true
+    q_error_not_col --> [*]: abort asset_not_collateral
+    q_check_liq_paused --> q_error_paused: liquidation_paused == true
+    q_check_liq_paused --> q_refresh: liquidation_paused == false
+    q_error_paused --> [*]: abort liquidation_paused_for_asset
+    q_refresh --> q_check_safe: refresh_obligation_assets_interest(now)
+    q_check_safe --> q_error_safe: weighted_debt <= collateral_weighted (still safe)
+    q_check_safe --> q_check_close: weighted_debt > collateral_weighted (unsafe)
+    q_error_safe --> [*]: abort liquidation_obligation_still_safe
+    q_check_close --> q_bypass_close: near bad debt (collateral <= 1.01 * debt)
+    q_check_close --> q_check_min_val: not near bad debt
+    q_bypass_close --> q_calc_seize: close_factor bypassed
+    q_check_min_val --> q_skip_close: debt_value <= close_factor_bypass_min_value
+    q_check_min_val --> q_enforce_close: debt_value > close_factor_bypass_min_value
+    q_skip_close --> q_calc_seize: close_factor not enforced
+    q_enforce_close --> q_error_close: repay_amount > debt * close_factor
+    q_enforce_close --> q_calc_seize: repay_amount <= debt * close_factor
+    q_error_close --> [*]: abort liquidation_close_factor_exceeded
+    q_calc_seize --> q_cap_ctokens: seize_ctokens = (repay * (1 + incentive) * debt_price) / (col_price * exchange_rate)
+    q_cap_ctokens --> q_refund_excess: total_ctokens < seized_ctokens
+    q_cap_ctokens --> q_repay_debt: total_ctokens >= seized_ctokens
+    q_refund_excess --> q_repay_debt: seized_ctokens = total_ctokens, refund excess
+    q_repay_debt --> q_withdraw_ctokens: obligation.unsafe_repay_debt_only(repay_amount)
+    q_withdraw_ctokens --> q_liquidate_reserve: obligation.withdraw_ctokens(seized_ctokens)
+    q_liquidate_reserve --> q_update_emode: reserve.liquidate_ctokens(ctokens, liq_revenue_factor)
+    q_update_emode --> q_repay_reserve: emode_group.update_asset_borrow(old, new)
+    q_repay_reserve --> q_try_stop_adl: reserve.repay_amount(repay_coin)
+    q_try_stop_adl --> q_update_mining: try_stop_borrow/collateral_deleverage()
+    q_update_mining --> q_emit: update_obligation_reward_manager()
+    q_emit --> [*]: return (collateral_coin, refund_coin)
+
+    note right of q_check_safe
+        INV-001: Liquidation only when weighted_debt > collateral_weighted (obligation unsafe)
+        INV-002: close_factor limits partial liquidation amount
+        INV-003: close_factor bypassed when near bad debt (collateral <= 1.01 * total_debt)
+        INV-004: liquidation_incentive added to repay for seize calculation
+        INV-005: protocol takes liquidation_fee_rate from seized collateral as revenue
+        INV-006: soft liquidation: cannot liquidate more than available ctokens
+        INV-007: spot price used for liquidation seize calculation (not EMA)
+    end note

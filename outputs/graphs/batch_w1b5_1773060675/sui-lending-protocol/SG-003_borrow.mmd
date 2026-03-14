@@ -1,0 +1,58 @@
+---
+title: "borrow (Scallop Sui Lending Protocol)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_version: assert_current_version(version)
+    q_version --> q_whitelist: assert_whitelist_access(market, ctx)
+    q_whitelist --> q_check_lock: obligation::borrow_locked(obligation) == false
+    q_check_lock --> q_check_active: obligation not locked
+    q_check_lock --> q_abort_locked: obligation is locked
+    q_abort_locked --> [*]: abort obligation_locked
+    q_check_active --> q_calc_time: is_base_asset_active(market, coin_type)
+    q_check_active --> q_abort_inactive: base asset not active
+    q_abort_inactive --> [*]: abort base_asset_not_active_error
+    q_calc_time --> q_check_key: now = clock_timestamp_ms / 1000
+    q_check_key --> q_check_collateral_loop: assert_key_match(obligation, obligation_key)
+    q_check_collateral_loop --> q_check_isolated: !has_coin_x_as_collateral(obligation, coin_type)
+    q_check_collateral_loop --> q_abort_collateral: has collateral of same type
+    q_abort_collateral --> [*]: abort unable_to_borrow_a_collateral_coin
+    q_check_isolated --> q_check_min: assert_isolated_asset(market, obligation, coin_type)
+    q_check_min --> q_check_apm: borrow_amount > min_borrow_amount
+    q_check_min --> q_abort_small: borrow_amount <= min_borrow_amount
+    q_abort_small --> [*]: abort borrow_too_small_error
+    q_check_apm --> q_handle_outflow: check_is_collateral_price_fluctuate(obligation, market, oracle, clock)
+    q_handle_outflow --> q_handle_borrow: market::handle_outflow(market, borrow_amount, now)
+    q_handle_borrow --> q_init_debt: borrowed_balance = market::handle_borrow(market, borrow_amount, now)
+    q_init_debt --> q_accrue: obligation::init_debt(obligation, market, coin_type)
+    q_accrue --> q_increase_debt: obligation::accrue_interests(obligation, market)
+    q_increase_debt --> q_check_health: obligation::increase_debt(obligation, coin_type, borrow_amount)
+    q_check_health --> q_check_borrow_limit: collaterals_value > debts_value
+    q_check_health --> q_abort_too_much: collaterals_value <= debts_value
+    q_abort_too_much --> [*]: abort borrow_too_much_error
+    q_check_borrow_limit --> q_calc_fee: current_total_global_debt <= borrow_limit
+    q_check_borrow_limit --> q_abort_limit: current_total_global_debt > borrow_limit
+    q_abort_limit --> [*]: abort borrow_limit_reached_error
+    q_calc_fee --> q_split_fee: borrow_fee = borrow_amount * borrow_fee_rate
+    q_split_fee --> q_emit: split fee and referral from borrowed_balance
+    q_emit --> [*]: return (borrowed_balance, referral_fee)
+
+    note right of q_check_isolated
+        INV-001: isolated asset cannot coexist with other debt types in same obligation
+        INV-002: non-isolated borrow cannot coexist with isolated debt
+    end note
+
+    note right of q_check_health
+        INV-003: collaterals_value_usd_for_borrow > debts_value_usd_with_weight after borrow
+        INV-004: obligation remains overcollateralized after debt increase
+    end note
+
+    note right of q_check_borrow_limit
+        INV-005: global total debt per asset must not exceed borrow_limit
+        INV-006: outflow limiter tracks borrow amounts within rolling window
+    end note
+
+    note right of q_calc_fee
+        INV-007: borrow fee deducted from borrowed_balance, not added to debt
+        INV-008: referral discount and referral share applied before protocol fee
+    end note
