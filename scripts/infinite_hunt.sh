@@ -8,27 +8,26 @@
 #
 # Usage:
 #   bash scripts/infinite_hunt.sh
-#   bash scripts/infinite_hunt.sh --dry-run   # プロンプトだけ表示
+#   bash scripts/infinite_hunt.sh --dry-run
 # ============================================================
 
-set -euo pipefail
+set -uo pipefail  # no -e: we handle errors ourselves
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 AUDIT_TARGET="C:/Users/shieru_k/Desktop/audit-current-main"
-ISSUE_COMMENT_ID="4024684461"
-ISSUE_NUMBER="138"
 BRANCH="hiro/high-bug-hunting"
 LOG_DIR="$REPO_ROOT/outputs/logs/hunt"
 FINDINGS_DIR="$REPO_ROOT/outputs/hunt_findings"
-STATE_FILE="$REPO_ROOT/outputs/hunt_state.json"
+STATE_FILE="$REPO_ROOT/outputs/hunt_state.txt"
 DRY_RUN="${1:-}"
 
 mkdir -p "$LOG_DIR" "$FINDINGS_DIR"
 
 # ============================================================
-# 探索戦略ローテーション (各ラウンドで異なるアングル)
+# 探索戦略ローテーション
 # ============================================================
 STRATEGIES=(
   "exchange_rate_manipulation"
@@ -63,7 +62,6 @@ STRATEGIES=(
   "referral_rebate_overflow"
 )
 
-# 既知のバグ (重複回避用)
 KNOWN_BUGS="003:spot_ema_price_inconsistency
 048:close_factor_bypass_per_debt
 062:bad_debt_not_socialized
@@ -88,7 +86,7 @@ KNOWN_BUGS="003:spot_ema_price_inconsistency
 057:repay_fee_rate_misused"
 
 # ============================================================
-# ヘルパー関数
+# Pure bash ヘルパー (Python不要)
 # ============================================================
 
 log() {
@@ -97,7 +95,7 @@ log() {
 
 get_round() {
   if [[ -f "$STATE_FILE" ]]; then
-    python3 -c "import json; print(json.load(open('$STATE_FILE')).get('round', 0))" 2>/dev/null || echo 0
+    grep "^round=" "$STATE_FILE" 2>/dev/null | cut -d= -f2 || echo 0
   else
     echo 0
   fi
@@ -107,41 +105,16 @@ save_state() {
   local round="$1"
   local strategy="$2"
   local status="$3"
-  python3 -c "
-import json, datetime
-state = {}
-try:
-    state = json.load(open('$STATE_FILE'))
-except: pass
-state['round'] = $round
-state['strategy'] = '$strategy'
-state['status'] = '$status'
-state['last_update'] = datetime.datetime.now().isoformat()
-state.setdefault('findings', [])
-state.setdefault('total_rounds', 0)
-state['total_rounds'] = max(state['total_rounds'], $round)
-json.dump(state, open('$STATE_FILE', 'w'), indent=2)
-"
-}
-
-add_finding() {
-  local finding_id="$1"
-  local title="$2"
-  python3 -c "
-import json, datetime
-state = json.load(open('$STATE_FILE'))
-state.setdefault('findings', [])
-state['findings'].append({
-    'id': '$finding_id',
-    'title': '$title',
-    'found_at': datetime.datetime.now().isoformat()
-})
-json.dump(state, open('$STATE_FILE', 'w'), indent=2)
-"
+  cat > "$STATE_FILE" <<STATEEOF
+round=$round
+strategy=$strategy
+status=$status
+last_update=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+STATEEOF
 }
 
 # ============================================================
-# バグハンティング用プロンプト生成
+# プロンプト生成
 # ============================================================
 
 generate_prompt() {
@@ -208,8 +181,8 @@ Focus on these based on strategy "$strategy":
       ### Mitigation
       (fix suggestion)
 
-5. Save the report to: outputs/reports/high/report_{NNN}_{slug}.md
-6. Save the PoC to: outputs/pocs/poc_{NNN}_{slug}.move
+5. Save the report to: $REPO_ROOT/outputs/reports/high/report_{NNN}_{slug}.md
+6. Save the PoC to: $REPO_ROOT/outputs/pocs/poc_{NNN}_{slug}.move
    Use the next available number after 062.
 
 If you find NOTHING new after thorough analysis, output exactly:
@@ -224,8 +197,8 @@ PROMPT
 # ============================================================
 
 wait_for_rate_limit() {
-  local wait_secs="${1:-300}"  # デフォルト5分
-  local max_wait=3600          # 最大1時間
+  local wait_secs="${1:-300}"
+  local max_wait=3600
   local attempt=0
 
   while true; do
@@ -239,20 +212,18 @@ wait_for_rate_limit() {
     save_state "$(get_round)" "waiting" "rate_limited"
     sleep "$current_wait"
 
-    # テストコール: claude が応答するか確認
     log "Testing if rate limit has recovered..."
-    local test_result
-    test_result=$(echo "Reply with exactly: OK" | claude --print 2>&1) || true
+    local test_result=""
+    test_result=$(echo "Reply with exactly the word OK and nothing else" | timeout 60 claude --print 2>&1) || true
 
     if echo "$test_result" | grep -qi "OK"; then
       log "Rate limit recovered! Resuming..."
       return 0
-    elif echo "$test_result" | grep -qi "rate\|limit\|429\|overloaded"; then
+    elif echo "$test_result" | grep -qi "rate\|limit\|429\|overloaded\|capacity"; then
       log "Still rate limited..."
       continue
     else
-      # 他のエラーでもとりあえず続行
-      log "Got response (possibly recovered): ${test_result:0:100}"
+      log "Got response, assuming recovered"
       return 0
     fi
   done
@@ -284,24 +255,27 @@ run_hunt_round() {
     return 0
   fi
 
-  # Claude CLI 実行 (--print でストリーム出力、結果をファイルに保存)
   local exit_code=0
   local output_file="$FINDINGS_DIR/round_${round}_${strategy}_${timestamp}.md"
 
-  # タイムアウト30分、allowedTools制限
   echo "$prompt" | timeout 1800 claude \
     --print \
-    --allowedTools "Read,Glob,Grep,Write,Bash(read-only)" \
-    --max-turns 30 \
+    --allowed-tools "Read,Glob,Grep,Write" \
+    --add-dir "$AUDIT_TARGET" \
+    --permission-mode bypassPermissions \
+    --max-budget-usd 5 \
     > "$output_file" 2>"$log_file" || exit_code=$?
 
   # レートリミットチェック
   if [[ $exit_code -ne 0 ]]; then
-    if grep -qi "rate\|limit\|429\|overloaded\|capacity" "$log_file" 2>/dev/null; then
+    local log_content=""
+    log_content=$(cat "$log_file" "$output_file" 2>/dev/null) || true
+
+    if echo "$log_content" | grep -qi "rate\|limit\|429\|overloaded\|capacity"; then
       log "Rate limit detected in round #$round"
       save_state "$round" "$strategy" "rate_limited"
-      return 2  # レートリミット用の特別な戻り値
-    elif grep -qi "timeout\|timed out" "$log_file" 2>/dev/null; then
+      return 2
+    elif echo "$log_content" | grep -qi "timeout\|timed out"; then
       log "Timeout in round #$round — moving to next strategy"
       save_state "$round" "$strategy" "timeout"
       return 0
@@ -312,37 +286,32 @@ run_hunt_round() {
     fi
   fi
 
-  # 結果解析: 新しいfindingがあるか
+  # 結果解析
   if grep -q "NO_NEW_FINDINGS" "$output_file" 2>/dev/null; then
     log "No new findings in round #$round ($strategy)"
     save_state "$round" "$strategy" "no_findings"
     return 0
   fi
 
-  # 新しいレポート/PoCファイルがあるかチェック
-  local new_reports
-  new_reports=$(git status --porcelain outputs/reports/high/ outputs/pocs/ 2>/dev/null | grep "^??" | wc -l)
+  # 新しいレポート/PoCファイルがあるか
+  local new_reports=0
+  new_reports=$(git status --porcelain outputs/reports/high/ outputs/pocs/ 2>/dev/null | grep -c "^??" || true)
 
   if [[ "$new_reports" -gt 0 ]]; then
     log "*** NEW FINDING(S) in round #$round! ($new_reports new files) ***"
     save_state "$round" "$strategy" "found"
 
-    # 自動コミット & プッシュ
     git add outputs/reports/high/ outputs/pocs/ 2>/dev/null || true
     git add outputs/hunt_findings/ 2>/dev/null || true
 
-    local commit_msg="feat: HIGH bug hunt round #$round ($strategy) — new finding(s)"
-    git commit -m "$(cat <<EOF
-$commit_msg
+    git commit -m "feat: HIGH bug hunt round #$round ($strategy) — new finding(s)
 
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
-EOF
-)" 2>/dev/null || true
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>" 2>/dev/null || true
 
     git push origin "$BRANCH" 2>/dev/null || true
     log "Committed and pushed new findings"
   else
-    log "Round #$round completed — output saved but no new report files"
+    log "Round #$round completed — no new report files created"
     save_state "$round" "$strategy" "completed"
   fi
 
@@ -364,7 +333,6 @@ main() {
   local round
   round=$(get_round)
 
-  # 無限ループ
   while true; do
     round=$((round + 1))
 
@@ -372,38 +340,31 @@ main() {
     run_hunt_round "$round" || result=$?
 
     if [[ $result -eq 2 ]]; then
-      # レートリミット — 待機して同じラウンドをリトライ
       wait_for_rate_limit 300
-      round=$((round - 1))  # 同じラウンドを再実行
+      round=$((round - 1))
       continue
     fi
 
-    # 全戦略1周したらメッセージ
     if [[ $((round % ${#STRATEGIES[@]})) -eq 0 ]]; then
       log "=== Full strategy rotation complete (${#STRATEGIES[@]} strategies) ==="
       log "=== Starting next rotation with deeper analysis ==="
     fi
 
-    # 短い休憩 (APIを穏やかに使う)
     sleep 5
   done
 }
 
 # ============================================================
-# シグナルハンドラ (Ctrl+C で状態保存)
+# シグナルハンドラ
 # ============================================================
 
 cleanup() {
   log "Interrupted! Saving state..."
-  save_state "$(get_round)" "interrupted" "stopped"
-  log "State saved to $STATE_FILE"
+  save_state "$(get_round)" "interrupted" "stopped" 2>/dev/null || true
+  log "State saved. Exiting."
   exit 0
 }
 
 trap cleanup SIGINT SIGTERM
-
-# ============================================================
-# 実行
-# ============================================================
 
 main "$@"
