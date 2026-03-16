@@ -1,0 +1,198 @@
+{
+  "contest": "2024-05-bakerfi",
+  "issues": [
+    {
+      "number": 48,
+      "title": "_payDebt() Lack of slippage protection",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "upgraded by judge",
+        ":robot:_19_group",
+        "duplicate-32"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/strategies/StrategyLeverage.sol#L545\n\n\n# Vulnerability details\n\n## Vulnerability details\nin `_payDebt()` will perform the following steps\n1. calculate how much `amountIn` is needed to pay back `debtAmount + fee` by using the `quoteExactOutputSingle()` method\n2. call _withdraw(amountIn) to retrieve `ierc20A`.\n3. call _swap(maxAmountIn = amountIn) to get `debtAmount + fee`.\n\n```solidity\n      function _payDebt(uint256 debtAmount, uint256 fee) internal {\n        _repay(wETHA(), debtAmount);\n        // Get a Quote to know how much collateral i require to pay debt\n        (uint256 amountIn, , , ) = uniQuoter().quoteExactOutputSingle(\n@>          IQuoterV2.QuoteExactOutputSingleParams(ierc20A(), wETHA(), debtAmount + fee, 500, 0)\n        );    \n        \n@>      _withdraw(ierc20A(), amountIn, address(this) );\n\n        uint256 output = _swap(\n            ISwapHandler.SwapParams(\n                ierc20A(),\n                wETHA(),\n                ISwapHandler.SwapType.EXACT_OUTPUT,\n@>              amountIn,\n                debtAmount + fee,\n                _swapFeeTier,\n                bytes(\"\")\n            )\n        );\n        // When there are leftovers from the swap, deposit then back\n        uint256 wethLefts = output > (debtAmount + fee) ? output - (debtAmount + fee) : 0;\n        if (wethLefts > 0) {\n            _supply(wETHA(), wethLefts);\n        }\n        emit StrategyUndeploy(msg.sender, debtAmount);\n    }\n```\n\nThe first step to get `amountIn` uses the real time price, then in the third step the `amountIn` is used as the `Max Amount In`.\n\nIt's all real-time pricing, and there is no slippage protection\n\n## Impact\n\n`vault.rebalance()->strategy.harvest() ->_adjustDebt()->_payDebt()` Sandwich attack to manipulate prices\n\n## Recommended Mitigation\n\nAdding slippage protection: range calculation via `TWAP` prices\n\n\n\n## Assessed type\n\nContext"
+    },
+    {
+      "number": 47,
+      "title": "ETHOracle.getLatestPrice need to convert to 18 decimals",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "selected for report",
+        "sponsor confirmed",
+        ":robot:_primary",
+        "H-01"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/oracles/EthOracle.sol#L30\n\n\n# Vulnerability details\n\n## Vulnerability details\nin `ETHOracle.sol` \n`getPrecision()` is defined as `10 ** 18`, but the actual oracle used is 8-decimals\nhttps://data.chain.link/feeds/arbitrum/mainnet/eth-usd\nthis data feeds 's decimals` is 8\n```solidity\n/**\n *  ETH/USD Oracle using chainlink data feeds\n * \n *  For more information about the feed go to \n@> *  https://data.chain.link/feeds/arbitrum/mainnet/eth-usd\n * \n **/\ncontract ETHOracle is IOracle {\n    IChainlinkAggregator private immutable _ethPriceFeed;\n@>  uint256 private constant _PRECISION = 10 ** 18;\n....\n    function getLatestPrice() public view override returns (IOracle.Price memory price) {\n        (, int256 answer, uint256 startedAt, uint256 updatedAt,) = _ethPriceFeed.latestRoundData();\n        if ( answer<= 0 ) revert InvalidPriceFromOracle();        \n        if ( startedAt ==0 || updatedAt == 0 ) revert InvalidPriceUpdatedAt();    \n\n@>      price.price = uint256(answer);  //@audit 8 decimals\n        price.lastUpdate = updatedAt;\n    }\n```\n\n`PythOracle` is used to get prices for other tokens, also `getPrecision() == 18`\n\n```solidity\ncontract PythOracle is IOracle {\n...\n    uint256 private constant _PRECISION = 18;\n\n    function _getPriceInternal(uint256 age) private view returns (IOracle.Price memory outPrice) {\n        PythStructs.Price memory price = age == 0 ? \n            _pyth.getPriceUnsafe(_priceID): \n            _pyth.getPriceNoOlderThan(_priceID, age);\n\n        if (price.expo >= 0) {\n            outPrice.price =\n                uint64(price.price) *\n                uint256(10 ** (_PRECISION + uint32(price.expo)));\n        } else {\n            outPrice.price =\n                uint64(price.price) *\n                uint256(10 ** (_PRECISION - uint32(-price.expo)));\n        }\n        outPrice.lastUpdate = price.publishTime;\n    }\n```\n\nSince a differe"
+    },
+    {
+      "number": 46,
+      "title": "First depositor can abuse exchange rate to steal funds from later depositors",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        ":robot:_22_group",
+        "duplicate-39"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/Vault.sol#L280\n\n\n# Vulnerability details\n\n## Vulnerability details\nClassic issue with vaults. \nFirst depositor can deposit a single wei then donate to the vault to greatly inflate share ratio. \nDue to truncation when converting to shares this can be used to steal funds from later depositors.\n```solidity\n    function deposit(\n        address receiver\n    )\n...\n    function deposit(\n        address receiver\n    )\n        external\n        payable\n        override\n        nonReentrant\n        whenNotPaused\n        onlyWhiteListed\n        returns (uint256 shares)\n    {\n...\n        Rebase memory total = Rebase(_totalAssets(maxPriceAge), totalSupply());\n...\n        uint256 amount = abi.decode(result, (uint256));\n@>       shares = total.toBase(amount, false);\n        _mint(receiver, shares);\n```\n total.toBase formula： `amount * totalShares / totalAsset`\n\n`_totalAssets` donation through strategy, like `AAVE3.supply(onBehalfOf=valult)`\n```solidity\n    function _totalAssets(uint256 priceMaxAge) private view returns (uint256 amount) {\n        amount = _strategy.deployed(priceMaxAge);\n    }\n```\nConsider the following scenario.\nAlice wants to deposit 2M * 1e6 USDC to vault.\nBob observes Alice's transaction, frontruns to deposit 1 wei USDC to mint 1 wei share, and donation 1 M * 1e6 USDC to the vault.\nAlice's transaction is executed, since _totalAsset = 1M * 1e6 + 1 and totalSupply = 1, Alice receives 2M * 1e6 * 1 / (1M * 1e6 + 1) = 1 share.\nThe vault now has 3M*1e6 +1 assets and distributed 2 shares. Bob profits 0.5 M and Alice loses 0.5 M USDC.\n\n## Impact\n\nFirst depositor can abuse exchange rate to steal funds from later depositors\n\n## Recommended Mitigation\n\nEither during creation of the vault or for first depositor, lock a small amount of the deposit to avoid this.\n\n\n\n\n## Assessed type\n\nContext"
+    },
+    {
+      "number": 44,
+      "title": "MEV bots can sandwich withdrawals from a Vault to extract funds from user's withdrawals",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        ":robot:_primary",
+        "duplicate-32"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L612\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyAAVEv3WSTETH.sol#L96\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L72\n\n\n# Vulnerability details\n\n## Impact\nUser's funds are at risk because the swaps don't enforce a correct slippage to prevent MEV manipulation.\n\n## Proof of Concept\nWhen withdrawing from a Vault, the Vault will burn shares from the withdrawer and will send him native ETH.\n\nThe withdrawal process looks like this:\n1. The Vault computes the amount of ETH to withdraw for the specified amount of shares to be burnt\n2. The Vault calls the [`StrategyLeverage.undeploy() function`](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L327-L331) to proceed with the withdrawal of the corresponding amount of collateral from Aave.\n3. The Strategy computes the delta of the Collateral and Debt expressed in their ETH value that is required to accommodate the withdrawal in Aave\n4. The Strategy takes a flashloan in Balancer to borrow the deltaDebtInETH.\n5. Using the flashloaned WETH, the strategy repays WETH debt in Aave\n6. The Strategy withdraws (if enough deposits) the `deltaCollateralInETH` amount of collateral from Aave.\n7. All the withdrawn collateral is swapped for WETH using a Uniswap.\n8. The Strategy unwraps the difference between all the received WETH from the previous step and all the debt owed to balancer (flashloned amount + fees)\n9. The native received from unwrapping WETH in the previous step is then sent to the Vault\n10. Finally, the received native ETH from the Strategy is forwarded to the withdrawer.\n\nThe problem that allows MEV bots to steal from users is located in step 8.\n\nWhen requesting the swap to the UniRouter to swap the withdrawn collateral for WETH, the Strategy doesn't compute a minim"
+    },
+    {
+      "number": 39,
+      "title": "Vault is vulnerable to first depositor inflation attack.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "selected for report",
+        "sponsor confirmed",
+        ":robot:_22_group",
+        "H-02"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/Vault.sol#L190-L227\n\n\n# Vulnerability details\n\n## Impact\nFirst depositor can manipulate the price of the shares at will, forcing new depositors to deposit more ETH for the same amount of shares that the first depositor paid\n\n## Proof of Concept\nBefore diving into the details of how this attack is performed, let's understand how the Vault determines the amount of shares to mint for a deposited amount of ETH.\n\n1. When doing a deposit, [the Vault creates a new variable of `Rebase` type by passing the resultant values of calling `_totalAssets()` and `totalSupply()` functions](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/Vault.sol#L203). By inpsecting the `Rebase` struct, we know that the `totalAssets()` will be the `elastic` portion, and the `totalSupply()` will be the `base`. Or in other words:\n- `assets` are elastic.\n- `shares` are the base\n\n2. Now, let's see what values are returned on each of the two functions that are called when the `total` variable of `Rebase` type is created.\n- [`_totalAssets()`](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/Vault.sol#L289-L291) represents the amount of assets owned by the strategy. By `own` it means the difference between the collateral value in ETH and all the WETH debt. For example, if the total collateral value in ETH is 100 ETH, and the total WETH debt is 70 WETH, then, the `totalAssets` would return 30 ETH. See below the exact code that is used to calculate the totalAssets:\n```\n> Vault.sol\n\nfunction _totalAssets(uint256 priceMaxAge) private view returns (uint256 amount) {\n    //@audit-info => totalAssets is difference between totalCollateralInETh - totalDebtInEth owned by the Strategy!\n    amount = _strategy.deployed(priceMaxAge);\n}\n\n> StrategyLeverage.sol\nfunction deployed(uint256 priceMaxAge) public view returns (uint256 totalOwnedAssets) {\n\n    //@audit-info => totalCollateralInEth i"
+    },
+    {
+      "number": 38,
+      "title": "When harvesting a strategy and adjusting the debt, all the leftover collateral that is not used to swap the withdrawn collateral from Aave for WETH to repay the flashloan will be locked and lost in the Strategy contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "selected for report",
+        "sponsor confirmed",
+        "upgraded by judge",
+        ":robot:_38_group",
+        "H-03"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L545-L547\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L95-L97\n\n\n# Vulnerability details\n\n## Impact\nCollateral can be locked and lost in the Strategy contract.\n\n## Proof of Concept\nWhen harvesting a strategy and adjusting the debt to maintain the loan to value of the strategy, the strategy does the following steps:\n1. Computes the deltaDebt required to readjust the loan to value within the accepted boundaries.\n2. Takes a WETH flashloan on Balancer for the exact deltaDebt amount\n3. Repays WETH on Aave for the exact amount that was flashloaned borrowed on Balancer\n4. Uses the UniQuoterV2 to compute the amount of collateral needed to repay the flashloan (including the flashloan fees)\n5. Withdraws collateral from Aave for exact amount computed by the UniQuoterV2\n6. Does an `EXACT_OUTPUT` swap on Uniswap. It requests to receive the exact `debtAmount + fees` (to repay the flashloan) in exchange for at most the withdrawn amount of collateral from Aave\n7. Does a couple of extra checks and finally the flashloan is repaid.\n\nThe problem identified on this report is caused due to some issues in the steps 4 & 6. Let's dive into it.\n\nThe ***first part of the problem*** is caused due to the way how the UniQuoter is invoked. [The `fee` of the pool that is sent to the UniQuoter is hardcoded to be `500`](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L545-L547), which represents a pool of (0.05% fee). This can cause two problems:\n1. The execution can be reverted if there is not an existing pool for the COLLATERAL/WETH at a 0.05% fee. The UniQuoter will receive the call and will derive the address of the pool based on the tokenIn, tokenOut and fee. **If there is not a pool for the 0.05% fee (500), the call will be reverted and the whole harvesting execution will blo"
+    },
+    {
+      "number": 34,
+      "title": "_payDebt()  quoteExactOutputSingle should use _swapFeeTier",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sponsor confirmed",
+        "upgraded by judge",
+        ":robot:_primary",
+        "duplicate-38"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/strategies/StrategyLeverage.sol#L546\n\n\n# Vulnerability details\n\n## Vulnerability details\nin `_payDebt()`\nWe need to calculate `amountIn` first.\n```solidity\n     function _payDebt(uint256 debtAmount, uint256 fee) internal {\n        _repay(wETHA(), debtAmount);\n        // Get a Quote to know how much collateral i require to pay debt\n        (uint256 amountIn, , , ) = uniQuoter().quoteExactOutputSingle(\n@>          IQuoterV2.QuoteExactOutputSingleParams(ierc20A(), wETHA(), debtAmount + fee, 500, 0)\n        );    \n        \n        _withdraw(ierc20A(), amountIn, address(this) );\n\n        uint256 output = _swap(\n            ISwapHandler.SwapParams(\n                ierc20A(),\n                wETHA(),\n                ISwapHandler.SwapType.EXACT_OUTPUT,\n                amountIn,\n                debtAmount + fee,\n@>              _swapFeeTier,\n                bytes(\"\")\n            )\n        );\n        // When there are leftovers from the swap, deposit then back\n        uint256 wethLefts = output > (debtAmount + fee) ? output - (debtAmount + fee) : 0;\n        if (wethLefts > 0) {\n            _supply(wETHA(), wethLefts);\n        }\n        emit StrategyUndeploy(msg.sender, debtAmount);\n    }\n```\nIn the above method, `QuoteExactOutputSingleParams.fee` is hardcoded to a fixed value of `500`\nwhereas it should correctly use `_swapFeeTier`.\n\n## Impact\n\nUsing the incorrect `FeeTier` could lead to inaccuracies in `amountIn`, resulting in a failed swap.\n\n## Recommended Mitigation\n\n```diff\n      function _payDebt(uint256 debtAmount, uint256 fee) internal {\n        _repay(wETHA(), debtAmount);\n        // Get a Quote to know how much collateral i require to pay debt\n        (uint256 amountIn, , , ) = uniQuoter().quoteExactOutputSingle(\n-           IQuoterV2.QuoteExactOutputSingleParams(ierc20A(), wETHA(), debtAmount + fee, 500, 0)\n+           IQuoterV2.QuoteExactOutput"
+    },
+    {
+      "number": 33,
+      "title": "_supplyAndBorrow() should not call setUserUseReserveAsCollateral(true) every time",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "unsatisfactory",
+        ":robot:_primary"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/strategies/StrategyAAVEv3.sol#L106\n\n\n# Vulnerability details\n\n## Vulnerability details\nwhen user call `deposit()` protocol will call `_supplyAndBorrow()`\n```solidity\n    function _supplyAndBorrow(\n        address assetIn,\n        uint256 amountIn,\n        address assetOut,\n        uint256 borrowOut\n    ) internal override virtual{\n        _supply(assetIn, amount);\n@>      aaveV3().setUserUseReserveAsCollateral(assetIn, true);\n        aaveV3().borrow(assetOut, borrowOut, 2, 0, address(this));\n    }\n\n```\nEach time the method is executed, `aaveV3().setUserUseReserveAsCollateral(true)` is called once. \nIts primary purpose is to set `assetIn` as collateral. \nHowever, if `assetIn` is already collateral, calling this method again will result in a revert.\n\nhttps://github.com/aave/aave-protocol/blob/4b4545fb583fd4f400507b10f3c3114f45b8a037/contracts/lendingpool/LendingPool.sol#L782\n```solidity\n    function setUserUseReserveAsCollateral(address _reserve, bool _useAsCollateral)\n        external\n        nonReentrant\n        onlyActiveReserve(_reserve)\n        onlyUnfreezedReserve(_reserve)\n    {\n        uint256 underlyingBalance = core.getUserUnderlyingAssetBalance(_reserve, msg.sender);\n\n        require(underlyingBalance > 0, \"User does not have any liquidity deposited\");\n\n        require(\n@>          dataProvider.balanceDecreaseAllowed(_reserve, msg.sender, underlyingBalance),\n@>          \"User deposit is already being used as collateral\"\n        );\n\n        core.setUserUseReserveAsCollateral(_reserve, msg.sender, _useAsCollateral);\n\n        if (_useAsCollateral) {\n            emit ReserveUsedAsCollateralEnabled(_reserve, msg.sender);\n        } else {\n            emit ReserveUsedAsCollateralDisabled(_reserve, msg.sender);\n        }\n    }\n```\n\n\n## Impact\n\n`deposit()` can only be executed once, subsequent execute will fail.\n\n## Recommended Mitigation\nwhen "
+    },
+    {
+      "number": 32,
+      "title": "Multiple swap lack slippage protection.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "selected for report",
+        "sponsor confirmed",
+        ":robot:_17_group",
+        "H-04"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/hooks/UseSwapper.sol#L72\n\n\n# Vulnerability details\n\n## Vulnerability details\nThe current protocol requires swapping tokens in multiple places, such as `weth -> ierc20A` or `ierc20A -> weth`. \nPrimarily, these swaps are executed using the `_swap()` method.\n```solidity\n    function _swap(\n        ISwapHandler.SwapParams memory params\n    ) internal override returns (uint256 amountOut) {\n        if (params.underlyingIn == address(0)) revert InvalidInputToken();\n        if (params.underlyingOut == address(0)) revert InvalidOutputToken();\n        uint24 fee = params.feeTier;\n        if (fee == 0) revert InvalidFeeTier();\n\n        // Exact Input\n        if (params.mode == ISwapHandler.SwapType.EXACT_INPUT) {\n            amountOut = _uniRouter.exactInputSingle(\n                IV3SwapRouter.ExactInputSingleParams({\n                    tokenIn: params.underlyingIn,\n                    tokenOut: params.underlyingOut,\n                    amountIn: params.amountIn,\n@>                  amountOutMinimum: 0,   //@audit miss set params.amountOut\n                    fee: fee,\n                    recipient: address(this),\n                    sqrtPriceLimitX96: 0\n                })\n            );\n            if (amountOut == 0) {\n                revert SwapFailed();\n            }\n            emit Swap(params.underlyingIn, params.underlyingOut, params.amountIn, amountOut);\n            // Exact Output\n        } else if (params.mode == ISwapHandler.SwapType.EXACT_OUTPUT) {\n            uint256 amountIn = _uniRouter.exactOutputSingle(\n                IV3SwapRouter.ExactOutputSingleParams({\n                    tokenIn: params.underlyingIn,\n                    tokenOut: params.underlyingOut,\n                    fee: fee,\n                    recipient: address(this),\n                    amountOut: params.amountOut,\n                    amountInMaximum: params.amountIn,\n "
+    },
+    {
+      "number": 26,
+      "title": "No slippage protection during the uniswap swap",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        ":robot:_17_group",
+        "duplicate-32"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L72\n\n\n# Vulnerability details\n\n## Proof of Concept\nUseSwapper hook provides `_swap` function that allows exactIn and exactOut swaps in uniswap. When `exactIn` type is provided, then [function set 0 as `amountOutMinimum`](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L72), which opens a window for sandwiching transaction to make profit.\n\n`ISwapHandler.SwapType.EXACT_INPUT` type is used by protocol [inside `_convertFromWETH` and `_convertToWETH` functions](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L579-L617). In both cases it's possible to steal some amount of funds.\n\nThis is how i see typical attack. User wants to withdraw his shares, so flashloan is taken to repay some debt, then collateral is withdrawn to swap it to weth. Attacker will sandwich the call to steal some amount from user, but will leave enough funds to cover flashloanloan + fees, so call doesn't revert.\n\n## Impact\nUser's funds can be stolen.\n\n## Tools Used\nVsCode\n## Recommended Mitigation Steps\nYou should use slippage protection and check if enough funds were returned by swap. You can calculate min amount with oracle prices and deduct some 1% slippage.\n\n\n## Assessed type\n\nError"
+    },
+    {
+      "number": 25,
+      "title": "StrategyAAVEv3WSTETH._convertToWETH won't work and user will not be able to withdraw",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyAAVEv3WSTETH.sol#L56\n\n\n# Vulnerability details\n\n## Proof of Concept\n`StrategyAAVEv3WSTETH._convertToWETH` function is responsible to swap wstEth to weth using uniswap. It does it with [`_swap` function](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyAAVEv3WSTETH.sol#L90-L99).\n\nBut the problem is that `uniRouterA()` is granted with approve [by `stETH()`](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyAAVEv3WSTETH.sol#L56C14-L56C21) instead of wstEth. As result swap will always revert.\n\nThis is a big problem, because `_convertToWETH` is called, when users [want to withdraw](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L704). Withdraw calls will always revert, because of that.\n\n## Impact\nNo ability to withdraw.\n\n## Tools Used\nVsCode\n\n## Recommended Mitigation Steps\nYou need to provide approve to wstEth tokens.\n\n\n## Assessed type\n\nError"
+    },
+    {
+      "number": 22,
+      "title": "Share price manipulation attack",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        ":robot:_22_group",
+        "duplicate-39"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/Vault.sol#L225\n\n\n# Vulnerability details\n\n## Proof of Concept\nIn this variant of share price manipulation attack, an attacker will need to deploy a small amount of assets, like 1 wei, just to mint 1 wei of shares and then donate aave collateral tokens directly to the contract, to increase share price to make its price to be e18 for example.\n\nThen all next depositors may lose some value to the attacker and this value depends on the amount they deposited. There is [no 0 shares check](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/Vault.sol#L225), which means that depositor can receive nothing at all after deposit.\n\n## Impact\nUser lose deposited assets.\n\n## Tools Used\nVsCode\n\n## Recommended Mitigation Steps\nMake sure first depositor mints big amount of shares.\n\n\n## Assessed type\n\nError"
+    },
+    {
+      "number": 17,
+      "title": "Missing slippage in the call to `exactInputSingle()` inside `UseSwapper::_swap()`",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "upgraded by judge",
+        ":robot:_primary",
+        ":robot:_17_group",
+        "duplicate-32"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L72\n\n\n# Vulnerability details\n\n## Description\nThe [exactInputSingle() inside _swap()](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/hooks/UseSwapper.sol#L72) function uses a `amountOutMinimum` param with a value of zero. Thus it offers no slippage protection to the caller and can result in sandwich attacks or even under the normal flow of events a bad price for which the caller was not ready.\n\n## Tools Used\nManual review\n\n## Recommended Mitigation Steps\nSet it to a user provided param by specifying `amountOutMinimum: params.amountOutMinimum` inside `ExactInputSingleParams`.\n\n\n\n## Assessed type\n\nOther"
+    },
+    {
+      "number": 6,
+      "title": "An attacker can extract someone else's `ShareReward`",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/Vault.sol#L224\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/59b1f70cbf170871f9604e73e7fe70b70981ab43/contracts/core/Vault.sol#L254\n\n\n# Vulnerability details\n\n## Impact\nAn attacker can extract someone else's `ShareReward`\n\n## Proof of Concept\n\n1. Vault#deposit:\n    shares = amount *  totalSupply / _totalAssets\n\n```solidity\n    function deposit(address receiver) ....{\n        .....\n        uint256 amount = abi.decode(result, (uint256));\n        // shares = amount *  totalSupply / _totalAssets\n        shares = total.toBase(amount, false);\n        _mint(receiver, shares);\n        emit Deposit(msg.sender, receiver, msg.value, shares);\n    }\n\n```\n\n_totalAssets = totalCollateralInEth - totalDebtInEth \n\n```solidity\n    function deployed(uint256 priceMaxAge) public view returns (uint256 totalOwnedAssets) {\n        (uint256 totalCollateralInEth, uint256 totalDebtInEth) = _getPosition(priceMaxAge);\n        totalOwnedAssets = totalCollateralInEth > totalDebtInEth\n            ? (totalCollateralInEth - totalDebtInEth) : 0;\n    }\n```\n\n2. withdrawAmount = share * totalAssets() / totalSupply()\n\n3. When totalAssets > 0, the attacker can `deposit` and `withdraw` again and again, and the attacker will always get `share` until totalAssets = 0.\n\n\n## Tools Used\nvscode, manual\n\n## Recommended Mitigation Steps\nModify the way rewards are distributed.\n\n\n\n## Assessed type\n\nError"
+    },
+    {
+      "number": 3,
+      "title": "Hardcoded uniswap fee tier may cause dos of harvest functionality",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "upgraded by judge",
+        "edited-by-warden",
+        ":robot:_03_group",
+        "duplicate-38"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L545-L547\n\n\n# Vulnerability details\n\n## Proof of Concept\nWhen `StrategyLeverage.harvest` is called and current LTV is bigger than max LTV, then function adjusts LTV of position and then [flashloan is taken](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L346-L350) with `FlashLoanAction.PAY_DEBT` action, which means that `_payDebt` function [will handle callback](https://github.com/code-423n4/2024-05-bakerfi/blob/main/contracts/core/strategies/StrategyLeverage.sol#L307). \n\nThe function tries to understand what amount of collateral it needs to withdraw to repay flashloan and fee.\n```solidity\n        (uint256 amountIn, , , ) = uniQuoter().quoteExactOutputSingle(\n            IQuoterV2.QuoteExactOutputSingleParams(ierc20A(), wETHA(), debtAmount + fee, 500, 0)\n        );    \n```\n\nAs you can see it puts `500` as uniswap fee tier.\nBut later during the swap it uses `_swapFeeTier` to get correct pool.\n```solidity\n        uint256 output = _swap(\n            ISwapHandler.SwapParams(\n                ierc20A(),\n                wETHA(),\n                ISwapHandler.SwapType.EXACT_OUTPUT,\n                amountIn,\n                debtAmount + fee,\n                _swapFeeTier,\n                bytes(\"\")\n            )\n        );\n```\n\nAs result, in case if `_swapFeeTier` is not `500` this means that functionality may work incorrectly. For example it's possible that there is no 500 fee tier, or `_swapFeeTier` is higher, which means that swap will revert as not enough funds will be allowed to swap.\n\n## Impact\nHarvest functionality may now work.\n\n## Tools Used\nVsCode\n\n## Recommended Mitigation Steps\nUse `_swapFeeTier` variable to get quote.\n\n```solidity\n        (uint256 amountIn, , , ) = uniQuoter().quoteExactOutputSingle(\n            IQuoterV2.QuoteExactOutputSingleParams(ierc20A(), wETHA(), debtAmount + fee, _swa"
+    }
+  ]
+}
