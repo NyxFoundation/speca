@@ -1,0 +1,730 @@
+{
+  "contest": "2024-05-loop",
+  "issues": [
+    {
+      "number": 137,
+      "title": "Upgraded Q -> 3 from #117 [1718034766745]",
+      "labels": [
+        "3 (High Risk)",
+        "partial-25",
+        "duplicate-33"
+      ],
+      "body": "Judge has assessed an item in Issue #117 as 3 risk. The relevant finding follows:\n\n 2. Users being able to donate to ETH or lpETH before conversion one of protocol's main invariant\nLinks to affected code *\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L392\n\nImpact\nFrom the readme, there's a main invariant -\n\nUsers that deposit ETH/WETH get the correct amount of lpETH on claim (1 to 1 conversion)\n\nThis 1 to 1 invariant can be easily broken through donations, before the convertAllETH function is called. The function queries the balance of ETH before conerting all to lpETH, and queries the contract's lpETH balance to set the totalLpETH parameter. The conversion rate is 1 to 1.\n\n    function convertAllETH() external onlyAuthorized onlyBeforeDate(startClaimDate) {\n        if (block.timestamp - loopActivation <= TIMELOCK) {\n            revert LoopNotActivated();\n        }\n\n        // deposits all the ETH to lpETH contract. Receives lpETH back\n        uint256 totalBalance = address(this).balance;\n        lpETH.deposit{value: totalBalance}(address(this));\n\n        totalLpETH = lpETH.balanceOf(address(this));\n\n        // Claims of lpETH can start immediately after conversion.\n        startClaimDate = uint32(block.timestamp);\n\n        emit Converted(totalBalance, totalLpETH);\n    }\nNote the totalSupply tracks ETH deposits only through the _processLock function, meaning it isn't affected by donations. So if tokens had been donated, they'll be converted to lpETH without actually changing the totalSupply.\n\nWhen claiming, the claimed amount a user is entitled to is calculated as userStake * totalLpETH/totalSupply. And as it has been established that totalLpETH was a 1 to 1 exchange, this means that it will be more than totalSupply (since donations had increased address(this).balance but didn't affect totalSupply). As totalLpETH is more than totalSupply, a user's claimed amount will not be in a 1 to 1 ratio with h"
+    },
+    {
+      "number": 136,
+      "title": "Ethers sent to the contract can be stolen from any user",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        ":robot:_primary",
+        ":robot:_01_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L240-L266\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L405-L442\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n## Impact\n\nUser can by passing 0 as a `_percentage`, receive `lpETH` based on the ethers in the contract.\n\n## Proof of Concept\n\nIf the `PrelaunchPoints.sol` contract has native ether, any user can get `lpETH` for them without sending anything.\n\nThe user only needs to have a balance in the contract of the token that passes when he perform the attack to pass this check - it can be 1 wei.\n\n```solidity\nuint256 userStake = balances[msg.sender][_token];\nif (userStake == 0) {\n    revert NothingToClaim();\n}\n```\n\nUser will call `claim()` with:\n\n- `_token` - anyToken\n- `_percentage` - 0\n- `Exchange` - TransformERC20\n- `_data`:\n    - TRANSFORM_SELECTOR = 0x415565b0\n    - inputToken = the token provided in _token\n    - outputToken = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE\n    - inputTokenAmount = 0\n\n```solidity\nfunction claim(address _token, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n```\n\nThen in `_claim()` it will enter the else statement, `userClaim` will become 0 because its - **`userStake * 0 / 100 = 0`**.\n\nThen `_validateData()` will pass correctly, his balance will not be changed. When `_fillQuote()` is called, nothing will be exchanged because it will pass **`userClaim` which is 0**, so no ethers will enter the contract, and `boughtETHAmount` will remain the same. The `claimedAmount` will then be the contract balance and will be deposited into `lpETH`, by passing him as receiver, causing him to receive `lpETH` based on the Ether balance in the contract without having to sent anything**.**\n\n[PrelaunchPoints.sol#L240-L266](https://github.com/code-"
+    },
+    {
+      "number": 109,
+      "title": "Assumption that if the swap is purely on `UniswapV3` then the selector is the `UNI_SELECTOR` is incorrect causing the `_validateData()` function to revert",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor acknowledged",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_primary",
+        ":robot:_15_group"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L412\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L414\n\n\n# Vulnerability details\n\n## Impact\nCalling the 0xAPI for an LRT is might result in `TransformERC20()` (`0x415565b0`) selector being returned, even if the exchange that is the `source` of the data is `Uniswap_V3`. This causes the `_validate()` data to revert with `WrongSelector(\"0x415565b0\")` every time the user tries to claim/claim and stake their `lpETH`. The `outputToken` checked by manually decoding the API return data in Remix IDE with the `_decodeTransformERC20()` function is set to `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` - `ETH`, so the call to `TransformERC20()` should NOT be reverted. This means, that the API return data does not have to necessarily return the `UNI_SELECTOR`, when the source is set as `Uniswap_V3`.\n\nThe vulnerability is caused by the mitigation of [WP-M3] finding from LoopFi / Prelaunch / LRT #2 audit.\n## Proof of Concept\n\nTo better understand this problem paste the code in this [gist](https://gist.github.com/6b1504e567a5a5aae4f5510bc809112f.git) to the `PrelaunchPoints0x.test.ts` test file, and run it with `yarn hardhat test ./test/PrelaunchPoints0x.test.ts`. It is a simplified version of the original test, where we consider only the `rswETH` token for clarity. Data resulting from the API call indeed begins with `0x415565b0`, suggesting that we should be using the `TransformERC20()` function in `_fillQuote`. However, we never get to filling the quote, because `orders[0].source` is `Uniswap_V3` meaning that the `exchangeCode` is `0`. In `_validateData` the first branch is executed and the code fails due to `WrongSelector(0x415565b0)` error as explained before.\n## Tools Used\nManual review\n## Recommended Mitigation Steps\n\nThis problem has to be further investigated and only when 0x API re"
+    },
+    {
+      "number": 82,
+      "title": "Unexpected Gains at the Expense of Users Who Sent ETH by Mistake",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sponsor confirmed",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_primary",
+        ":robot:_09_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L389-L392\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L252-L265\n\n\n# Vulnerability details\n\n## Impact\nPrelaunchPoints.sol line 256 state: `ETH sent to this contract directly will be locked forever.` but that is not true:\n\nAfter `convertAllETH` phase, when a user `claim` will get unexpected earnings at expenses of another user that sent by mistake ETH to the contract and also this problem  creates a front running competence to monitor mempool and claim just after the transaction that sends ETH to the contract.\n\n## Proof of Concept\n\nPOC showing the unexpected gain if user send 30 ETH (number really big to make clear the example)\n\nAdd `NotExpectedGains.test.ts` to $project/test/ and  run `npx hardhat test`\n\n```javascript\nimport { expect } from \"chai\"\nimport hre, { ethers } from \"hardhat\"\nimport {\n  time,\n  impersonateAccount,\n  setBalance,\n} from \"@nomicfoundation/hardhat-toolbox/network-helpers\"\nimport fetch from \"node-fetch\"\nimport \"dotenv/config\"\nimport {\n  IERC20,\n  MockLpETH,\n  MockLpETHVault,\n  PrelaunchPoints,\n} from \"../typechain\"\nimport { parseEther } from \"ethers\"\n\nconst ZEROX_API_KEY = process.env.ZEROX_API_KEY\n\nconst tokens = [\n  {\n    name: \"ezETH\",\n    address: \"0xbf5495Efe5DB9ce00f80364C8B423567e58d2110\",\n    whale: \"0x267ed5f71EE47D3E45Bb1569Aa37889a2d10f91e\",\n  }\n]\n\ndescribe(\"Smart Contract Audit\", function () {\n  const ETH = \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n  const exchangeProxy = \"0xdef1c0ded9bec7f1a1670819833240f027b25eff\"\n\n  const sellAmount = ethers.parseEther(\"1\")\n  const referral = ethers.encodeBytes32String(\"\")\n\n  // Contracts\n  let lockToken: IERC20\n  let prelaunchPoints: PrelaunchPoints\n  let lpETH: MockLpETH\n  let lpETHVault: MockLpETHVault\n\n  before(async () => {\n    const LpETH = await hre.ethers.getContractFactory(\"MockLpETH\")\n    lpETH = (await LpETH.deploy()) as unknown as MockLpETH\n\n    const LpETHVa"
+    },
+    {
+      "number": 81,
+      "title": "Claims that are not paused during `emergencymode` can cause users to get more `lpETH` than the amount of `ETH` they have locked",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_primary",
+        ":robot:_46_group",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L240-L266\n\n\n# Vulnerability details\n\n## Impact\n\nUsers get more `lpETH` than the amount of `ETH` they have locked\n\n## Proof of Concept\n\nThe LoopFi protocol has an emergency mode feature which allows users to withdraw their assets even though the `loopActivation` and `startClaimDate` periods have passed. However, in emergency mode, users can still claim `lpETH` by exchanging the `ETH` they have with the `claim()` function. This can be a problem because the total supply of `ETH` changes and affects the exchange rate of `lpETH` and `ETH`.\n\n### Exploit Scenario\n\n1. Normally, the user initially locks his `ETH` with the `lockETH()` or `lockETHfor()` function until a certain time limit.\n2. Then after a certain time, owner calls the `setLoopAddresses()` function and starts the first epoch. And after 7 days the owner calls the `convertAllETH()` function to start the claim period for users to be able to claim `lpETH`.\n3. For example, it is assumed that the data obtained:\n    - totalLpETH    :   1000\n    - totalSupply   :    1000\n4. Because there was a problem, the owner activated the `emergencyMode` feature by calling the `setEmergencyMode()` function\n5. We assume that some users withdraw their `ETH` and the data obtained becomes:\n    - totalLpETH    :   1000\n    - totalSupply   :    500\n6. Bob knows this condition and has a locked ETH balance (i.e. 100 `ETH`) calls the `claim()` function to exchange it for `lpETH`.\n\n```solidity\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n```\n\n7. With the formula above, Bob should have gotten 100 `lpETH` tokens but now he gets 200 `lpETH` tokens because the exchange rate has changed due to the change in the total supply of `ETH`.\n\nNOTE :\n\n1. This also affects"
+    },
+    {
+      "number": 74,
+      "title": "Loss of funds for users who claim vested `lpETH` by swapping via `UniswapV3`",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_08_group"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L192\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L252-L263\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L491-L505\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L405\n\n\n# Vulnerability details\n\n## Impact\nUsers who lock `wrapped LRTs` can claim their `vested lpETH` by swapping their tokens via `UniswapV3` or `TransformERC20`.\n\nIf they use `UniswapV3`, their token must be swapped for `WETH`. The problem is that the `WETH` received from the `swap` is never unwrapped to `ETH`, so when the protocol attempts to send `lpETH` to the user, it will convert `ETH` to `lpETH` by a 1:1 conversion ratio, but since the `WETH` was never unwrapped to `ETH`, that amount will be 0.\n\nIn addition `WETH` is not recoverable because it is always in the `isTokenAllowed` list, which causes `recoverERC20()` to revert. Therefore users will lose all funds and their `WETH` may be locked in the contract forever.\n\n## Proof of Concept\nThe `PrelaunchPoints` contract allows users to lock `ETH`, `WETH`, and `wrapped LRTs`.\n\n```javascript\n    function _processLock(address _token, uint256 _amount, address _receiver, bytes32 _referral)\n        internal\n        onlyBeforeDate(loopActivation)\n    {\n        if (_amount == 0) {\n            revert CannotLockZero();\n        }\n\n@>      if (_token == ETH) {\n            totalSupply = totalSupply + _amount;\n            balances[_receiver][ETH] += _amount;\n        } else {\n@>          if (!isTokenAllowed[_token]) {\n                revert TokenNotAllowed();\n            }\n            IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);\n\n@>          if (_token == address(WETH)) {\n                WETH.withdraw(_amount);\n                totalSupply = totalSupply + _amount;\n                balances[_receiver][ETH] += _amount;\n            // @audit if token is not WETH or "
+    },
+    {
+      "number": 70,
+      "title": "Incorrect Handling of Contract's ETH Balance in _claim Function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_07_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L257-L266\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n## Impact\nWhen a user claims a non-ETH token, the `_claim` function incorrectly calculates the amount of lpETH to be minted and transferred to the user. If the contract holds any ETH balance before the token swap, this pre-existing ETH will be included in the lpETH minting, resulting in the user receiving more lpETH than they should. This could lead to inflation of the lpETH supply and loss of funds for the protocol.\n\n\n## Proof of Concept\nThe `_claim` function in the contract assumes that the entire ETH balance of the contract after a token-to-ETH swap is the result of that swap. This is incorrect if the contract already held some ETH before the swap. Here's the relevant part of the code:\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L257-L266\n\n```solidity\n// At this point there should not be any ETH in the contract\n// Swap token to ETH\n_fillQuote(IERC20(_token), userClaim, _data);\n\n// Convert swapped ETH to lpETH (1 to 1 conversion)\nclaimedAmount = address(this).balance;\nlpETH.deposit{value: claimedAmount}(_receiver);\n```\n\nLet's consider the following scenario:\n1. The contract holds a balance of 10 ETH from previous interactions.\n2. A user calls the `claim` function to claim 1000 tokens of a non-ETH token, with a `_percentage` of 100.\n3. The `_claim` function calculates `userClaim` as 1000 tokens and calls `_fillQuote` to swap these tokens for ETH.\n4. The `_fillQuote` function performs the swap and receives 5 ETH in return.\n5. After the swap, the contract's balance is now 15 ETH (10 ETH from before + 5 ETH from the swap).\n6. The `_claim` function then calculates `claimedAmount` as the entire balance of the contract"
+    },
+    {
+      "number": 69,
+      "title": "User can Claim Entire Eth Balance of Contract instead of just their own Eth Claim Value",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_07_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L503\n\n\n# Vulnerability details\n\n## Impact\nRisk of Fund Loss to Protocol as User can Claim Entire Eth Balance of Contract instead of just their own Eth Claim Value in the PrelaunchPoints.sol contract during claim function call.\n## Proof of Concept\n```solidity\nfunction _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n>>>            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n>>>            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n>>>            claimedAmount = address(this).balance; ❌\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n        emit Claimed(msg.sender, _token, claimedAmount);\n    }\n```\nThe function above shows how _claim(...) function is implemented in the PrelaunchPoints.sol contract, it can be noted from the pointers that when token is Non Eth a swap is done before a claim of Eth value is done and deposited to receiver address, from the first pointer, the protocol assumes there should not be any Eth in the contract which is why the last pointer assigns the complete balance of eth in contr"
+    },
+    {
+      "number": 68,
+      "title": "Excess ETH (Protocol Fee Refund) Not Returned to User in _fillQuote Function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_07_group",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L491-L505\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L259-L259\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262-L263\n\n\n# Vulnerability details\n\n\n## Impact\nWhen a user claims tokens other than ETH, the `_claim` function calls the `_fillQuote` function to swap the tokens for ETH using the 0x exchange proxy. If there is any excess ETH (protocol fee refund) sent back from the 0x exchange proxy after the swap, it is not refunded to the user who initiated the claim. Instead, the excess ETH is converted to lpETH and sent to the `_receiver`, which is not the intended behavior. This results in the user losing the protocol fee refund they are entitled to.\n\n## Proof of Concept\nThe issue occurs in the `_fillQuote` function. Here's a detailed explanation:\n\nIn the `_claim` function, when a user claims tokens other than ETH, it calls the `_fillQuote` function to swap the tokens for ETH:\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L259-L259\n```solidity\n// PrelaunchPoints.sol\n259:            _fillQuote(IERC20(_token), userClaim, _data);\n```\n\n\nAfter the swap, the `_claim` function converts the swapped ETH to lpETH and sends it to the `_receiver`:\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262-L263\n\n```solidity\n262:            claimedAmount = address(this).balance;\n263:            lpETH.deposit{value: claimedAmount}(_receiver);\n```\n\n\nNow, let's look at the `_fillQuote` function:\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L491-L505\n\n```solidity\n491:    function _fillQuote(IERC20 _sellToken, uint256 _amount, bytes "
+    },
+    {
+      "number": 64,
+      "title": "Incorrect Handling of ETH Balance Post-Swap in _claim Function Leading to lpETH Over/Under-Minting",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        ":robot:_07_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\n\nThe bug can lead to incorrect issuance of lpETH tokens during the claim process, potentially resulting in financial loss or discrepancy for users. If the contract holds any ETH before a swap, the claimedAmount calculation will be incorrect, causing either over-minting or under-minting of lpETH.\n\n## Root of the bug \n\nthe bug is in the assumption that the entire ETH balance of the contract post-swap corresponds to the amount of _token swapped. \nAnd The current implementation does not account for any pre-existing ETH balance in the contract.\nWe have The _claim function is designed to allow users to claim their vested lpETH. \nIf the _token is ETH, it calculates claimedAmount based on the user's share of totalLpETH. \nIf the _token is not ETH, it calls _fillQuote to swap the token to ETH and then converts the received ETH to lpETH.\n\n```solidity\nif (_token == ETH) {\n    claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n    balances[msg.sender][_token] = 0;\n    lpETH.safeTransfer(_receiver, claimedAmount);\n} else {\n    uint256 userClaim = userStake * _percentage / 100;\n    _validateData(_token, userClaim, _exchange, _data);\n    balances[msg.sender][_token] = userStake - userClaim;\n\n    // Swap token to ETH\n    _fillQuote(IERC20(_token), userClaim, _data);\n\n    // Convert swapped ETH to lpETH (1 to 1 conversion)\n    claimedAmount = address(this).balance;\n    lpETH.deposit{value: claimedAmount}(_receiver);\n}\n\n```\n\nThe vulnerability Is in this line : \n\n```\n\nclaimedAmount = address(this).balance;\n\n```\nHere in this  calculation assumes that the entire ETH balance of the contract after calling _fillQuote is the result of the token swap. This assumption fails if the contract had any pre-existing ETH balance.\n\nThe calculation does not isolate the ETH received from the swap but instead uses the total ETH"
+    },
+    {
+      "number": 63,
+      "title": "Attacker can bypass lock to claim any number of token they wanted",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_42_group"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L254-L263\n\n\n# Vulnerability details\n\n## Impact\n\nIn usual circumstances, to obtain 1 ETH worth of lpETH, a user must lock 1 ETH for a period until it can be claimed. However, due to the incorrect validation in the `_validateData` function, attackers can deposit only a tiny amount of ERC20 Tokens whitelisted by the contract. Subsequently, by creating a malicious ERC20 token, they inflate the contract's ETH balance. Consequently, the contract mistakenly assumes the attacker has locked a sufficient amount of tokens, thus granting the attacker more lpETH than the locked amount.\n\nThis is inherently unfair to regular users.\n\n## Proof of Concept\n\nWhen `claim` is invoked, it calls the `_claim` function. If the passed `_token` is an ERC20 Token, it first checks the passed `data` using `_validateData`. Subsequently, it utilizes `_fillQuote` to perform a UniswapV3 swap to ETH, and finally, it fetches the current contract balance and mints corresponding lpETH to the `_receiver`.\n\nThe `_validateData` function only checks `inputToken` and `outputToken`; it does not validate the tokens in the conversion path.\n\nThe attacker's attack path is as follows, assuming the ERC20 Token whitelisted is `USDT`, and the attacker aims to obtain 1 ETH worth of lpETH:\n\n1. Create a malicious ERC20 Token, referred to as Evil, with overridden `transferFrom` function to enable specified transfers.\n2. Create two uniswap pairs: USDT-Evil and Evil-ETH.\n3. The attacker deposits a small amount of USDT using `lock`, for example, 10wei.\n4. Wait until `startClaimDate`, then invoke `claim` with the Uniswap path as USDT-Evil and Evil-ETH.\n5. The contract executes `_fillQuote` for the conversion, transferring 1 ETH to the contract while passing through Evil.\n6. Upon completion of the swap, the contract checks the current balance, presuming 1 ETH has been obtained, and consequently mints 1 ETH worth of lpETH for the attac"
+    },
+    {
+      "number": 58,
+      "title": "Users could claim any amount of `lpETH` without locking a corresponding amount of tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\n\nUsers could claim any amount of `lpETH` by locking only 1 wei worth of tokens in the contract, which breaks the core functionality of the contract.\n\n\n## Proof of Concept\n\nThe `_claim` function uses the current ETH balance of this contract to claim `lpETH` for the `_receiver`. However, any user with any amount of staked tokens could transfer some ETH to this contract to obtain any desired amount of `lpETH`. \nThe only restriction is that `balances[msg.sender][_token]` should not be zero. For instance, a user could lock only 1 wei of `LRTToken` and then claim 1 ether of `lpETH` by transferring ETH to this contract before calling `claim`.\n\n```solidity\n    function _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n        //@audit it use the ETH of this to claim lpETH,\n        //@audit which should be the diff value in `fillQuote`\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmo"
+    },
+    {
+      "number": 57,
+      "title": "Claim and stake more than initially locked",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-75",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/1a4dc278f1b149eec7e49ffc28e02ea18c52eff3/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n\n\n## Impact\nUser can claim and stake more tokens via `claimAndStake()` than he had initially locked.\n\n## Proof of Concept\nBased on [\"Users who provide liquidity for lpETH and lock the respective LP tokens with Loop, earn a points multiplier compared to just depositing ETH/LRTs and holding lpETH.\"](https://docs.loopfi.xyz/the-launch/the-points-program#:~:text=Users%20who%20provide%20liquidity%20for%20lpETH%20and%20lock%20the%20respective%20LP%20tokens%20with%20Loop%2C%20earn%20a%20points%20multiplier%20compared%20to%20just%20depositing%20ETH/LRTs%20and%20holding%20lpETH.) it seems staking lpETH via `claimAndStake()` confers an advantage over staking directly oneself (perhaps based on the emitted `claimedAmount`).\n\nBy transferring ETH directly to the PrelaunchPoints contract before calling `claimAndStake()` on non-ETH tokens this ETH will be added to the [`claimedAmount = address(this).balance;`](https://github.com/code-423n4/2024-05-loop/blob/1a4dc278f1b149eec7e49ffc28e02ea18c52eff3/src/PrelaunchPoints.sol#L262) and then deposited in lpETH and staked. The user is thus able to stake via `claimAndStake()` (or the amount claimed via `claim()`) for funds he had not locked.\n\n## Recommended Mitigation Steps\nCount the difference before and after `_fillQuote()`.\n\n\n## Assessed type\n\nContext"
+    },
+    {
+      "number": 56,
+      "title": "User can skip locking mechanism funnelling in ether deposits to mint `lpETH` when the time deemed to do so is long past",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L252-L264\n\n\n# Vulnerability details\n\n## Impact\nA user can still deposit more and end up minting more `lpETH` even at a time when it is no longer possible to be eligible to do so by funneling in ether deposits on every small `lpETH` claim which resolves to mint more `lpETH` than expected by the protocol without the supposed full amount being locked in `ETH`, `WETH` or `LRTs` in the first place.\n\nThis breaches one of the protocol's invariants:\n> Deposits are active up to the lpETH contract and lpETHVault contract are set\n\n## Proof of Concept\n- Alice locks 1 `LRT` or less. Let's assume the `LRT` is Renzo ETH in this case `ezETH`\n\n[PrelaunchPoints.sol#L143-L148](https://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L143-L148)\n```solidity\nfunction lock(address _token, uint256 _amount, bytes32 _referral) external {\n        if (_token == ETH) {\n            revert InvalidToken();\n        }\n@>      _processLock(_token, _amount, msg.sender, _referral); // @note processes Alice's deposit of 1 ezETH\n    }\n```\n\n- We skip to the time when locking is no longer possible as the loop has been activated. We can see in the `_processLock()` function below, that there is a modifier to stop locking when the loop is activated `onlyBeforeDate()`\n\n[PrelaunchPoints.sol#L172-L175](https://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L172-L175)\n```solidity\nfunction _processLock(address _token, uint256 _amount, address _receiver, bytes32 _referral)\n        internal\n@>      onlyBeforeDate(loopActivation) // @note blocks locking attempts after loop activation\n    {\n...\n\nmodifier onlyBeforeDate(uint256 limitDate) {\n        if (block.timestamp >= limitDate) { // @note this reverts if loop activated\n            revert NoLongerPossible();\n        }\n        _;\n    }\n```\n\n[PrelaunchPoints.sol#L211-L216](https://github.com/code-423n4/2024-05-loop/blob/main/src/Prela"
+    },
+    {
+      "number": 55,
+      "title": "Potential Over-Issuance of lpETH Due to Unaccounted ETH Deposits Before Claim and Stake Operations",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-50",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L226-L235\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L252-L266\n\n\n# Vulnerability details\n\n\n## Impact\n\nThis could lead to the over-issuance of lpETH tokens relative to the actual amount of ETH backing them. If additional ETH is deposited into the contract (not through the standard `lockETH` or `convertAllETH` functions) and is not accounted for in `totalLpETH`, then when `claimAndStake` is executed, this extra ETH could be wrongly converted into lpETH. This misalignment could inflate the lpETH supply without proper backing which could devalue the lpETH.\n\n\n## Proof of Concept\n\nThe issue in the `claimAndStake` function, which allows users to claim their vested lpETH and immediately stake it. The function internally calls `_claim`, which handles the conversion of tokens to lpETH. \nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L226-L235\n\n```solidity\nfunction claimAndStake(address _token, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n    external\n    onlyAfterDate(startClaimDate)\n{\n    uint256 claimedAmount = _claim(_token, address(this), _percentage, _exchange, _data);\n    lpETH.approve(address(lpETHVault), claimedAmount);\n    lpETHVault.stake(claimedAmount, msg.sender);\n\n    emit StakedVault(msg.sender, claimedAmount);\n}\n```\n\nThe `_claim` function includes logic for converting non-ETH tokens to ETH and then to lpETH:\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L252-L266\n\n```solidity\nif (_token != ETH) {\n    uint256 userClaim = userStake * _percentage / 100;\n    _validateData(_token, userClaim, _exchange, _data);\n    balances[msg.sender][_token] = userStake - userClaim;\n\n    // Swap token to ETH\n    _fillQuote(IERC20(_token), "
+    },
+    {
+      "number": 53,
+      "title": "Users can claim as much lpETH as they want as long as they have LRT token deposited",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L240-L266\n\n\n# Vulnerability details\n\n## Impact\n* The total lpETH claimable through the PrelaunchPoints contract should be capped to the amount of ETH and ETH value of LRTs deposited up until the claims start but this allows users to bypass that limit.\n* Allows users to easily arbitrage lpETH on exchanges either using their own funds or a flashloan.\n* Defeats the purpose of having ETH deposits in the first place.\n\n## Proof of Concept\n### Root Cause\n```solidity\n    function _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else { <===== audit\n            uint256 userClaim = userStake * _percentage / 100; // <===== audit\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim; <===== audit\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data); <===== audit\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance; // <===== audit\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n        emit Claimed(msg.sender, _token, claimedAmount);\n    }\n\n    /**\n     * Enable receive ETH\n     * @dev ETH sent to this contract directly will be locked forever.\n     */\n    receive() external payable {} // <===== audit\n```\n\n* When claiming lpETH against an LRT deposit, the contract s"
+    },
+    {
+      "number": 51,
+      "title": "Report on Incorrect Assumption in Contract Functionality giving users more LPETH THAN THEIR SWAPPED AMOUNT",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L257-L262\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L388-L392\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n\n## Impact\nThe assumption made by the developer in line 257 of the contract is flawed and could lead to users getting more lpeth token than they should. This assumption incorrectly assumes that no ETH will be present in the contract at a certain point, which may not hold true as ETH can be forwarded to the contract at any time, even after this function(convertAllETH) is called \n```solidity\n/**\n     * @dev Called by a owner to convert all the locked ETH to get lpETH\n     */\n    function convertAllETH() external onlyAuthorized onlyBeforeDate(startClaimDate) .\n```\n\n```solidity\n    /**\n     * Enable receive ETH\n     * @dev ETH sent to this contract directly will be locked forever.\n     */\n    receive() external payable {}\n```\n\n Consequently, users could benefit from receiving more ETH than the actual swapped amount, leading to potential exploitation of donated ETH.\n\n## Proof of Concept\nThe flawed assumption is evident in the following code snippet:\n\n```solidity\n   function _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _valid"
+    },
+    {
+      "number": 49,
+      "title": "Race condition on `PrelaunchPoints::_claim()` allow malicious actor deposit all other user `ETH` to `lpETHVault` to get `lpETH` more than they should be",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_42_group",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L252-L265\n\n\n# Vulnerability details\n\n## Impact\n\nUser loses all `ETH` balance and cannot claim `lpETH`\n\n## Proof of Concept\n\n[PrelaunchPoints::_claim()](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L240-L266) has a function for users to claim `lpETH` based on the amount of `ETH` or other `LRT's` tokens that are locked. When a user only claims `lpETH` using the `ETH` they own, this does not become an issue but the issue lies when the user wants to claim `lpETH` using `LRT's` which have previously been locked.\n\n```solidity\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n```\n\nWhen a user wants to claim `lpETH` with the `LRT's` she/he has then the steps are:\n\n1. User calls the claim function and enters the `LRT's` address\n2. Users can also set how many `LRT's` will be used to claim `lpETH` by entering a percentage value\n3. After all variables have been entered and are valid, there are two main steps that must be taken\n4. The protocol validates the data that the user enters with the [_validateData()](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L405-L442) function\n5. After the data is validated, the `LRT's` token will be swapped for `ETH` according to the percentage entered by the user using the [_fillQuote("
+    },
+    {
+      "number": 48,
+      "title": "User can game rewarding system siphoning rewards for themselves at a huge margin to other stakers when it shouldn't be possible",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sponsor acknowledged",
+        "sufficient quality report",
+        ":robot:_00_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L226-L235\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L263\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nA user can lock up a very small amount of `LRT` e.g 0.5 `rsETH` while earning 10x+ more staking rewards compared to another user who locked up 10 `rsETH` effectively taking most of the staking reward pool from other honest stakers who are unaware of the exploit path.\n\n## Proof of Concept\n- User A locks 10 `rsETH`\n- User B locks 0.5 `rsETH`\n- The protocol activates `lpETH` claims\n- Claiming of `lpETH` is set\n- User A redeems then stakes his 10 `rsETH` for 9.99 `lpETH` (assuming he swapped at a favorable price)\n- User B slowly claims 0.05 `rsETH` while ending up staking 10.05 `lpETH` each time which shouldn't be because they only locked 0.5 `rsETH`. User B can do this 10+ times since 0.05 is only 10% of his 0.5 `rsETH` deposit which means they get to redeem and stake 100.5 `lpETH` altogether when they initially only locked 0.5 `rsETH`.\n- Keep in mind User A had no idea of this backdoor, so all they could stake was up to 9.99 `lpETH` and no more. With that being the case, User B now keeps 90+% of the reward pool to themself.\n- This attack is possible because of the way the contract handles its ether balance using `address(this).balance` which user B leverages as a backdoor entry to successfully put in a direct ether transfer into the contract before executing the `claimAndStake()` for `lpETH` staking which then associates the ether balance in the contract to them allowing them to stake more `lpETH` even though their initial locked `rsETH` was very little ~ 0.5 `rsETH`. This can then be automated to slowly siphon rewards from other users by calling `claimAndStake()`. This is possible because of the `LRT` claim process which differs from the `ETH` and `WETH` one.\n\nSummari"
+    },
+    {
+      "number": 47,
+      "title": "Staking users can emit any valued Claimed and StakedVault events, which may disrupt point calculation.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sponsor acknowledged",
+        "sufficient quality report",
+        ":robot:_primary",
+        ":robot:_00_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nUsers can send ETH to the contract before calling the claim function or claimAndStake, causing them to be converted to lqETH through the contract, triggering incorrect Claimed and claimAndStake events, which may allow them to earn more points.\n\n## Proof of Concept\nThe reasons for this issue are:\n\n1. The _claim function converts all ETH in the contract to lqETH.\n2. Users can claim tokens other than ETH multiple times.\ngithub:[https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262)\n```solidity\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n```\n\nDue to the lack of visibility into the specific process of point calculation, the POC can only be reflected in the anomalies of events.\n\nPOC:\n1. Bob locked 1 token (other than ETH and WETH).\n2. During the claim process, Bob twice sent a large amount of ETH (5e18) to the contract before calling the claimAndStake function.\n3. Upon inspecting the events, it was discovered that both claimed events had a claimedAmount of 5e18.\n```solidity\n    function testContralEvent() public {\n        ERC20 DAI = ERC20(0x6B175474E89094C44Da98b954EedeAC495271d0F);\n        prelaunchPoints.allowToken(address(DAI));\n\n        address Bob = makeAddr(\"Bob\");\n\n        uint lockAmount = 100;\n        vm.deal(Bob, 10e18);\n        deal(address(DAI), Bob, 1);\n\n        vm.startPrank(Bob);\n        DAI.approve(address(prelaunchPoints), 1);\n        prelaunchPoints.lock(address(DAI), 1, referral);\n        assertEq(prelaunchPoints.balances(Bob, address(DAI)), 1);\n        vm.warp(1);\n        vm.stopPrank();\n\n        prelaunchPoints.setLoopAddresses(address("
+    },
+    {
+      "number": 46,
+      "title": "Users can receive more lpETH than their locked ETH allows them",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L263\n\n\n# Vulnerability details\n\n## Impact\nUsers can lock less ERC20 and receive more lpETH, by sending ETH directly to the contract before claiming.\n\n## Proof of Concept\nIn the _fillQuote function the boughtETHAmount is calculated. \nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L503\nHowever in the claim function the amount that is actually deposited and given to the user is the balance of the contract:\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\nThis is because of the wrong assumption that the contract will not have any ETH balance after the convertAllETH function is called. \nConsider the following scenario:\n1. A user locks only a very small amount of a supported LRT.\n2. The convertAllETH function is called and now claims are unlocked.\n3. The user decides that they want more lpETH. They send ETH directly to the contract right before calling claim. Because of the wrong assumption the user will actually get more lpETH with less locked tokens, which compromises the whole purpose of the locking.\n\n## Tools Used\nManual Review\n## Recommended Mitigation Steps\nThe `_fillQuote` function should return the boughtETHAmount and the `claimedAmount` here:\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L263\nshould be replaced with the boughtETHAmount.\n\n\n## Assessed type\n\nETH-Transfer"
+    },
+    {
+      "number": 45,
+      "title": "An attacker can swap all ETH in the contract to lpETH",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_42_group",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L259-L263\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n## Impact\nIn the _claim function, due to the incorrect calculation of claimedAmount, all ETH in the contract will be swapped by the attacker to lpETH.\n## Proof of Concept\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L259-L263\n```sol\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n```\nIn this code, the amount of claimAmount is all the ETH in the current contract (including the ETH locked by all users). The correct logic should be the amount after converting ERC20 to ETH - the previous amount of ETH.\n\nIn the _fillQuote function, budedETHAmount should be returned, which represents the difference between before and after eth, which is the ETH actually redeemed by the user. The actual value of ClaimedAmount should be equal to buyETHAmount, not address(this).balance.\n\n### Use an example to prove: (18 decimals)\nUser A locked 1ETH, address(this).balance is equal to 1eth\nUser B locked 1ETH, address(this).balance is equal to 2eth\nUser C locked 1WETH, address(this).balance is equal to 2eth\n\nUser C (attacker) calls prelaunchPoints.claim(WETH, 100, PrelaunchPoints.Exchange.TransformERC20, data);. At this time, the attacker has exchanged 1WETH for 1eth, address(this).balance is equal to 3eth, and claimedAmount is 3eth. , eventually the attacker will get all lpETH.\n```sol\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n```\nhttps://docs.loopfi.xyz/the-launch/the-points-program#what-happens-after-the-points-program-has-concluded\n\nAccording to the document requirements, the exchange ratio betwe"
+    },
+    {
+      "number": 43,
+      "title": "Direct ETH transfer to the protocol will break one of its main invariants",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L321-L322\n\n\n# Vulnerability details\n\n## Impact\n\nOne of the main invariants of the protocol states, \"Users that deposit ETH/WETH get the correct amount of lpETH on claim (1 to 1 conversion).\" However there is a critial vulnerability and if it is exploited, it would break this invariant, resulting in users not receiving lpETH at the 1:1 peg. Consequently, operations dependent on this invariant, such as determining the rewards from staking lpETH could be affected, calculating the lpETH price which in turn will affect integrating Loopfi with other protocols, because other protocols that accept lpETH as collateral might experience liquidation events and more. This will significantly impair the usability of the protocol.\n\n## Proof of Concept\n\nThis vulnerability arises due to the susceptibility of the initial ETH amount that should be deposited to the lpETH contract to manipulation, primarily through the risk of direct ETH transfer by malicious actors to the protocol. Let's examine how this issue can be exploited:\n\nIn order to convert all the ETH initially locked by users to lpETH, the contract owner should invoke the `convertAllETH()` function. The balance that should be deposited to lpETH contract is calculated by retrieving the `PrelaunchPoints` contract's balance, which should represent the total ETH deposited by users:\n\n```solidity\n    function convertAllETH() external onlyAuthorized onlyBeforeDate(startClaimDate) {\n        ...\n        // deposits all the ETH to lpETH contract. Receives lpETH back\n        uint256 totalBalance = address(this).balance;\n        lpETH.deposit{value: totalBalance}(address(this));\n        totalLpETH = lpETH.balanceOf(address(this));\n        ...\n    }\n\n```\n\nHowever, because this contract can accept direct ETH transfers through its `receive()` function, the calculation of the lpETH deposit amount can be disrupted. "
+    },
+    {
+      "number": 42,
+      "title": "Malicious actors could exploit `claim()` function to get lpETH at a discount",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_42_group"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L252-L264\n\n\n# Vulnerability details\n\n## Impact\n\nMalicious actors will receive more lpETH than they should relative to the value of the LRT they locked in the contract, ultimately resulting in theft from the protocol and other users who are utilizing it.\n\n## Proof of Concept\n\nIf users deposited LRTs instead of ETH, obtaining the corresponding lpETH amount against their LRTs is executed as follows, as stated on the contest page: \"The conversion for LRTs happens on each claim by using 0x API. This is triggered by each user.\" However, while claiming lpETH against the LRT value they've deposited, malicious actors could manipulate the protocol to receive more lpETH than they are entitled to.\n\nThis issue arises from the expectation of the protocol team, that when users claim their LRTs, the contract balance would not contain any ETH. Thus, the `claimedAmount`, retrieved as `claimedAmount = address(this).balance;`, where `address(this).balance` is expected to reflect the value of LRT in terms of ETH from the 0x API. Based on `claimedAmount` also is determined the amount of lpETH that the user should receive. However, a malicious actor could exploit this by transferring ETH to the contract before calling the `claim()` function. This vulnerability is profitable if the ETH price is lower than the LRT price in ETH terms. For example, at the time of writing this report, the price of UNIETH is $3,340.88, and the ETH price is $3,132.95. Therefore, this exploitation would allow the malicious actor to receive more lpETH at a cheaper price relative to the LRT.\n\n```solidity\n    function _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        ...\n         else {\n            uint256 use"
+    },
+    {
+      "number": 41,
+      "title": "Invariant is broken, one ETH deposit by user is not convertable to one lpETH, if someone manually deposits eth to contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L315\n\n\n# Vulnerability details\n\n## Impact\nWithin the context of invariants, it's emphasized that when a user deposits 1 ETH, it should automatically convert to 1 lpETH. However, if an individual chooses to directly send ETH to the contract, this disrupts the conversion mechanism, diverging from the user's intended perspective.\n\n## Proof of Concept\nBy incorporating the provided test into the existing test file, it becomes evident that the conversion process is compromised.\n\n```javascript\nfunction testBreakOneToOneConversion(uint256 lockAmount) public {\n        lockAmount = bound(lockAmount, 1, 1e36);\n        vm.deal(address(this), lockAmount);\n        prelaunchPoints.lockETH{value: lockAmount}(referral);\n\n        // Directly deposit 1 eth\n        address userDepositETH = makeAddr(\"user\");\n        vm.deal(address(userDepositETH), 1e18);\n        vm.prank(userDepositETH);\n        (bool sent, bytes memory data) = address(prelaunchPoints).call{\n            value: 1e18\n        }(\"\");\n        vm.stopPrank();\n\n        // Set Loop Contracts and Convert to lpETH\n        prelaunchPoints.setLoopAddresses(address(lpETH), address(lpETHVault));\n        vm.warp(\n            prelaunchPoints.loopActivation() + prelaunchPoints.TIMELOCK() + 1\n        );\n        prelaunchPoints.convertAllETH();\n\n        vm.warp(prelaunchPoints.startClaimDate() + 1);\n        prelaunchPoints.claim(\n            ETH,\n            100,\n            PrelaunchPoints.Exchange.UniswapV3,\n            emptydata\n        );\n\n        uint256 balanceLpETH = (prelaunchPoints.totalLpETH() * lockAmount) /\n            prelaunchPoints.totalSupply();\n\n        assertEq(prelaunchPoints.balances(address(this), ETH), 0);\n        assertEq(lpETH.balanceOf(address(this)), balanceLpETH);\n        assertEq(lpETH.balanceOf(address(this)), lockAmount);\n    }\n```\n\n## Tools Used\nManual review\n\n## Recommended Mitigation Steps\nTo resolve this issue, "
+    },
+    {
+      "number": 40,
+      "title": "Users can still \"deposit\" in order to mint more `lpETH` than they have locked during the lock-up period",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L240-L266\n\n\n# Vulnerability details\n\n## Impact\n\nThe main invariant : \"Deposits are active up to the lpETH contract and lpETHVault contract are set\" is broken.\n\nEven though the deposits are not active anymore, users are still able to gain the benefits from depositing and bypass the `LRT` lock-up period enforced by the protocol to get more `lpETH` than they are owed.\n\n## Proof of concept\n\nThe core idea of the `PrelaunchPoints.sol` contract is that users lock their `LRT` tokens for a certain period and are able to claim `lpETH` based upon their stake when this period comes to an end.\n\nWhen administrators call `setLoopAddresses()` users can't deposit their `LRT` anymore and the amount of `lpETH` they are able to mint is settled.\n\nThese `lpETH` can be claimed using the `claim()` function after the `startClaimDate` set by administrators has been reached.\n\nThe issue is when the `LRT` tokens users are trying to `claim()` from is not `ETH` nor `WETH`, the `LRT` tokens are first swapped to `native ETH` through the `_fillQuote()` function.\n\nRight after, the contract uses its new ETH balance to mint the corresponding amount of `lpETH` which should only be equal to the amount received from the swap.\n\n[https://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L252-L264](https://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L252-L264)\n\n```js\n// Swap LRT to ETH\n_fillQuote(IERC20(_token), userClaim, _data);\n// Gets the contract's balance\nclaimedAmount = address(this).balance;\n// Mints lpETH using the contract's balance\nlpETH.deposit{value: claimedAmount}(_receiver);\n```\n\nHowever if a user transfers `native ETH` to the contract before calling `claim()`, the amount of `lpETH` to mint will include the amount of ETH transfered.\n\nThis will end up in the user artificially depositing without having to deal with the lock-up period, thus, minting more `lpETH"
+    },
+    {
+      "number": 39,
+      "title": " The `_claim()` function `claimedAmount` calculations causes the `lpETH` to `ETH` conversion rate inflate and not equal 1:1",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L249\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nWhen `claimedAmount` is calculated in the `(_token == ETH)` branch, the amount of `lpETH` received may be greater than the staked `ETH` in case there was an accidental direct deposit of `ETH` to the contract. The user making this transfer of `ETH` rightfully losses it without a way to recover, the issue is that the `ETH` can be considered to be lost as much as it would be when sent to a dummy address, as there is no way to recover it from the contract - you can only recover ERC20s or use the `withdraw()` function as a user. The excess balance causes `totalLpETH` to be greater than `totalSupply` because of the following lines in `convertAllETH`:\n```javascript\nuint256 totalBalance = address(this).balance;\nlpETH.deposit{value: totalBalance}(address(this));\ntotalLpETH = lpETH.balanceOf(address(this));\n```\n\nTherefore, it increases the `claimedAmount` for each user. This is causing the conversion rate between `ETH` and `lpETH` to not equal 1. Moreover, considering the `(_token != ETH)` branch, a user can `_fillQuote` with amount equal to `userClaim`, however the `claimedAmount` can be increased by simply sending `ETH` directly to the contract right before the call to `claim()` or `claimAndStake()` functions. Again, this makes the conversion to change from 1:1, because `ETH` sent directly to the contract is NOT accessible by anyone including the owner.\n\nBoth of these situations make the `lpETH` inflationary as users essentially get more `lpETH` for the same amount of _real_ stake if they do what's explained above for both `_claim()` function token branches.\n\n## Proof of Concept\n\nTo run a PoC proving how the received `lpETH` is indeed increased when the user sends `ETH` directly to the con"
+    },
+    {
+      "number": 38,
+      "title": "It's possible for an user to lock and get more lpETH even after `loopActivation` timestamp",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nThe protocol defines that users cannot lock tokens/ETH anymore after the `loopActivation` time, but this breaks the rule, and can potentially affect other state variables.\n\n## Proof of Concept\nFor any locking operations, they all call `_processLock` internally:\n\n```solidity\n    function _processLock(address _token, uint256 _amount, address _receiver, bytes32 _referral)\n        internal\n        onlyBeforeDate(loopActivation)\n    {\n        if (_amount == 0) {\n            revert CannotLockZero();\n        }\n        if (_token == ETH) {\n            totalSupply = totalSupply + _amount;\n            balances[_receiver][ETH] += _amount;\n        } else {\n            if (!isTokenAllowed[_token]) {\n                revert TokenNotAllowed();\n            }\n            IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);\n\n            if (_token == address(WETH)) {\n                WETH.withdraw(_amount);\n                totalSupply = totalSupply + _amount;\n                balances[_receiver][ETH] += _amount;\n            } else {\n                balances[_receiver][_token] += _amount;\n            }\n        }\n\n        emit Locked(_receiver, _amount, _token, _referral);\n    }\n```\n\nAs we can see, this function handles the transfer of ETH and other ERC20 tokens. Also the `onlyBeforeDate` modifier implies this function is only supposed to be called before `loopActivation` timestamp.\n\nAnother timestamp is `startClaimDate`, this indicates when the claiming starts. In constructor, it's set to the max value of uint32, and updated when an admin comes in and calls `convertAllETH` to set the value to `block.timestamp`. This implies `lpETH` are ready to be claimed and distributed to whoever locked their tokens in the protocol.\n\nIn `_claim` function, which is called internally by both `claim` and `claimAndStake` "
+    },
+    {
+      "number": 37,
+      "title": "Malicious users could bypass the lock process to claim any amount of lpETH",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L253-L263\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n## Impact\nDuring `claim` process, `_claim` is called to claim `lpETH` token to user, whose amount `claimedAmount` is calculated based on user staked amount during lock period.\nHowever, for the scenario that user stake allowed token to claim `lpETH`, `claimedAmount` is calculated using PrelaunchPoints's balance. \nSo malicious users could send any amount of ETH to PrelaunchPoints and call claim in a single transaction to claim any amount of `lpETH` they wants, which will make the whole lock process useless.\n## Proof of Concept\n1. Alice lock `x_amount` allowed Token to PrelaunchPoints by calling `lock`\n2. After `convertAllETH` and time passed `startClaimDate`, Alice can claim `lpETH`, whose amount should equals to the amount of ETH swapped by `x_amount` staked token. Let's define the correct amount of `lpETH` Alice should get is `x_amt_ETH`.\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L502-L504\n```solidity\n        // Use our current buyToken balance to determine how much we've bought.\n        boughtETHAmount = address(this).balance - boughtETHAmount;\n        emit SwappedTokens(address(_sellToken), _amount, boughtETHAmount);\n```\n3. However, Alice send `y_amount` ETHs to PrelaunchPoints and call `claim` in a single transaction, so the actual amount `lpETH` she can get is `y_amount + x_amt_ETH`. Since this `y_amount` can be any number, which means that Alice could claim arbitrary amount of `lpETH` she wants and thusly make lock process useless.\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L261-L263 \n```solidity\n            // Convert swapped ETH to lpET"
+    },
+    {
+      "number": 36,
+      "title": "Inaccurate Calculation of lpETH During Token Claiming",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sufficient quality report",
+        "unsatisfactory",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nThe `_claim` function  inaccurately calculates the amount of `lpETH` to be received when users claim tokens. This inaccuracy stems from directly using `address(this).balance` to determine the claimed amount, which reflects the total ETH balance of the contract, since the contract implements a `receive` function any one can send ETH to this contract. This approach doesn't account for the actual amount received after token swapping, leading to potential inconsistencies in the claimed lpETH amount.\n\n\nUsers may receive incorrect amounts of `lpETH` during the claiming process.\n\nThe `_claim` function swaps tokens other than ETH for ETH and then converts the resulting ETH to lpETH using a 1-to-1 conversion ratio.\n\nHowever, the claimed amount is determined solely based on the total ETH balance of the contract, which does not accurately represent the amount received after token swapping. anyone can send ETh to this contract.\n\n## Proof of Concept\nSuppose a user claims 100 tokens, expecting to receive 100 `lpETH` based on the 1-to-1 conversion ratio. However, due to market conditions, the actual amount of ETH received from the token swap may differ. If the contract directly uses address(this).balance to calculate the claimed lpETH, the user may receive more or fewer lpETH than anticipated, leading to inconsistencies and potential dissatisfaction.\n\n## Tools Used\nManual Review\n\n## Recommended Mitigation Steps\nImplement a mechanism to determine the exact amount of ETH received from the token swap.\nUse this actual amount of ETH to calculate the equivalent lpETH and transfer it to the user accordingly.\nEnsure that the claimed amount accurately reflects the converted token amount, maintaining fairness and consistency in the claiming process.\n\n\n\n## Assessed type\n\nInvalid Validation"
+    },
+    {
+      "number": 35,
+      "title": "User can maliciously lock specific tokens (`ETH` and `WETH`) to gain additional `lpETH` tokens unfairly, if `ETH` was mistakenly deposited by someone.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L240-L266\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L321-L324\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L179-L195\n\n\n# Vulnerability details\n\n## Impact\nWhen someone mistakenly deposits `ETH` to the `PrelaunchPoints` contract it is supposed to be locked forever, however when the `owner` calls `PrelaunchPoints::convertAllETH` function all `ETH` balance is converted into `lpETH` including the mistakenly sent `ETH`.\n\nNow the variable `totalSupply` only got updated inside `PrelaunchPoints::_processLock` function when `ETH`/`WETH` was deposited. Meanwhile `totalLpETH` was set inside `PrelaunchPoints::convertAllETH` method and could be a much larger value.\n\nWhen a user who locked `ETH`/`WETH` calls the `PrelaunchPoints::claim` or `PrelaunchPoints::claimAndStake` functions, they receive a much larger amount of `lpETH` than the `ETH`/`WETH` they originally locked. \nHowever, users who locked any other LRTs don't receive this added benefit from the tokens which were supposed to be locked forever, and thereby giving them unfair disadvantage.\n\n```javascript\n        if (_token == ETH) {\n @>         claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n```\n\n## Pro"
+    },
+    {
+      "number": 34,
+      "title": "User can manipulate locking mechanism by locking small amount of wrapped `LRT` then send the rest of the ethers at the claim date",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262-L263\n\n\n# Vulnerability details\n\n# Summary\nThe Prelaunch Points system will lock fund of the users for at least \n7 days after the authorized owner of the smart contract set \nthe `lpETH` via `setLoopAddresses()` function. Within that period, \nthe users can withdraw their fund. If the users withdraw their \nfund, they can't claim `lpETH` anymore. But this mechanism can be manipulated \nby only locking small amount of wrapped `LRT` and then send the rest of \nthe fund (in the form of ethers) at the time the users claim the `lpETH`. \nWithin the locking and before claim period, the users can use the rest of \ntheir fund to do something else.\n\n# Vulnerability Detail\nUser locks small amount of wrapped `LRT`. When the claim date comes,\nbefore calling `claim()` function, the user sends ethers to the contract.\nWhen the `claim()` function is called, all of its balance will be converted into\n`lpETH` (including the ethers sent by the user).\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262-L263\n\nNow the user has `lpETH` from conversion of the amount of locked wrapped `LRT` plus the \namount of ethers sent.\n\n# Impact\nThe user can manipulate locking mechanism by locking a small amount of wrapped `LRT`\nand provide the rest of the ethers at the claim date to get `lpETH`.\n\n# Code Snippet\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262-L263\n\n# Tool used\nManual Review\n\n# Recommendation\nOnly deposit the amount of ethers bought from exchange when user uses wrapped `LRT` in order to claim `lpETH`.\n\n\n\n\n\n\n## Assessed type\n\nOther"
+    },
+    {
+      "number": 33,
+      "title": "Availability of deposit invariant can be bypassed",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "satisfactory",
+        "selected for report",
+        "sponsor confirmed",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "H-01"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L324\n\n\n# Vulnerability details\n\n## Impact\n\nOne of the [main invariants](https://github.com/code-423n4/2024-05-loop?tab=readme-ov-file#main-invariants) stated in the contest is the following:\n\n> Deposits are active up to the lpETH contract and lpETHVault contract are set\n\nHowever, there are currently two ways this invariant can be broken, allowing users to gain lpETH without explicitly locking tokens before contracts are set.\n\n1. Sandwich a call to `convertAllETH` by  front-running to directly donate ETH and then back-running to claim lpETH via multiple lock positions\n\n<br/>\n\n2. Bundle a transaction of donation and claiming with a previously locked position of wrapped LRT\n\n\nThis bypasses the `onlyBeforeDate(loopActivation)` modifier included in all lock functions. It also potentially allows no cap in lpETH minted and also discourages users from locking ETH in the `PrelaunchPoints.sol` contract before contract addresses are set (i.e. `loopActivation` is assigned)\n\n## Proof of Concept\n\n### Scenario 1\nBundle a transaction of donation and claiming with a previously locked position of wrapped LRT. User can execute the following in one transaction, assuming the user previously has a locked position with any of the allowed LRTs.\n\n1. Donate ETH directly to contract\n2. Call `claim()/claimAndStake()`, claiming all tokens, this swaps users wrapped LRT to ETH via `_fillQuote`.\n3. Since `claimedAmount` is set as `address(this).balance` [here](https://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262), `claimedAmount`is computed as the addition of ETH receive from LRT swapped + user donated ETH \n4. `claimedAmount` worth of lpETH is subsequently claimed/staked via `lpETH.deposit()/lpETHVault.stake()`. \n\n### Scenario 2\n\nSandwich a call to `convertAllETH` by  front-running to directly do"
+    },
+    {
+      "number": 32,
+      "title": "Users can claim and mint tokens that they have not locked",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-75",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nA user that has locked just 1 wei of the allowed tokens can claim an arbitrary amount of the `lpETH` token.\n\n## Proof of Concept\nThis is the `_claim()` function:\n```solidity\nfunction _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n        emit Claimed(msg.sender, _token, claimedAmount);\n    }\n```\nIf a user has locked just 1 wei of any of the allowed tokens, then he can do the following:\n1. Directly send Ether to the contract for the amount he wishes to claim\n2. Call the `claim()` function with the token he has locked for 1 wei\n3. He will end up in the `else` statement as his token is not `ETH`\n4. His 1 wei of the token gets swapped to ETH\n5. Then, the `claimedAmount` variable is equal to `address(this).balance` which he just increased as he sent Ether directly to the contract\n\nWhile the implementati"
+    },
+    {
+      "number": 30,
+      "title": "User can get as much `lpETH` as he wants with low locked amount of tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L240-L266\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L388-L392\n\n\n# Vulnerability details\n\n## Impact\nUser can get as much `lpETH` as he wants with low locked amount of tokens, sabotaging the whole idea of the locking mechanism \n\n## Proof of Concept\nUser can easily bypass the locking mechanism by locking a low amount of tokens (different than WETH). If he lock his tokens and wait for the `convertAllETH` function to be called he can additionally send ETH to the contract and then immediately call the `claim`/`claimAndStake` function to claim the `lpETH`. this is possible because of the following block of code in the `_claim` function:\n```javascript\nuint256 userClaim = (userStake * _percentage) / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion first person to claim, gets it\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n``` \nIt deposits the whole ETH balance of the contract to the recipient in form of `lpETH`, which means that the user's token deposit and the ETH he sent right before calling the `claim` function are now his in the form of `lpETH`, which sabotages the whole idea of the locking mechanism \n## Tools Used\nmanual review\n\n## Recommended Mitigation\nJust sending the ETH to the owner via `receive` function wont be enough, since a malicious user can transfer ETH to the contract in other ways (for example create a contract with implemented `selfdestruct` function). The best I can think of is to make the `_fillQuote` function return the `boughtETHAmount` variable, and "
+    },
+    {
+      "number": 29,
+      "title": "Malicious user can lock all lpETH using wrapped LRT from being claimed via a direct donation",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_42_group",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L491-L505\n\n\n# Vulnerability details\n\n## Impact\n\nIn `PreLaunchPoints.sol`, users can claim their lpETH after the `startClaimDate` when all ETH balance within the contract is converted to lpETH via `convertAllETH()`. Users claim lpETH depending on whether ETH/WETH or wrapped LRTs are locked:\n\n1. ETH/WETH - 1:1 exchange of amount locked\n2. Wrapped LRTs - A swap is initiated via a uniswapV3 pool and/or other exchanges\n\nHowever, due to a flaw in `_fillQuote()` revolving how `boughtETHAmount` is computed, it can potentially cause a permanent locking in funds. The impact of this is borderline medium/high, given ALL potential users funds are locked but would require the attacker to potentially donate an equal/greater value worth of ETH. Since it is mentioned explicitly as an [attack vector](https://github.com/code-423n4/2024-05-loop?tab=readme-ov-file#attack-ideas-where-to-focus-for-bugs) to focus on, I will leave as high severity\n\n> - User funds getting locked forever\n\n## Proof of Concept\n\n```solidity\nfunction _fillQuote(IERC20 _sellToken, uint256 _amount, bytes calldata _swapCallData) internal {\n    // Track our balance of the buyToken to determine how much we've bought.\n    uint256 boughtETHAmount = address(this).balance;\n\n    require(_sellToken.approve(exchangeProxy, _amount));\n\n    (bool success,) = payable(exchangeProxy).call{value: 0}(_swapCallData);\n    if (!success) {\n        revert SwapCallFailed();\n    }\n\n    // Use our current buyToken balance to determine how much we've bought.\n    boughtETHAmount = address(this).balance - boughtETHAmount;\n    emit SwappedTokens(address(_sellToken), _amount, boughtETHAmount);\n}\n```\n\n1. Assume that 50e18 amount of wrapped LRTs are locked within the `PrelaunchPoints.sol` contract. When users want to claim the tokens, `_fillQuote()` is executed to initiate the swap, notice how only `userClaim` worth of tokens is approved for swap. \n\n<br/>"
+    },
+    {
+      "number": 28,
+      "title": "Attackers could steal the ETH contained in the PrelaunchPoints contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-50",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L259-L262\n\n\n# Vulnerability details\n\n## Impact\nWhen users claim lpETH and the specified _token is not ETH, if there is ETH in the `PrelaunchPoints` contract transferred by mistake by others, the contract will also convert this part of ETH into lpETH for the user. This is because the amount of lpETH calculated for the user's claim in the `_claim` function is `address(this).balance`, rather than the actual amount of ETH obtained through exchangeProxy with the _token in the `_fillQuote` function.\n```solidity\n_fillQuote(IERC20(_token), userClaim, _data);\n\n// Convert swapped ETH to lpETH (1 to 1 conversion)\nclaimedAmount = address(this).balance;\nlpETH.deposit{value: claimedAmount}(_receiver);\n```\nAlthough the comment states, \"At this point there should not be any ETH in the contract,\" this is an ideal situation. In reality, it is highly possible that someone could mistakenly transfer ETH to the `PrelaunchPoints` contract.\n\n## Proof of Concept\n1. User A calls the `lock` function, locking an amount of `_token` into the `PrelaunchPoints` contract.\n2. The owner calls the `convertAllETH` function to convert the ETH in the `PrelaunchPoints` contract into lpETH and updates the `startClaimDate` variable, allowing users who have locked assets in the contract to start claiming lpETH.\n3. User B mistakenly transfers 10 ETH to the `PrelaunchPoints` contract.\n4. User A observes User B's mistaken transfer and immediately calls the `claim` function to claim lpETH. The `claim` function calls the `_claim` function for the actual operation. In the `_claim` function, `_fillQuote` is invoked, which converts User A's _token into ETH held within the `PrelaunchPoints` contract.\n5. The contract converts the amount of ETH denoted as `claimedAmount` into lpETH for User A’s specified `_receiver`. Note that the `claimedAmount` here is `address(this).balance`, which includ"
+    },
+    {
+      "number": 27,
+      "title": "User can bypass the locking mechanism and still be able to get as big amount of `lpETH` as he wants",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L240-L266\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L492-L505\n\n\n# Vulnerability details\n\n## Impact\nUser can lock low amount worth of any token different than `WETH` and get as much `lpETH` as he wants.\n\n## Proof of Concept\nThe user will lock via `lock()` function, then after some time when the owner calls the `convertAllETH()` function and everybody is able to claim or stake their `lpETH`, the user will send ether to the contract and immediately call `claim()` or `claimAndStake()` functions. No matter which function he will call, because they are both leading to the following block of code in the `_claim()` function:\n```javascript\n} else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n        emit Claimed(msg.sender, _token, claimedAmount);\n```\nIt deposits the ETH balance of the contract to the receiver, assuming that there is no ETH left in the contract after the `convertAllETH()` function is called. This sabotages the whole idea of the locking mechanism, making it easy for users to trick the system\n\n## Tools Used\nManual review\n\n## Recommended Mitigation\nreturn the `boughtETHAmount` from `_fillQuote` function and deposit it, instead of depositing the ETH balance of the contract \n\n\n\n\n\n\n## Assessed type\n\nOther"
+    },
+    {
+      "number": 26,
+      "title": "[H-1] `PrelaunchPoints::lock, lockFor` allows a users to lock s small amount of LRT token and then force ether into the contract claiming as much lpETH as they want, removing the risk of locking a lot of tokens and braking the 2nd invariant",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n**Description:**\n\nIn the `Prelaunchpoint` the functions `lock` and `lockFor` allow users to lock LRTs or WETH into the contract. After the owner calls `setLoopAddresses` and converts all the ETH, users are able to call the `claim` and `claimAndStake` functions. A user can force ETH into the smart contract and right after call the `claim` function with the LRT Token with a small percentage. Because `claimedAmount` is set to `address(this).balance` this will also get the forced ETH, allowing users to remove the risk of locking a large amount and rather lock a small amount and then force ether to get the desired lpETH.\n\n**Impact:**\n\n1. Allows users to remove the risk of locking a large amount of tokens.\n2. Allows users to mint how much ever lpETH they want, as long as they have the capital and a small locked amount of LRT Token.\n3. This breaks the 2nd invariant - `Deposits are active up to the lpETH contract and lpETHVault contract are set`\n\n**Proof of Concept:**\n\n1. The user locks a desired amount of an LRT Token\n2. The owner sets the loop addresses and the 7 days to withdraw pass\n3. The owner converts all the ETH, which allows the user to claim, claim and stake\n4. The user forces ETH into the contract\n5. The user calls the `claim` function and gets the lpETH for the forced ETH\n\nPaste this into `PrelaunchPoints.t.sol`\n\n```javascript\nfunction testDepositAndStakeAfterTheClaimStartDate() public {\n        uint256 lockAmount = 10;\n        address userOne = vm.addr(1);\n\n        lrt.mint(userOne, lockAmount);\n\n        vm.startPrank(userOne);\n        lrt.approve(address(prelaunchPoints), lockAmount);\n        prelaunchPoints.lock(address(lrt), lockAmount, referral);\n        vm.stopPrank();\n\n        // Set Loop Contracts and Convert to lpETH\n        prelaunchPoints.setLoopAddresses(address(lpETH), address(lpETHVault));"
+    },
+    {
+      "number": 25,
+      "title": "Users are able to get more lpETH tokens than they have staked for during the locking period",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-75",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L172\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L240\n\n\n# Vulnerability details\n\n## Impact\n\nThe `PrelaunchPoints` contract allows a user to lock a very small amount of LRT tokens, and right before or during a claim, the user can transfer a large amount of ETH directly to the contract.\n\nOriginally, by design, lpETH tokens should be gained only from the contract by staking LRT tokens during the locking period and then claiming them after the locking period has ended.\n\nHowever, using the method described above, a user will end up **avoiding uncertainty and risks associated with the staking process** and being able to claim as many LRT tokens as they want **even after the locking period has ended.** Even though the user isn't getting those lpETH tokens for free, the user is **bypassing the staking process** and **avoiding the risks associated with it**.\n\nFollowing that, the documentation also states, \"[`Deposits are active up to the lpETH contract and lpETHVault contract are set`](https://code4rena.com/audits/2024-05-loopfi#top:~:text=Deposits%20are%20active%20up%20to%20the%20lpETH%20contract%20and%20lpETHVault%20contract%20are%20set)\" which is **an invariant, that is broken here** and further more confirms this finding.\n\n## Example scenario\n\n_The amounts are simplified for the sake of easier understanding_\n\n- Alice locks 1 LRT token and stakes it.\n- Some time passes and the locking period ends.\n- Before claiming, Alice sends large amount of ETH directly to the contract to gain more lpETH tokens than they have staked for during the locking period.\n- Alice claims the staked amount and receives 10 lpETH tokens.\n- Alice now has 10 lpETH tokens, even though they have only staked 1 LRT token during the locking period.\n\n## Proof of Concept\n\nThe following Foundry test can be added "
+    },
+    {
+      "number": 24,
+      "title": "Users can claim the eth accidently sent to PrelaunchPoints using the claim function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-25",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\n\nAny user can claim the eth accidently sent to the PrelaunchPoints contract.\n\n## Proof of Concept\n\nThe protocol operates under the assumption that ETH sent to the contract is permanently locked:\n\n```solidity\n    /**\n     * Enable receive ETH\n     * @dev ETH sent to this contract directly will be locked forever.\n     */\n    receive() external payable {}\n```\n\nThe problem arises in the _claim function, which uses address(this).balance instead of the user's balance when depositing in lpETH, resulting in a first-come, first-served scenario:\n\n```solidity\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n```\n\nConsequently, after all ETH has been converted, any remaining or subsequently sent ETH to the contract will be claimed by the first user.\n\n## Tools Used\n\nManual review\n\n## Recommended Mitigation Steps\n\nConsider updating the _claim function as follows:\n\n```solidity\n            claimedAmount = userClaim > address(this).balance ? address(this).balance : userClaim;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n```\n\ndditionally, implement a similar function to recoverERC20 to withdraw ETH, accessible only after convertAllETH has been called.\n\n\n\n## Assessed type\n\nOther"
+    },
+    {
+      "number": 23,
+      "title": "Users can raise the `lpETH` tokens out of the locking process",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L392\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L315\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/README.md?plain=1#L124\n\n\n# Vulnerability details\n\n## Issue Description\nThe protocol's main job is to lock ETH and other tokens to send `lpETH` tokens to users at the right time\nThere is an invariant that says: `Deposits are active up to the lpETH contract and lpETHVault contract are set`\nUsers deposit and lock ETH before `loopActivation` and their `lpETH` tokens correspond to the number of tokens they deposited at the right time so technically they must not be able to manipulate the `lpETH` tokens after `loopActivation`.\nHowever, this can be done by sending ether to the contract thanks to the `receive()` function before the owner calls the `convertAllETH` function which sets the `totalLpETH`.\nThe value of `totalLpETH` is crucial for calculating the number of `lpETH` tokens users can claim\nThis unintentionally enables users to influence their `lpETH` token balance after `loopActivation`, violating the protocol's intended behavior and its invariant\n\n## Impact\nThis vulnerability allows users to manipulate their `lpETH` token balance after the critical `loopActivation` phase, potentially leading to discrepancies in the issuance of `lpETH` tokens. This undermines the protocol's security and reliability, impacting the expected behavior of deposit and token issuance mechanisms\n\n## Proof of Concept\nHere is the scenario:\n1. Users lock ETH\n2. the owner calls the `setLoopAddresses` function and ends up with the deposits\n3. According to one of the main invariants, Users can't lock and deposit any tokens after setting the `loopActivation` \nHowever, Users can send ETH to the contract before the owner calls the `convertAllETH` which is unexpecte"
+    },
+    {
+      "number": 22,
+      "title": "Unaccounted ETH Deposits May Lead to Unintended `lpETH` Minting and Staking",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "partial-75",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n#### Summary:\n\nThe `PrelaunchPoints` contract currently contains logic that allows users to claim their locked funds as `lpETH` during a claim period. However, there exists a vulnerability where ETH sent to the contract via direct transfer (fallback function) is not accounted for and may result in more `lpETH` being minted and potentially staked than intended based on a user's legitimate locked tokens balance.\n\n#### Description:\n\nIn the `_claim` function, after swapping a user's ERC20 tokens for ETH using `_fillQuote`, the contract mints `lpETH` using the entire balance of ETH within the contract, rather than only the amount of ETH that was specifically obtained from the swap. This behavior opens up an opportunity for a user to \"front-run\" their claim by transferring ETH directly to the contract at the time of calling the `claim` function, leading to a larger amount of `lpETH` being minted than is due from their locked ERC20 token balance alone.\n\n#### Impact:\n\nBy sending additional ETH to the contract before claiming, a user can artificially inflate the amount of `lpETH` that they receive, which could lead to an unfair advantage in the staking process. This may, in turn, distort the staking rewards and undermine the prelaunch point system's integrity and intended economics, leading to possible reputational damage and potential financial loss for legitimate participants.\n\n#### Steps To Reproduce:\n\n1. Lock an ERC20 token in the contract that is approved for conversion to `lpETH`.\n2. Call the `claim` function with parameters to trade the ERC20 for ETH and then mint `lpETH`.\n3. Immediately before the `claim` transaction is mined, send ETH directly to the contract's address, triggering the fallback function.\n4. Observe that the contract uses the entire ETH balance, which includes the additional ETH sent unintent"
+    },
+    {
+      "number": 21,
+      "title": "Users don't claim the correct amount of `lpETH` token, violating the invariant",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L249\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L321-L324\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L392\n\n\n# Vulnerability details\n\n## Issue Description\nThere is an invariant that says : \n`Users that deposit ETH/WETH get the correct amount of lpETH on claim (1 to 1 conversion)`\nThe protocol's invariant, which guarantees a 1:1 conversion ratio of deposited ETH to lpETH upon claim, is being violated due to the presence of the `receive()` function and the `convertAllETH` function.\n```java\n    function convertAllETH() external onlyAuthorized onlyBeforeDate(startClaimDate) {\n        // ...\n\n        uint256 totalBalance = address(this).balance;\n        lpETH.deposit{value: totalBalance}(address(this));\n\n        totalLpETH = lpETH.balanceOf(address(this));\n\n        // ...\n    }\n```\nThe `convertAllETH` function improperly calculates `totalLpETH` by assigning the contract's ETH balance directly to this variable, rather than ensuring accurate handling of ETH and `lpETH` balances. This miscalculation allows `totalLpETH` to be increased through the receipt of ETH without corresponding `lpETH` issuance, leading to a disparity between `totalLpETH` and `totalSupply`.\nThis all happens because of the simple math calculation in the `_claim` function:\n```java\nfunction _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        //...\n\n        if (_token == ETH) {\n              // Users gets more lpETH because of `totalLpETH > totalSupply`\n@>            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmou"
+    },
+    {
+      "number": 20,
+      "title": "Malicious user can claim any amount of ``lpeth`` and stake that amount without depositing equivalent amount of ETH/WETH or other LRT's in a specific case.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L240\n\n\n# Vulnerability details\n\n## Impact\nAfter you lock some amount of ETH/WETH or LRTs for certain ``LoopActivation`` period(max 120days), 7 days TIMELOCK and up to ``startClaimDate``(can be months, years), you are finally allowed to ``claim`` equivalent amount of ``lpEth`` using the ``_claim()`` function.\n\n```solidity\n    function _claim(address _token, address _receiver, uint8 _percentage, Exchange _exchange, bytes calldata _data)\n        internal\n        returns (uint256 claimedAmount)\n    {\n        uint256 userStake = balances[msg.sender][_token];\n        if (userStake == 0) {\n            revert NothingToClaim();\n        }\n        if (_token == ETH) {\n            claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);\n            balances[msg.sender][_token] = 0;\n            lpETH.safeTransfer(_receiver, claimedAmount);\n        } else {\n            uint256 userClaim = userStake * _percentage / 100;\n            _validateData(_token, userClaim, _exchange, _data);\n            balances[msg.sender][_token] = userStake - userClaim;\n\n            // At this point there should not be any ETH in the contract\n            // Swap token to ETH\n            _fillQuote(IERC20(_token), userClaim, _data);\n\n            // Convert swapped ETH to lpETH (1 to 1 conversion)\n            claimedAmount = address(this).balance;\n            lpETH.deposit{value: claimedAmount}(_receiver);\n        }\n        emit Claimed(msg.sender, _token, claimedAmount);\n    }\n```\nNow, if you stake ``ETH/WETH``, you are directly transferred ``lpETH`` in 1 to 1 conversion ratio. But for LRTs, first the LRT token needs to be swapped into ``ETH``. It is done with ``_fillQuote()`` function. Before ``_fillQuote()`` function is executed inside ``_claim()`` function, It is assumed that there should not be any ETH in the contract. It is because the amount of ``lpETH`` minted for rec"
+    },
+    {
+      "number": 19,
+      "title": "Users can bypass locking funds and use claim directly",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sufficient quality report",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nUsers can bypass _processLock and use claim when the start claim date is active. This breaks a core concept in the protocol to lock funds within the period of 120 days at max.\n\n\n## Proof of Concept\nUsers will call [_processLock](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L172)  to transfer thier tokens to PrelaunchPoints contract  to be locked, then they have to wait for a period of time until the deposits are paused then after 7 days the claim date is activeted, and only then they can start to claim lpETH.\n\nAn attacker can deposit small amount using _processLock let's say 100 WEI amount before the 7 days start, then he will wait for the owner to call `convertAllETH`, after that he will send an amount of X Native ETH let's say 100e18, and call [claim](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L211), the attacker will receive an amount of lpETH while he didn't lock any amount before except for 100 WEI.\n\nBreak down the Scenario:\n- Bob will deposit 100 WEI of LRT token (e.g stETH).\n- Deposit period is done and now the 7 days started with deposits being paused.\n- The Owner convert all ETH and now the start claim date is active.\n- Pay attention to the comment [// At this point there should not be any ETH in the contract](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L257), it's true since the conversion is done now there no ETH in the contract.\n- Bob will send 10e18 ETH to PrelaunchPoints contract address.\n- Bob will call claim with 1 WEI amount for stETH Token.\n- _claim will pass [if (userStake == 0)](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/Prel"
+    },
+    {
+      "number": 18,
+      "title": "Users can claim more lpETH than locked ETH in case of someone sends ETH to the contract directly",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sponsor confirmed",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_primary",
+        ":robot:_42_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L179-L182\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L321-L322\n\n\n# Vulnerability details\n\n## Impact\nThe contract is designed to receive ETH so that users can use the function ```lockETH()```\n to get lpETH (1 to 1 conversion). User deposits are stored in the state variable ```totalSupply```. While converting all user deposited ETH to lpETH via a privileged function ```convertAllETH()```, the ETH balance of the current contract is used instead of the state variable ```totalSupply```. In case that some users mistakenly sent ETH directly to the contract the 1 to 1 conversion ratio of ETH to lpETH will be broken leading to users getting more lpETH than they were supposed to.\n\n\n## Proof of Concept\n\n- Consider all user ETH deposits in the state variable is 1000. \n- Someone mistakenly had sent 10 ETH directly to the contract. \n- ```totalBalance``` variable in the function ```convertAllETH()```  will be 1010 resulting in minting of 1010 lpETH. ```totalLpETH``` state variable will be also 1010.\n- While user is claiming lpETH,   the following formula is used\n ```claimedAmount = userStake.mulDiv(totalLpETH, totalSupply);```\n\nIn this situation, all users will get 1.01 more lpETH that the ETH they staked. It will be more if the amount of ETH that was mistakenly sent is higher.\n\n\n\n\n## Tools Used\n\nManual review.\n\n## Recommended Mitigation Steps\n\nUse state variable ```totalSupply``` in the function ```convertAllETH``` instead of \"address(this).balance\" to calculate the amount to be deposited to lpETH contract.\n\n\n\n\n## Assessed type\n\nInvalid Validation"
+    },
+    {
+      "number": 16,
+      "title": "Inconsistent Emergency Mode Handling in `withdraw` Function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_14_group",
+        "duplicate-17"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L290-L303\n\n\n# Vulnerability details\n\n## Description\n\nThe [`withdraw`](https://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L274-L306) function in the PrelaunchPoints contract has an inconsistency in how it handles emergency mode for different token types. In emergency mode, the function treats ETH withdrawals differently compared to other tokens, such as other LRTs. This inconsistency can lead to unintended behavior and potential issues.\n\nLet's examine the relevant code snippet:\n\n```solidity\nfunction withdraw(address _token) external {\n    if (!emergencyMode) {\n        // Standard time checks\n    } else {\n        if (_token == ETH) {\n            if (block.timestamp >= startClaimDate) {\n                revert UseClaimInstead();\n            }\n        }\n        // No similar check for other tokens\n    }\n    // Withdrawal logic...\n}\n```\n\nIn the code above, when the contract is in emergency mode, the function checks if the token being withdrawn is ETH. If it is ETH and the current timestamp is greater than or equal to `startClaimDate`, the function reverts with the `UseClaimInstead` error, indicating that the user should use the claim process instead of withdrawing.\n\nHowever, the function does not apply the same logic to other token types (LRTs). This means that even if the contract is in emergency mode and `startClaimDate` has passed, users can still withdraw wrapped LRTs, without any restrictions.\n\n## Impact\n\nThe inconsistent handling of emergency mode in the `withdraw` function can have significant consequences:\n\n- In emergency mode, after `startClaimDate` has passed, users should be directed to use the claim process for all token types. However, the current implementation allows users to withdraw wLRT tokens even when they should be using the claim process. This can lead to uninte"
+    },
+    {
+      "number": 12,
+      "title": "Wrong `if` statement in the `_validateData` function causes the `claim` function always to revert when claiming tokens that are not ETH",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_11_group"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/main/src/PrelaunchPoints.sol#L439\n\n\n# Vulnerability details\n\n## Impact\nThe vulnerability identified in the `_validateData` function of the `PrelaunchPoints` contract can lead to unintended contract behavior. Specifically, the contract will always revert with the `WrongRecipient` error due to a misleading condition in the code. This can prevent expected functionality related to token swaps and recipient validation.\n\n## Proof of Concept\nThe vulnerability can be found in the `_validateData` function within the `PrelaunchPoints` contract:\n\n```solidity\n\nfunction _validateData(address _token, uint256 _amount, Exchange _exchange, bytes calldata _data) internal view {\n    // Other code omitted for brevity\n\n    if (recipient != address(this) && recipient != address(0)) {    // Incorrect condition\n        revert WrongRecipient(recipient);\n    }\n}\n\n\n```\n\nThe issue arises from the condition `recipient != address(this) && recipient != address(0)`, which expects `recipient` to be neither the contract's address (`address(this)`) nor the zero address (`address(0)`). However, this condition does not align with the expected behavior of the `recipient` variable in the context of token swaps.\n\nImpact of the Vulnerability:\n\n- The condition always evaluates to `true` due to the nature of recipient addresses used in token swap operations.\n- As a result, the contract always reverts with the `WrongRecipient` error, regardless of the actual recipient address.\n\n## Tools Used\n\nManual Review\n\n## Recommended Mitigation Steps\nTo mitigate this vulnerability, the condition in the `_validateData` function regarding the `recipient` address check should be revised to align with the actual use case of the recipient address in token swap scenarios. Considerations for valid recipient addresses in token swaps should be made to ensure smooth contract functionality without unnecessary reverts.\n\n\n## Assessed type\n\nInvalid Validation"
+    },
+    {
+      "number": 6,
+      "title": "it is possible to claim `lpETH` anytime after the `startClaimDate` without locking assets from before",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sponsor confirmed",
+        "sufficient quality report",
+        "upgraded by judge",
+        ":robot:_primary",
+        ":robot:_44_group",
+        "edited-by-warden",
+        "duplicate-33"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/0dc8467ccff27230e7c0530b619524cc8401e22a/src/PrelaunchPoints.sol#L262\n\n\n# Vulnerability details\n\n## Impact\nA malicious user can lock a minimum amount of an allowed ERC20 token like DAI during the lock time. They can then wait until the claim date begins and send Ether directly to the `PrelaunchPoints` contract. Afterward, they can call the `claim()` or `claimAndStake()` function.\n\nThis allows the user to claim `lpETH` based on the amount of Ether they just sent to `PrelaunchPoints`, not the amount they locked before, during the locking time.\n\nThe issue lies in the `_claim()` function where the `claimedAmount` is determined by `address(this).balance`, which can be manipulated by the user by sending Ether directly.\n\n## Proof of Concept\nThe foundry test `testClaimLpEthWihtoutLocking` demonstrates how this bug can be exploited.\n### ./test/Bug.t.sol\n```solidity  \n// SPDX-License-Identifier: UNLICENSED\npragma solidity ^0.8.20;\n\nimport \"forge-std/Test.sol\";\nimport \"../src/PrelaunchPoints.sol\";\nimport \"../src/interfaces/ILpETH.sol\";\n\nimport \"@openzeppelin/contracts/token/ERC20/ERC20.sol\";\nimport \"../src/mock/MockLpETH.sol\";\nimport \"../src/mock/MockLpETHVault.sol\";\nimport {ERC20Token} from \"../src/mock/MockERC20.sol\";\nimport {LRToken} from \"../src/mock/MockLRT.sol\";\n\nimport \"forge-std/console.sol\";\n\ncontract Bug is Test {\n    PrelaunchPoints public prelaunchPoints;\n\n    ILpETH public lpETH;\n    ILpETHVault public lpETHVault;\n    ERC20Token public dai;\n    bytes32 referral = bytes32(uint256(1));\n\n    address constant EXCHANGE_PROXY = 0xDef1C0ded9bec7F1a1670819833240f027b25EfF;\n    address public constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;\n    address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;\n    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;\n    address[] public allowedTokens;\n\n    function setUp() public {\n        dai = ERC20Token(DAI);\n\n       "
+    },
+    {
+      "number": 5,
+      "title": "`withdraw` can be maliciously used to mint gas tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "sufficient quality report",
+        "unsatisfactory",
+        ":robot:_primary"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L274\n\n\n# Vulnerability details\n\n## Impact\n\nTheft of user funds\n\n## Proof of Concept\n\n[withdraw](https://github.com/code-423n4/2024-05-loop/blob/40167e469edde09969643b6808c57e25d1b9c203/src/PrelaunchPoints.sol#L274) allows users to withdraw their locked funds before `startClaimDate` and after `loopActivation`.For the `emergencyMode` is `true` condition, it can be called anytime.\n\n```solidity\nContract: PrelaunchPoints.sol\n\n274:     function withdraw(address _token) external {\n275:         if (!emergencyMode) {\n276:             if (block.timestamp <= loopActivation) {\n277:                 revert CurrentlyNotPossible();\n278:             }\n279:             if (block.timestamp >= startClaimDate) {\n280:                 revert NoLongerPossible();\n281:             }\n282:         }\n283:\n284:         uint256 lockedAmount = balances[msg.sender][_token];\n285:         balances[msg.sender][_token] = 0;\n286:\n287:         if (lockedAmount == 0) {\n288:             revert CannotWithdrawZero();\n289:         }\n290:         if (_token == ETH) {\n291:             if (block.timestamp >= startClaimDate){\n292:                 revert UseClaimInstead();\n293:             }\n294:             totalSupply = totalSupply - lockedAmount;\n295:\n296:             (bool sent,) = msg.sender.call{value: lockedAmount}(\"\");\n297:\n298:             if (!sent) {\n299:                 revert FailedToSendEther();\n300:             }\n301:         } else {\n302:             IERC20(_token).safeTransfer(msg.sender, lockedAmount);\n303:         }\n304:\n305:         emit Withdrawn(msg.sender, _token, lockedAmount);\n306:     }\n```\n\nIf the users locked ETH and claiming is not started yet, the users who locked ETH can withdraw their ETH too.\nHowever, at L: 296, the ETH transfer fashion is executed by `call`which creates a point to steal funds.\n\nThe concept is known as gas token minting and it works with"
+    }
+  ]
+}
