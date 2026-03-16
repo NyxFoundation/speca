@@ -6,7 +6,7 @@ The `handle_debt_auto_deleverage` execution guard at `market.move:580` uses glob
 
 ### Root Cause
 
-In [`market.move:580-582`](contracts/protocol/sources/internal/market/market.move#L580):
+In [`market.move:580-582`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/market.move#L580-L582):
 
 ```move
 let total_debt = (*self.reserves.load_by_type(debt_type).debt()).floor();
@@ -57,6 +57,11 @@ The severity is amplified because ADL operates with a `liquidation_ltv_threshold
 
 ### PoC
 
+Place in `contracts/protocol/tests/integration/test_cases/` and run:
+```bash
+sui move test poc_066 --gas-limit 5000000000
+```
+
 ```move
 #[test_only]
 module protocol::poc_066_adl_global_debt_mismatch;
@@ -89,9 +94,9 @@ fun test_adl_passes_with_global_debt_above_target() {
     );
 
     // Group A borrow = 30M — BELOW target, should NOT trigger ADL
-    let group_a_borrow: u64 = 30_000_000;
+    let _group_a_borrow: u64 = 30_000_000;
     // This correctly would NOT pass:
-    // params.ensure_limit_breached(group_a_borrow); // would abort: 50M >= 30M
+    // params.ensure_limit_breached(_group_a_borrow); // would abort: 50M >= 30M
 
     // But the code uses GLOBAL reserve.debt = 110M
     let global_reserve_debt: u64 = 110_000_000;
@@ -103,7 +108,7 @@ fun test_adl_passes_with_global_debt_above_target() {
 
 /// Shows that using the correct per-group amount would block the ADL.
 #[test]
-#[expected_failure(abort_code = protocol::error::Err_ADL_WithinLimit)]
+#[expected_failure(abort_code = 603, location = protocol::adl)]
 fun test_adl_correctly_blocked_with_group_debt() {
     let target_amount: u64 = 50_000_000;
 

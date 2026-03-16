@@ -6,14 +6,14 @@ The permissionless `repay_on_behalf` function reduces eMode group borrow trackin
 
 ### Root Cause
 
-In [`market.move:489-491`](contracts/protocol/sources/internal/market/market.move#L489), `handle_repay` calls `try_stop_borrow_deleverage` using the current eMode group total borrow:
+In [`market.move:489-491`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/market.move#L489-L491), `handle_repay` calls `try_stop_borrow_deleverage` using the current eMode group total borrow:
 
 ```move
 let adl = dynamic_field::borrow_mut<ADLRegistryKey, AutoDeleverageRegistry>(&mut self.id, ADLRegistryKey {});
 adl.try_stop_borrow_deleverage<CoinType>(type_name::with_defining_ids<MarketType>(), emode_group_id, emode_group_total_borrow.ceil());
 ```
 
-In [`adl.move:130-147`](contracts/protocol/sources/internal/market/adl.move#L130), `try_stop_borrow_deleverage` removes the ADL entry when `target_amount >= current_value`:
+In [`adl.move:130-147`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/adl.move#L130-L147), `try_stop_borrow_deleverage` removes the ADL entry when `target_amount >= current_value`:
 
 ```move
 if (t.inner.target_amount < current_value) return;
@@ -57,14 +57,17 @@ During a market crisis where ADL is the last line of defense against insolvency,
 
 ### PoC
 
+Place in `contracts/protocol/tests/integration/test_cases/` and run:
+```bash
+sui move test poc_067 --gas-limit 5000000000
+```
+
 ```move
 #[test_only]
 module protocol::poc_067_adl_premature_stop;
 
 use protocol::adl;
 use math::float;
-
-const SECONDS_IN_A_DAY: u64 = 86400;
 
 /// Demonstrates that ADL can be disabled by transiently dropping
 /// emode tracking below target, then re-inflating in the same PTB.
