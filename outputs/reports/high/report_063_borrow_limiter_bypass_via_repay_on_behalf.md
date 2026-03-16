@@ -1,7 +1,4 @@
-# 063: Borrow Rate Limiter Bypass via `repay_on_behalf`
-
-### Title
-Attacker will bypass borrow rate limiter via `repay_on_behalf` to accumulate unbounded debt, causing bad debt for depositors
+### Attacker will bypass borrow rate limiter via `repay_on_behalf` to accumulate unbounded debt, causing bad debt for depositors
 
 ### Summary
 The [`repay_on_behalf`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/lending/repay.move#L33-L47) function (public, no ownership check) calls [`handle_repay`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/market.move#L445-L489) which reduces the borrow rate limiter's outflow counter via [`reduce_outflow`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/limiter.move#L100-L119). An attacker can cycle **borrow → repay_on_behalf(victim) → borrow** within a single Sui PTB to repeatedly reset the rate limiter's current segment, bypassing the borrow velocity cap entirely. This removes the protocol's primary defense against over-borrowing during oracle instability, enabling the attacker to accumulate unbounded individual debt (up to their collateral limit) in a single transaction.
