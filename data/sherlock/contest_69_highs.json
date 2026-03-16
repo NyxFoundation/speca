@@ -1,0 +1,443 @@
+{
+  "contest_id": 69,
+  "contest_title": "Blueberry Update",
+  "judging_repo": "sherlock-audit/2023-04-blueberry-judging",
+  "issues": [
+    {
+      "number": 147,
+      "title": "`AuraSpell`'s Balancer pool exit will always revert",
+      "author": "cuthalion0x",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "cuthalion0x\n\nhigh\n\n# `AuraSpell`'s Balancer pool exit will always revert\n\n## Summary\n\nIn `AuraSpell.closePositionFarm`, the call to `BalancerVault.exitPool` is not properly encoded and will always revert.\n\n## Vulnerability Detail\n\nAll Balancer Vault operations include an input argument called `userData`. This is optional for all known swaps, but it is very much required for all known joins and exits. In `AuraSpell.closePositionFarm`, a call to `BalancerVault.exitPool` leaves the `userData` empty. As a result, the exit will always revert, and it will be impossible to close a position.\n\n## Impact\n\nIt is not possible to close a position using the `AuraSpell`.\n\n## Code Snippet\n\n[spell/AuraSpell.sol#L184-189](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L184-L189), annotated below for clarity.\n\n```solidity\nwAuraPools.getVault(lpToken).exitPool(\n    IBalancerPool(lpToken).getPoolId(),\n    address(this),\n    address(this),\n    IBalancerVault.ExitPoolRequest(tokens, minAmountsOut, \"\", false) // @audit-info The \"\" here is empty `userData`.\n);\n```\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nFirst, create an integration test for the Aura spell. There are tests for Convex, Curve, and Ichi, but not Aura. A test would likely have caught this issue.\n\nTo fix the issue, consult the [Balancer docs on pool exits](https://docs.balancer.fi/reference/joins-and-exits/pool-exits.html). The safest exit type is the \"proportional\" exit, whose `userData` looks like:\n\n```solidity\n[uint256, uint256]\n[EXACT_BPT_IN_FOR_TOKENS_OUT, bptAmountIn]\n```\n\nNote that if we choose the proportional exit, we will get all underlying tokens out and will have to deal with each one.\n\nDuplicate of #129\n"
+    },
+    {
+      "number": 145,
+      "title": "Deadline check is not effective, allowing outdated slippage and allow pending transaction to be unexpected executed",
+      "author": "ctf_sec",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "ctf_sec\n\nhigh\n\n# Deadline check is not effective, allowing outdated slippage and allow pending transaction to be unexpected executed\n\n## Summary\n\nDeadline check is not effective, allowing outdated slippage and allow pending transaction to be unexpected executed\n\n## Vulnerability Detail\n\nIn the current implementation in CurveSpell.sol\n\n```solidity\n{\n\t// 2. Swap rewards tokens to debt token\n\tuint256 rewards = _doCutRewardsFee(CRV);\n\t_ensureApprove(CRV, address(swapRouter), rewards);\n\tswapRouter.swapExactTokensForTokens(\n\t\trewards,\n\t\t0,\n\t\tswapPath,\n\t\taddress(this),\n\t\ttype(uint256).max\n\t);\n}\n```\n\nthe deadline check is set to type(uint256).max, which means the deadline check is disabled!\n\nIn IChiSpell. the swap is directedly call on the pool instead of the router\n\n```solidity\nSWAP_POOL.swap(\n\taddress(this),\n\t// if withdraw token is Token0, then swap token1 -> token0 (false)\n\t!isTokenA,\n\tamountToSwap.toInt256(),\n\tisTokenA\n\t\t? param.sqrtRatioLimit + deltaSqrt\n\t\t: param.sqrtRatioLimit - deltaSqrt, // slippaged price cap\n\tabi.encode(address(this))\n);\n```\n\nand it has no deadline check for the transaction when swapping\n\n## Impact\n\nAMMs provide their users with an option to limit the execution of their pending actions, such as swaps or adding and removing liquidity. The most common solution is to include a deadline timestamp as a parameter (for example see Uniswap V2 and Uniswap V3). If such an option is not present, users can unknowingly perform bad trades:\n\nAlice wants to swap 100 tokens for 1 ETH and later sell the 1 ETH for 1000 DAI.\n\nThe transaction is submitted to the mempool, however, Alice chose a transaction fee that is too low for miners to be interested in including her transaction in a block. The transaction stays pending in the mempool for extended periods, which could be hours, days, weeks, or even longer.\n\nWhen the average gas fee dropped far enough for Alice's transaction to become interesting again for miners to include it, her swap will be executed. In the meantime, the price of ETH could have drastically changed. She will still get 1 ETH but the DAI value of that output might be significantly lower. \n\nShe has unknowingly performed a bad trade due to the pending transaction she forgot about.\n\nAn even worse way this issue can be maliciously exploited is through MEV:\n\nThe swap transaction is still pending in the mempool. Average fees are still too high for miners to be interested in it. \n\nThe price of tokens has gone up significantly since the transaction was signed, meaning Alice would receive a lot more ETH when the swap is executed. But that also means that her maximum slippage value (sqrtPriceLimitX96 and minOut in terms of the Spell contracts) is outdated and would allow for significant slippage.\n\nA MEV bot detects the pending transaction. Since the outdated maximum slippage value now allows for high slippage, the bot sandwiches Alice, resulting in significant profit for the bot and significant loss for Alice.\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L162-L175\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nWe recommend the protocol use block.timstamp for swapping deadline for Uniswap V2 and swap with Unsiwap Router V3 instead of the pool directly!\n"
+    },
+    {
+      "number": 144,
+      "title": "Missing slippage control in CurveSpell swap",
+      "author": "ctf_sec",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "ctf_sec\n\nhigh\n\n# Missing slippage control in CurveSpell swap\n\n## Summary\n\nMissing slippage control in CurveSpell swap\n\n## Vulnerability Detail\n\nWhen closePositionFarm in CurveSpell\n\n```solidity\n// 1. Take out collateral - Burn wrapped tokens, receive crv lp tokens and harvest CRV\nbank.takeCollateral(param.amountPosRemove);\nwCurveGauge.burn(pos.collId, param.amountPosRemove);\n\n{\n\t// 2. Swap rewards tokens to debt token\n\tuint256 rewards = _doCutRewardsFee(CRV);\n\t_ensureApprove(CRV, address(swapRouter), rewards);\n\tswapRouter.swapExactTokensForTokens(\n\t\trewards,\n\t\t0,\n\t\tswapPath,\n\t\taddress(this),\n\t\ttype(uint256).max\n\t);\n}\n```\n\nnote the function call on swapRouter\n\n```solidity\nswapRouter.swapExactTokensForTokens(\n\trewards,\n\t0,\n\tswapPath,\n\taddress(this),\n\ttype(uint256).max\n);\n```\n\nhttps://docs.uniswap.org/contracts/v2/reference/smart-contracts/router-02#swapexacttokensfortokens\n\nthe second parameter is amountOutMin, means The minimum amount of output tokens that must be received for the transaction not to revert.\n\nsetting it to 0 meaning no slippage control is in-place to avoid frontrunning / sandwitch attack (which is in still common in ethereum)\n\n## Impact\n\nLose of fund from sandwitch attack when swaping token because of lack of slippage control\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L162-L176\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nWe recommend the protocol add slipagge control in CurveSpell Uniswap V2 Swap\n\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 143,
+      "title": "`AuraSpell`'s Balancer pool join will always revert",
+      "author": "cuthalion0x",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "cuthalion0x\n\nhigh\n\n# `AuraSpell`'s Balancer pool join will always revert\n\n## Summary\n\nIn `AuraSpell.openPositionFarm`, the call to `BalancerVault.joinPool` is not properly encoded and will always revert.\n\n## Vulnerability Detail\n\nAll Balancer Vault operations include an input argument called `userData`. This is optional for all known swaps, but it is very much required for all known joins and exits. In `AuraSpell.openPositionFarm`, a call to `BalancerVault.joinPool` leaves the `userData` empty. As a result, the join will always revert, and it will be impossible to open a position.\n\n## Impact\n\nIt is not possible to open a position using the `AuraSpell`.\n\n## Code Snippet\n\n[spell/AuraSpell.sol#L109-119](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L109-L119), annotated below for clarity.\n\n```solidity\nvault.joinPool(\n    poolId,\n    address(this),\n    address(this),\n    IBalancerVault.JoinPoolRequest(\n        tokens,\n        maxAmountsIn,\n        \"\", // @audit-info This is the `userData` argument, which has been left empty.\n        false\n    )\n);\n```\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nFirst, create an integration test for the Aura spell. There are tests for Convex, Curve, and Ichi, but not Aura. A test would likely have caught this issue.\n\nTo fix the issue, consult the [Balancer docs on pool joins](https://docs.balancer.fi/reference/joins-and-exits/pool-joins.html). Specifically, we probably want the \"exact tokens\" join type, whose `userData` looks like:\n\n```solidity\n[uint256, uint256[], uint256]\n[EXACT_TOKENS_IN_FOR_BPT_OUT, amountsIn, minimumBPT]\n```\n\nNote that this will also require specifying the `minimumBPT` that we will get out. We may have to leverage an oracle in order to compute this amount.\n\nDuplicate of #120\n"
+    },
+    {
+      "number": 141,
+      "title": "`BalancerPairOracle` can be manipulated using read-only reentrancy",
+      "author": "cuthalion0x",
+      "labels": [
+        "High",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "cuthalion0x\n\nhigh\n\n# `BalancerPairOracle` can be manipulated using read-only reentrancy\n\n## Summary\n\n`BalancerPairOracle.getPrice` makes an external call to `BalancerVault.getPoolTokens` without checking the Balancer Vault's reentrancy guard. As a result, the oracle can be trivially manipulated to liquidate user positions prematurely.\n\n## Vulnerability Detail\n\nIn February, the Balancer team disclosed a read-only reentrancy vulnerability in the Balancer Vault. The detailed disclosure can be found [here](https://forum.balancer.fi/t/reentrancy-vulnerability-scope-expanded/4345). In short, all Balancer pools are susceptible to manipulation of their external queries, and all integrations must now take an extra step of precaution when consuming data. Via reentrancy, an attacker can force token balances and BPT supply to be out of sync, creating very inaccurate BPT prices.\n\nSome protocols, such as Sentiment, remained unaware of this issue for a few months and were later [hacked](https://twitter.com/spreekaway/status/1643313471180644360) as a result.\n\n`BalancerPairOracle.getPrice` makes a price calculation of the form `f(balances) / pool.totalSupply()`, so it is clearly vulnerable to synchronization issues between the two data points. A rough outline of the attack might look like this:\n\n```solidity\nAttackerContract.flashLoan() ->\n    // Borrow lots of tokens and trigger a callback.\n    SomeProtocol.flashLoan() ->\n        AttackerContract.exploit()\n\nAttackerContract.exploit() ->\n    // Join a Balancer Pool using the borrowed tokens and send some ETH along with the call.\n    BalancerVault.joinPool() ->\n        // The Vault will return the excess ETH to the sender, which will reenter this contract.\n        // At this point in the execution, the BPT supply has been updated but the token balances have not.\n        AttackerContract.receive()\n\nAttackerContract.receive() ->\n    // Liquidate a position using the same Balancer Pool as collateral.\n    BlueBerryBank.liquidate() ->\n        // Call to the oracle to check the price.\n        BalancerPairOracle.getPrice() ->\n            // Query the token balances. At this point in the execution, these have not been updated (see above).\n            // So, the balances are still the same as before the start of the large pool join.\n            BalancerVaul.getPoolTokens()\n\n            // Query the BPT supply. At this point in the execution, the supply has already been updated (see above).\n            // So, it includes the latest large pool join, and as such the BPT supply has grown by a large amount.\n            BalancerPool.getTotalSupply()\n\n            // Now the price is computed using both balances and supply, and the result is much smaller than it should be.\n            price = f(balances) / pool.totalSupply()\n\n        // The position is liquidated under false pretenses.\n```\n\n## Impact\n\nUsers choosing Balancer pool positions (such as Aura vaults) as collateral can be prematurely liquidated due to unreliable price data.\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/oracle/BalancerPairOracle.sol#L70-L92\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nThe Balancer team recommends utilizing their [official library](https://github.com/balancer/balancer-v2-monorepo/blob/3ce5138abd8e336f9caf4d651184186fffcd2025/pkg/pool-utils/contracts/lib/VaultReentrancyLib.sol) to safeguard queries such as `Vault.getPoolTokens`. However, the library makes a state-modifying call to the Balancer Vault, so it is not suitable for `view` functions such as `BalancerPairOracle.getPrice`. There are then two options:\n1. Invoke the library somewhere else. Perhaps insert a hook into critical system functions like `BlueBerryBank.liquidate`.\n2. Adapt a slightly different read-only solution that checks the Balancer Vault's reentrancy guard without actually entering."
+    },
+    {
+      "number": 138,
+      "title": "the core logic of `ShortLongSpell` is breaked",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nmedium\n\n# the core logic of `ShortLongSpell` is breaked\n\n## Summary\n\n## Vulnerability Detail\non `ShortLongSpell.openPosition()`\nfrom [this](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L120-L123) check \n```solidity\n        if (\n            address(ISoftVault(strategy.vault).uToken()) != param.borrowToken ||\n            swapData.fromToken != param.borrowToken\n        ) revert Errors.INCORRECT_LP(param.borrowToken);\n```\nwe know `address(ISoftVault(strategy.vault).uToken()) == param.borrowToken` and `swapData.fromToken == param.borrowToken` \nnow in `ShortLongSpell.openPosition()._deposit()` this is the computation of `strTokenAmt`\n```solidity\n        // 2. Borrow specific amounts\n        uint256 strTokenAmt = _doBorrow(param.borrowToken, param.borrowAmount);\n\n        // 3. Swap borrowed token to strategy token\n        IERC20Upgradeable swapToken = ISoftVault(strategy.vault).uToken();\n        // swapData.fromAmount = strTokenAmt;\n        PSwapLib.megaSwap(augustusSwapper, tokenTransferProxy, swapData);\n        strTokenAmt = swapToken.balanceOf(address(this)) - strTokenAmt;\n        if (strTokenAmt < swapData.expectedAmount)\n            revert Errors.SWAP_FAILED(address(swapToken));\n\n```  \nthe `strTokenAmt` is the borrowed amount of `param.borrowToken` token\n`swapToken` is the same `param.borrowToken`\n\n```solidity\nswapToken.balanceOf(address(this)) == IERC20(param.borrowToken).balanceOf(address(this)) \n```\nAfter the swap `swapToken.balanceOf(address(this))` will be `<=` with `strTokenAmt`\n so it will revert or the `strTokenAmt` will be zero `strTokenAmt == 0`\n\nNow If `swapData.expectedAmount > 0` (this is normal otherwise you will get frontrun) this check is always `true` and it will keep reverting\n\n```solidity\n        if (strTokenAmt < swapData.expectedAmount)\n            revert Errors.SWAP_FAILED(address(swapToken));\n```\n\n## Impact\n`ShortLongSpell.openPosition()` will keep reverting\n\n## Code Snippet\n\n## Tool used\n\nManual Review\n\n## Recommendation\nuse before and after `balanceOf()`\n\nDuplicate of #133\n"
+    },
+    {
+      "number": 136,
+      "title": "Pending CRV rewards are not accounted for and can cause unfair liquidations",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# Pending CRV rewards are not accounted for and can cause unfair liquidations\n\n## Summary\n\npendingRewards are factored into the health of a position so that the position collateral is fairly assessed. However WCurveGauge#pendingRewards doesn't return the proper reward tokens/amounts meaning that positions aren't valued correctly and users can be unfairly liquidated.\n\n## Vulnerability Detail\n\n[BlueBerryBank.sol#L408-L413](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/BlueBerryBank.sol#L408-L413)\n\n            (address[] memory tokens, uint256[] memory rewards) = IERC20Wrapper(\n                pos.collToken\n            ).pendingRewards(pos.collId, pos.collateralSize);\n            for (uint256 i; i < tokens.length; i++) {\n                rewardsValue += oracle.getTokenValue(tokens[i], rewards[i]);\n            }\n\nWhen BlueBerryBank is valuing a position it also values the pending rewards since they also have value. \n\n[WCurveGauge.sol#L106-L114](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WCurveGauge.sol#L106-L114)\n\n    function pendingRewards(\n        uint256 tokenId,\n        uint256 amount\n    )\n        public\n        view\n        override\n        returns (address[] memory tokens, uint256[] memory rewards)\n    {}\n\nAbove we see that WCurveGauge#pendingRewards returns empty arrays when called. This means that pending rewards are not factored in correctly and users can be liquidated when even when they should be safe.\n\n## Impact\n\nUser is liquidated when they shouldn't be\n\n## Code Snippet\n\n[WCurveGauge.sol#L106-L114](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WCurveGauge.sol#L106-L114)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nChange WCurveGauge#pendingRewards to correctly return the pending rewards"
+    },
+    {
+      "number": 135,
+      "title": "ShortLongSpell#openPosition can cause user unexpected liquidation when increasing position size",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# ShortLongSpell#openPosition can cause user unexpected liquidation when increasing position size\n\n## Summary\n\nWhen increasing a position, all collateral is sent to the user rather than being kept in the position. This can cause serious issues because this collateral keeps the user from being liquidated. It may unexpectedly leave the user on the brink of liquidation where a small change in price leads to their liquidation.\n\n## Vulnerability Detail\n\n[ShortLongSpell.sol#L129-L141](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L129-L141)\n\n        {\n            IBank.Position memory pos = bank.getCurrentPositionInfo();\n            address posCollToken = pos.collToken;\n            uint256 collSize = pos.collateralSize;\n            address burnToken = address(ISoftVault(strategy.vault).uToken());\n            if (collSize > 0) {\n                if (posCollToken != address(wrapper))\n                    revert Errors.INCORRECT_COLTOKEN(posCollToken);\n                bank.takeCollateral(collSize);\n                wrapper.burn(burnToken, collSize);\n                _doRefund(burnToken);\n            }\n        }\n\nIn the above lines we can see that all collateral is burned and the user is sent the underlying tokens. This is problematic as it sends all the collateral to the user, leaving the position collateralized by only the isolated collateral.\n\nBest case the user's transaction reverts but worst case they will be liquidated almost immediately.  \n\n## Impact\n\nUnfair liquidation for users\n\n## Code Snippet\n\n[ShortLongSpell.sol#L111-L151](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L111-L151)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nDon't burn the collateral"
+    },
+    {
+      "number": 133,
+      "title": "Balance check for swapToken in ShortLongSpell#_deposit is incorrect and will result in nonfunctional contract",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nmedium\n\n# Balance check for swapToken in ShortLongSpell#_deposit is incorrect and will result in nonfunctional contract\n\n## Summary\n\nThe balance checks on ShortLongSpell#_withdraw are incorrect and will make contract basically nonfunctional \n\n## Vulnerability Detail\n\nswapToken is always vault.uToken. borrowToken is always required to be vault.uToken which means that swapToken == borrowToken. This means that the token borrowed is always required to be swapped. \n\n[ShortLongSpell.sol#L83-L89](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L83-L89)\n\n        uint256 strTokenAmt = _doBorrow(param.borrowToken, param.borrowAmount);\n\n        // 3. Swap borrowed token to strategy token\n        IERC20Upgradeable swapToken = ISoftVault(strategy.vault).uToken();\n        // swapData.fromAmount = strTokenAmt;\n        PSwapLib.megaSwap(augustusSwapper, tokenTransferProxy, swapData);\n        strTokenAmt = swapToken.balanceOf(address(this)) - strTokenAmt; <- @audit-issue will always revert on swap\n\nBecause swapToken == borrowToken if there is ever a swap then the swapToken balance will decrease. This causes L89 to always revert when a swap happens, making the contract completely non-functional\n\n## Impact\n\nShortLongSpell is nonfunctional\n\n## Code Snippet\n\n[ShortLongSpell.sol#L160-L202](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L160-L202)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nRemove check"
+    },
+    {
+      "number": 132,
+      "title": "UniswapV3 sqrtRatioLimit doesn't provide slippage protection and will result in partial swaps",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# UniswapV3 sqrtRatioLimit doesn't provide slippage protection and will result in partial swaps\n\n## Summary\n\nThe sqrtRatioLimit for UniV3 doesn't cause the swap to revert upon reaching that value. Instead it just cause the swap to partially fill. This is a [known issue](https://github.com/Uniswap/v3-core/blob/d8b1c635c275d2a9450bd6a78f3fa2484fef73eb/contracts/UniswapV3Pool.sol#L641) with using sqrtRatioLimit as can be seen here where the swap ends prematurely when it has been reached. This is problematic as this is meant to provide the user with slippage protection but doesn't.\n\n## Vulnerability Detail\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/IchiSpell.sol#L209-L223\n\n        if (amountToSwap > 0) {\n            SWAP_POOL = IUniswapV3Pool(vault.pool());\n            uint160 deltaSqrt = (param.sqrtRatioLimit *\n                uint160(param.sellSlippage)) / uint160(Constants.DENOMINATOR);\n            SWAP_POOL.swap(\n                address(this),\n                // if withdraw token is Token0, then swap token1 -> token0 (false)\n                !isTokenA,\n                amountToSwap.toInt256(),\n                isTokenA\n                    ? param.sqrtRatioLimit + deltaSqrt\n                    : param.sqrtRatioLimit - deltaSqrt, // slippaged price cap\n                abi.encode(address(this))\n            );\n        }\n\nsqrtRatioLimit is used as slippage protection for the user but is ineffective and depending on what tokens are being swapped, tokens may be left the in the contract which can be stolen by anyone.\n\n## Impact\n\nIncorrect slippage application can result in partial swaps and loss of funds\n\n## Code Snippet\n\n[IchiSpell.sol#L181-L236](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/IchiSpell.sol#L181-L236)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nCheck the amount received from the swap and compare it against some user supplied minimum"
+    },
+    {
+      "number": 131,
+      "title": "IchiSpell applies slippage to sqrtPrice which is wrong and leads to unpredictable slippage",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "0x52\r\n\r\nmedium\r\n\r\n# IchiSpell applies slippage to sqrtPrice which is wrong and leads to unpredictable slippage\r\n\r\n## Summary\r\n\r\nUniswapV3 uses the sqrt of the price rather than the price itself, but slippage is applied directly to the sqrt of the price which leads to unpredictable prices.\r\n\r\n## Vulnerability Detail\r\n\r\n[IchiSpell.sol#L211-L222](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/IchiSpell.sol#L211-L222)\r\n\r\n            uint160 deltaSqrt = (param.sqrtRatioLimit *\r\n                uint160(param.sellSlippage)) / uint160(Constants.DENOMINATOR);\r\n            SWAP_POOL.swap(\r\n                address(this),\r\n                // if withdraw token is Token0, then swap token1 -> token0 (false)\r\n                !isTokenA,\r\n                amountToSwap.toInt256(),\r\n                isTokenA\r\n                    ? param.sqrtRatioLimit + deltaSqrt\r\n                    : param.sqrtRatioLimit - deltaSqrt, // slippaged price cap\r\n                abi.encode(address(this))\r\n            );\r\n\r\nWe see above that the sell slippage is applied to the sqrtPrice instead of the actual price. This means that applied slippage limits are not applied correctly and can be much larger than intended.\r\n\r\nExample:\r\nThe protocol wants to limit slippage to 10%. This limit is applied to the sqrt price so if the sqrt price is 10 (price = 100) then it will apply 10% to that making it 9. Now to get the true price we need to square the price which gives us a price of 81. This translates to a true slippage limit of 19% rather than 10%.\r\n\r\n## Impact\r\n\r\nSlippage limits are much larger than intended\r\n\r\n## Code Snippet\r\n\r\n[IchiSpell.sol#L181-L236](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/IchiSpell.sol#L181-L236)\r\n\r\n## Tool used\r\n\r\nManual Review\r\n\r\n## Recommendation\r\n\r\nApply slippage requirement on price not sqrt price\r\n\r\nDuplicate of #132 "
+    },
+    {
+      "number": 129,
+      "title": "UserData for balancer pool exits is malformed and will permanently trap users",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# UserData for balancer pool exits is malformed and will permanently trap users\n\n## Summary\n\nUserData for balancer pool exits is malformed and will result in all withdrawal attempts failing, trapping the user permanently. \n\n## Vulnerability Detail\n\n[AuraSpell.sol#L184-L189](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L184-L189)\n\n    wAuraPools.getVault(lpToken).exitPool(\n        IBalancerPool(lpToken).getPoolId(),\n        address(this),\n        address(this),\n        IBalancerVault.ExitPoolRequest(tokens, minAmountsOut, \"\", false)\n    );\n\nWe see above that UserData is encoded as \"\". This is problematic as it doesn't contain the proper data for exiting the pool, causing all exit request to fail and trap the user permanently.\n\nhttps://etherscan.io/address/0x5c6ee304399dbdb9c8ef030ab642b10820db8f56#code#F9#L50\n\n    function exactBptInForTokenOut(bytes memory self) internal pure returns (uint256 bptAmountIn, uint256 tokenIndex) {\n        (, bptAmountIn, tokenIndex) = abi.decode(self, (WeightedPool.ExitKind, uint256, uint256));\n    }\n\nUserData is decoded into the data shown above when using ExitKind = 0. Since the exit uses \"\" as the user data this will be decoded as 0 a.k.a [EXACT_BPT_IN_FOR_ONE_TOKEN_OUT](https://etherscan.io/address/0x5c6ee304399dbdb9c8ef030ab642b10820db8f56#code#F24#L50). This is problematic because the token index and bptAmountIn should also be encoded in user data for this kind of exit. Since it isn't the exit call will always revert and the user will be permanently trapped.\n\n## Impact\n\nUsers will be permanently trapped, unable to withdraw\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L149-L224\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nEncode the necessary exit data in userData"
+    },
+    {
+      "number": 127,
+      "title": "WAuraPools will irreversibly break if reward tokens are added to pool after deposit",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# WAuraPools will irreversibly break if reward tokens are added to pool after deposit\n\n## Summary\n\nWAuraPools will irreversibly break if reward tokens are added to pool after deposit due to an OOB error on accExtPerShare.\n\n## Vulnerability Detail\n\n[WAuraPools.sol#L166-L189](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WAuraPools.sol#L166-L189)\n\n        uint extraRewardsCount = IAuraRewarder(crvRewarder)\n            .extraRewardsLength(); <- @audit-issue rewardTokenCount pulled fresh\n        tokens = new address[](extraRewardsCount + 1);\n        rewards = new uint256[](extraRewardsCount + 1);\n\n        tokens[0] = IAuraRewarder(crvRewarder).rewardToken();\n        rewards[0] = _getPendingReward(\n            stCrvPerShare,\n            crvRewarder,\n            amount,\n            lpDecimals\n        );\n\n        for (uint i = 0; i < extraRewardsCount; i++) {\n            address rewarder = IAuraRewarder(crvRewarder).extraRewards(i);\n\n            @audit-issue attempts to pull from array which will be too small if tokens are added\n            uint256 stRewardPerShare = accExtPerShare[tokenId][i];\n            tokens[i + 1] = IAuraRewarder(rewarder).rewardToken();\n            rewards[i + 1] = _getPendingReward(\n                stRewardPerShare,\n                rewarder,\n                amount,\n                lpDecimals\n            );\n        }\n\naccExtPerShare stores the current rewardPerToken when the position is first created. It stores it as an array and only stores values for reward tokens that have been added prior to minting. This creates an issue if a reward token is added because now it will attempt to pull a value for an index that doesn't exist and throw an OOB error.\n\nThis is problematic because pendingRewards is called every single transaction via the isLiquidatable subcall in BlueBerryBank#execute.\n\n## Impact\n\nWAuraPools will irreversibly break if reward tokens are added to pool after\n\n## Code Snippet\n\n[WAuraPools.sol#L152-L190](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WAuraPools.sol#L152-L190)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nUse a mapping rather than an array to store values"
+    },
+    {
+      "number": 126,
+      "title": "ShortLongSpell#_withdraw checks slippage limit but never applies it making it useless",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Escalation Resolved",
+        "Reward"
+      ],
+      "body": "0x52\n\nmedium\n\n# ShortLongSpell#_withdraw checks slippage limit but never applies it making it useless\n\n## Summary\n\nSlippage limits protect the protocol in the event that a malicious user wants to extract value via swaps, this is an important protection in the event that a user finds a way to trick collateral requirements. Currently the sell slippage is checked but never applied so it is useless.\n\n## Vulnerability Detail\n\nSee summary.\n\n## Impact\n\nSlippage limit protections are ineffective for ShortLongSpell\n\n## Code Snippet\n\n[ShortLongSpell.sol#L160-L20](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L160-L202)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nApply sell slippage after it is checked"
+    },
+    {
+      "number": 124,
+      "title": "ConvexSpell#closePositionFarm removes liquidity without any slippage protection",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nmedium\n\n# ConvexSpell#closePositionFarm removes liquidity without any slippage protection\n\n## Summary\n\nConvexSpell#closePositionFarm removes liquidity without any slippage protection allowing withdraws to be sandwiched and stolen. Curve liquidity has historically been strong but for smaller pairs their liquidity is getting low enough that it can be manipulated via flashloans. \n\n## Vulnerability Detail\n\n[ConvexSpell.sol#L204-L208](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L204-L208)\n\n            ICurvePool(pool).remove_liquidity_one_coin(\n                amountPosRemove,\n                int128(tokenIndex),\n                0\n            );\n\nLiquidity is removed as a single token which makes it vulnerable to sandwich attacks but no slippage protection is implemented. The same issue applies to CurveSpell.\n\n## Impact\n\nUser withdrawals can be sandwiched\n\n## Code Snippet\n\n[ConvexSpell.sol#L147-L230](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L147-L230)\n\n[CurveSpell.sol#L143-L223](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L143-L223)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nAllow user to specify min out"
+    },
+    {
+      "number": 123,
+      "title": "Potential flash loan attack vulnerability in `getPrice` function of CurveOracle",
+      "author": "helpMePlease",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "helpMePlease\n\nhigh\n\n# Potential flash loan attack vulnerability in `getPrice` function of CurveOracle\n\n## Summary\nDuring a security review of the `getPrice` function in the CurveOracle, a potential flash loan attack vulnerability was identified.\n\n## Vulnerability Detail\nThe `getPrice` function retrieves the spot price of each token in a Curve LP pool, calculates the minimum price among them, and multiplies it by the virtual price of the LP token to determine the USD value of the LP token. If the price of one or more tokens in the pool is manipulated, this can cause the minimum price calculation to be skewed, leading to an incorrect USD value for the LP token. This can be exploited by attackers to make a profit at the expense of other users.\n\n## Impact\nThis vulnerability could potentially allow attackers to manipulate the price of tokens in Curve LP pools and profit at the expense of other users. If exploited, this vulnerability could result in significant financial losses for affected users.\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/96eb1829571dc46e1a387985bd56989702c5e1dc/blueberry-core/contracts/oracle/CurveOracle.sol#L122\n\n## Tool used\n\nManual Review\n\n## Recommendation\nuse TWAP to determine the prices of the underlying assets in the pool. \n"
+    },
+    {
+      "number": 121,
+      "title": "Users are forced to swap all reward tokens with no slippage protection",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nhigh\n\n# Users are forced to swap all reward tokens with no slippage protection\n\n## Summary\n\nAuraSpell forces users to swap their reward tokens to debt token but doesn't allow them to specify any slippage values.\n\n## Vulnerability Detail\n\n[AuraSpell.sol#L193-L203\n](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L193-L203)\n\n        for (uint256 i = 0; i < rewardTokens.length; i++) {\n            uint256 rewards = _doCutRewardsFee(rewardTokens[i]);\n            _ensureApprove(rewardTokens[i], address(swapRouter), rewards);\n            swapRouter.swapExactTokensForTokens(\n                rewards,\n                0,\n                swapPath[i],\n                address(this),\n                type(uint256).max\n            );\n        }\n\nAbove all reward tokens are swapped and always use 0 for min out meaning that deposits will be sandwiched and stolen.\n\n## Impact\n\nAll reward tokens can be sandwiched and stolen\n\n## Code Snippet\n\n[AuraSpell.sol#L149-L224](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L149-L224)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nAllow user to specify slippage parameters for all reward tokens"
+    },
+    {
+      "number": 120,
+      "title": "AuraSpell#openPositionFarm uses incorrect join type for balancer",
+      "author": "0x52",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Reward"
+      ],
+      "body": "0x52\n\nmedium\n\n# AuraSpell#openPositionFarm uses incorrect join type for balancer\n\n## Summary\n\nThe JoinPoolRequest uses \"\" for userData meaning that it will decode into 0. This is problematic because join requests of type 0 are \"init\" type joins and will revert for pools that are already initialized. \n\n## Vulnerability Detail\n\nhttps://etherscan.io/address/0x5c6ee304399dbdb9c8ef030ab642b10820db8f56#code#F24#L49\n\n    enum JoinKind { INIT, EXACT_TOKENS_IN_FOR_BPT_OUT, TOKEN_IN_FOR_EXACT_BPT_OUT }\n\nWe see above that enum JoinKind is INIT for 0 values.\n\nhttps://etherscan.io/address/0x5c6ee304399dbdb9c8ef030ab642b10820db8f56#code#F24#L290\n\n            return _joinExactTokensInForBPTOut(balances, normalizedWeights, userData);\n        } else if (kind == JoinKind.TOKEN_IN_FOR_EXACT_BPT_OUT) {\n            return _joinTokenInForExactBPTOut(balances, normalizedWeights, userData);\n        } else {\n            _revert(Errors.UNHANDLED_JOIN_KIND);\n        }\n\nHere user data is decoded into join type and since it is \"\" it will decode to type 0 which will result in a revert.\n\n## Impact\n\nUsers will be unable to open any farm position on AuraSpell\n\n## Code Snippet\n\n[AuraSpell.sol#L63-L147](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L63-L147)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nUses JoinKind = 1 for user data"
+    },
+    {
+      "number": 119,
+      "title": "`ShortLongSpell.openPosition()` should not refund token",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nhigh\n\n# `ShortLongSpell.openPosition()` should not refund token\n\n## Summary\n\n## Vulnerability Detail\nthis part of [ShortLongSpell.openPosition()](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#LL128C1-L141C10)\n```solidity\n        // 4. Put collateral -\n        {\n            IBank.Position memory pos = bank.getCurrentPositionInfo();\n            address posCollToken = pos.collToken;\n            uint256 collSize = pos.collateralSize;\n            address burnToken = address(ISoftVault(strategy.vault).uToken());\n            if (collSize > 0) {\n                if (posCollToken != address(wrapper))\n                    revert Errors.INCORRECT_COLTOKEN(posCollToken);\n                bank.takeCollateral(collSize);\n                wrapper.burn(burnToken, collSize);\n                _doRefund(burnToken);\n            }\n        }\n```\nis asking werc20 to burn the wrapped token (erc1155)  to receive back the `burnToken` which is the `SoftVault` token. the received amount should stay on the SPELL to transfer by `_doPutCollateral` to werc20 again (the old + the new vault token ) in the next step.\n\nBut it transfers them to the user by invoking [ _doRefund(burnToken);](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L139) with out updating `pos.underlyingVaultShare`\n\n## Impact\n- the transaction could end up successfully if the position has enough Isolated Collateral on the SoftVault but it will be in an awkward position  \n- or the transaction will keep reverting in the `isLiquidatable()` check \n\n## Code Snippet\n\n## Tool used\n\nManual Review\n\n## Recommendation\n```diff\n        // 4. Put collateral -\n        {\n            IBank.Position memory pos = bank.getCurrentPositionInfo();\n            address posCollToken = pos.collToken;\n            uint256 collSize = pos.collateralSize;\n            address burnToken = address(ISoftVault(strategy.vault).uToken());\n            if (collSize > 0) {\n                if (posCollToken != address(wrapper))\n                    revert Errors.INCORRECT_COLTOKEN(posCollToken);\n                bank.takeCollateral(collSize);\n                wrapper.burn(burnToken, collSize);\n-                _doRefund(burnToken);\n            }\n        }\n```\n\nDuplicate of #135\n"
+    },
+    {
+      "number": 112,
+      "title": "users could be exposed to big penalties from the Curve Pool",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nhigh\n\n# users could be exposed to big penalties from the Curve Pool\n\n## Summary\nOn [Ichi SPELL](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/IchiSpell.sol#L182-L183) the protocol use this \n```soldity\n        if (param.sellSlippage > bank.config().maxSlippageOfClose())\n            revert Errors.RATIO_TOO_HIGH(param.sellSlippage);\n``` \nto check the slippage for Uniswap.\n\nA Curve pool is considered imbalanced when there is an imbalance between the assets within it. For instance, the Curve stETH/ETH pool is considered imbalanced if it has the following reserves:\n\n- ETH: 340,472.34 (31.70%)\n- stETH: 733,655.65 (68.30%)\n\n## Vulnerability Detail\nIf a Curve Pool is imbalanced, attempting to perform a proportional join will not give an optimal return (e.g. result in fewer Pool LP tokens received).\n\nIn Curve Pool, there are penalties/bonuses when depositing to a pool. The pools are always trying to balance themselves. If a deposit helps the pool to reach that desired balance, a deposit bonus will be given (receive extra tokens). On the other hand, if a deposit deviates from the pool from the desired balance, a deposit penalty will be applied (receive fewer tokens). \n\nThe source code of [add_liquidity()](https://github.com/curvefi/curve-contract/blob/master/contracts/pools/steth/StableSwapSTETH.vy). The function attempts to calculate the `difference` between the `ideal_balance` and `new_balances`, and uses the `difference` as a factor of the fee computation, which is tied to the bonus and penalty.\n(by xiaoming90)\n\nBut in Convex and Curve SPELL this line repeat several times\n```solidity\nICurvePool(pool).add_liquidity(suppliedAmts, minLPMint);\n``` \nThe [minLPMint](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L69) has no check for it \nThis could lead to:\n\n\n## Impact\n1- users could be exposed to a front-run attack \n2- users could be exposed to big penalties from the Curve Pool in case it becomes imbalanced ( there are multiple instances where the largest Curve pool (stETH/ETH) becomes imbalanced (Reference [01](https://twitter.com/LidoFinance/status/1437124281150935044) and [02](https://www.coindesk.com/markets/2022/06/17/biggest-steth-pool-almost-empty-complicating-exit-for-would-be-sellers/) )\nSo there is no guarantee that a Curve Pool will always be balanced\n\n## Code Snippet\n\n## Tool used\n\nManual Review\n\n## Recommendation\ncheck the received LP token's value\n\nDuplicate of #126\n"
+    },
+    {
+      "number": 109,
+      "title": "ShortLongSpell would never work",
+      "author": "sinarette",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Sponsor Confirmed",
+        "Will Fix",
+        "Escalation Resolved",
+        "Reward"
+      ],
+      "body": "sinarette\n\nhigh\n\n# ShortLongSpell would never work\n\n## Summary\nThe ShortLongSpell contract would never work well, due to bugs in the deposit functionality.\n\n## Vulnerability Detail\nThe existing bugs in the deposit functionality shows like this:\n\n- `strTokenAmt` calculation would always revert due to underflow\n```solidity\n        uint256 strTokenAmt = _doBorrow(param.borrowToken, param.borrowAmount);\n\n        IERC20Upgradeable swapToken = ISoftVault(strategy.vault).uToken();\n\n        PSwapLib.megaSwap(augustusSwapper, tokenTransferProxy, swapData);\n        strTokenAmt = swapToken.balanceOf(address(this)) - strTokenAmt;\n```\nThe initial `strTokenAmt` is the balance of `swapToken`. Since `swapToken` is the `fromToken` for `megaSwap`, the remaining balance should be always less than the initial one. So it would always underflow if you try `swapToken.balanceOf(address(this)) - strTokenAmt`.\n\n- Wrong invariant for `strTokenAmt` and `expectedAmount`\n```solidity\n        if (strTokenAmt < swapData.expectedAmount)\n```\nEven if the `strTokenAmt` is calculated correctly, `strTokenAmt` refers to the balance of `swapToken`, but `expectedAmount` refers to the balance of the finally swapped result token (e.g. USDT when swapping WETH > DAI > USDT). Direct comparison between different units.\n\n- Inconsistent collateral\n```solidity\n        address vault = strategies[param.strategyId].vault;\n        _doPutCollateral(\n            vault,\n            IERC20Upgradeable(ISoftVault(vault).uToken()).balanceOf(\n                address(this)\n            )\n        );\n```\nHere `vault` refers to the SoftVault token, but the second parameter of `_doPutCollateral` refers to the balance of the underlying token of `vault`.\n\n```solidity\n/* BasicSpell.sol */\n    function _doPutCollateral(address token, uint256 amount) internal {\n        if (amount > 0) {\n            _ensureApprove(token, address(werc20), amount);\n            werc20.mint(token, amount);\n            bank.putCollateral(\n                address(werc20),\n                uint256(uint160(token)),\n                amount\n            );\n        }\n    }\n\n/* WERC20.sol */\n    function mint(\n        address token,\n        uint256 amount\n    ) external override nonReentrant returns (uint256 id) {\n        uint256 balanceBefore = IERC20Upgradeable(token).balanceOf(\n            address(this)\n        );\n        IERC20Upgradeable(token).safeTransferFrom(\n            msg.sender,\n            address(this),\n            amount\n        );\n        uint256 balanceAfter = IERC20Upgradeable(token).balanceOf(\n            address(this)\n        );\n        id = _encodeTokenId(token);\n        _mint(msg.sender, id, balanceAfter - balanceBefore, \"\");\n    }\n```\nAs you can see in these code, the `amount` should refer to the balance of `token` itself, not the underlying token.\nI know, SoftVault basically shares the unit with its underlying token, but before that you need to deposit those underlying tokens.\n\n## Impact\n\nThe contract would never work as expected\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ShortLongSpell.sol#L1-L251\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nDo not ever deploy untested, untidy code\nDo not include it in the audit scope neither\n\nDuplicate of #133\n"
+    },
+    {
+      "number": 102,
+      "title": "missing slippage protection",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nhigh\n\n# missing slippage protection\n\n## Summary\n\n\n## Vulnerability Detail\nOn this part of [ConvexSpell.closePositionFarm()](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L195-L209)\n```solidity\n            // 4. Remove liquidity\n            int128 tokenIndex;\n            for (uint256 i = 0; i < tokens.length; i++) {\n                if (tokens[i] == pos.debtToken) {\n                    tokenIndex = int128(uint128(i));\n                    break;\n                }\n            }\n\n            ICurvePool(pool).remove_liquidity_one_coin(\n                amountPosRemove,\n                int128(tokenIndex),\n                0\n            );\n        }\n```\nThe SPELL will remove the liquidity from Curve Pool (to pay back the borrowed amount to Compound ) with a 0 value for the [_min_amount](https://curve.readthedocs.io/factory-pools.html?highlight=remove_liquidity_one_coin#StableSwap.remove_liquidity_one_coin) (Minimum amount of the coin to receive)\n\nso the slippage/minimum amount of tokens to be received is set to a zero value. Thus, the Curve Pool will continue to redeem the pool tokens even if the trade incurs significant slippage\n\n## Impact\n- the SPELL could receive leas tokens in return, leading the user to losses for the rewards.\n\n## Code Snippet\n\n## Tool used\n\nManual Review\n\n## Recommendation\nThe proper way of computing the minimum amount of tokens to receive from a single-side trade (remove_liquidity_one_coin) is to call the Curve Pool's [calc_withdraw_one_coin](https://github.com/curvefi/curve-contract/blob/b0bbf77f8f93c9c5f4e415bce9cd71f0cdee960e/contracts/pools/steth/StableSwapSTETH.vy#L646) function off-chain to calculate the amount received when withdrawing a single LP Token, and then apply an acceptable discount. \n(by: xiaoming90)\n\nDuplicate of #124\n"
+    },
+    {
+      "number": 101,
+      "title": "attackers will keep stealing the `rewards` from Convex SPELL",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Has Duplicates",
+        "Will Fix",
+        "Escalation Resolved",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nhigh\n\n# attackers will keep stealing the `rewards` from Convex SPELL\n\n## Summary\nOn [WConvexPools.burn()](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WConvexPools.sol#L201-L235) transfer [CRV + CVX + the extra rewards](https://docs.convexfinance.com/convexfinance/general-information/why-convex/convex-for-liquidity-providers) to Convex SPELL \n\n\n## Vulnerability Detail\nBut [ConvexSpell.openPositionFarm()](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L67-L138) only refund CVX to the user.\nSo the rest rewards will stay in the SPELL intel if someone (could be an attacker) invokes `_doRefund()` within `closePositionFarm()` with the same address tokens \n\n## Impact\n- Convex SPELL steals the user rewards \n- the protocol will lose some fees \n- attackers will keep stealing the rewards from Convex SPELL\n\n## Code Snippet\n`WConvexPools.burn()` transfer CRV + CVX + the extra rewards\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/wrapper/WConvexPools.sol#L201-L235\n```solidity\n        // Transfer LP Tokens\n        IERC20Upgradeable(lpToken).safeTransfer(msg.sender, amount);\n\n        // Transfer Reward Tokens\n        (rewardTokens, rewards) = pendingRewards(id, amount);\n\n        for (uint i = 0; i < rewardTokens.length; i++) {\n            IERC20Upgradeable(rewardTokens[i]).safeTransfer(\n                msg.sender,\n                rewards[i]\n            );\n        }\n```\n\nonly refund CVX to the user\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#LL127C1-L138C10\n```solidity\n        // 6. Take out existing collateral and burn\n        IBank.Position memory pos = bank.getCurrentPositionInfo();\n        if (pos.collateralSize > 0) {\n            (uint256 pid, ) = wConvexPools.decodeId(pos.collId);\n            if (param.farmingPoolId != pid)\n                revert Errors.INCORRECT_PID(param.farmingPoolId);\n            if (pos.collToken != address(wConvexPools))\n                revert Errors.INCORRECT_COLTOKEN(pos.collToken);\n            bank.takeCollateral(pos.collateralSize);\n            wConvexPools.burn(pos.collId, pos.collateralSize);\n            _doRefundRewards(CVX);\n        }\n```\n\n## Tool used\n\nManual Review\n\n## Recommendation\nyou should Refund all Rewards (CRV + CVX + the extra rewards)"
+    },
+    {
+      "number": 98,
+      "title": "Aura SPELL is not compatible with Balancer pools",
+      "author": "Ch_301",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Ch_301\n\nhigh\n\n# Aura SPELL is not compatible with Balancer pools\n\n## Summary\nThe [AuraSpell.sol](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol) defines how Blueberry Protocol interacts with Aura pools.\n\n## Vulnerability Detail\nOn the [openPositionFarm](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L63-L95) at the third step\n```solidity\n        // 3. Add liquidity on Balancer, get BPT\n        {\n            IBalancerVault vault = wAuraPools.getVault(lpToken);\n            _ensureApprove(param.borrowToken, address(vault), borrowBalance);\n\n            (address[] memory tokens, uint256[] memory balances, ) = wAuraPools\n                .getPoolTokens(lpToken);\n            uint[] memory maxAmountsIn = new uint[](2);\n            maxAmountsIn[0] = IERC20(tokens[0]).balanceOf(address(this));\n            maxAmountsIn[1] = IERC20(tokens[1]).balanceOf(address(this));\n```     \nThe elements (address) on the `tokens[ ]` array are the list of which tokens can hold by the pool, and it could contain two elements (2 address) to eight elements (8 address).        \nthis is one of the biggest pools on Balancer with three tokens USDC, DAI and USDT https://app.balancer.fi/#/ethereum/pool/0x79c58f70905f734641735bc61e45c19dd9ad60bc0000000000000000000004e7\nBut the `maxAmountsIn [ ]` can only take the two first indexes (token balance) from `tokens[ ]`.\nThe main goal here is to read the balance of `param.borrowToken` in this SPELL.\nin case  `tokens[ ].length == 3` and the `param.borrowToken` address is in the least index on (e.g.tokens[3] == param.borrowToken) \nso the current strategy `param.strategyId` will never work\n\n## Impact\n- The AuraSpell.sol can't handle some Balancer pools correctly \n- The user will lose some fees if he invokes `increasePosition()` first, then he will fail to invoke `openPositionFarm()` \n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L63-L95\n```solidity\n        // 3. Add liquidity on Balancer, get BPT\n        {\n            IBalancerVault vault = wAuraPools.getVault(lpToken);\n            _ensureApprove(param.borrowToken, address(vault), borrowBalance);\n\n            (address[] memory tokens, uint256[] memory balances, ) = wAuraPools\n                .getPoolTokens(lpToken);\n            uint[] memory maxAmountsIn = new uint[](2);\n            maxAmountsIn[0] = IERC20(tokens[0]).balanceOf(address(this));\n            maxAmountsIn[1] = IERC20(tokens[1]).balanceOf(address(this));\n```    \n## Tool used\n\nManual Review\n\n## Recommendation\nCheck the `tokens[ ].length` \n\nDuplicate of #127\n"
+    },
+    {
+      "number": 74,
+      "title": "All spell's `closePositionFarm` function can be attacked by sandwich attack",
+      "author": "J4de",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "J4de\n\nhigh\n\n# All spell's `closePositionFarm` function can be attacked by sandwich attack\n\n## Summary\n\nAll spell's `closePositionFarm` function can be attacked by sandwich attack\n\n## Vulnerability Detail\n\nTake `AuraSpell.sol` contract as an example.\n\n```solidity\nFile: spell/AuraSpell.sol\n192         // 4. Swap rewards tokens to debt token\n193         for (uint256 i = 0; i < rewardTokens.length; i++) {\n194             uint256 rewards = _doCutRewardsFee(rewardTokens[i]);\n195             _ensureApprove(rewardTokens[i], address(swapRouter), rewards);\n196             swapRouter.swapExactTokensForTokens(\n197                 rewards,\n198                 0,\n199                 swapPath[i],\n200                 address(this),\n201                 type(uint256).max\n202             );\n203         }\n```\n\nThe `closePositionFarm` function will replace all rewarded tokens with debt tokens. This can lead to a sandwich attack due to no set minimum number of receive.\n\n## Impact\n\nSome of the user's funds were stolen.\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L192-L203\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nIt is recommended to set the minimum receiving amount or slippage\n\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 65,
+      "title": "Lack of deadline for uniswap AMM",
+      "author": "Bauer",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Bauer\n\nmedium\n\n# Lack of deadline for uniswap AMM\n\n## Summary\nThe `CurveSpell.closePositionFarm()` function lacks a deadline check, making it vulnerable to sandwich attacks that can result in users losing their assets\n\n## Vulnerability Detail\nThe `CurveSpell.closePositionFarm()` params does not include a deadline currently. Inside the  `CurveSpell.closePositionFarm()` function swaps are executed through the swapRouter.\n```solidity\n function closePositionFarm(\n        ClosePosParam calldata param,\n        IUniswapV2Router02 swapRouter,\n        address[] calldata swapPath\n    )\n        external\n        existingStrategy(param.strategyId)\n        existingCollateral(param.strategyId, param.collToken)\n    {\n        address crvLp = strategies[param.strategyId].vault;\n        IBank.Position memory pos = bank.getCurrentPositionInfo();\n        if (pos.collToken != address(wCurveGauge))\n            revert Errors.INCORRECT_COLTOKEN(pos.collToken);\n        if (wCurveGauge.getUnderlyingToken(pos.collId) != crvLp)\n            revert Errors.INCORRECT_UNDERLYING(crvLp);\n\n        // 1. Take out collateral - Burn wrapped tokens, receive crv lp tokens and harvest CRV\n        bank.takeCollateral(param.amountPosRemove);\n        wCurveGauge.burn(pos.collId, param.amountPosRemove);\n\n        {\n            // 2. Swap rewards tokens to debt token\n            uint256 rewards = _doCutRewardsFee(CRV);\n            _ensureApprove(CRV, address(swapRouter), rewards);\n            swapRouter.swapExactTokensForTokens(\n                rewards,\n                0,\n                swapPath,\n                address(this),\n                type(uint256).max\n            );\n        }\n\n```\nBecause Front-running is a key aspect of AMM design, deadline is a useful tool to ensure that your tx cannot be “saved for later”.\n\nDue to the removal of the check, it may be more profitable for a validator to deny the transaction from being added until the transaction incurs the maximum amount of slippage.\n\n\n## Impact\n\nSandwich attacks cause users to lose assets\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L143-L174\n\n## Tool used\n\nManual Review\n\n## Recommendation\nThe `CurveSpell.closePositionFarm()` function should accept a user-input deadline param\n\n\nDuplicate of #145\n"
+    },
+    {
+      "number": 60,
+      "title": "Setting Deadline for `swapExactTokensForTokens` as `type(uint256).max` allows Exploits",
+      "author": "Breeje",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Breeje\n\nmedium\n\n# Setting Deadline for `swapExactTokensForTokens` as `type(uint256).max` allows Exploits\n\n## Summary\n\nWhile Closing Position Farm in `AuraSpell`, `convexSpell` and `curveSpell`, there is a use of Uniswap Router which uses `swapExactTokensForTokens` method call to Swap rewards tokens to debt token. But the value of `deadline` is set to be `type(uint256).max` which allows transaction to maliciously executed at a later stage in an unfavorable condition leading to exploits.\n\n## Vulnerability Detail\n\nIn `closePositionFarm` method of all 3 spell contracts, the deadline check is set to `type(uint256).max` which means the miner can manipulate and execute the transaction wherever it is the most favorable for him/her. Firstly, there is no Slippage check present in the contract, and even if after mitigation, it is added, This attack vector allows the transaction to happen after a long time in future which can to bad swap as a valid slippage value will also be stale as it is passed considering today's scenario.\n\nHere's the scenario of how this can happen:\n\n1. There is a call made to `closePositionFarm`. The transaction can be pending in mempool for a long time and the trading activity is very time senstive. \n3. With deadline check set to `type(uint256).max`, the trade transaction can be executed in a long time after the caller submit the transaction, at that time, the trade can be done in a sub-optimal price, which harms caller's position.\n4. In this scenario, even slippage parameter won't completely rescue caller. Let's say the slippage is set to 1% at today's price results in `amountOutMin` value of `x`. But in future, that `x` value can potentially lead to 20% slippage as the price has gone up for that token.\n5. Miner can sandwich attack after long time when it is favorable for him/her to get the maximum slippage value out of this transaction at Alice's expense.\n\nThis is the reason having a valid deadline check is very important as it ensures that the transaction will be executed on time and the expired transaction will reverts which prevent loss of funds. Also Given both issues having different attack vectors: Slippage Check protects against MEV Bots sandwiching their transaction while deadline protects against executing the transaction till the time slippage value is valid, Reporting it as different medium issue than slippage one.\n\n## Impact\n\nLoss of Funds.\n\n## Code Snippet\n\n```solidity\nFile: AuraSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L196-L202)\n\n```solidity\nFile: ConvexSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L174-L180)\n\n```solidity\nFile: CurveSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L167-L173)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nAdd a valid Deadline.\n\nDuplicate of #145\n"
+    },
+    {
+      "number": 59,
+      "title": "No Slippage Protection while removing liquidity from Curve Pool",
+      "author": "Breeje",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Breeje\n\nhigh\n\n# No Slippage Protection while removing liquidity from Curve Pool\n\n## Summary\n\nWhile Closing Position Farm in `convexSpell` and `curveSpell`, there is a use of `remove_liquidity_one_coin` method in Curve Pool to remove the liquidity. But the value of `_min_amount` is set to be zero which allow maximum Slippage.\n\n## Vulnerability Detail\n\nIn `closePositionFarm` method of all the 3 spell contracts, there is no valid slippage parameter set in `remove_liquidity_one_coin` method call. \n\n`remove_liquidity_one_coin` method is used to withdraw a single asset from the pool. It can take the following 3 parameters:\n\n1. `_burn_amount`: Amount of LP tokens to burn in the withdrawal.\n\n2. `i`: Index value of the coin to withdraw. Can be found using the coins getter method.\n\n3. `_min_amount`: Minimum amount of the coin to receive\n\nBut in both ConvexSpell and CurveSpell contracts, the value of `_min_amount` is set to zero which means the contract is allowing to burn all the LP tokens but in return allowing to accept 0 tokens as a withdrawal amount. This leads to High Slippage issue.\n\n## Impact\n\nLoss of Funds.\n\n## Code Snippet\n\n```solidity\nFile: ConvexSpell.sol\n\n  ICurvePool(pool).remove_liquidity_one_coin( \n      amountPosRemove,\n      int128(tokenIndex),\n      0\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L204-L208)\n\n```solidity\nFile: CurveSpell.sol\n\n  ICurvePool(pool).remove_liquidity_one_coin( \n      amountPosRemove,\n      int128(tokenIndex),\n      0\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L197-L201)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nUse a valid `_min_amount` value to protect against Maximum Slippage\n\nDuplicate of #124\n"
+    },
+    {
+      "number": 58,
+      "title": "No Slippage Protection while Swapping tokens through uniswap router",
+      "author": "Breeje",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Breeje\n\nhigh\n\n# No Slippage Protection while Swapping tokens through uniswap router\n\n## Summary\n\nWhile Closing Position Farm in `AuraSpell`, `convexSpell` and `curveSpell`, there is a use of Uniswap Router which uses `swapExactTokensForTokens` method call to Swap rewards tokens to debt token. But the value of `amountOutMinimum` is set to be zero which allows 100% Value Slippage.\n\n## Vulnerability Detail\n\nIn `closePositionFarm` method of all the 3 spell contracts, there is no slippage control while swapping the reward tokens into debt tokens which means that a malicious actor could, e.g., trivially insert transactions before and after the naive transaction (using the infamous \"sandwich\" attack), causing the smart contract to trade at a radically worse price, profit from this at the caller's expense, and then return the contracts to their original state, all at a low cost.\n\n## Impact\n\nLoss of Funds.\n\n## Code Snippet\n\n```solidity\nFile: AuraSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L196-L202)\n\n```solidity\nFile: ConvexSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L174-L180)\n\n```solidity\nFile: CurveSpell.sol\n\n  swapRouter.swapExactTokensForTokens(\n      rewards,\n      0,\n      swapPath,\n      address(this),\n      type(uint256).max\n  );\n\n```\n[Link to Code](https://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L167-L173)\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nUse a require check at the end of swap to make sure that slippage is not higher than user allowed slippage.\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 50,
+      "title": "spell#closePositionFarm executes swapExactTokensForTokens without slippage protection",
+      "author": "nobody2018",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "nobody2018\n\nhigh\n\n# spell#closePositionFarm executes swapExactTokensForTokens without slippage protection\n\n## Summary\n\n`AuraSpell/ConvexSpell/CurveSpell#closePositionFarm` executes swaps without slippage protection. That will cause a loss of funds because of sandwich attacks.\n\n## Vulnerability Detail\n\nAs we all know, if the second parameter `amountOutMin` of the `UniswapV2Router02#swapExactTokensForTokens` function is set to 0, it is vulnerable to sandwich attacks. `AuraSpell/ConvexSpell/CurveSpell#closePositionFarm` will internally swap reward tokens into debt tokens for repayment.\n\n```solidity\n//AuraSpell.sol\n    // 4. Swap rewards tokens to debt token\n        for (uint256 i = 0; i < rewardTokens.length; i++) {\n            uint256 rewards = _doCutRewardsFee(rewardTokens[i]);\n            _ensureApprove(rewardTokens[i], address(swapRouter), rewards);\n            swapRouter.swapExactTokensForTokens(\n                rewards,\n->              0,\t\t\n                swapPath[i],\n                address(this),\n                type(uint256).max\n            );\n        }\n```\n\n## Impact\n\n`swapExactTokensForTokens` will be sandwiched causing a loss of funds for users.\n\n## Code Snippet\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L196-L202\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L174-L180\n\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L167-L173\n\n## Tool used\n\nManual Review\n\n## Recommendation\n\nSlippage parameters should be included in the tx's calldata and passed to `swapExactTokensForTokens`.\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 45,
+      "title": "AuraSpell executes swaps without slippage protection",
+      "author": "Bauer",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Bauer\n\nhigh\n\n# AuraSpell executes swaps without slippage protection\n\n## Summary\nThe AuraSpell protocol executes swaps without slippage protection. That will cause a loss of funds because of sandwich attacks.\n\n\n## Vulnerability Detail\nIn `AuraSpell .closePositionFarm()`  swaps are executed through the `swapRouter`.The `amountOutMin` value has been set to 0. Without slippage protection, this is vulnerable to sandwich attacks\n\n```solidity\nfor (uint256 i = 0; i < rewardTokens.length; i++) {\n            uint256 rewards = _doCutRewardsFee(rewardTokens[i]);\n            _ensureApprove(rewardTokens[i], address(swapRouter), rewards);\n            swapRouter.swapExactTokensForTokens(\n                rewards,\n                0,\n                swapPath[i],\n                address(this),\n                type(uint256).max\n            );\n        }\n\n```\n\n## Impact\nSwaps will be sandwiched causing a loss of funds for users you withdraw their rewards.\n\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L196-L202\n\n## Tool used\n\nManual Review\n\n## Recommendation\nCalculate the maximum output and set slippage protection\n\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 44,
+      "title": "The quotes from Curve may be subject to manipulation",
+      "author": "Bauer",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Bauer\n\nhigh\n\n# The quotes from Curve may be subject to manipulation\n\n## Summary\nThe `get_virtual_price()` function in Curve has a reentrancy risk, which can affect the price if the protocol fetches quotes from pools integrated with ETH on Curve.\n\n## Vulnerability Detail\nThe `CurveOracle` protocol calls the function `get_virtual_price_from_lp_token()` to obtain a quote from Curve. However, all pools integrated with ETH pose a read-only reentrancy risk. Please refer below link for detail.\nhttps://chainsecurity.com/heartbreaks-curve-lp-oracles/\n\n## Impact\nThe read-only reentrancy operation manipulates the price.\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/oracle/CurveOracle.sol#L101\n## Tool used\n\nManual Review\n\n## Recommendation\n\n\n\nDuplicate of #123\n"
+    },
+    {
+      "number": 42,
+      "title": "The protocol does not return all of the rewards to user",
+      "author": "Bauer",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "Bauer\r\n\r\nhigh\r\n\r\n# The protocol does not return all of the rewards to user\r\n\r\n## Summary\r\nWhen user calls the `openPositionFarm()` function to add liquidity to Balancer pool, with staking to Aura, if user has a collateral and the protocol does not return all of the rewards to user upon withdrawal.\r\n\r\n## Vulnerability Detail\r\nThe `AuraSpell.openPositionFarm()` function allows users to open a new position on a specific farming pool using collateral and borrowed tokens. The function follows a series of steps to deposit collateral, borrow tokens, add liquidity to a Balancer pool, and validate the maximum loan-to-value (LTV) and position size. Inside the function,it takes out any existing collateral and burns the corresponding pool tokens.\r\n```solidity\r\n        // 6. Take out existing collateral and burn\r\n        IBank.Position memory pos = bank.getCurrentPositionInfo();\r\n        if (pos.collateralSize > 0) {\r\n            (uint256 pid, ) = wAuraPools.decodeId(pos.collId);\r\n            if (param.farmingPoolId != pid)\r\n                revert Errors.INCORRECT_PID(param.farmingPoolId);\r\n            if (pos.collToken != address(wAuraPools))\r\n                revert Errors.INCORRECT_COLTOKEN(pos.collToken);\r\n            bank.takeCollateral(pos.collateralSize);\r\n            wAuraPools.burn(pos.collId, pos.collateralSize);\r\n            _doRefundRewards(AURA);\r\n        }\r\n\r\n```\r\nFor the `WAuraPools.burn()` function ,it retrieves any pending rewards for the burned tokens by calling the \"pendingRewards\" function and transfers the corresponding reward tokens and amounts back to the `AuraSpell` protocol using a loop that iterates over the reward tokens and calls the \"safeTransfer\" function.\r\n```solidity\r\nfunction burn(\r\n        uint256 id,\r\n        uint256 amount\r\n    )\r\n        external\r\n        nonReentrant\r\n        returns (address[] memory rewardTokens, uint256[] memory rewards)\r\n    {\r\n        if (amount == type(uint256).max) {\r\n            amount = balanceOf(msg.sender, id);\r\n        }\r\n        (uint256 pid, ) = decodeId(id);\r\n        _burn(msg.sender, id, amount);\r\n\r\n        (address lpToken, , , address balRewarder, , ) = getPoolInfoFromPoolId(\r\n            pid\r\n        );\r\n        // Claim Rewards\r\n        IAuraRewarder(balRewarder).withdraw(amount, true);\r\n        // Withdraw LP\r\n        auraPools.withdraw(pid, amount);\r\n\r\n        // Transfer LP Tokens\r\n        IERC20Upgradeable(lpToken).safeTransfer(msg.sender, amount);\r\n\r\n        // Transfer Reward Tokens\r\n        (rewardTokens, rewards) = pendingRewards(id, amount);\r\n\r\n        for (uint i = 0; i < rewardTokens.length; i++) {\r\n            IERC20Upgradeable(rewardTokens[i]).safeTransfer(\r\n                msg.sender,\r\n                rewards[i]\r\n            );\r\n        }\r\n    }\r\n\r\n```\r\nHowever, the `AuraSpell` protocol only refunds any earned rewards in AURA tokens by calling the \"_doRefundRewards\" function.\r\n\r\n## Impact\r\nThe reward tokens were not returned to the user\r\n\r\n## Code Snippet\r\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L131-L140\r\n\r\n## Tool used\r\n\r\nManual Review\r\n\r\n## Recommendation\r\n Swap rewards tokens to corresponding token and reward to user.\r\n\r\nDuplicate of #101 \r\n"
+    },
+    {
+      "number": 35,
+      "title": "No slippage control when closing position in CurveSpell",
+      "author": "n1punp",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "n1punp\n\nhigh\n\n# No slippage control when closing position in CurveSpell\n\n## Summary\nNo slippage control when closing position in CurveSpell\n\n## Vulnerability Detail\nNo slippage control when closing position in CurveSpell, specifically `remove_liquidity_one_coin` can output almost 0 tokens, if the attacker sandwich attack so the desired is very very expensive (low liquidity in the underlying pool).\n\n## Impact\nAttacker can sandwich attack users when they want to close position in CurveSpell, leading to users getting nothing out (0 tokens).\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/CurveSpell.sol#L143-L223\n\n## Tool used\n\nManual Review\n\n## Recommendation\n- Add slippage control for all tokens that are involved with swapping (including reward token CRV).\n\n\nDuplicate of #124\n"
+    },
+    {
+      "number": 34,
+      "title": "No slippage control when closing position in ConvexSpell",
+      "author": "n1punp",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "n1punp\n\nhigh\n\n# No slippage control when closing position in ConvexSpell\n\n## Summary\nNo slippage control when closing position in ConvexSpell\n\n## Vulnerability Detail\nNo slippage control when closing position in ConvexSpell, specifically `remove_liquidity_one_coin` can output almost 0 tokens, if the attacker sandwich attack so the desired is very very expensive (low liquidity in the underlying pool).\n\n## Impact\nAttacker can sandwich attack users when they want to close position in ConvexSpell, leading to users getting nothing out (0 tokens).\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/ConvexSpell.sol#L147-L230\n\n## Tool used\n\nManual Review\n\n## Recommendation\n- Add slippage control for all tokens that are involved with swapping (including reward token CVX).\n\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 33,
+      "title": "Missing slippage control when closing position in AuraSpell",
+      "author": "n1punp",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "n1punp\n\nhigh\n\n# Missing slippage control when closing position in AuraSpell\n\n## Summary\nMissing slippage control when closing position in AuraSpell\n\n## Vulnerability Detail\nThere's no slippage control for minimum out tokens obtained.\n\n## Impact\nFarmers who close positions in AuraSpell can potentially get sandwich-attacked and get $0 value out. (the attacker can manipulate the pool so the swap gets very bad rate). Right now all swaps get 0 min token amount out for slippage control and there are no other checks.\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L149-L224\n\n## Tool used\n\nManual Review\n\n## Recommendation\n- Add slippage control to all tokens in the `closePositionFarm` function\n\n\nDuplicate of #121\n"
+    },
+    {
+      "number": 32,
+      "title": "Missing slippage control validation in opening position function in AuraSpell",
+      "author": "n1punp",
+      "labels": [
+        "High",
+        "Duplicate",
+        "Reward"
+      ],
+      "body": "n1punp\n\nhigh\n\n# Missing slippage control validation in opening position function in AuraSpell\n\n## Summary\nMissing slippage control validation in opening position function in AuraSpell\n\n## Vulnerability Detail\nUsers who try to open position in Aura pool via Blueberry can get sandwiched attack, leading to the user potentially getting 0 lp amount from swaps, and the tx will still succeed.\n\n## Impact\nAll your farmers to the Aura pool will get sandwiched and wrecked.\n\n## Code Snippet\nhttps://github.com/sherlock-audit/2023-04-blueberry/blob/main/blueberry-core/contracts/spell/AuraSpell.sol#L63-L147\n\n## Tool used\n\nManual Review\n\n## Recommendation\n- Add slippage control for minLPAmount and check with the obtained lpAmount.\n\n\nDuplicate of #121\n"
+    }
+  ]
+}

