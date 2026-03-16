@@ -4,16 +4,16 @@
 Attacker will bypass borrow rate limiter via `repay_on_behalf` to accumulate unbounded debt, causing bad debt for depositors
 
 ### Summary
-The `repay_on_behalf` function (public, no ownership check) calls `handle_repay` which reduces the borrow rate limiter's outflow counter via `reduce_outflow`. An attacker can cycle **borrow → repay_on_behalf(victim) → borrow** within a single Sui PTB to repeatedly reset the rate limiter's current segment, bypassing the borrow velocity cap entirely. This removes the protocol's primary defense against over-borrowing during oracle instability, enabling the attacker to accumulate unbounded individual debt (up to their collateral limit) in a single transaction.
+The [`repay_on_behalf`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/lending/repay.move#L33-L47) function (public, no ownership check) calls [`handle_repay`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/market.move#L445-L489) which reduces the borrow rate limiter's outflow counter via [`reduce_outflow`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/limiter.move#L100-L119). An attacker can cycle **borrow → repay_on_behalf(victim) → borrow** within a single Sui PTB to repeatedly reset the rate limiter's current segment, bypassing the borrow velocity cap entirely. This removes the protocol's primary defense against over-borrowing during oracle instability, enabling the attacker to accumulate unbounded individual debt (up to their collateral limit) in a single transaction.
 
 ### Root Cause
-In [`market.move:483`](contracts/protocol/sources/internal/market/market.move#L483), the `handle_repay` function unconditionally reduces the borrow rate limiter's outflow:
+In [`market.move:483`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/market.move#L483), the `handle_repay` function unconditionally reduces the borrow rate limiter's outflow:
 
 ```move
 emode.borrow_mut_borrow_limiter().reduce_outflow(now, coin.value());
 ```
 
-This is called for ALL repayments, including `repay_on_behalf` which requires no obligation ownership. The `reduce_outflow` function in [`limiter.move:100-119`](contracts/protocol/sources/internal/market/limiter.move#L100) only modifies the current time segment (saturating at 0):
+This is called for ALL repayments, including [`repay_on_behalf`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/entry_points/lending/repay.move#L33-L47) which requires no obligation ownership. The [`reduce_outflow`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/limiter.move#L100-L119) function only modifies the current time segment (saturating at 0):
 
 ```move
 if (segment.value <= reduced_value) {
@@ -23,7 +23,7 @@ if (segment.value <= reduced_value) {
 }
 ```
 
-Since `borrow` (via `add_outflow`) and `repay_on_behalf` (via `reduce_outflow`) operate on the same segment within one PTB (same timestamp), the attacker can repeatedly add and then remove outflow from the current segment while old segments remain unchanged. This resets the available capacity back to `outflow_limit - old_segments_total` after each repay cycle.
+Since `borrow` (via [`add_outflow`](https://github.com/pebble-protocol/sui-move-contract/blob/8a250918a763b63449a767482a4c4a5079b30893/contracts/protocol/sources/internal/market/limiter.move#L78-L94)) and `repay_on_behalf` (via `reduce_outflow`) operate on the same segment within one PTB (same timestamp), the attacker can repeatedly add and then remove outflow from the current segment while old segments remain unchanged. This resets the available capacity back to `outflow_limit - old_segments_total` after each repay cycle.
 
 Additionally, the `reserve.debt` check (`asset_max_borrow_amount`) and `emode_group_total_borrow` check (`emode_max_borrow_amount`) are also neutralized because the repay resets reserve-level debt and emode-level tracking back to pre-borrow values after each cycle.
 
