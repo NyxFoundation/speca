@@ -37,6 +37,9 @@ def load_csv_issues(
     severity_filter: set[str] | None = None,
 ) -> list[Issue]:
     import csv
+    import sys
+
+    csv.field_size_limit(sys.maxsize)
 
     issues: list[Issue] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
