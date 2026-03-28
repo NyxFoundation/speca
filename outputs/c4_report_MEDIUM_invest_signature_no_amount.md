@@ -24,7 +24,7 @@ function _verifyInvestSignature(bytes calldata _signature) internal view virtual
         msg.sender,        // investor address
         address(this),     // sale contract
         block.chainid      // chain ID
-    )).toEthSignedMessageMessage();
+    )).toEthSignedMessageHash();
     if (_data.recover(_signature) != s_addressConfig.legionSigner) {
         revert Errors.LegionSale__InvalidSignature(_signature);
     }

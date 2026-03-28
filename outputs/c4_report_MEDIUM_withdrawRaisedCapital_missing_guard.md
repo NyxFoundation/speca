@@ -1,6 +1,6 @@
 # Severity rating
 
-Medium Severity
+QA Report (low)
 
 # Title
 
