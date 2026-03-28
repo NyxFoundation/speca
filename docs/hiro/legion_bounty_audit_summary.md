@@ -143,6 +143,32 @@ Expected outcome: **Low probability of acceptance** due to:
 - Scope debate (LegionPositionManager not in in_scope_assets)
 - May have been found in prior audits (OOS #7)
 
+## Phase 4: Deep Audit Agent Verification (Post-Context-Resume)
+
+6 parallel deep audit agents completed and produced 8 Medium+ findings that initially survived OOS filtering. All 8 were manually verified against actual code and **all eliminated**:
+
+| Finding | Source Agent | Verdict | Reason |
+|---------|------------|---------|--------|
+| abi.encodePacked collision in _verifyValidPosition | merkle | FP | All types fixed-size (address, uint256, enum) — no collision possible |
+| cancelLocked permanent fund lock | sealed_bid | OOS #1 | Centralization risk — requires onlyLegion admin to malfunction |
+| Position merge rate overclaim | fees | FP | Rate = absolute share of supply, sum is correct; claim overwrites with server-signed value |
+| Merkle proof replay via merge | merkle | FP | Transfer requires hasClaimedExcess=true; excess Merkle leaf is address-bound |
+| CapitalRaise cancel() missing whenTokensNotSupplied | access_control | FP | CapitalRaise has no token supply concept — modifier N/A |
+| Transfer sig no expiry | sig_patterns | Duplicate | Already M-01 |
+| Vesting sig no expiry (stale terms) | sig_patterns | FP | hasSettled single-use guard prevents exploitation |
+| abi.encodePacked collision in CapitalRaise | merkle | FP | Same as above — all fixed-size types |
+
+**Total from deep audit agents: 0 new confirmed findings.**
+
+## Final Recommendation
+
+**Submit M-01 (transfer signature replay) only.** This is the sole surviving candidate after:
+- SPECA automated pipeline (62 raw → 3 candidates)
+- Manual line-by-line audit of all 18 contracts
+- 6 parallel deep audit agents (8 candidates → 0 confirmed)
+- Self-review checklist application
+- OOS filtering
+
 ## Files Modified/Created
 
 - `outputs/c4_report_HIGH_signature_replay.md` — M-01 report
