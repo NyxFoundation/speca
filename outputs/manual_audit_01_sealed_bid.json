@@ -1,0 +1,82 @@
+[
+  {
+    "severity": "High",
+    "title": "Sealed Bid Commit/Reveal スキームが存在しない — Bid金額はオンチェーンで平文イベントとして漏洩する",
+    "description": "invest() 関数は encryptedAmountOut と sealedBidPublicKey を abi.decode するが、コントラクトはこれらの値をストレージに保存しない。代わりに CapitalInvested イベントで encryptedAmountOut をそのままemitする (line 118)。すべてのオブザーバーはイベントログから暗号文を取得し、ECIES.decrypt() (view関数・外部公開済み) をオフチェーンで呼ぶか、salt/publicKey を mempool で観察することで他の入札者の金額推定が可能。さらに、本実装には古典的な commit-then-reveal フェーズが存在せず、「revealSealedBid」関数は一切存在しない。Reveal期間中のfront-running可能性を問う以前に、単一フェーズ (invest-only) 設計であるため、入札期間終了まで暗号文はオンチェーンに公開され続ける。実際のBid金額は、Legionが privateKey と fixedSalt を publishSaleResults() で公開した時点で全員が復元可能になる (line 184-181)。この設計により、入札者の戦略的なBid金額は事後的にすべて開示されてしまう。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 118,
+    "impact": "Bidの機密性を保護する主目的が形骸化。競合入札者・Legionオペレーター自身が他者の入札額を事後参照し、不公正な清算が可能。SizeSealed (Code4rena 2022-11) で確認された同系列パターン: finalize時の入札データ露出によって資金ロックが発生したケースと同様のリスク。"
+  },
+  {
+    "severity": "High",
+    "title": "PrivateKey と FixedSalt が publishSaleResults() でオンチェーンに永続保存され、すべてのBid履歴が復元可能になる",
+    "description": "publishSaleResults() (line 144-187) は sealedBidPrivateKey と fixedSalt を s_sealedBidAuctionSaleConfig に保存し、SaleResultsPublished イベントでも emit する (line 184-186)。ECIES ライブラリの salt は keccak256(abi.encodePacked(investor, fixedSalt)) という単純な構造 (decryptSealedBid, line 219)。fixedSalt は全投資家で共通 (per-bid乱数ではなく per-auction定数)。privateKey が公開された瞬間、過去の全 encryptedAmountOut イベントに対して任意の第三者が decrypt() を呼び出し、全入札者の希望価格を完全復元できる。SizeSealed の類似パターン (finalize で clearing price が公開される問題) と照合: ECIES 暗号の強度に依存した設計で、鍵公開後の不可逆開示を防ぐ手段がない。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 178,
+    "impact": "Sealed-bidオークションのプライバシー保証が完全破壊。鍵公開後、すべての落札額・非落札額が公開データとなり、将来オークションの戦略漏洩リスクが発生する。また fixedSalt が定数のため per-investor の対称鍵が keccak256(sharedSecret, keccak256(investor||salt)) に縮退し、辞書攻撃の表面積が増大する。"
+  },
+  {
+    "severity": "High",
+    "title": "Bid金額の上限チェックが存在しない — maximumInvestAmount が実装されていない",
+    "description": "invest() (line 77-122) は _verifyMinimumInvestAmount() (line 103) を呼ぶが、最大投資額の検証は一切行わない。LegionSaleInitializationParams にも maximumInvestAmount フィールドが存在しない (ILegionAbstractSale.sol line 25-56)。また、1投資家が invest() を複数回呼ぶことができ (line 89-91: positionId が既存なら再利用)、investedCapital が累積加算される (line 115)。これにより単一投資家がオークション全体を独占できる。SizeSealed の類似パターン ([PNM-002] finalize with malicious input) と照合: 入力検証不備が資金ロックを引き起こすパターンの変形。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 103,
+    "impact": "クジラ投資家が無制限に資本を積み上げ、オークションを支配可能。他の参加者は落札できず、公正なプライス・ディスカバリーが機能しない。プロトコル設計の根幹的欠陥。"
+  },
+  {
+    "severity": "High",
+    "title": "投資家がBid金額 (encryptedAmountOut) をinvest後に変更不可能 — 誤暗号化済みBidの救済手段なし",
+    "description": "invest() は encryptedAmountOut をイベントとしてのみ記録し、ストレージには保存しない。投資家が誤った金額を暗号化してBidを送信した場合、コントラクト上で訂正する手段がない。refund() (LegionAbstractSale.sol line 165-192) はrefund期間中に investedCapital を返却するが、封印された入札金額情報の修正はできない。Legionがオフチェーンで「再度 invest() を呼べ」とガイドすることは可能だが、その場合は二重のBidが蓄積される (investedCapital が加算される)。コントラクト側には updateSealedBid() 等の修正機能が存在しない。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 97,
+    "impact": "正当な投資家が誤入力したBidから資金を取り戻す正式な手段がない。refundは可能だが、その場合はオークション参加権を放棄しなければならない。UX上の重大な欠陥。"
+  },
+  {
+    "severity": "High",
+    "title": "invest() の署名検証がリプレイ攻撃を防げない — nonce/expiryが存在しない",
+    "description": "_verifyInvestSignature() (LegionAbstractSale.sol line 886-892) は keccak256(abi.encodePacked(msg.sender, address(this), block.chainid)) のみを署名対象とする。timestamp, nonce, amount を含まないため: (1) 一度取得した署名を無制限に再利用できる。(2) 同一investorが invest() を何度でも呼び出せる (金額・encryptedBidを変えて再度使用)。(3) Legionがユーザーのアクセスを無効化したい場合、既存の有効署名を失効させる手段がない。SizeSealed の Refinalization with theft of funds (Code4rena 2022-11) で確認された状態再進入パターンと関連。",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 887,
+    "impact": "署名の無期限有効性により、悪意のある投資家やLegionの判断変更に対応できない。KYC/AML ホワイトリスト的な役割を果たす署名が形骸化する。"
+  },
+  {
+    "severity": "High",
+    "title": "initializePublishSaleResults() と publishSaleResults() の2段階分離が不完全 — cancelLocked 設定後に publishSaleResults が失敗した場合、永続ロック状態になる",
+    "description": "initializePublishSaleResults() (line 125-141) は cancelLocked = true を設定する。その後 publishSaleResults() (line 144-187) が呼ばれなかった場合 (reverted、Legionの不作為、privateKey紛失など)、s_sealedBidAuctionSaleConfig.cancelLocked は true のままになる。cancel() には whenCancelNotLocked modifier (line 200) があるため、Project は cancel() を呼べない。さらに、cancelLocked を false に戻すパブリック関数が存在しない。結果として投資家の資金が永遠にロックされる。SizeSealed の '[PNM-002] finalize with malicious input may lock bidder funds' (Code4rena 2022-11) と完全に対応するパターン。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 137,
+    "impact": "Legionのオペレーションミスや秘密鍵紛失により、全投資家の資金が恒久的にロックされる可能性がある。緊急脱出機能 (emergencyWithdraw) はLegionのみが呼べるが、これはLegionへの完全な信頼依存を前提とする。"
+  },
+  {
+    "severity": "Medium",
+    "title": "publishSaleResults() で設定される capitalRaised が totalCapitalInvested と照合されない — Legionが任意の値を設定できる",
+    "description": "publishSaleResults() (line 144-187) の capitalRaised パラメータはオンチェーンで totalCapitalInvested と比較・検証されない。Legionは totalCapitalInvested よりも大きい capitalRaised を設定することができ (line 175)、その場合 withdrawRaisedCapital() (LegionAbstractSale.sol line 195) は超過額を転送しようとしてコントラクト残高不足でreverする可能性がある。逆に capitalRaised < totalCapitalInvested の場合、余剰資金が acceptedCapitalMerkleRoot による excess capital claim フローに委ねられるが、excess claim のMerkleデータが正確でないと資金が孤立する。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 175,
+    "impact": "Legionオペレーターの入力ミスや悪意ある操作により、資金の誤配分または永久ロックが発生する可能性。SizeSealed の 'Attacker can drain the SizeSealed.sol contract' (Code4rena 2022-11) と同系統の信頼境界問題。"
+  },
+  {
+    "severity": "Medium",
+    "title": "decryptSealedBid() が public view 関数として外部公開されており、privateKey公開後に全Bidが即座に復号可能",
+    "description": "decryptSealedBid() (line 207-221) は external view 関数であり、privateKey が publishSaleResults() で設定された後、誰でも任意の encryptedAmountOut と investor アドレスを渡して復号できる。CapitalInvested イベントから encryptedAmountOut を収集した第三者 (MEVbot、競合プロジェクト等) が全入札者の金額を完全復元できる。これは封印入札の匿名性保証を事後的に無効化する。また ECIES.decrypt() も public view として外部公開されている (ECIES.sol line 68)。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 207,
+    "impact": "プライバシー保護の完全失敗。オークション終了後にすべての入札戦略が公開されるため、反復オークションへの参加者が将来の入札戦略を学習される。"
+  },
+  {
+    "severity": "Medium",
+    "title": "同額Bid (tie-breaking) のロジックが存在しない — 同じ capitalRaised の結果でも清算順序が不定",
+    "description": "publishSaleResults() はオフチェーンで計算された claimMerkleRoot と acceptedMerkleRoot を受け取るのみで、同額Bidの優先順位付けロジック (early bidder priority, position ID順等) が一切コントラクト上に定義されていない。タイブレークの基準が不透明であり、Legionオペレーターが恣意的な順序でMerkleツリーを構築できる。これは 'Malicious seller can finalize auction without changing data.lowestQuote' (Size, Code4rena 2022-11) と同様の、オペレーター裁量による操作可能性を示すパターン。",
+    "file": "src/sales/LegionSealedBidAuctionSale.sol",
+    "line": 144,
+    "impact": "同額入札者に対してLegionが恣意的に当落を決定できる。公平性の欠如。オークションの完全性に対する信頼が損なわれる。"
+  },
+  {
+    "severity": "Low",
+    "title": "ECIES ライブラリの ecMul に固定 gas limit (6000) が設定されており、将来のガスコスト変更で失敗する可能性",
+    "description": "ECIES._ecMul() (ECIES.sol line 138) は address(0x07).staticcall{ gas: 6000 } と固定gasを指定してaltbn128のスカラー乗算プリコンパイルを呼ぶ。EIP-1108 (Istanbul) でプリコンパイルのガスコストは削減されたが、将来のEIPで再変更された場合や、gas: 6000 が不足する場合にすべての暗号化・復号オペレーションが失敗する。投資の成否が外部プリコンパイルのgas pricing変動に依存する脆弱な設計。",
+    "file": "src/lib/ECIES.sol",
+    "line": 138,
+    "impact": "ネットワークアップグレード後に invest()、decryptSealedBid()、_verifyValidPrivateKey() が全てrevertsし、オークション機能が停止する可能性。"
+  }
+]

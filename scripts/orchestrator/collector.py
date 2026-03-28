@@ -125,7 +125,7 @@ class ResultCollector:
             dir=str(self.output_dir), suffix=".json.tmp"
         )
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, indent=2)
             os.replace(tmp_path, str(output_path))
         except BaseException:

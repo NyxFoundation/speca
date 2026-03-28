@@ -1,0 +1,114 @@
+[
+  {
+    "severity": "High",
+    "title": "No nonReentrant Modifier on Any External Function Across All Contracts",
+    "description": "None of the external/public functions in LegionAbstractSale, LegionFixedPriceSale, LegionSealedBidAuctionSale, LegionPreLiquidOpenApplicationSale, LegionPreLiquidApprovedSale, LegionCapitalRaise, LegionTokenDistributor, or LegionReferrerFeeDistributor use a reentrancy guard (ReentrancyGuard / nonReentrant modifier). The codebase contains no import or usage of any reentrancy guard pattern whatsoever. While the majority of state changes occur before external calls (CEI mostly followed), the absence of nonReentrant means a single oversight or a token with transfer hooks (ERC777, fee-on-transfer with hooks) creates a pathway for reentrancy. Any future modification or inheritance that inadvertently violates CEI will have no safety net.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 40,
+    "impact": "All value-transferring functions are unprotected. If bidToken or askToken implements ERC777 tokensReceived / tokensToSend hooks, or if any external address used as fee receiver contains malicious code, an attacker can re-enter multiple state-changing functions. The blast radius covers all inherited sale contracts and capital raise contracts."
+  },
+  {
+    "severity": "High",
+    "title": "ERC777 / Hookable bidToken Enables Reentrancy in invest() via tokensToSend Hook",
+    "description": "In LegionAbstractSale.refund() (line 165-192) and in all invest() implementations (LegionFixedPriceSale.invest line 72-114, LegionPreLiquidOpenApplicationSale.invest line 58-96, LegionSealedBidAuctionSale.invest line 77-122), safeTransferFrom is called on bidToken. If bidToken is an ERC777 token, the sender's tokensToSend hook fires BEFORE the transfer completes. At the point of the hook call in invest(), the state has already been updated (investedCapital incremented, positionId created), so reentrancy into invest() itself is blocked by the hasRefunded / hasClaimedExcess checks. However, reentrancy into refund() during invest() is possible: the attacker's invest() call triggers tokensToSend, from which refund() is called. At that moment investedCapital has been incremented but the safeTransferFrom (pulling tokens in) has not yet completed, so the contract's balance is temporarily less than what it owes. A net theft of funds equal to one invest round-trip is achievable.",
+    "file": "src/sales/LegionFixedPriceSale.sol",
+    "line": 113,
+    "impact": "If bidToken supports ERC777 sender hooks: attacker can call invest() then have tokensToSend trigger refund(), draining refundable capital before the invest deposit is settled. Attack results in direct loss of other investors' funds held in the contract."
+  },
+  {
+    "severity": "High",
+    "title": "ERC777 askToken Enables Reentrancy in claimTokenAllocation() via tokensReceived Hook on Vesting Contract Deployment",
+    "description": "In LegionAbstractSale.claimTokenAllocation() (lines 251-313) and LegionPreLiquidApprovedSale.claimTokenAllocation() (lines 397-480), the flow is: (1) set position.hasSettled = true, (2) call _createVesting() which calls ILegionVestingFactory.createLinearVesting() or createLinearEpochVesting() — an external call that deploys a new contract, (3) set position.vestingAddress = vestingAddress, (4) safeTransfer askToken to vesting contract, (5) safeTransfer askToken to msg.sender (amountToDistributeOnClaim). Step (4) can trigger an ERC777 tokensReceived hook on the newly-deployed vesting contract. Although hasSettled is set to true before the external calls, the vestingAddress is set AFTER _createVesting() returns but BEFORE the safeTransfer at step 4. An attacker controlling the vesting factory could manipulate step 2. More critically, in step 5, safeTransfer to msg.sender fires tokensReceived on the caller. If the askToken is ERC777, the attacker's tokensReceived callback can call releaseVestedTokens(), which calls ILegionVesting(investorVestingAddress).release(). The vesting contract now holds tokens (transferred at step 4), and since release() on OZ VestingWallet is not reentrant-safe and vestingAddress is already set, an early release is possible before the outer claimTokenAllocation() stack frame returns.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 298,
+    "impact": "With an ERC777 askToken, an attacker can claim TGE tokens and simultaneously trigger an early vesting release in the same transaction. Double-spending of the token allocation is possible: both the TGE portion and (some of) the vested portion can be extracted before the full transaction settles."
+  },
+  {
+    "severity": "High",
+    "title": "withdrawRaisedCapital() Transfers to msg.sender Before Completing All Fee Transfers — Cross-Function Reentrancy Risk",
+    "description": "In LegionAbstractSale.withdrawRaisedCapital() (lines 195-248), the state flag capitalWithdrawn is set to true before any safeTransfer call. However, the function then performs three sequential safeTransfer calls: (1) to projectAdmin/msg.sender, (2) to legionFeeReceiver, (3) to referrerFeeReceiver. If any of these recipients is a contract with a fallback that calls back into the sale contract, they can re-enter other functions. Critically, if the projectAdmin calls cancel() (only guarded by whenSaleResultsNotPublished and whenSaleNotCanceled) from within the bidToken transfer callback, the sale can be canceled mid-withdrawal. While capitalWithdrawn=true prevents a second withdrawRaisedCapital(), the cancel() function in LegionPreLiquidOpenApplicationSale and LegionPreLiquidApprovedSale calls safeTransferFrom to pull capital back into the contract. A re-entrant cancel() after capital has been sent to the project would create an accounting inconsistency where totalCapitalWithdrawn is reset to 0 while the tokens are already gone, potentially allowing investors to claim double refunds via withdrawInvestedCapitalIfCanceled().",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 205,
+    "impact": "Cross-function reentrancy: project admin can trigger cancel() during their own bidToken receipt callback, resulting in totalCapitalWithdrawn being reset to 0 while funds have already been sent. Investors can then drain the contract via withdrawInvestedCapitalIfCanceled() against a balance that was already paid out."
+  },
+  {
+    "severity": "High",
+    "title": "LegionPreLiquidApprovedSale.cancel() and LegionPreLiquidOpenApplicationSale.cancel() — State Reset After External Call",
+    "description": "In LegionPreLiquidApprovedSale.cancel() (lines 483-500) and LegionPreLiquidOpenApplicationSale.cancel() (lines 221-247), the flow is: (1) cache capitalToReturn = totalCapitalWithdrawn, (2) set isCanceled = true, (3) emit SaleCanceled, (4) if capitalToReturn > 0: set totalCapitalWithdrawn = 0, then call safeTransferFrom(bidToken, msg.sender, address(this), capitalToReturn). The safeTransferFrom at step 4 triggers an ERC777 tokensToSend hook on msg.sender (the project) before tokens are debited from the project's account. At this point isCanceled is already true and totalCapitalWithdrawn is already reset to 0. If the project's hook calls cancel() again, the second call will pass _verifySaleNotCanceled() (which now reverts because isCanceled=true) — so direct reentrancy is blocked. However, the hook can call withdrawInvestedCapitalIfCanceled() for an investor address it controls, draining investor funds before the project's refund transfer completes. This is possible because isCanceled=true is set before the external call.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 483,
+    "impact": "With an ERC777 bidToken, a malicious project can trigger investor fund drainage via withdrawInvestedCapitalIfCanceled() during their own cancel() tokensToSend callback, before their own refund safeTransferFrom completes. If the contract balance is insufficient after the re-entrant withdrawals, the project's own safeTransferFrom will fail and revert — but the re-entrant withdrawals already executed."
+  },
+  {
+    "severity": "High",
+    "title": "LegionCapitalRaise.cancel() — Same Pattern as PreLiquidApprovedSale.cancel()",
+    "description": "LegionCapitalRaise.cancel() (lines 282-299) exhibits the same pattern: isCanceled is set to true and the event is emitted before the conditional safeTransferFrom that pulls capital back. With an ERC777 bidToken, the tokensToSend hook fires during safeTransferFrom(bidToken, msg.sender, address(this), capitalToReturn). At this moment isCanceled=true and totalCapitalWithdrawn=0, allowing a re-entrant call to withdrawInvestedCapitalIfCanceled() on behalf of any investor position before the cancel's refund transfer completes.",
+    "file": "src/raise/LegionCapitalRaise.sol",
+    "line": 282,
+    "impact": "Same as LegionPreLiquidApprovedSale.cancel() — re-entrant investor withdrawals during project's refund transfer in an ERC777 bidToken scenario."
+  },
+  {
+    "severity": "Medium",
+    "title": "withdrawInvestedCapitalIfCanceled() — Missing hasRefunded Flag, Enables Double Withdrawal via Cross-Function Reentrancy",
+    "description": "In LegionAbstractSale.withdrawInvestedCapitalIfCanceled() (lines 445-472), the function sets investedCapital=0 and decrements totalCapitalInvested before calling safeTransfer. However, it does NOT set hasRefunded=true. The hasRefunded flag is only set in refund(). An attacker who re-enters withdrawInvestedCapitalIfCanceled() during the safeTransfer callback would fail only because investedCapital is already 0 (checked implicitly via the amountToWithdraw==0 revert). However, in a cross-function reentrancy scenario, the attacker could call refund() from within the safeTransfer callback. Since hasRefunded is still false at the time of the callback, the refund() function's _verifyHasNotRefunded() check passes. Note: refund() is gated by whenSaleNotCanceled, so direct cross-reentrancy with refund() is blocked by the isCanceled check. The same issue exists in LegionCapitalRaise.withdrawInvestedCapitalIfCanceled() (line 303-327) and LegionPreLiquidApprovedSale.withdrawInvestedCapitalIfCanceled() (lines 504-531).",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 445,
+    "impact": "Medium — The whenSaleNotCanceled guard on refund() prevents the most obvious cross-function attack. But the inconsistency in flag management (not setting hasRefunded in withdrawInvestedCapitalIfCanceled) is a design flaw that could be exploited if any future code path allows refund() after cancellation, or via other re-entry vectors."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionReferrerFeeDistributor.claim() — CEI Partially Followed, No Reentrancy Guard",
+    "description": "In LegionReferrerFeeDistributor.claim() (lines 62-91), the function updates s_claimedAmounts[msg.sender] += amountToClaim and s_feeDistributorConfig.totalReferrerFeesDistributed += amountToClaim BEFORE the safeTransfer. This is CEI-compliant for preventing double claims. However, there is no nonReentrant guard. If the token (s_feeDistributorConfig.token) is an ERC777 token, the tokensReceived hook on msg.sender fires during safeTransfer. From within that hook, the attacker cannot call claim() again for more tokens (because s_claimedAmounts is already updated), but they can call any other external function: emergencyWithdraw() is restricted to onlyLegion. The pause/unpause functions are restricted. The setMerkleRoot function is restricted. So in practice, reentrancy within claim() is mitigated by the state update ordering. However, the absence of nonReentrant leaves this reliant solely on CEI compliance.",
+    "file": "src/distribution/LegionReferrerFeeDistributor.sol",
+    "line": 62,
+    "impact": "Low to Medium — CEI is correctly followed, so double-claim reentrancy is not possible. But if a future code change adds state after the safeTransfer, the lack of a guard would immediately create a vulnerability. Current risk: low with standard tokens; medium with ERC777."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionTokenDistributor.claimTokenAllocation() — Vesting Factory External Call Between State Updates",
+    "description": "In LegionTokenDistributor.claimTokenAllocation() (lines 136-195), the sequence is: (1) position.hasSettled = true and totalAmountClaimed updated, (2) _createVesting() — external call to vesting factory, (3) position.vestingAddress = vestingAddress set AFTER the external call to factory, (4) safeTransfer to vestingAddress, (5) safeTransfer to msg.sender. The critical issue: vestingAddress is not stored in state until AFTER _createVesting() returns. During step 2, if the vesting factory is a compromised or malicious contract, it can call back into claimTokenAllocation() for a different investor or call releaseVestedTokens() (which checks vestingAddress != address(0) — which is still zero at this point, so it would revert). The state is protected by hasSettled=true for the same investor. Cross-investor reentrancy during _createVesting() is theoretically possible if the factory is malicious. More practically: with an ERC777 askToken, step 5's safeTransfer to msg.sender triggers tokensReceived, from which the attacker can call releaseVestedTokens(). Since vestingAddress is now set (step 3 completed) and the vesting contract holds tokens (step 4 completed), an early release is triggered.",
+    "file": "src/distribution/LegionTokenDistributor.sol",
+    "line": 180,
+    "impact": "With ERC777 askToken and a malicious/cooperating vesting factory: potential double-spend of token allocation. The TGE portion is claimed and the vested tokens can also be released early in the same tx via tokensReceived reentrancy into releaseVestedTokens()."
+  },
+  {
+    "severity": "Medium",
+    "title": "Read-Only Reentrancy: investorPosition() and saleStatus() View Functions Return Stale State During Active Transfers",
+    "description": "Functions like investorPosition() (LegionAbstractSale line 559), saleStatus() (line 554), and similar view functions in all contracts return storage state directly. During an active external call (e.g., safeTransfer in refund()), if an attacker re-enters a view function from a malicious token's hook, they observe: investedCapital=0 but hasRefunded=false (because hasRefunded is set before the transfer in refund()), or totalCapitalInvested already decremented. Any protocol or off-chain system that relies on these view functions for accounting during an in-progress transaction (e.g., a lending protocol that reads investor position for collateral valuation) would see temporarily inconsistent state. This is a read-only reentrancy concern for any downstream integrator.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 554,
+    "impact": "Medium — affects downstream integrators that read Legion contract state from within token callbacks. Not directly exploitable against the Legion contracts themselves, but creates oracle manipulation risk for any protocol that prices collateral based on Legion investor positions."
+  },
+  {
+    "severity": "Medium",
+    "title": "supplyTokens() — Multiple Sequential safeTransferFrom Calls Without Reentrancy Guard",
+    "description": "In LegionAbstractSale.supplyTokens() (lines 372-433), LegionPreLiquidApprovedSale.supplyTokens() (lines 281-339), and LegionTokenDistributor.supplyTokens() (lines 77-124), after setting tokensSupplied=true, three sequential safeTransferFrom calls are made: one to the contract itself, one to legionFeeReceiver, one to referrerFeeReceiver. The askToken (ERC777) can fire tokensToSend on msg.sender (the project) during any of these three calls. After the first safeTransferFrom completes and tokensSupplied=true is set, if the project's tokensToSend callback from the second or third transfer calls supplyTokens() again, it will revert due to tokensAlreadySupplied check. However, the callback can call claimTokenAllocation() for any investor, which now passes the whenTokensSupplied modifier. This allows token claims before all three fee transfers have completed, creating an inconsistency where fee receivers may not have received their fees yet while token claims are already being processed.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 372,
+    "impact": "Medium — with ERC777 askToken, investors can begin claiming tokens before fee recipients have received their portions. If subsequent fee transfers fail (e.g., fee receiver reverts), the supplyTokens() call itself may revert but tokensSupplied=true was set — creating a permanently stuck state."
+  },
+  {
+    "severity": "Low",
+    "title": "emergencyWithdraw() Has No Reentrancy Protection and No State Update",
+    "description": "The emergencyWithdraw() functions in LegionAbstractSale (line 475), LegionPreLiquidApprovedSale (line 342), LegionCapitalRaise (line 223), LegionTokenDistributor (line 127), and LegionReferrerFeeDistributor (line 94) perform a safeTransfer with no preceding state update and no reentrancy guard. While these are restricted to onlyLegion, if the Legion bouncer address is a multi-sig or smart contract wallet with a receive hook, re-entry into the sale contract is possible. The function emits an event before the transfer, meaning the event log is correct, but there is no invariant protected against re-entry.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 475,
+    "impact": "Low — requires a compromised or malicious Legion bouncer address. If the Legion bouncer is a smart contract, emergencyWithdraw can be called re-entrantly to drain contract beyond intended amount."
+  },
+  {
+    "severity": "Low",
+    "title": "releaseVestedTokens() Delegates to External Vesting Contract Without Reentrancy Guard",
+    "description": "In LegionAbstractSale.releaseVestedTokens() (lines 354-369), LegionPreLiquidApprovedSale.releaseVestedTokens() (lines 582-597), and LegionTokenDistributor.releaseVestedTokens() (lines 198-210), the function calls ILegionVesting(investorVestingAddress).release(token), which is an external call to an arbitrary (though Legion-deployed) vesting contract. The vesting contract (LegionLinearVesting / LegionLinearEpochVesting) calls super.release() from OZ VestingWalletUpgradeable, which performs a safeTransfer to the beneficiary. If the beneficiary is a contract with a tokensReceived hook, it can re-enter releaseVestedTokens() in the sale contract. OZ VestingWallet tracks released amounts and only releases what's available, so double-release is not possible from within the vesting contract itself. But re-entry back into the sale contract (e.g., calling claimTokenAllocation again) during the vesting release is possible for the window before hasSettled prevents it.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 354,
+    "impact": "Low — OZ VestingWallet internal accounting prevents token double-release. Re-entry into sale contract from within vesting release is possible but hasSettled=true blocks claimTokenAllocation re-entry. Risk is minimal with current code but nonReentrant would provide defense in depth."
+  },
+  {
+    "severity": "Low",
+    "title": "withdrawExcessInvestedCapital() — State Update Order Inconsistency in LegionAbstractSale",
+    "description": "In LegionAbstractSale.withdrawExcessInvestedCapital() (lines 316-351), the order is: (1) verify eligibility (_verifyCanClaimExcessCapital checks hasClaimedExcess), (2) set hasClaimedExcess=true, (3) decrement investedCapital, (4) decrement totalCapitalInvested, (5) emit event, (6) safeTransfer. This is CEI-compliant. However, in LegionPreLiquidApprovedSale.withdrawExcessInvestedCapital() (lines 534-579), the order differs slightly: signature-used check → mark signature used → mark hasClaimedExcess=true → decrement capitals → update position → verify position → emit → safeTransfer. The position verification step (_verifyValidPosition) happens after state changes but before the transfer. This verify step reads from storage (the updated position) and is a view check, so CEI is maintained. No direct vulnerability, but the inconsistency in ordering between contracts is a maintenance risk.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 316,
+    "impact": "Low — no immediate vulnerability. The inconsistent CEI ordering between abstract and concrete implementations creates maintenance risk where future changes to the ordering in one contract may not be reflected in others."
+  }
+]

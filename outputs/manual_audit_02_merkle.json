@@ -1,0 +1,90 @@
+[
+  {
+    "severity": "High",
+    "title": "claimTokenAllocation: signature used-check after state mutation allows same-block replay via reentrancy",
+    "description": "In LegionPreLiquidApprovedSale.claimTokenAllocation (lines 429-436), _verifyValidPosition and _verifyValidVestingPosition are called *before* _verifySignatureNotUsed. The sequence is: (1) _verifyValidPosition(claimSignature, ...) verifies ECDSA, (2) _verifyValidVestingPosition(vestingSignature, ...) verifies ECDSA, (3) _verifySignatureNotUsed(claimSignature) checks the used-map, (4) s_usedSignatures[...][claimSignature] = true marks it used, (5) position.hasSettled = true. Because hasSettled is the only re-entrancy guard and it is set AFTER the signature-used check is performed, a reentrant call path that somehow bypasses hasSettled before it is set (or a logic path where hasSettled check is skipped) could allow the claimSignature to be consumed twice. More critically, because _verifySignatureNotUsed is checked AFTER both ECDSA verifications but BEFORE the state write, a contract acting as msg.sender that calls back into claimTokenAllocation before the first call completes would find the signature still unused. The correct order should be: mark signature used FIRST, then verify, then distribute tokens (CEI pattern).",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 436,
+    "impact": "A malicious investor (contract) could potentially claim token allocation more than once if reentrancy is possible during the token transfer that occurs at the end of the function, as the signature is only marked used after all ECDSA checks but just before the state write (hasSettled). The financial impact is double-claiming vested tokens for the same positionId."
+  },
+  {
+    "severity": "High",
+    "title": "Merkle root zero-value check missing: zero acceptedCapitalMerkleRoot allows any proof to pass in MerkleProofLib",
+    "description": "In LegionAbstractSale._verifyCanClaimExcessCapital (line 767), the Merkle proof is verified against s_saleStatus.acceptedCapitalMerkleRoot. However, there is no check that acceptedCapitalMerkleRoot != bytes32(0) before performing the verification. Solady's MerkleProofLib.verify with a zero root and an empty proof[] will return true when the leaf happens to equal bytes32(0), which is extremely unlikely but not impossible. More practically: if Legion admin calls setAcceptedCapital(bytes32(0)) (no input validation prevents this), then the root is zero. According to Solady's MerkleProofLib implementation, verify([], bytes32(0), leaf) returns true only when leaf == bytes32(0), but verify(proof, bytes32(0), leaf) can be manipulated with a crafted proof since the hashing traversal starts from zero. The function setAcceptedCapital has no validation on the merkleRoot argument to reject bytes32(0), enabling an admin misconfiguration that opens the Merkle gate. The same issue applies to claimTokensMerkleRoot in publishSaleResults.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionAbstractSale.sol",
+    "line": 767,
+    "impact": "If the Merkle root is set to bytes32(0) by mistake or via admin error, investors may be able to craft proofs that pass verification and withdraw excess capital they are not entitled to, or claim token allocations they should not receive."
+  },
+  {
+    "severity": "High",
+    "title": "abi.encodePacked collision in _verifyValidPosition signature leaf construction",
+    "description": "Both LegionPreLiquidApprovedSale._verifyValidPosition (line 1041) and LegionCapitalRaise._verifyValidPosition (line 710) construct the signed data using abi.encodePacked with the following dynamic-length adjacent fields: keccak256(abi.encodePacked(msg.sender, address(this), block.chainid, uint256(position.cachedInvestAmount), uint256(position.cachedTokenAllocationRate), _actionType)). The fields cachedInvestAmount (uint256) and cachedTokenAllocationRate (uint256) are fixed-size types, so no encodePacked collision occurs between those two. However, _actionType is an enum (uint8 under the hood in Solidity ABI), and when packed with adjacent uint256 fields, the byte boundary is predictable. More importantly, the actionType enum distinguishes INVEST vs CLAIM_TOKEN_ALLOCATION vs WITHDRAW_EXCESS_CAPITAL. If two different (amount, rate, actionType) tuples produce the same packed bytes, a signature for INVEST could be replayed for CLAIM_TOKEN_ALLOCATION. Concretely: if cachedInvestAmount has a value whose last byte matches what would be produced by shifting the enum value left, a collision is theoretically constructible. The safe fix is to use abi.encode instead of abi.encodePacked to prevent any potential packing collisions across tuple boundaries.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 1041,
+    "impact": "A malicious investor with a valid INVEST signature could potentially craft inputs that make the packed data match a CLAIM_TOKEN_ALLOCATION or WITHDRAW_EXCESS_CAPITAL signature, allowing them to perform unauthorized actions using a signature obtained for a different action type."
+  },
+  {
+    "severity": "High",
+    "title": "abi.encodePacked collision in LegionCapitalRaise._verifyValidPosition",
+    "description": "Same issue as above but in LegionCapitalRaise._verifyValidPosition (line 710): uses abi.encodePacked with (msg.sender [20 bytes], address(this) [20 bytes], block.chainid [variable], uint256 cachedInvestAmount, uint256 cachedTokenAllocationRate, CapitalRaiseAction _actionType). The chainid is packed without padding which means for chain IDs with different byte lengths, the boundary between chainid and cachedInvestAmount shifts. For example, chainid=1 (1 byte in packed encoding) vs chainid=256 (2 bytes) causes different offsets for the subsequent uint256 fields. This means on chains where chainid can vary (e.g., testnets, L2s), a signature generated on one chain might be reinterpretable with different field values on another chain. While chainid is included to prevent cross-chain replay, the packed encoding allows for ambiguous parsing of field boundaries when chainid changes.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/raise/LegionCapitalRaise.sol",
+    "line": 710,
+    "impact": "Cross-chain signature ambiguity. A signature valid on a chain with chainid=1 could potentially decode to different (amount, rate, actionType) values on a chain with a different-length chainid. This could allow an attacker to replay or misuse signatures across deployments."
+  },
+  {
+    "severity": "Medium",
+    "title": "withdrawExcessInvestedCapital in LegionAbstractSale has no time/state guard allowing premature excess capital withdrawal",
+    "description": "In LegionAbstractSale.withdrawExcessInvestedCapital (lines 316-351), the function only has modifiers: whenNotPaused and whenSaleNotCanceled. It does NOT require the sale to have ended (no whenSaleHasEnded modifier), nor does it require sale results to be published (no whenSaleResultsArePublished modifier), nor does it require the refund period to be over. This means that as long as the Merkle root acceptedCapitalMerkleRoot has been set (via setAcceptedCapital which only requires onlyLegion and whenSaleNotCanceled), investors can call withdrawExcessInvestedCapital at ANY time during an active sale, even before the sale ends. This allows premature reduction of investedCapital, potentially disrupting sale accounting and allowing investors to reduce their committed capital while the sale is still ongoing.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionAbstractSale.sol",
+    "line": 316,
+    "impact": "Investors can call withdrawExcessInvestedCapital while the sale is still active (before it ends), allowing them to withdraw capital commitments prematurely. This could undermine the integrity of the capital raise, as investors can effectively reduce their positions while others are still investing."
+  },
+  {
+    "severity": "Medium",
+    "title": "setAcceptedCapital can be called at any time with no validation, enabling root reset attack",
+    "description": "In LegionAbstractSale.setAcceptedCapital (line 436), the only guards are onlyLegion and whenSaleNotCanceled. There is no restriction on: (1) when it can be called (e.g., before or during active sale), (2) what value can be set (bytes32(0) is accepted), (3) how many times it can be called (the root can be overwritten multiple times). This means Legion can update the acceptedCapitalMerkleRoot at any time, including after investors have already called withdrawExcessInvestedCapital. If a new root is set that covers different (investor, acceptedAmount) pairs, investors who have not yet claimed could get different excess amounts than initially promised. Additionally, if the root is reset to bytes32(0) accidentally, all Merkle proof verifications for excess capital withdrawal would rely on an empty/zero root.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionAbstractSale.sol",
+    "line": 436,
+    "impact": "Legion admin can change the Merkle root at any time, potentially changing investor entitlements retroactively. Investors who have already claimed based on one root cannot reclaim, but investors who have not claimed yet could be affected by a root change. This is a centralization risk and could be exploited for manipulation of excess capital distribution."
+  },
+  {
+    "severity": "Medium",
+    "title": "Merkle proof replay: withdrawExcessInvestedCapital does not record used proofs separately from hasClaimedExcess",
+    "description": "In LegionAbstractSale._verifyCanClaimExcessCapital (line 761), the replay protection relies solely on the hasClaimedExcess boolean flag. The Merkle proof itself is not recorded or invalidated. If hasClaimedExcess is somehow reset or bypassed (e.g., through position transfer and merge logic that incorrectly handles this flag), the same proof can be reused. Specifically, in _burnOrTransferInvestorPosition (line 686-687), the transfer requires !positionToUpdate.hasClaimedExcess, but the burn/transfer modifies the position data without preserving proof consumption records. After a position merge, the merged position's hasClaimedExcess state may not accurately reflect whether both contributing positions have claimed excess.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionAbstractSale.sol",
+    "line": 761,
+    "impact": "In complex position transfer/merge scenarios, the same Merkle proof for excess capital withdrawal could potentially be used more than once, allowing an investor to withdraw more excess capital than entitled."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionPreLiquidApprovedSale.claimTokenAllocation missing signature-not-used check timing (TOCTOU)",
+    "description": "In LegionPreLiquidApprovedSale.claimTokenAllocation (lines 423-442), the function checks _verifyCanClaimTokenAllocation (which checks hasSettled) BEFORE updating the position with _updateInvestorPosition, and then calls _verifyValidPosition with the updated position data. But the used-signature check (_verifySignatureNotUsed at line 436) comes AFTER both signature verifications (lines 430, 433). This creates a TOCTOU (Time of Check Time of Use) window where: (1) hasSettled is checked and is false, (2) _verifyValidPosition verifies the ECDSA signature as valid, (3) _verifyValidVestingPosition verifies the vesting signature, (4) _verifySignatureNotUsed confirms unused, (5) claimSignature is marked used, (6) hasSettled is set to true. Steps 1-4 all happen before any state change. If a contract receives a callback between steps 3 and 4 (during ECDSA recovery which calls external libs), reentrancy is possible. The fix is to follow CEI strictly: mark signature used and set hasSettled at the beginning.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 424,
+    "impact": "A malicious contract investor could potentially reenter claimTokenAllocation during the ECDSA recovery or vesting position verification steps, calling the function again before hasSettled is set to true, resulting in double token allocation claims."
+  },
+  {
+    "severity": "Low",
+    "title": "LegionAbstractSale._verifyInvestSignature uses abi.encodePacked with only three fields, missing investment amount",
+    "description": "The invest signature verification in LegionAbstractSale._verifyInvestSignature (line 887) signs only (msg.sender, address(this), block.chainid) — it does NOT include the investment amount, investAmount cap, or tokenAllocationRate. This means a single Legion-signed authorization covers ALL possible investment amounts for a given investor-contract-chain combination. While the actual Merkle proof approach in LegionAbstractSale's subclasses (LegionFixedPriceSale, LegionSealedBidAuctionSale) handles allocation verification separately, the invest signature itself provides no amount-level authorization. An attacker with a valid invest signature (obtained through normal participation) could theoretically invest any amount as long as they have the signed bytes, without any per-amount authorization.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionAbstractSale.sol",
+    "line": 887,
+    "impact": "The invest signature provides only identity authorization (who can invest) but not amount authorization (how much they can invest). While downstream controls (Merkle proof for allocation) may partially compensate, an authorized investor can invest amounts that were not specifically approved by Legion at signature time."
+  },
+  {
+    "severity": "Low",
+    "title": "LegionPreLiquidApprovedSale and LegionCapitalRaise: no abi.encode vs abi.encodePacked distinction documented for off-chain signer",
+    "description": "The _verifyValidPosition functions in both LegionPreLiquidApprovedSale (line 1041) and LegionCapitalRaise (line 710) use abi.encodePacked for constructing the signed message hash. This is an uncommon pattern that differs from the more standard EIP-712 structured data signing (which uses abi.encode). Any off-chain signer implementation that mistakenly uses abi.encode instead of abi.encodePacked (or vice versa) will produce incompatible signatures. The contracts do not validate or document the expected encoding format in a machine-readable way (no EIP-712 domain separator or typehash). This creates a documentation and implementation risk.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 1041,
+    "impact": "Off-chain signing infrastructure that uses abi.encode instead of abi.encodePacked will produce invalid signatures, causing legitimate investors to be unable to claim tokens or invest. Conversely, if the encoding is not well-documented, future changes to the off-chain signer could introduce incompatibilities silently."
+  },
+  {
+    "severity": "Low",
+    "title": "LegionPreLiquidApprovedSale.withdrawExcessInvestedCapital does not validate that amount <= investedCapital before decrement",
+    "description": "In LegionPreLiquidApprovedSale.withdrawExcessInvestedCapital (line 566), the function executes s_investorPositions[positionId].investedCapital -= amount without verifying that amount <= position.investedCapital. While the Merkle-based excess capital approach in LegionAbstractSale (the other version) encodes the ACCEPTED capital as (investedCapital - amount) and thus implicitly bounds amount, LegionPreLiquidApprovedSale uses a signature-based approach with no explicit upper-bound check on amount. If amount > investedCapital, Solidity 0.8.x would revert with an underflow, so funds are not at direct risk, but the lack of an explicit validation means error messages are less clear and the contract relies on arithmetic underflow protection rather than explicit business logic validation.",
+    "file": "C:/Users/shieru_k/Documents/security-agent/target_workspace/legion-protocol-contracts/src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 566,
+    "impact": "Low direct risk due to Solidity 0.8.x underflow protection, but poor defensive programming practice. An invalid amount in the signed data would cause an opaque underflow revert rather than a descriptive error."
+  }
+]

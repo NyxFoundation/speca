@@ -1,0 +1,92 @@
+[
+  {
+    "severity": "High",
+    "title": "LegionAbstractSale._verifyInvestSignature: Signature Replay Across Multiple Investments (No Nonce / No Deadline)",
+    "matched_pattern": "Signature Replay Attack",
+    "description": "In LegionAbstractSale._verifyInvestSignature (line 887), the signed hash is keccak256(abi.encodePacked(msg.sender, address(this), block.chainid)). This hash is static for a given investor+contract+chain combination — it never changes. As a result, a valid investment signature issued by legionSigner can be replayed an unlimited number of times across multiple calls to invest() (e.g. LegionFixedPriceSale.invest, LegionSealedBidAuctionSale.invest, LegionPreLiquidOpenApplicationSale.invest). An attacker who obtains a legitimate signature (e.g. via mempool observation or off-chain channel) can keep calling invest() to exceed their intended investment cap without additional authorization from legionSigner. There is no nonce, no deadline, and no per-call amount binding in the signed payload. Compare this to LegionPreLiquidApprovedSale.invest which uses a per-signature used-map (s_usedSignatures) to prevent reuse.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 886,
+    "impact": "An investor (or any party who intercepts the signature) can replay the invest signature repeatedly to deposit capital beyond the per-investor limit intended by the protocol, inflating totalCapitalInvested and manipulating sale outcomes. Affects LegionFixedPriceSale, LegionSealedBidAuctionSale, LegionPreLiquidOpenApplicationSale which all inherit _verifyInvestSignature without per-usage tracking."
+  },
+  {
+    "severity": "High",
+    "title": "LegionAbstractSale._verifyInvestSignature: No Amount Binding — Investor Can Invest Arbitrary Amounts With One Signature",
+    "matched_pattern": "Unsigned Parameter / Signature Malleability",
+    "description": "The signed message in _verifyInvestSignature (LegionAbstractSale.sol line 887) does not include the investment amount. The signer authorizes an investor's identity (msg.sender + contract + chainId) but does not commit to the amount to be invested in that call. Any investor who holds a valid signature may call invest() with any amount value, including amounts far above what the signer intended to approve. This is analogous to the Biconomy vulnerability 'Unsigned tokenGasPriceFactor parameter' where a field outside the signed domain could be manipulated by the caller.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 887,
+    "impact": "An approved investor can invest amounts significantly larger or smaller than the off-chain SAFT allocation by changing the amount parameter while reusing the same signature. This bypasses per-investor capital controls and may result in disproportionate token allocation or capital over-raise."
+  },
+  {
+    "severity": "High",
+    "title": "LegionPreLiquidApprovedSale.claimTokenAllocation: _verifySignatureNotUsed Called AFTER State Mutation (Check-Signature-After-Effect Order)",
+    "matched_pattern": "Signature Replay Attack",
+    "description": "In LegionPreLiquidApprovedSale.invest (lines 190-212) and withdrawExcessInvestedCapital (lines 550-572), the sequence is: (1) _verifySignatureNotUsed — checks s_usedSignatures, (2) state mutations (increment capital, update position), (3) s_usedSignatures[msg.sender][sig] = true — marks used, (4) _verifyValidPosition — verifies signature content. While this pattern does eventually mark the signature used, in claimTokenAllocation (lines 435-442) the same pattern appears: _verifySignatureNotUsed is checked (line 436) BEFORE position.hasSettled = true but AFTER _verifyValidPosition is called. The critical risk is that if a reentrancy path exists before step (3), a re-entrant call could pass step (1) again with the same signature. Though no direct ETH reentrancy exists here (SafeTransferLib used), a malicious bidToken (ERC777/callback token) could trigger reentrancy between steps (2) and (3), replaying the signature.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 191,
+    "impact": "If bidToken supports transfer callbacks (ERC777 or similar), an attacker could re-enter invest() before s_usedSignatures is set to true, replaying the signature to double-invest or double-claim excess capital. Even without reentrancy, the non-atomic pattern is an anti-pattern relative to CEI (Checks-Effects-Interactions)."
+  },
+  {
+    "severity": "High",
+    "title": "LegionPositionManager._verifyTransferSignature: Transfer Signature Has No Expiry / Deadline",
+    "matched_pattern": "Missing Deadline/Expiry Check",
+    "description": "In LegionPositionManager._verifyTransferSignature (lines 161-165), the signed hash includes only (from, to, positionId, msg.sender, address(this), block.chainid). There is no timestamp, nonce, or deadline field. A transfer authorization signature remains valid indefinitely — it cannot expire even if the position owner changes their mind. This matches the Astaria contest finding 'Vault's don't verify that a strategy's deadline has passed' (Code4rena 2023-01). Once issued, a transfer signature can be submitted by anyone at any future time, including after the original authorization intent has changed.",
+    "file": "src/position/LegionPositionManager.sol",
+    "line": 161,
+    "impact": "A transfer authorization signature issued by legionSigner never expires. If the intended transfer is later deemed invalid (e.g. due to position state change, investor dispute, or key compromise), the signature cannot be invalidated on-chain. Any party holding the signature can use it to transfer a soulbound NFT position at any time within the valid state window."
+  },
+  {
+    "severity": "High",
+    "title": "LegionPreLiquidApprovedSale._verifyValidPosition: Signature Used AFTER State Update — Same Signature Reused for INVEST and WITHDRAW_EXCESS_CAPITAL",
+    "matched_pattern": "Signature Replay Attack / Unauthorized Signature Usage by Third Party",
+    "description": "In LegionPreLiquidApprovedSale, the same signature bytes are passed to _verifySignatureNotUsed (which checks s_usedSignatures per-address-per-signature) AND _verifyValidPosition (which reconstructs the hash including _actionType). The usedSignatures mapping keys on (msg.sender => signature_bytes). The same signature bytes could theoretically be different for different _actionType values. However, s_usedSignatures is keyed on raw signature bytes, not on the hash. If legionSigner reuses the same signature across different actions (invest, claim, withdraw) with different _actionType encodings but the same raw bytes, the mapping would prevent the second use. But there is a deeper issue: the invest() function marks the signature as used (line 206) BEFORE calling _verifyValidPosition (line 212). Since _verifyValidPosition reconstructs the hash with updated position state, if the position state changes between mark and verify (not possible here due to single transaction), the verification could fail. In claimTokenAllocation, _verifySignatureNotUsed is checked (line 436) but the marking happens at line 442 — after _verifyValidPosition (line 430) and _verifyValidVestingPosition (line 433). This means there is a 12-line window where the state is partially updated but the signature is not yet marked used.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 430,
+    "impact": "Non-atomic signature marking combined with state updates in claimTokenAllocation creates a logical inconsistency. While not immediately exploitable without external callback, this is a latent reentrancy risk and violates the Checks-Effects-Interactions principle. Additionally, if bidToken is upgraded to support callbacks, this becomes a direct vulnerability."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionAbstractSale._verifyInvestSignature: Signature Valid Across All Sale Instances on Same Chain (Missing Per-Sale Nonce Binding)",
+    "matched_pattern": "Signature Replay Attack",
+    "description": "The signed message in _verifyInvestSignature includes address(this) which binds the signature to a specific contract deployment. However, if Legion Protocol deploys multiple sale contracts for the same investor on the same chain (which is expected — multiple sales per investor is a normal scenario), a signature issued for Sale A cannot be replayed at Sale B. This is correctly handled by address(this). However, the signed message does NOT include any sale-specific identifier (e.g. sale name, round ID, or nonce) beyond the contract address. If the proxy implementation is reused or if the address is recycled (via selfdestruct + redeploy, which is theoretically possible), a historical signature could become valid again. This is a lower-probability but structurally present risk.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 887,
+    "impact": "In edge cases involving contract address reuse (selfdestruct + CREATE2 redeploy), old investment signatures could be replayed in a new sale deployment at the same address. The impact depends on the deployment strategy and is medium likelihood given CREATE2 proxy patterns."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionCapitalRaise._verifyValidPosition: invest() Marks Signature Used Before _verifyValidPosition — State Inconsistency Risk",
+    "matched_pattern": "Signature Replay Attack / Nonce Dimension Replay",
+    "description": "In LegionCapitalRaise.invest (lines 173-180): the signature is marked used (line 174: s_usedSignatures[msg.sender][investSignature] = true) BEFORE _verifyValidPosition is called (line 180). _verifyValidPosition reads position.investedCapital and position.cachedInvestAmount to verify the amount matches. The state update (position.investedCapital += amount, line 171) happens before both the marking and the validation. If _verifyValidPosition reverts (e.g. because cachedInvestAmount doesn't match), the transaction reverts and the signature remains usable (since the mapping update reverts too). However, if the validation passes but a later step fails, the signature is consumed. This is correct behavior. But the ordering means that _verifyValidPosition is called with updated state (post-increment) while _verifySignatureNotUsed was checked with pre-update state. This pattern is fragile and could cause issues if state dependencies change.",
+    "file": "src/raise/LegionCapitalRaise.sol",
+    "line": 173,
+    "impact": "While not immediately exploitable, the non-standard ordering (mark-used before final validation) increases code fragility. Future refactoring could inadvertently create a window where a signature is consumed but the action fails, or where signatures can be replayed if validation order changes."
+  },
+  {
+    "severity": "Medium",
+    "title": "LegionPreLiquidApprovedSale._verifyValidVestingPosition: Vesting Signature Has No Expiry — Stale Vesting Terms Can Be Claimed",
+    "matched_pattern": "Missing Deadline/Expiry Check",
+    "description": "In LegionPreLiquidApprovedSale._verifyValidVestingPosition (lines 870-887), the vesting signature encodes (msg.sender, address(this), block.chainid, _positionId, _investorVestingConfig). While _positionId is included, there is no deadline or expiry timestamp in the signed data. Vesting parameters (cliff, duration, TGE rate) signed off-chain remain valid indefinitely. If the protocol wishes to update vesting terms for an investor (e.g. after legal changes or TGE parameter revisions), the old signature cannot be invalidated without key rotation. An investor could claim using stale vesting terms that are no longer intended.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 879,
+    "impact": "Investors can use old vesting authorization signatures to claim under deprecated vesting terms. Since there is no expiry, a signature issued at any point in the past remains valid. This could allow investors to claim with favorable legacy vesting schedules after protocol updates."
+  },
+  {
+    "severity": "Low",
+    "title": "LegionPositionManager._verifyTransferSignature: msg.sender Included in Signed Hash — Restricts Who Can Submit But Not Who Benefits",
+    "matched_pattern": "Unauthorized Signature Usage by Third Party",
+    "description": "In _verifyTransferSignature (line 161), the signed hash includes msg.sender (the transaction submitter). This means the signature is bound to a specific submitter address. However, the 'from' and 'to' addresses are also parameters — meaning a different submitter cannot replay the same signature. This is a reasonable defense. However, it means that if the authorized submitter (msg.sender) is a compromised relayer, they could freely execute the transfer. The protocol should consider whether restricting msg.sender in the signed hash is intentional (allowlisting a specific relayer) or incidental.",
+    "file": "src/position/LegionPositionManager.sol",
+    "line": 161,
+    "impact": "Low impact by itself, but the design choice of binding signatures to a specific submitter (msg.sender) rather than to the position owner (from) creates confusion about the trust model. A malicious or compromised relayer who holds the signature can execute unauthorized transfers of soulbound NFT positions."
+  },
+  {
+    "severity": "Low",
+    "title": "All Signature Functions: No EIP-712 Structured Data — Raw abi.encodePacked Used Instead",
+    "matched_pattern": "Signature Validation Flaw / EIP-712 Missing",
+    "description": "All signature verification functions across LegionAbstractSale, LegionPreLiquidApprovedSale, LegionCapitalRaise, and LegionPositionManager use raw abi.encodePacked hashed with keccak256 and then toEthSignedMessageHash(). None use EIP-712 structured typed data (DOMAIN_SEPARATOR + type hashes). This means: (1) Signers cannot see human-readable parameter names in their wallet UI. (2) There is no domain separator to isolate signatures between different versions of the protocol. (3) Cross-contract replay may be possible if two contracts share the same address space and parameter structure. EIP-712 was specifically designed to prevent these issues. All Paraspace/Biconomy findings about permit implementations reference EIP-712 compliance as the standard.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 887,
+    "impact": "Without EIP-712, hardware wallets and smart signers cannot display meaningful context for what is being signed. This increases phishing risk for investors and reduces auditability. Additionally, lack of DOMAIN_SEPARATOR means future protocol upgrades cannot differentiate old from new signatures at the type level."
+  }
+]

@@ -418,7 +418,7 @@ class BaseOrchestrator(ABC):
         md = "\n".join(lines)
 
         try:
-            with open(summary_path, "a") as f:
+            with open(summary_path, "a", encoding="utf-8") as f:
                 f.write(md)
                 f.write("\n")
         except OSError as e:
@@ -595,7 +595,7 @@ class Phase01Orchestrator(BaseOrchestrator):
         for pattern in self.config.input_patterns:
             for filepath in sorted(glob_mod.glob(resolve_pattern(pattern))):
                 try:
-                    with open(filepath) as f:
+                    with open(filepath, encoding="utf-8") as f:
                         data = json.load(f)
 
                     # Validate 01a output structure
@@ -631,7 +631,7 @@ class Phase01Orchestrator(BaseOrchestrator):
         for pattern in self.config.input_patterns:
             for filepath in sorted(glob_mod.glob(resolve_pattern(pattern))):
                 try:
-                    with open(filepath) as f:
+                    with open(filepath, encoding="utf-8") as f:
                         data = json.load(f)
 
                     # Validate 01b partial structure
@@ -709,7 +709,7 @@ class Phase01Orchestrator(BaseOrchestrator):
             return hashlib.sha256(file_path.encode()).hexdigest()[:8]
 
         try:
-            with open(file_path) as f:
+            with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
 
             # Try specs[].title or specs[].source_url
@@ -750,7 +750,7 @@ class Phase01Orchestrator(BaseOrchestrator):
             )
 
         try:
-            with open(scope_path) as f:
+            with open(scope_path, encoding="utf-8") as f:
                 scope_data = json.load(f)
             print(f"  Injected bug_bounty_scope from {scope_path}")
         except Exception as e:
@@ -789,7 +789,7 @@ class Phase01Orchestrator(BaseOrchestrator):
                     subgraph_cache[subgraph_file] = {}
                 elif subgraph_file not in subgraph_cache:
                     try:
-                        with open(subgraph_file) as f:
+                        with open(subgraph_file, encoding="utf-8") as f:
                             subgraph_cache[subgraph_file] = json.load(f)
                     except Exception:
                         subgraph_cache[subgraph_file] = {}
@@ -825,7 +825,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
         index = []
         for filepath in sorted(glob_mod.glob(str(get_output_root() / "01b_PARTIAL_*.json"))):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
                 for spec in data.get("specs", []):
                     entry = {
@@ -847,7 +847,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
                 print(f"Warning: Failed to read {filepath} for subgraph index: {e}", file=sys.stderr)
 
         out_path = get_output_root() / "01b_SUBGRAPH_INDEX.json"
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(index, f, indent=2)
 
         total_sg = sum(len(e["subgraphs"]) for e in index)
@@ -864,7 +864,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
 
         for filepath in sorted(glob.glob(str(get_output_root() / "01e_PARTIAL_*.json"))):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
 
                 # Validate 01e partial structure
@@ -1008,7 +1008,7 @@ class Phase03Orchestrator(BaseOrchestrator):
 
         for filepath in sorted(glob.glob(str(get_output_root() / "02c_PARTIAL_*.json"))):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
 
                 try:
@@ -1155,7 +1155,7 @@ class Phase04Orchestrator(BaseOrchestrator):
         validation_warnings = 0
         for filepath in sorted(glob.glob(str(get_output_root() / "03_PARTIAL_*.json"))):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
 
                 try:
@@ -1232,7 +1232,7 @@ class Phase04Orchestrator(BaseOrchestrator):
         prop_lookup: dict[str, dict[str, Any]] = {}
         for filepath in sorted(glob_mod.glob(str(get_output_root() / "02c_PARTIAL_*.json"))):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
                 for prop in data.get("properties_with_code", []):
                     pid = prop.get("property_id", "")

@@ -1,0 +1,74 @@
+[
+  {
+    "severity": "Medium",
+    "title": "Fee Truncation (Round-Down) Systematically Benefits Investors at Protocol Expense on Capital-Raised Fees",
+    "description": "In withdrawRaisedCapital() (LegionAbstractSale.sol:224-229, LegionPreLiquidApprovedSale.sol:372-377, LegionCapitalRaise.sol:253-258), both legionFee and referrerFee are computed with integer floor division:\n  legionFee   = (legionFeeOnCapitalRaisedBps * totalCapitalRaised) / 10000\n  referrerFee = (referrerFeeOnCapitalRaisedBps * totalCapitalRaised) / 10000\nBecause each division truncates independently, up to 1 wei per fee can be lost per sale. The project receives the residual (totalCapitalRaised - legionFee - referrerFee), which is rounded UP by 0-2 wei. This is user-favourable for the project but creates systematic under-payment of protocol/referrer fees across many sales. With two independent truncations and no correction term, the maximum cumulative per-sale shortfall is 1 wei per fee = 2 wei total per sale. At scale, or with low-decimal tokens (e.g. USDC 6 decimals), the per-sale shortfall can be up to 1e-6 USDC * 2, which is economically negligible but architecturally inconsistent.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 224,
+    "impact": "Protocol and referrer receive up to 2 wei less than intended per sale. With 6-decimal bid tokens, this can approach 2e-6 token units per sale. Low financial impact per occurrence, but cumulative over many sales. No exploit path exists, but it represents a rounding policy that is not explicitly documented."
+  },
+  {
+    "severity": "Medium",
+    "title": "supplyTokens Amount Equals totalTokensAllocated but Claimed Amounts Can Sum to Less Due to Double Truncation in claimTokenAllocation",
+    "description": "In LegionAbstractSale.supplyTokens() the contract receives exactly `totalTokensAllocated` tokens. In claimTokenAllocation() (line 288-292), the per-investor distribution is:\n  amountToDistributeOnClaim = amount * tokenAllocationOnTGERate / 1e18  (truncates down)\n  amountToBeVested          = amount - amountToDistributeOnClaim          (exact complement)\nSo for each investor the sum is preserved. However, in LegionPreLiquidApprovedSale.claimTokenAllocation() (lines 451-459), the computation is a double truncation:\n  totalAmount              = askTokenTotalSupply * cachedTokenAllocationRate / 1e18  (first truncation)\n  amountToDistributeOnClaim = totalAmount * tokenAllocationOnTGERate / 1e18           (second truncation)\n  amountToBeVested         = totalAmount - amountToDistributeOnClaim\nEach investor's totalAmount truncates off up to 1e18-1 units of the smallest token denomination. If there are N investors, up to N * (1e18-1) / 1e18 token units (i.e., up to N-1 tokens of 0 decimals, or N * ~1e-18 of an 18-decimal token) remain stranded in the contract because the supply was set to totalTokensAllocated which was computed off-chain as the exact sum of all per-investor totals, but on-chain the sum of truncated per-investor claims is less. Dust accumulates in the sale contract with no sweep mechanism.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 451,
+    "impact": "Residual token dust remains locked in the contract after all investors claim. Magnitude is up to (N_investors * 1) tokens at 0 decimal precision, or negligible for 18-decimal tokens. There is no emergencyWithdraw for the askToken in LegionPreLiquidApprovedSale, so dust is permanently locked. Risk increases with low-decimal ask tokens."
+  },
+  {
+    "severity": "Medium",
+    "title": "supplyTokens Fee Verification Uses Truncated Expected Values, Allowing Caller to Pass Truncated Fee to Bypass Rounding Up",
+    "description": "In LegionAbstractSale.supplyTokens() (lines 394-408), the expected fee amounts are:\n  expectedLegionFeeAmount   = (legionFeeOnTokensSoldBps * amount) / 10000\n  expectedReferrerFeeAmount = (referrerFeeOnTokensSoldBps * amount) / 10000\nBoth are truncated. The contract strictly requires legionFee == expectedLegionFeeAmount. This means:\n1. The project supplies `amount` tokens to the contract (for investor distribution), PLUS pays legionFee and referrerFee from their own wallet.\n2. The actual total tokens drawn from the project = amount + legionFee + referrerFee, where fees are both floor-rounded.\n3. There is no check that amount == totalTokensAllocated - legionFee - referrerFee. The supply amount is separately validated against totalTokensAllocated (the gross allocation).\nIf totalTokensAllocated was set as the NET investor allocation (gross minus fees), then the project must supply net + floored_fees. If totalTokensAllocated is the GROSS amount, the project supplies gross tokens (to contract) plus floor_fees additionally. The relationship between totalTokensAllocated and what investors can claim is not enforced on-chain, relying entirely on off-chain computation by Legion. A misconfiguration where totalTokensAllocated < sum(investor_allocations) cannot be caught at supply time.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 394,
+    "impact": "If Legion's off-chain totalTokensAllocated calculation is inconsistent with the Merkle tree of investor claim amounts, the last investors to claim may receive less than expected or the transaction reverts due to insufficient balance. The on-chain fee validation does not prevent this."
+  },
+  {
+    "severity": "High",
+    "title": "Double-Precision Loss in PreLiquidApprovedSale claimTokenAllocation: Cascaded Division Yields Up to 2 Wei Loss Per Investor",
+    "description": "In LegionPreLiquidApprovedSale.claimTokenAllocation() the token amount is computed in two sequential divisions with 1e18 as denominator:\n  Step 1: totalAmount = askTokenTotalSupply * cachedTokenAllocationRate / 1e18\n  Step 2: amountToDistributeOnClaim = totalAmount * tokenAllocationOnTGERate / 1e18\nBoth divisions independently truncate. The final amountToBeVested = totalAmount - amountToDistributeOnClaim preserves the complement of Step 2, but the Step 1 truncation is unrecoverable. For a token with large supply and allocation rate near 1e18 (close to 100%), the truncation at Step 1 can be up to (1e18 - 1) / 1e18, i.e., nearly 1 token unit. For low-decimal tokens (e.g. 6-decimal USDC equivalent tokens), this translates to up to 1e-6 USDC equivalent per investor. In contrast, LegionAbstractSale.claimTokenAllocation() (line 288-292) uses a single division on the Merkle-verified amount, avoiding the double truncation. The architectural difference between the two claim paths creates inconsistent precision semantics.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 451,
+    "impact": "Each investor loses up to 1 token unit (in base token denomination) due to the first truncation, plus up to 1 additional token unit at the second truncation. For low-decimal ask tokens, this represents meaningful value. The dust stays in the contract but there is no recovery mechanism. With 1000 investors and a 6-decimal token, up to 2000 units (0.002 tokens) may be stranded."
+  },
+  {
+    "severity": "Medium",
+    "title": "Position Merge: cachedTokenAllocationRate Summation Semantically Invalid, Producing Incorrect Token Claims",
+    "description": "In LegionPreLiquidApprovedSale._burnOrTransferInvestorPosition() (line 852) and LegionAbstractSale._burnOrTransferInvestorPosition() (line 692), when two positions are merged, the receiver's position is updated with:\n  positionToUpdate.investedCapital += positionToBurn.investedCapital\n  positionToUpdate.cachedTokenAllocationRate += positionToBurn.cachedTokenAllocationRate  [PreLiquidApprovedSale only]\nHowever, cachedTokenAllocationRate is a fractional rate (with denominator 1e18), not an additive quantity. If investor A has rate 0.5e18 (50%) and investor B has rate 0.3e18 (30%), the merged rate becomes 0.8e18 (80%), which then computes:\n  totalAmount = askTokenTotalSupply * 0.8e18 / 1e18 = 80% of total supply\nThis is mathematically incorrect. The correct merged allocation should be computed as the sum of the two individual allocations:\n  total = supply * 0.5e18/1e18 + supply * 0.3e18/1e18 = 80% of supply\nIn this specific additive case, the result happens to be numerically correct if the rates represent independent fractional shares of a fixed total. However, if the rates are not additive by design (e.g., if each rate is relative to its own invested amount, not to the total supply), then summation is wrong. Additionally, if the sum of two rates exceeds 1e18 (100%), the computation produces a totalAmount exceeding askTokenTotalSupply, potentially draining other investors' tokens. No cap is enforced on cachedTokenAllocationRate.",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 852,
+    "impact": "If two merged positions have rates summing to > 1e18, the merged investor can claim more than the total token supply allocated to them, effectively stealing from the contract. This is exploitable: an investor who controls two positions (via the Legion-authorized transfer mechanism) could engineer a rate sum > 1e18 and claim excess tokens from the contract."
+  },
+  {
+    "severity": "Low",
+    "title": "capitalRaised Set by Legion Admin Can Be Arbitrary Value Independent of Actual Invested Capital",
+    "description": "In LegionCapitalRaise.publishRaisedCapital() (line 396-412) and LegionPreLiquidApprovedSale.publishRaisedCapital(), the totalCapitalRaised is set to the admin-provided `capitalRaised` parameter without on-chain verification against totalCapitalInvested:\n  s_capitalRaiseStatus.totalCapitalRaised = capitalRaised;\nLegion (onlyLegion) can set this to any value. If set to a value greater than the contract's actual bid token balance, withdrawRaisedCapital() will revert. If set to a value less than the actual balance, the difference is permanently locked. The fee calculations (legionFee, referrerFee) operate on this admin-set value. This creates a trust dependency on Legion admin accuracy, with no on-chain invariant enforcing capitalRaised == totalCapitalInvested - totalCapitalRefunded.",
+    "file": "src/raise/LegionCapitalRaise.sol",
+    "line": 408,
+    "impact": "Incorrect capitalRaised value leads to incorrect fee distribution and potential fund lockup. Exploitable only by a malicious or compromised Legion admin. Given the trusted admin model, risk is limited to operational error or admin key compromise."
+  },
+  {
+    "severity": "Low",
+    "title": "Overflow Risk in cachedTokenAllocationRate and cachedInvestAmount Summation During Position Merge",
+    "description": "In LegionPreLiquidApprovedSale._burnOrTransferInvestorPosition() (lines 851-853):\n  positionToUpdate.investedCapital += positionToBurn.investedCapital\n  positionToUpdate.cachedTokenAllocationRate += positionToBurn.cachedTokenAllocationRate\n  positionToUpdate.cachedInvestAmount += positionToBurn.cachedInvestAmount\nSolidity 0.8.x has built-in overflow protection, so addition will revert if it overflows uint256. However, cachedTokenAllocationRate is semantically bounded to [0, 1e18], but there is no explicit cap check before or after addition. If the sum exceeds 1e18, the merged position will attempt to claim more than 100% of the token supply, and the transfer may revert if insufficient tokens exist. The revert protects against loss, but it also means the merge becomes permanently unusable for positions that would sum to > 1e18, denying legitimate position consolidation. For cachedInvestAmount (the max SAFT investment), summation of two large limits could exceed practical SAFT bounds and bypass the investedCapital == cachedInvestAmount check in _verifyValidPosition().",
+    "file": "src/sales/LegionPreLiquidApprovedSale.sol",
+    "line": 851,
+    "impact": "A merged position with cachedTokenAllocationRate sum > 1e18 allows overclaiming (if balance exists) or claim reverts (if not). A merged position with cachedInvestAmount > actual investable cap bypasses the SAFT cap verification. No explicit overflow guard beyond Solidity 0.8 built-in check."
+  },
+  {
+    "severity": "Low",
+    "title": "totalAmountClaimed in LegionTokenDistributor Not Bounded by totalAmountToDistribute On-Chain",
+    "description": "In LegionTokenDistributor.claimTokenAllocation() (line 164):\n  s_tokenDistributorConfig.totalAmountClaimed += claimAmount;\nThe claimAmount is verified by signature (_verifyValidPosition) but there is no on-chain check that the cumulative totalAmountClaimed does not exceed totalAmountToDistribute. The signature-based authorization is the only guard. If Legion's signer produces duplicate or inconsistent signatures, or if a bug exists in the signature verification logic, an investor could claim more than their allocation, potentially draining the contract. The contract relies entirely on Legion signer integrity rather than maintaining a balance invariant.",
+    "file": "src/distribution/LegionTokenDistributor.sol",
+    "line": 164,
+    "impact": "In a scenario of signer compromise or signature replay bug, totalAmountClaimed could exceed totalAmountToDistribute, draining all tokens from the distributor contract. hasSettled flag prevents double-claim per address, but does not prevent overpayment if claimAmount itself is inflated."
+  },
+  {
+    "severity": "Low",
+    "title": "LegionAbstractSale Position Merge Only Aggregates investedCapital, Ignores cachedTokenAllocationRate",
+    "description": "In LegionAbstractSale._burnOrTransferInvestorPosition() (lines 681-702), when positions are merged, only investedCapital is summed:\n  positionToUpdate.investedCapital += positionToBurn.investedCapital\nThe cachedTokenAllocationRate of the burned position is silently discarded. Since claimTokenAllocation() in LegionAbstractSale uses a Merkle proof with the explicit `amount` parameter (not derived from cachedTokenAllocationRate), this is technically harmless for the claim path. However, the merged investor now has an incorrect investedCapital balance relative to what they originally committed, since the rate-to-capital relationship is broken. This inconsistency may cause issues in future protocol extensions or off-chain analytics.",
+    "file": "src/sales/LegionAbstractSale.sol",
+    "line": 692,
+    "impact": "Functionally benign in current implementation since LegionAbstractSale claim does not use cachedTokenAllocationRate. However, creates an inconsistent state where investedCapital does not reflect the SAFT terms of either position. Low risk currently, but creates technical debt."
+  }
+]

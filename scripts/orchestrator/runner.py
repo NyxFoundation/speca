@@ -206,7 +206,7 @@ class LogAnomalyDetector:
         tool_call_count = 0
 
         try:
-            with open(log_path, errors="replace") as f:
+            with open(log_path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     text_to_scan, is_tool_use = _extract_scannable_text(line)
 
@@ -388,7 +388,7 @@ class ClaudeRunner:
         )
 
         # Build command
-        cmd = self._build_cmd(prompt_content)
+        cmd, stdin_prompt = self._build_cmd(prompt_content)
 
         # Build environment
         env = self._build_env(
@@ -408,14 +408,21 @@ class ClaudeRunner:
         watcher = LogWatcher(log_file, config=watcher_config)
         watcher_task = asyncio.create_task(watcher.watch())
 
-        # Execute
+        # Execute — prompt is piped via stdin to avoid Windows cmd-line limits
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=self.config.workdir or str(Path.cwd()),
         )
+        # Write prompt to stdin and close
+        if proc.stdin:
+            proc.stdin.write(stdin_prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
 
         # Collect stderr concurrently so it's available for error logging.
         # Reading stdout and stderr sequentially risks deadlock when the
@@ -717,7 +724,7 @@ class ClaudeRunner:
         # Show stderr from log if available
         try:
             if log_file.exists():
-                with open(log_file, errors="replace") as lf:
+                with open(log_file, encoding="utf-8", errors="replace") as lf:
                     for line in lf:
                         try:
                             obj = json.loads(line)
@@ -748,7 +755,7 @@ class ClaudeRunner:
 
         last_result: dict[str, Any] | None = None
         try:
-            with open(log_file, errors="replace") as f:
+            with open(log_file, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     try:
                         obj = json.loads(line)
@@ -800,7 +807,7 @@ class ClaudeRunner:
 
     def _build_prompt(self, **kwargs) -> str:
         """Build the prompt content with arguments."""
-        with open(self.config.prompt_path) as f:
+        with open(self.config.prompt_path, encoding="utf-8") as f:
             prompt_content = f.read()
 
         def _quote(v: Any) -> str:
@@ -861,7 +868,7 @@ class ClaudeRunner:
 
         base_mcp = Path(".mcp.json")
         if base_mcp.exists():
-            with open(base_mcp) as f:
+            with open(base_mcp, encoding="utf-8") as f:
                 base_config = json.load(f)
         else:
             base_config = {"mcpServers": {}}
@@ -893,18 +900,24 @@ class ClaudeRunner:
 
         return config_path
 
-    def _build_cmd(self, prompt_content: str) -> list[str]:
-        """Build the Claude CLI command."""
+    def _build_cmd(self, prompt_content: str) -> tuple[list[str], str]:
+        """Build the Claude CLI command and return (cmd, prompt_text).
+
+        The prompt is passed via stdin to avoid Windows command-line length
+        limits and argument parsing issues.
+        """
         # Ensure prompt doesn't start with '-' which Claude CLI would
         # misinterpret as an option flag (e.g. YAML frontmatter '---').
         if prompt_content.lstrip().startswith("-"):
             prompt_content = "\n" + prompt_content
+        import shutil
+        claude_bin = shutil.which("claude") or "claude"
         cmd = [
-            "claude",
+            claude_bin,
             "--dangerously-skip-permissions",
             "--verbose",
             "--output-format", "stream-json",
-            "-p", prompt_content,
+            "-p",
         ]
         if self.config.model:
             cmd.extend(["--model", self.config.model])
@@ -917,12 +930,12 @@ class ClaudeRunner:
         if self.config.mcp_servers is not None:
             mcp_config_path = self._get_phase_mcp_config()
             cmd.extend(["--strict-mcp-config", "--mcp-config", str(mcp_config_path)])
-        return cmd
+        return cmd, prompt_content
 
     def _save_json(self, path: Path, data: Any) -> None:
         """Save JSON data to file."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
     def _save_error_log(
@@ -956,7 +969,7 @@ class ClaudeRunner:
         except Exception:
             pass
 
-        with open(error_log_file, "w") as f:
+        with open(error_log_file, "w", encoding="utf-8") as f:
             f.write(f"exit_code={exit_code}\n")
             if stderr_text:
                 f.write("\n[stderr]\n")
@@ -1009,7 +1022,7 @@ class ClaudeRunner:
 
         result_text = ""
         try:
-            with open(log_file) as f:
+            with open(log_file, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     try:
                         msg = json.loads(line)
@@ -1041,7 +1054,7 @@ class ClaudeRunner:
         if not output_path.exists():
             return []
         try:
-            with open(output_path) as f:
+            with open(output_path, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             return []

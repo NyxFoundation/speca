@@ -544,7 +544,7 @@ def extract_token_usage_from_log(log_path: Path | str) -> dict[str, int]:
     msg_order: list[str] = []
 
     try:
-        with open(log_path, errors="replace") as f:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:

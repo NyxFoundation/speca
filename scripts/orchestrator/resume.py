@@ -53,7 +53,7 @@ class ResumeManager:
 
         for filepath in sorted(glob.glob(pattern)):
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     data = json.load(f)
             except (json.JSONDecodeError, OSError) as exc:
                 print(
