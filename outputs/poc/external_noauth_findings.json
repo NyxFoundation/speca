@@ -1,0 +1,259 @@
+{
+  "title": "認証不要・外部から即時悪用可能な脆弱性一覧",
+  "audit_date": "2026-04-09",
+  "scope": "完全外部（認証情報不要）",
+  "findings": [
+    {
+      "id": "EXT-001",
+      "severity": "High",
+      "title": "WebClass Session Flooding DoS（レート制限なし）",
+      "cwe": "CWE-400",
+      "status": "PoC実証済み",
+      "description": "WebClassログインページへのGETリクエスト毎にサーバーサイドでセッションが生成される。レート制限・IP制限なし。",
+      "evidence": {
+        "target": "https://aichi-te-ad.webclass.jp/webclass/login.php",
+        "method": "GET (認証不要)",
+        "sessions_generated": 200,
+        "duration_seconds": 8.71,
+        "rate_per_second": 23.0,
+        "all_unique": true,
+        "rate_limiting": "NONE DETECTED"
+      },
+      "impact": "サーバーサイドのセッションストア枯渇。正規ユーザーのログイン不能。AWS CloudFront経由だがオリジンサーバーに到達する。",
+      "exploitability": "curl 1行で実行可能。botnet不要。単一IPから秒間23セッション生成確認済み。"
+    },
+    {
+      "id": "EXT-002",
+      "severity": "High",
+      "title": "WebClass 公開APIによる管理者情報漏洩",
+      "cwe": "CWE-200",
+      "status": "実証済み",
+      "description": "認証不要のAPIエンドポイントが管理者ユーザー名、内部ID、権限レベル、実名を返却。",
+      "evidence": {
+        "endpoint": "https://aichi-te-ad.webclass.jp/webclass/information.php/public/api/listForGuest",
+        "method": "GET (認証不要)",
+        "leaked_data": {
+          "admin_users": [
+            {"username": "senkoad", "realname": "システム管理者（学校様用）", "perms": "admin", "id_hash": "c5fed0868a51c90c006677a300d40fe2"},
+            {"username": "admin_kanri", "realname": "admin_kanri", "perms": "admin", "id_hash": "55f620a83c4701a0f16a62aaefac3b50"}
+          ],
+          "publisher_id": "1 (デフォルト管理者)",
+          "total_posts": 3
+        }
+      },
+      "impact": "ブルートフォース攻撃の対象ユーザー名が特定される。内部システム構造の把握。",
+      "exploitability": "curl 1行。レスポンスにadminユーザー名・権限・IDが含まれる。"
+    },
+    {
+      "id": "EXT-003",
+      "severity": "High",
+      "title": "メールスプーフィング（DMARC/SPF不備）",
+      "cwe": "CWE-290",
+      "status": "DNS分析で確認済み",
+      "description": "aichi-te.aichi-c.ed.jp にDMARCレコードなし + SPF ~all。aichi-te-ad.jp にDMARC p=none + SPF ~all。学校ドメインを騙ったフィッシングメールが配信可能。",
+      "evidence": {
+        "aichi-te.aichi-c.ed.jp": {
+          "spf": "v=spf1 +ip4:210.162.58.204 ~all",
+          "spf_verdict": "SOFT FAIL (拒否しない)",
+          "dmarc": "レコードなし",
+          "dmarc_verdict": "無防備"
+        },
+        "aichi-te-ad.jp": {
+          "spf": "v=spf1 a include:_spf.bizmw.com include:_spf.google.com ~all",
+          "spf_verdict": "SOFT FAIL (拒否しない)",
+          "dmarc": "v=DMARC1; p=none",
+          "dmarc_verdict": "監視のみ (rua未設定=監視すらしていない)"
+        }
+      },
+      "impact": "教職員・保護者・生徒へのフィッシング。EXT-002で判明した実在のadminユーザー名を騙ることで信頼度向上。",
+      "exploitability": "SMTPサーバーからFrom:ヘッダを偽装するだけ。ツール不要。"
+    },
+    {
+      "id": "EXT-004",
+      "severity": "Medium",
+      "title": "SSLStripping（HSTS未設定 + HTTP自己リンク）",
+      "cwe": "CWE-319",
+      "status": "確認済み",
+      "description": "メインサイトにHSTSヘッダなし。HTML内にhttp://自サイトへのリンクが存在。中間者攻撃でHTTPSをHTTPにダウングレード可能。",
+      "evidence": {
+        "sites_without_hsts": [
+          "aichi-te.aichi-c.ed.jp",
+          "aichi-te-jh.aichi-c.ed.jp"
+        ],
+        "http_self_links": [
+          "http://www.aichi-te.aichi-c.ed.jp/",
+          "http://www.aichi-te-ad.jp"
+        ],
+        "tls_version": "TLSv1.2 only",
+        "alpn": "not negotiated"
+      },
+      "impact": "校内Wi-Fi等の共有ネットワーク上で通信傍受。HTTP経由でアクセスした場合の平文通信。",
+      "exploitability": "arpspoof + sslstrip で成立。校内ネットワークに接続した生徒等が攻撃者になりうる。"
+    },
+    {
+      "id": "EXT-005",
+      "severity": "Medium",
+      "title": "WebClass セッションCookie属性欠落",
+      "cwe": "CWE-614",
+      "status": "実証済み",
+      "description": "WBT_Session CookieにSecure/HttpOnly/SameSite属性なし。XSS不要でもSSLStripping時にCookie漏洩。",
+      "evidence": {
+        "cookie_header": "Set-Cookie: WBT_Session=...; path=/",
+        "missing_flags": ["Secure", "HttpOnly", "SameSite"],
+        "path_scope": "/ (広すぎる。/webclass/に限定すべき)"
+      },
+      "impact": "EXT-004 (SSLStripping) 成立時にセッションCookieが平文で送信される。ネットワーク傍受でセッションハイジャック。",
+      "exploitability": "EXT-004と組み合わせて認証不要で成立。"
+    },
+    {
+      "id": "EXT-006",
+      "severity": "Medium",
+      "title": "WebClass ブルートフォース無制限（ユーザー名既知）",
+      "cwe": "CWE-307",
+      "status": "確認済み",
+      "description": "ログインフォームにCAPTCHA/レート制限/ロックアウトなし。EXT-002で管理者ユーザー名が判明しているため、パスワード推測攻撃が可能。",
+      "evidence": {
+        "endpoint": "POST /webclass/login.php",
+        "known_usernames": ["senkoad", "admin_kanri"],
+        "csrf_token": "なし",
+        "rate_limit": "なし",
+        "captcha": "なし",
+        "lockout": "なし"
+      },
+      "impact": "管理者アカウント乗っ取り。教育機関では弱いパスワード（学校名+年度等）が多い。",
+      "exploitability": "hydra/wfuzz等の標準ツールで即実行可能。"
+    },
+    {
+      "id": "EXT-007",
+      "severity": "High",
+      "title": "メールサービス平文認証の公開（IMAP/POP3 AUTH=PLAIN pre-TLS）",
+      "cwe": "CWE-319",
+      "status": "実証済み",
+      "description": "aichi-te-ad.jp のIMAP(143)/POP3(110)サーバーがSTARTTLS前にAUTH=PLAINおよびLOGINコマンドを提供。ネットワーク傍受で教職員のメール認証情報が平文で取得可能。",
+      "evidence": {
+        "imap_banner": "* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+ STARTTLS AUTH=PLAIN AUTH=LOGIN] Dovecot ready.",
+        "pop3_banner": "+OK Dovecot ready.",
+        "pop3_sasl": "SASL PLAIN LOGIN",
+        "smtp_banner": "220 aichi-te-ad.jp ESMTP Postfix",
+        "smtp_auth": "AUTH PLAIN LOGIN (pre-TLS and post-TLS)",
+        "services_exposed": ["IMAP:143", "POP3:110", "SMTP:587", "FTP:21"],
+        "ip": "210.154.252.239",
+        "tls": "STARTTLS対応だがクライアントが使用しない場合は平文通信が成立"
+      },
+      "impact": "教職員のメールパスワード傍受。傍受した認証情報でメール閲覧・送信が可能。EXT-002の管理者ユーザー名と組み合わせて標的型攻撃。",
+      "exploitability": "同一ネットワーク上でtcpdump/Wiresharkによるパケットキャプチャ。メールクライアントがSTARTTLSを使用しない設定の場合は完全に平文。"
+    },
+    {
+      "id": "EXT-008",
+      "severity": "Medium",
+      "title": "FTPサーバー公開 + バージョン情報露出（vsFTPd 3.0.3）",
+      "cwe": "CWE-200",
+      "status": "実証済み",
+      "description": "aichi-te-ad.jp でvsFTPd 3.0.3 (2015年リリース)がインターネットに公開。バージョンバナーがそのまま返却される。11年間更新されていない可能性。",
+      "evidence": {
+        "ftp_banner": "220 (vsFTPd 3.0.3)",
+        "anonymous_login": "拒否 (530 Login incorrect)",
+        "host": "ftp.aichi-te-ad.jp:21",
+        "cve_related": "CVE-2021-3618 (ALPACA attack)",
+        "version_age": "2015年リリース (11年前)"
+      },
+      "impact": "ブルートフォースによるFTPアカウント乗っ取り。FTPプロトコルは認証情報を平文で送信。サーバー上のファイルへのアクセス。",
+      "exploitability": "hydra/medusa等でFTPブルートフォース。認証情報はEXT-002で判明したユーザー名を使用可能。"
+    },
+    {
+      "id": "EXT-009",
+      "severity": "Medium",
+      "title": "WebClass公開APIによる教育運用データ漏洩",
+      "cwe": "CWE-200",
+      "status": "実証済み",
+      "description": "listForGuest APIが管理者情報に加え、詳細な時間割変更・教室情報・コース名・科目名を認証なしで返却。教育機関の運用情報が外部に公開。",
+      "evidence": {
+        "endpoint": "https://aichi-te-ad.webclass.jp/webclass/information.php/public/api/listForGuest?limit=100",
+        "leaked_fields": ["substance (HTML本文)", "publisher_course_name", "publish_to_faculty", "publish_to_department", "format"],
+        "operational_data_example": "コース名: 自動車工学I, ロボット工学, 生産管理技術II / 教室変更 / オンデマンド授業への切替",
+        "total_records": 3,
+        "format": "legacy-html (HTMLがそのまま格納)"
+      },
+      "impact": "学校の運用スケジュール・カリキュラム構造の把握。ソーシャルエンジニアリングの材料。不審者による授業時間の特定。",
+      "exploitability": "curl 1行。レスポンスにHTML本文が含まれる。"
+    },
+    {
+      "id": "EXT-010",
+      "severity": "Low",
+      "title": "WebClass公開投稿のIDOR（連番ID列挙）",
+      "cwe": "CWE-639",
+      "status": "確認済み",
+      "description": "公開投稿エンドポイントで連番IDを指定することで全公開投稿にアクセス可能（post/1, post/2, post/22が有効）。",
+      "evidence": {
+        "accessible_ids": [1, 2, 22],
+        "endpoint_pattern": "/webclass/information.php/public/post/{id}/",
+        "response_sizes": {"1": "5966B", "2": "6971B", "22": "5976B"}
+      },
+      "impact": "全公開投稿の一括取得。将来追加される投稿のモニタリング。",
+      "exploitability": "IDを1からインクリメントしてGETリクエスト。"
+    },
+    {
+      "id": "EXT-011",
+      "severity": "Medium",
+      "title": "a-blog cms 管理者ログイン公開 + パスワードリセットによるユーザー列挙",
+      "cwe": "CWE-204",
+      "status": "実証済み",
+      "description": "専攻科サイト(www.aichi-te-ad.jp)のa-blog cms管理者ログインページが/login/で公開。CAPTCHAなし。パスワードリセット(/admin-reset-password/)にmail:validator#existフィールドがあり、メールアドレスの存在確認（ユーザー列挙）が可能。",
+      "evidence": {
+        "login_url": "https://www.aichi-te-ad.jp/login/",
+        "reset_url": "https://www.aichi-te-ad.jp/admin-reset-password/",
+        "captcha": "なし",
+        "csrf_tokens": ["formUniqueToken", "formToken"],
+        "user_enum_field": "mail:validator#exist",
+        "cms_version": "a-blog cms (standard edition)",
+        "last_update": "2025-03-24 (CSS/JSタイムスタンプ)",
+        "exposed_config": {
+          "google_api_key": "AIzaSyBXZ2JeAKKaua-vtHwhV-TpozuwjenIpRE",
+          "jquery_version": "3.6.1",
+          "max_upload_size": "200M",
+          "media_library": "on"
+        }
+      },
+      "impact": "管理者メールアドレスの列挙。ブルートフォース（CAPTCHAなし）。パスワードリセットの悪用。Google API keyの流用。",
+      "exploitability": "ブラウザからアクセスするだけ。パスワードリセットフォームにメールアドレスを入力してexistバリデーションの応答差分を観察。"
+    },
+    {
+      "id": "EXT-012",
+      "severity": "Medium",
+      "title": "Scrapbox API 全コンテンツ・ユーザーアカウント認証不要取得",
+      "cwe": "CWE-200",
+      "status": "実証済み",
+      "description": "学校のScrapboxプロジェクト(tande: 269ページ, askbu: 28ページ)のAPIが認証なしで全ページ内容・ユーザーアカウント情報を返却。部活動情報（生徒関連データ含む可能性）が外部公開。",
+      "evidence": {
+        "tande_api": "https://scrapbox.io/api/pages/tande",
+        "askbu_api": "https://scrapbox.io/api/pages/askbu",
+        "tande_pages": 269,
+        "askbu_pages": 28,
+        "users_exposed": [
+          {"name": "T&E進路", "id": "69c5fe54ce6b86fe81171606"}
+        ],
+        "askbu_content": "バレーボール部, 剣道部, クイズ研究部, バスケットボール部 等",
+        "project_settings": {"publicVisible": true, "plan": null}
+      },
+      "impact": "学校の内部情報（企業連携先269件、部活動情報28件）が外部公開。ユーザーアカウント名・IDが取得可能。ソーシャルエンジニアリングの材料。",
+      "exploitability": "curl 1行。/api/pages/{project}?limit=1000 で全データ取得。"
+    },
+    {
+      "id": "EXT-013",
+      "severity": "Medium",
+      "title": "AWSELB Cookie によるオリジンサーバーIP漏洩（CDNバイパス）",
+      "cwe": "CWE-200",
+      "status": "実証済み",
+      "description": "WebClass (aichi-te-ad.webclass.jp) のAWSELB cookieをデコードするとオリジンサーバーのIP (115.109.163.71) が判明。CloudFrontをバイパスして直接オリジンにアクセス可能。",
+      "evidence": {
+        "cookie": "AWSELB=736DA3471A3C843F...",
+        "decoded_ip": "115.109.163.71",
+        "decode_method": "hex decode → offset 0 の4バイト",
+        "cdn": "CloudFront",
+        "impact_detail": "CloudFrontのDDoS防御・WAFルール・レート制限を全てバイパス"
+      },
+      "impact": "オリジンサーバーへの直接攻撃が可能。CloudFrontのセキュリティ機能（DDoS防御、WAF、レート制限）を完全にバイパス。EXT-001 (Session Flooding) をCDNバイパスで増幅可能。",
+      "exploitability": "AWSELB cookieのhexデコードでIPを取得。直接そのIPにHTTPリクエスト送信。"
+    }
+  ]
+}
