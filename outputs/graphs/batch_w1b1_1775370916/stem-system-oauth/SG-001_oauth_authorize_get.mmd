@@ -1,0 +1,54 @@
+---
+title: "GET /oauth/authorize (stem-system OAuth)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_parse: parse searchParams from request.url
+    q_parse --> q_validate_required: extract clientId, redirectUri, state, codeChallenge, codeChallengeMethod, responseType, scope
+    q_validate_required --> q_err_missing: !clientId || !redirectUri || !codeChallenge || !state
+    q_err_missing --> [*]: return 400 invalid_request "Missing required parameters"
+    q_validate_required --> q_validate_response_type: all required params present
+    q_validate_response_type --> q_err_response_type: responseType != "code"
+    q_err_response_type --> [*]: return 400 unsupported_response_type
+    q_validate_response_type --> q_validate_pkce: responseType == "code"
+    q_validate_pkce --> q_err_pkce: codeChallengeMethod != "S256"
+    q_err_pkce --> [*]: return 400 invalid_request "Only S256 supported"
+    q_validate_pkce --> q_auth_check: codeChallengeMethod == "S256"
+    q_auth_check --> q_get_user: supabase = createClient()
+    q_get_user --> q_check_logged_in: getUser()
+    q_check_logged_in --> q_redirect_login: authError || !user
+    q_redirect_login --> [*]: set oauth_redirect cookie, redirect 307 to /login
+    q_check_logged_in --> q_validate_client: user authenticated
+    q_validate_client --> q_rpc_client: rpc get_application_by_client_id(clientId)
+    q_rpc_client --> q_err_client: appError || !application
+    q_err_client --> [*]: return 400 invalid_client "Unknown client_id"
+    q_rpc_client --> q_validate_redirect: application found
+    q_validate_redirect --> q_err_redirect: !isValidRedirectUri(redirectUri, application.redirect_uris)
+    q_err_redirect --> [*]: return 400 invalid_request "Invalid redirect_uri"
+    q_validate_redirect --> q_check_consent: redirectUri valid
+    q_check_consent --> q_rpc_consent: rpc check_user_consent(user.id, application.id)
+    q_rpc_consent --> q_build_consent_url: build consent URL with all params
+    q_build_consent_url --> q_set_already_consented: existingConsent == true
+    q_build_consent_url --> q_redirect_consent: existingConsent == false
+    q_set_already_consented --> q_redirect_consent: set already_consented=true
+    q_redirect_consent --> [*]: redirect 307 to /oauth/authorize/consent
+
+    note right of q_validate_required
+        INV-001: All of clientId, redirectUri, codeChallenge, state must be non-null before proceeding
+    end note
+
+    note right of q_validate_pkce
+        INV-002: PKCE code_challenge_method must be S256 (plain not accepted)
+    end note
+
+    note right of q_redirect_login
+        INV-003: oauth_redirect cookie is httpOnly, secure when HTTPS, sameSite=lax, maxAge=600s
+    end note
+
+    note right of q_validate_redirect
+        INV-004: redirectUri must match one of the registered redirect_uris for the application
+    end note
+
+    note right of q_redirect_consent
+        INV-005: All original OAuth params are forwarded to consent page via query string
+    end note

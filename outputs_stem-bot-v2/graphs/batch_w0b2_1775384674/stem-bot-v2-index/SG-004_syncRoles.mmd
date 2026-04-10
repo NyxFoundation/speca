@@ -1,0 +1,58 @@
+---
+title: "syncRoles (stem-bot-v2: src/api/rolesSync.ts)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_validate: discord_uid = req.body.discord_uid
+    q_validate --> q_err_input: !discord_uid
+    q_validate --> q_fetch_member: getMember(discord_uid)
+    q_err_input --> [*]: res.status(400)
+    q_fetch_member --> q_err_member: member is null
+    q_fetch_member --> q_fetch_db: supabase.from(members).eq(discord_uid)
+    q_err_member --> [*]: res.status(404)
+    q_fetch_db --> q_err_db: memberError or !memberData
+    q_fetch_db --> q_sync_gen: memberData loaded
+    q_err_db --> [*]: res.status(404)
+
+    q_sync_gen --> q_add_gen: generationRole exists and member lacks it
+    q_sync_gen --> q_remove_other_gen: generationRole exists and member has it
+    q_sync_gen --> q_sync_teams: no generationRole found
+    q_add_gen --> q_remove_other_gen: addRoleToMember(generationRole)
+    q_remove_other_gen --> q_sync_teams: remove other generation roles (loop)
+
+    q_sync_teams --> q_add_team_roles: fetch member_team_relations, teams
+    q_add_team_roles --> q_remove_team_roles: add missing team roles (loop)
+    q_remove_team_roles --> q_sync_leader: remove non-member team roles (loop)
+
+    q_sync_leader --> q_add_leader: isLeader in DB
+    q_sync_leader --> q_remove_leader: not leader in DB
+    q_sync_leader --> q_sync_status: no DISCORD_LEADER_ROLE_ID set
+    q_add_leader --> q_sync_status: addRoleToMember(leaderRoleId)
+    q_remove_leader --> q_sync_status: removeRoleFromMember(leaderRoleId)
+
+    q_sync_status --> q_set_status_role: determine target status role by memberData.status
+    q_set_status_role --> q_sync_member_role: add target, remove others
+
+    q_sync_member_role --> q_add_member_role: status 0 or 1
+    q_sync_member_role --> q_remove_member_role: status 2 (OB)
+    q_add_member_role --> q_sync_verified: addRoleToMember(memberRoleId)
+    q_remove_member_role --> q_sync_verified: removeRoleFromMember(memberRoleId)
+    q_sync_member_role --> q_sync_verified: no DISCORD_MEMBER_ROLE_ID
+
+    q_sync_verified --> q_respond: add verified role if missing
+    q_respond --> [*]: res.json(success, roles_assigned, roles_removed)
+
+    note right of q_validate
+        INV-001: discord_uid from request body is trusted without sanitization
+        INV-002: Any authenticated caller can sync roles for any discord_uid (no ownership check)
+    end note
+
+    note right of q_sync_gen
+        INV-003: Role sync is not atomic - partial failures leave inconsistent state
+        INV-004: Sequential role operations are not rate-limited against Discord API
+    end note
+
+    note right of q_sync_verified
+        INV-005: Verified role is granted to any DB-registered member unconditionally
+        INV-006: deleted_at is not checked - deleted members can still sync roles
+    end note

@@ -1,0 +1,47 @@
+---
+title: "completeRegistration (kintai-v3: QR Code Registration Completion)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_validate_token: token = formData.get('token')
+    q_validate_token --> q_missing_token: token is null
+    q_missing_token --> [*]: redirect to /register/{token}?error=Missing token
+    q_validate_token --> q_get_user: token present
+    q_get_user --> q_auth_check: supabase.auth.getUser()
+    q_auth_check --> q_not_auth: user null OR no provider_id
+    q_not_auth --> [*]: redirect ?error=Not authenticated
+    q_auth_check --> q_check_member: user authenticated with Discord
+    q_check_member --> q_member_lookup: SELECT FROM member.members WHERE id = user.id
+    q_member_lookup --> q_member_error: query error (not PGRST116)
+    q_member_error --> [*]: redirect ?error=profile fetch error
+    q_member_lookup --> q_no_member: member not found
+    q_no_member --> [*]: redirect ?error=profile not in central DB
+    q_member_lookup --> q_get_temp_reg: member exists
+    q_get_temp_reg --> q_validate_temp: SELECT FROM temp_registrations WHERE qr_token = token
+    q_validate_temp --> q_invalid_session: not found
+    q_invalid_session --> [*]: redirect ?error=Invalid session
+    q_validate_temp --> q_check_used: temp_reg found
+    q_check_used --> q_already_used: is_used = true
+    q_already_used --> [*]: redirect ?error=Session already used
+    q_check_used --> q_check_expiry: is_used = false
+    q_check_expiry --> q_expired: expires_at < now()
+    q_expired --> [*]: redirect ?error=Session expired
+    q_check_expiry --> q_upsert_card: not expired
+    q_upsert_card --> q_link_card: UPSERT attendance.users(user_id, card_id) ON CONFLICT supabase_auth_user_id
+    q_link_card --> q_link_error: upsert error
+    q_link_error --> [*]: redirect ?error=Failed to link card
+    q_link_card --> q_mark_used: upsert success
+    q_mark_used --> q_success: UPDATE temp_registrations SET is_used=true
+    q_success --> [*]: redirect ?success=true&newCardId={cardId}
+
+    note right of q_upsert_card
+        INV-001: UPSERT on supabase_auth_user_id replaces existing card for same user
+        INV-002: Uses adminSupabase client to bypass RLS for cross-schema writes
+        INV-003: temp_registration is marked used AFTER card link succeeds
+    end note
+
+    note right of q_check_expiry
+        INV-004: Token validity requires is_used=false AND expires_at >= now()
+        INV-005: User must have existing member.members profile (pre-registered by admin)
+        INV-006: Discord provider_id required for authentication verification
+    end note

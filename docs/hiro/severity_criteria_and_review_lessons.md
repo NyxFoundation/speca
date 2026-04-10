@@ -207,6 +207,19 @@ trusted role でも **trust hierarchy の逸脱** が明確なら High になり
 - [ ] **前提条件は2つ以上の稀な条件の同時成立を要求していないか？**
 - [ ] **Admin操作が前提なら、それは通常運用で起こりうるか？**
 
+### C/C++ OSS Human Review チェック（RQ2a 教訓）
+
+- [ ] **コード存在確認**: 指摘されたファイル・関数・行番号が実在するか grep/find で確認。不在なら即 FP
+- [ ] **最新ブランチ確認**: バグが最新で修正済みかチェック。修正済みなら PR 不要
+- [ ] **フレームワーク保証**: ライブラリ/フレームワーク固有の安全機構（ImageMagick CoderBlobSupportFlag 等）を確認
+- [ ] **関数セマンティクス追跡**: return/goto/longjmp の制御フローを正確に追跡。特にエラーパスの cleanup 順序
+- [ ] **メンテナ確認**: ドメイン知識が必要な判定はメンテナに確認。メンテナ reject = FP 確定
+- [ ] **他モデル相互参照**: 同じバグが Opus/Sonnet 4/DeepSeek R1 で検出されているか確認。複数モデルで TP なら信頼度高
+- [ ] **GT 依存判定の排除**: Ground Truth にないことは FP の理由にならない。コードの実態で判定
+- [ ] **スコープ確認**: vendored ヘッダー、テストコード、deprecated wrapper は FP
+- [ ] **重複排除**: 同一根本原因の finding が複数あれば統合（N5-npd-014 と npd-015 等）
+- [ ] **上流 PR 投稿前の最新確認**: フォークして最新コードで脆弱性が残存するか確認してから PR
+
 ### PoC チェック
 
 - [ ] **攻撃成功時にテストが PASS する**（revert 期待ではなく残高増加等を assert）
@@ -239,6 +252,11 @@ trusted role でも **trust hierarchy の逸脱** が明確なら High になり
 | **non-exploitable gap の報告** | M-05「2パスの非対称性」 | 経済的合理性を確認。得をする人がいないなら QA |
 | **defense-in-depth を Medium に** | M-07「future timestamp accepted」 | trusted path なら Low |
 | **mock PoC で証明不能なことを assertion** | M-15 旧PoC「console2.log で 5x loss」 | mock で再現できないなら code walkthrough に切り替え |
+| **「GT外 = FP」バイアス** | DeepSeek R1 が GT にないバグを一律 FP 判定 | GT は参考値。コードを読んでバグの実在を確認すること |
+| **Cross-project data contamination** | DeepSeek R1 が全プロジェクトに AuctionBidder.sol を混入 | 対象リポジトリに存在しないファイルへの言及は即 FP |
+| **フレームワーク保証の見落とし** | N2-npd-010: ImageMagick CoderBlobSupportFlag 無視 | フレームワーク固有の安全機構を確認してから判定 |
+| **C関数セマンティクス誤読** | M2b-mlk-008: do_cache_free() return 後の制御フロー誤解 | 関数の return が呼び出し元に戻ることを追跡 |
+| **ドメイン知識不足による投機的判定** | M2b-mlk-003: memcached refcount 不変条件の無視 | メンテナの確認が得られるまでは判定を保留 |
 
 ### AI Bulk Audit の現実的な歩留まり
 
@@ -333,3 +351,7 @@ Chainlink V2 での実績:
 13. **前提条件が2つ以上の稀な条件の同時成立を要求していないか確認**
 14. **Admin操作が前提なら通常運用で起こりうるかフィルタ**
 15. **HIGH 探索は過去 CSV パターンマッチが最も効率的**
+16. **C/C++ OSS レビュー時は最新ブランチでバグ残存を必ず確認してから PR 投稿**
+17. **他モデルの human review 結果と相互参照して判定の信頼度を向上させる**
+18. **GT 外の新発見は「GT にない = FP」ではなく、コードの実態で判定する**
+19. **メンテナからのレビューFBには迅速に対応（NULL→nullptr 等のスタイル修正含む）**

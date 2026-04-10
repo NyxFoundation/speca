@@ -1,0 +1,38 @@
+---
+title: "forceLogoutAll (kintai-v3: Batch Force Logout)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_time_check: GET /api/admin/force-logout-all
+    q_time_check --> q_forbidden: NOT (JST 22:50-23:50)
+    q_forbidden --> [*]: return 403 Forbidden
+    q_time_check --> q_get_today: within allowed time window
+    q_get_today --> q_fetch_attendances: todayDate = formatInTimeZone(now, 'Asia/Tokyo', 'yyyy-MM-dd')
+    q_fetch_attendances --> q_query: SELECT user_id, card_id, type, timestamp FROM attendances WHERE date=today ORDER BY timestamp DESC
+    q_query --> q_db_error: query error
+    q_db_error --> [*]: return {success=false, message='DB error'}
+    q_query --> q_find_active: build latest-per-user map
+    q_find_active --> q_filter_in: filter users where latest type = 'in'
+    q_filter_in --> q_none_active: no users with type='in'
+    q_none_active --> q_log_empty: INSERT daily_logout_logs(affected_count=0, status='success')
+    q_log_empty --> [*]: return {success=true, count=0}
+    q_filter_in --> q_batch_insert: users to log out found
+    q_batch_insert --> q_insert_out: INSERT attendances records with type='out' for all active users
+    q_insert_out --> q_insert_error: insert error
+    q_insert_error --> q_log_error: INSERT daily_logout_logs(affected_count=0, status='error')
+    q_log_error --> [*]: return {success=false}
+    q_insert_out --> q_log_success: insert success
+    q_log_success --> q_revalidate: INSERT daily_logout_logs(affected_count=N, status='success')
+    q_revalidate --> [*]: revalidatePath, return {success=true, count=N}
+
+    note right of q_time_check
+        INV-001: API only accessible between JST 22:50 and 23:50
+        INV-002: No authentication required (simple GET endpoint)
+        INV-003: Designed for cron/curl invocation
+    end note
+
+    note right of q_find_active
+        INV-004: Only the latest attendance record per user determines active status
+        INV-005: Batch insert creates one 'out' record per active user with same timestamp
+        INV-006: All operations logged to daily_logout_logs regardless of outcome
+    end note

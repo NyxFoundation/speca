@@ -1,0 +1,38 @@
+---
+title: "record_attendance_by_card (0001_create_attendance_schema)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_init: v_now = now(), v_date = (v_now AT TIME ZONE 'Asia/Tokyo')::date
+    q_init --> q_lookup_card: SELECT supabase_auth_user_id FROM attendance.users WHERE card_id = p_card_id
+    q_lookup_card --> q_check_user: v_user_id found?
+    q_check_user --> q_not_found: v_user_id IS NULL
+    q_not_found --> [*]: return json(success=false, message='unregistered card')
+    q_check_user --> q_get_member: v_user_id IS NOT NULL
+    q_get_member --> q_select_member: SELECT display_name, discord_uid FROM member.members WHERE supabase_auth_user_id = v_user_id
+    q_select_member --> q_check_display: v_display_name IS NULL?
+    q_check_display --> q_fallback_name: display_name IS NULL
+    q_fallback_name --> q_auth_lookup: SELECT global_name FROM auth.users WHERE id = v_user_id
+    q_auth_lookup --> q_get_last_type: fallback display_name resolved
+    q_check_display --> q_get_last_type: display_name IS NOT NULL
+    q_get_last_type --> q_select_last: SELECT type FROM attendance.attendances WHERE user_id = v_user_id ORDER BY timestamp DESC LIMIT 1
+    q_select_last --> q_determine_type: v_new_type = CASE WHEN v_last_type = 'in' THEN 'out' ELSE 'in' END
+    q_determine_type --> q_insert: INSERT INTO attendance.attendances (user_id, card_id, type, timestamp, date)
+    q_insert --> [*]: return json(success=true, type=v_new_type, user info)
+
+    note right of q_lookup_card
+        INV-001: Function is SECURITY DEFINER (runs with owner privileges, bypassing RLS)
+        INV-002: search_path is set to attendance, member (prevents search_path injection)
+    end note
+
+    note right of q_determine_type
+        INV-003: Toggle logic assumes last record determines next type (in->out, out/null->in)
+        INV-004: No date boundary check; last attendance could be from a previous day
+        INV-005: No rate limiting; same card can be swiped repeatedly without cooldown
+    end note
+
+    note right of q_insert
+        INV-006: card_id in attendances is denormalized (stored alongside user_id FK)
+        INV-007: EXCEPTION WHEN OTHERS catches all errors and returns JSON (never raises to caller)
+        INV-008: Callable by anon role (GRANT EXECUTE given in security fix migration)
+    end note

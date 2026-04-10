@@ -1,0 +1,54 @@
+---
+title: "oauth_token_exchange (stem-system: Clubhouse Manager)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_parse_body: extract grant_type, code, redirect_uri, client_id, client_secret, code_verifier
+    q_parse_body --> q_check_grant: params parsed
+    q_check_grant --> q_error_grant: grant_type != authorization_code
+    q_check_grant --> q_check_required: grant_type == authorization_code
+    q_error_grant --> [*]: return 400 unsupported_grant_type
+    q_check_required --> q_error_missing: missing required params
+    q_check_required --> q_verify_client: all required present
+    q_error_missing --> [*]: return 400 invalid_request
+    q_verify_client --> q_lookup_app: lookup application by client_id (admin client, bypass RLS)
+    q_lookup_app --> q_error_client: client not found
+    q_lookup_app --> q_compare_secret: client found
+    q_error_client --> [*]: return 401 invalid_client
+    q_compare_secret --> q_error_secret: bcrypt.compare(client_secret, hashed) fails
+    q_compare_secret --> q_lookup_code: secret matches
+    q_error_secret --> [*]: return 401 invalid_client
+    q_lookup_code --> q_fetch_code: lookup authorization_code in DB (admin client)
+    q_fetch_code --> q_error_code: code not found
+    q_fetch_code --> q_validate_code: code found
+    q_error_code --> [*]: return 400 invalid_grant
+    q_validate_code --> q_error_expired: code expired (created_at + 10min < now)
+    q_validate_code --> q_check_client_match: code not expired
+    q_error_expired --> [*]: return 400 invalid_grant (expired)
+    q_check_client_match --> q_error_mismatch: code.client_id != client_id or code.redirect_uri != redirect_uri
+    q_check_client_match --> q_verify_pkce: client and redirect match
+    q_error_mismatch --> [*]: return 400 invalid_grant
+    q_verify_pkce --> q_error_pkce: SHA256(code_verifier) != code_challenge
+    q_verify_pkce --> q_fetch_user: PKCE verified
+    q_error_pkce --> [*]: return 400 invalid_grant (PKCE failed)
+    q_fetch_user --> q_lookup_member: get user profile from Supabase auth + member table
+    q_lookup_member --> q_generate_jwt: member found
+    q_generate_jwt --> q_delete_code: sign JWT with HS256 (sub, display_name, discord_id, generation, status, scope)
+    q_delete_code --> q_respond: delete used authorization_code from DB
+    q_respond --> [*]: return access_token, token_type=bearer, expires_in
+
+    note right of q_verify_pkce
+        INV-001: PKCE verification uses S256 method only (SHA-256 hash comparison)
+        INV-002: authorization code is single-use (deleted after exchange)
+    end note
+
+    note right of q_compare_secret
+        INV-003: client_secret is compared against bcrypt hash (10 salt rounds)
+        INV-004: admin Supabase client bypasses RLS for all DB operations in token exchange
+    end note
+
+    note right of q_generate_jwt
+        INV-005: JWT signed with HS256 using JWT_SECRET env var
+        INV-006: access token expires in 30 days (ACCESS_TOKEN_EXPIRY)
+        INV-007: JWT contains issuer and audience claims for validation
+    end note

@@ -1,0 +1,155 @@
+[
+  {
+    "finding_id": "AUCTION-HIGH-001",
+    "title": "publishSaleResults can be called with zero capitalRaised, minting tokens for free (analogous to SizeSealed state confusion)",
+    "severity": "High",
+    "category": "Settlement / State Machine Integrity",
+    "source_issues": [
+      "Size (2022-11): Attacker can steal any funds in the contract by state confusion (no preconditions)",
+      "Size (2022-11): Calls to `finalize` can avoid updating state allowing an attacker to steal funds",
+      "Size (2022-11): Malicious seller can finalize auction without changing `data.lowestQuote`"
+    ],
+    "attack_pattern_summary": "In SizeSealed.sol, the 'finalized' state was determined solely by whether `a.data.lowestQuote != type(uint128).max`. A malicious seller could call `finalize()` with `clearingQuote = type(uint128).max`, collect quote tokens, but leave the state machine in 'RevealPeriod'. This allowed repeating finalize or calling cancelAuction to reclaim base tokens — draining the contract.",
+    "legion_target": "LegionSealedBidAuctionSale.sol + LegionAbstractSale.sol",
+    "legion_analysis": {
+      "state_finalization_check": "Legion uses `s_saleStatus.totalTokensAllocated != 0` as the proxy for 'results published' (see `_verifySaleResultsArePublished` / `_verifySaleResultsNotPublished` in LegionAbstractSale.sol:835-841). Unlike SizeSealed's `lowestQuote` flag, this is a dedicated field set only inside `publishSaleResults`. It is NOT caller-supplied for the purpose of state detection — Legion's design separates 'results published' from the auction parameters.",
+      "cancel_gate": "LegionAbstractSale.cancel() (line 603) checks `whenSaleResultsNotPublished` which reads `totalTokensAllocated != 0`. LegionSealedBidAuctionSale.cancel() additionally checks `whenCancelNotLocked`. Two independent guards.",
+      "vulnerable": false,
+      "rationale": "The SizeSealed bug required the sentinel value (type(uint128).max) to be user-injectable into the state-determining field. In Legion, `totalTokensAllocated` is set by Legion (trusted role) inside `publishSaleResults`, not by the project or bidder. However, see AUCTION-HIGH-002 for a related but distinct concern."
+    },
+    "residual_risk": "Low — architecture differs, but confirm `publishSaleResults` enforces `tokensAllocated > 0` to prevent a zero-allocation bypass of `_verifySaleResultsArePublished`."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-002",
+    "title": "publishSaleResults does not enforce tokensAllocated > 0, enabling state where results appear 'not published' after a partial call",
+    "severity": "Medium-High",
+    "category": "Settlement / State Guard Bypass",
+    "source_issues": [
+      "Size (2022-11): Check finalized state with `a.data.lowestQuote == type(uint128).max` makes fund loss",
+      "Size (2022-11): `Seller` can finalize an auction multiple times"
+    ],
+    "attack_pattern_summary": "State machine checks that use a numeric field as a sentinel (zero = unpublished, nonzero = published) are dangerous when that field can legally be zero. SizeSealed's `lowestQuote` started at `type(uint128).max` (not zero), but Legion's `totalTokensAllocated` starts at zero, making zero the 'unpublished' sentinel.",
+    "legion_target": "LegionAbstractSale.sol:835-841, LegionAbstractSale.sol:860-862",
+    "legion_analysis": {
+      "code_snippet": "_verifySaleResultsArePublished: if (s_saleStatus.totalTokensAllocated == 0) revert; _verifySaleResultsNotPublished: if (s_saleStatus.totalTokensAllocated != 0) revert; _verifyCanPublishSaleResults: if (s_saleStatus.totalTokensAllocated != 0) revert (TokensAlreadyAllocated)",
+      "issue": "If Legion (trusted bouncer) calls `publishSaleResults` with `tokensAllocated = 0`, `s_saleStatus.totalTokensAllocated` remains 0. The state machine would still read as 'not published'. The cancel guard and `whenSaleResultsArePublished` modifier rely on this field. The contract would behave as if results were never published even after the private key and merkle roots are set — a confused state.",
+      "vulnerable": true,
+      "impact": "After such a call, `cancelLocked` is set (preventing cancel), private key is revealed on-chain, merkle roots are set, but `cancel()` would still revert (because `cancelLocked` is true), yet `claimTokenAllocation` and `withdrawRaisedCapital` would also revert (results 'not published'). Funds locked. Also, `publishSaleResults` could be called again (since `_verifyCanPublishSaleResults` would still pass), potentially overwriting merkle roots and private key.",
+      "exploit_scenario": "Legion operator accidentally or maliciously submits tokensAllocated=0. Private key is now public. `_verifyCanPublishSaleResults` does NOT revert. State: cancelLocked=true, privateKey set, totalTokensAllocated=0. No one can cancel, no one can claim, no one can withdraw — contract is bricked for that sale."
+    },
+    "recommendation": "Add `if (tokensAllocated == 0) revert Errors.LegionSale__InvalidTokenAmountSupplied(0, 0)` inside `publishSaleResults`, or use an explicit boolean flag `saleResultsPublished` separate from the token amount.",
+    "code_location": "LegionSealedBidAuctionSale.sol:144-187, LegionAbstractSale.sol:835-841"
+  },
+  {
+    "finding_id": "AUCTION-HIGH-003",
+    "title": "Front-running bid reveals: private key is published on-chain revealing ALL sealed bids simultaneously",
+    "severity": "High",
+    "category": "Cryptographic / ECIES Scheme Weakness",
+    "source_issues": [
+      "Holograph (2022-10): MEV: Operator can bribe miner and steal honest operator's bond amount if gas price went high"
+    ],
+    "attack_pattern_summary": "In any sealed-bid auction, revealing the decryption key in a public transaction allows mempool observers (MEV bots, miners) to front-run by seeing all bid amounts before the transaction is confirmed.",
+    "legion_target": "LegionSealedBidAuctionSale.sol:144-187 (publishSaleResults), LegionSealedBidAuctionSale.sol:207-221 (decryptSealedBid)",
+    "legion_analysis": {
+      "issue": "`publishSaleResults` emits `sealedBidPrivateKey` as a public event parameter and stores it in `s_sealedBidAuctionSaleConfig.privateKey`. Any pending transaction calling `publishSaleResults` can be observed in the mempool. The private key decrypts ALL investor bids simultaneously (same key per auction, per `_verifyValidPublicKey` enforcing a single shared public key). An attacker can front-run the reveal tx to decrypt all bids and gain complete knowledge of the bid distribution before the results are finalized.",
+      "ecies_weakness": "ECIES.sol explicitly documents: 'security reduced to ~98 bits due to advances in attacks on alt_bn128', 'XOR encryption not as secure as modern algorithms', 'keccak256 KDF susceptible to dictionary attacks'. The salt is `keccak256(investor_address, fixedSalt)`. Since `investor_address` is public and `fixedSalt` is revealed with the private key, all symmetric keys can be derived offline.",
+      "fixed_salt_risk": "A single `fixedSalt` is used for ALL investors in the auction (line 219). If the private key leaks (via mempool or published on-chain), combined with public investor addresses, all bids can be decrypted simultaneously.",
+      "vulnerable": true,
+      "impact": "Complete loss of sealed-bid confidentiality at reveal time. MEV: arbitrageurs can compute clearing price, determine which bids are winners/losers, and trade related assets before settlement is processed off-chain."
+    },
+    "recommendation": "Use a commit-reveal scheme with a time delay, or consider using a TEE/ZK proof for results verification instead of publishing the raw private key. At minimum, document this as a known limitation with the assumption that Legion processes results atomically off-chain and the window is acceptable."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-004",
+    "title": "Bid amount manipulation: encryptedAmountOut is not validated against the actual invested amount",
+    "severity": "High",
+    "category": "Bid Amount Manipulation",
+    "source_issues": [
+      "Size (2022-11): Last bidder can win some base token without paying in edge cases",
+      "Size (2022-11): Bidders might fail to withdraw their unused funds after the auction was finalized"
+    ],
+    "attack_pattern_summary": "SizeSealed had a rounding issue where the last bidder could receive base tokens without paying because mulDivDown returned 0. Legion's invest() takes an `encryptedAmountOut` (desired token amount) that is never validated against the actual `amount` invested on-chain.",
+    "legion_target": "LegionSealedBidAuctionSale.sol:77-122 (invest)",
+    "legion_analysis": {
+      "issue": "The `invest()` function accepts `amount` (actual USDC deposited) and `encryptedAmountOut` (encrypted desired token amount). There is NO on-chain validation that `encryptedAmountOut`, when decrypted, corresponds to a reasonable price relative to `amount`. A bidder can:\n1. Encrypt a very large `amountOut` (claiming to want tokens at near-zero price) while depositing a normal `amount`\n2. Encrypt a very small `amountOut` while depositing a large `amount` (effectively padding their payment)\n3. Repeatedly call invest() to update their position — each call adds to `investedCapital` but replaces the sealed bid (the CapitalInvested event only records the latest `encryptedAmountOut`)\nThe actual clearing logic is off-chain (Legion processes the merkle roots). This is a trust assumption rather than an on-chain invariant.",
+      "repeated_invest_note": "An investor CAN call invest() multiple times (the code creates or retrieves the position). Each call adds to `investedCapital`. Each call emits a new `encryptedAmountOut`. This could be used to confuse off-chain settlement by having mismatched total capital vs. the latest encrypted bid.",
+      "vulnerable": true,
+      "impact": "Off-chain settlement integrity depends on Legion correctly processing ALL CapitalInvested events for an investor, not just the latest. If Legion only reads the last sealed bid per investor but counts ALL invested capital, there is a mismatch that can lead to incorrect token allocations or excess capital claims."
+    },
+    "recommendation": "Either (1) restrict invest() to a single call per investor (revert if position already exists and capital > 0), or (2) in multi-investment cases, re-encrypt and replace the sealed bid atomically, ensuring the off-chain processor always pairs the total invested capital with the correct sealed bid."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-005",
+    "title": "cancelLocked state prevents cancel but does not prevent expiry-based fund recovery if publishSaleResults is never called",
+    "severity": "High",
+    "category": "Cancel / State Transition Logic",
+    "source_issues": [
+      "Size (2022-11): A malicious seller can cancel the auction after finalization",
+      "Size (2022-11): Stealing fund directly from protocol (Repeating finalizing an auction or Cancelling a finalized auction)"
+    ],
+    "attack_pattern_summary": "SizeSealed allowed cancel after finalization due to a state check based on a sentinel value. In Legion, `initializePublishSaleResults` sets `cancelLocked=true` permanently, preventing cancel. However, if Legion never calls `publishSaleResults` after locking (e.g., operator key compromise, off-chain failure, or intentional griefing), investor funds are permanently locked.",
+    "legion_target": "LegionSealedBidAuctionSale.sol:125-141 (initializePublishSaleResults), LegionSealedBidAuctionSale.sol:195-204 (cancel)",
+    "legion_analysis": {
+      "issue": "Once `initializePublishSaleResults()` is called: (1) `cancelLocked = true` is set. (2) `cancel()` reverts via `whenCancelNotLocked`. (3) `publishSaleResults()` has not been called yet — the private key and merkle roots are NOT yet on-chain. If the Legion operator fails to follow through with `publishSaleResults()` (due to key loss, system failure, or sabotage), investor funds are permanently locked. There is no timeout mechanism or fallback for investors to recover capital in this intermediate state.",
+      "no_escape_hatch": "After cancelLocked=true: investors cannot refund (refund period is over, required by `whenRefundPeriodIsOver` on `initializePublishSaleResults`), cannot cancel (CancelLocked), cannot claim (no results published). The only recourse is `emergencyWithdraw` by Legion — a centralized rescue requiring Legion to be available and cooperative.",
+      "vulnerable": true,
+      "impact": "Temporary or permanent fund lock for all investors. Depends on Legion's operational reliability. In adversarial scenario: project admin has no ability to cancel (they are locked out), investors have no ability to recover, only Legion bouncer can emergencyWithdraw."
+    },
+    "recommendation": "Add a deadline: if `publishSaleResults` is not called within X days of `initializePublishSaleResults`, investors should be able to recover capital (e.g., auto-cancel or a permissionless recovery function)."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-006",
+    "title": "ECIES private key stored permanently on-chain enables future decryption of historical sealed bids",
+    "severity": "High",
+    "category": "Cryptographic / ECIES Scheme Weakness",
+    "source_issues": [
+      "Holograph (2022-10): MEV: Operator can bribe miner and steal honest operator's bond amount"
+    ],
+    "attack_pattern_summary": "Private key material stored on-chain is permanently public. Any encrypted data from before the key reveal can be decrypted retroactively.",
+    "legion_target": "LegionSealedBidAuctionSale.sol:178, LegionSealedBidAuctionSale.sol:207-221 (decryptSealedBid)",
+    "legion_analysis": {
+      "issue": "After `publishSaleResults` is called, `s_sealedBidAuctionSaleConfig.privateKey` is stored in contract storage and emitted as an event. The `decryptSealedBid()` view function is callable by anyone with any `(encryptedAmountOut, investor)` pair. This means:\n1. All historical CapitalInvested events contain `encryptedAmountOut` values\n2. All investor addresses are public from transaction sender data\n3. `fixedSalt` is also stored/emitted on-chain\n4. Any observer can call `decryptSealedBid()` for any past bidder and learn their bid amount\nThis is by design — but the documentation should clearly state that bid confidentiality is TEMPORARY (only during the bidding period).",
+      "security_level": "ECIES.sol self-documents ~98-bit security. With public key, a preimage attack on the encrypted bid space (amounts are bounded integers in a known range, e.g., 0 to max USDC supply) could succeed with dictionary attacks on the KDF.",
+      "vulnerable": true,
+      "impact": "Loss of bid amount confidentiality after settlement. Bidders may not realize their bid prices become permanently public on-chain. This could harm bidders' future negotiating positions or reveal proprietary investment strategies in subsequent auctions."
+    },
+    "recommendation": "Clearly document in the interface and UI that bid amounts become publicly decryptable after the auction concludes. Consider whether business requirements require post-auction confidentiality. If so, use ZK-proofs for settlement verification instead of publishing the private key."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-007",
+    "title": "Merkle root for claimTokenAllocation and acceptedCapital is set by trusted Legion with no on-chain validation against actual bids",
+    "severity": "High",
+    "category": "Settlement / Trust Boundary",
+    "source_issues": [
+      "Size (2022-11): finalize() use malicious clearingQuote can steal token",
+      "Size (2022-11): Refinalization with theft of funds from other auctions"
+    ],
+    "attack_pattern_summary": "In SizeSealed, the seller could pass malicious `clearingQuote` and `clearingBase` to finalize with wrong prices. In Legion, the equivalent is a malicious or compromised Legion bouncer publishing incorrect `claimMerkleRoot` and `acceptedMerkleRoot`.",
+    "legion_target": "LegionSealedBidAuctionSale.sol:144-187 (publishSaleResults), LegionAbstractSale.sol:250-313 (claimTokenAllocation)",
+    "legion_analysis": {
+      "issue": "The `claimMerkleRoot` and `acceptedMerkleRoot` are accepted directly from the Legion bouncer with no on-chain validation against the sealed bids or `totalCapitalInvested`. Specifically:\n1. `capitalRaised` is set by Legion but never validated against `s_saleStatus.totalCapitalInvested`\n2. The claim merkle tree content is entirely off-chain — a corrupted tree could allocate more tokens than `tokensAllocated`, or allocate tokens to non-investors\n3. `totalCapitalRaised` could be set higher than actual invested capital, but `withdrawRaisedCapital` transfers exactly `totalCapitalRaised` — if contract has insufficient balance, withdrawal would fail or overdraw",
+      "vulnerable": true,
+      "impact": "Compromised or malicious Legion bouncer can: set `capitalRaised` to any value (including higher than actual), set merkle roots that benefit specific parties, double-allocate tokens. The `_verifyCanWithdrawCapital` check only verifies `totalCapitalRaised > 0` and `!capitalWithdrawn`, not that `totalCapitalRaised <= totalCapitalInvested`.",
+      "over_withdrawal_risk": "If `totalCapitalRaised > totalCapitalInvested`, `withdrawRaisedCapital()` would attempt to transfer more tokens than the contract holds — stealing from other sales sharing the contract, or reverting and bricking the withdrawal."
+    },
+    "recommendation": "Add on-chain invariant: `require(capitalRaised <= s_saleStatus.totalCapitalInvested)` inside `publishSaleResults`. This is a simple sanity check that does not require decrypting any bid."
+  },
+  {
+    "finding_id": "AUCTION-HIGH-008",
+    "title": "hasClaimedExcess flag allows transferInvestorPosition only if excess has been claimed, creating a griefing vector",
+    "severity": "Medium",
+    "category": "State Transition / Position Management",
+    "source_issues": [
+      "Size (2022-11): Bidders might fail to withdraw their unused funds after the auction was finalized"
+    ],
+    "attack_pattern_summary": "Partial-fill scenarios in auctions can leave excess capital that must be claimed before certain operations. If excess claim is blocked or fails, dependent operations are also blocked.",
+    "legion_target": "LegionAbstractSale.sol:917-927 (_verifyCanTransferInvestorPosition)",
+    "legion_analysis": {
+      "code_snippet": "if (position.hasRefunded || position.hasSettled || !position.hasClaimedExcess) revert LegionSale__UnableToTransferInvestorPosition",
+      "issue": "`transferInvestorPosition` requires `hasClaimedExcess == true`. If an investor's proof for excess capital is invalid (wrong merkle proof, not included in the tree), they can never claim excess and can never transfer their position. This could happen if Legion publishes a merkle tree that omits certain investors from the excess capital tree, even though they have excess.",
+      "vulnerable": true,
+      "impact": "Investor position permanently locked from transfer if the `acceptedCapitalMerkleRoot` tree does not include them (meaning they had no excess, or all capital was accepted). The condition `!hasClaimedExcess` would be true for FULLY accepted investors — who would logically never call `withdrawExcessInvestedCapital`. This means investors whose entire investment was accepted CANNOT transfer their position, since `hasClaimedExcess` stays false."
+    },
+    "recommendation": "Either: (1) Allow transfer if the investor was fully accepted (claimMerkleRoot includes them but acceptedCapitalMerkleRoot does not), or (2) set `hasClaimedExcess=true` during settlement when excess is zero."
+  }
+]

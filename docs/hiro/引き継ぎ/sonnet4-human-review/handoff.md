@@ -87,7 +87,7 @@ ccfdef0e  rq2a: human review of Sonnet 4 SPECA results — 2 TP→FP corrections
 | OpenKinect/libfreenect | [#698](https://github.com/OpenKinect/libfreenect/pull/698) | N4-npd-005 (再投稿) | Open — レビュー待ち |
 | unicode-org/icu | [#3913](https://github.com/unicode-org/icu/pull/3913) | U5-uaf translit compoundFilter race | Open — CI `jira-ticket` FAIL (ICU-23359 "New"→"Accepted"待ち) |
 | unicode-org/icu | [#3921](https://github.com/unicode-org/icu/pull/3921) | U5-uaf-002 race in collation_root_cleanup | **Closed** — メンテナ(aheninger)が「u_cleanup()はスレッドセーフ非保証、バグではない」と回答。FP確定 |
-| unicode-org/icu | [#3922](https://github.com/unicode-org/icu/pull/3922) | U5-uaf-003 double-delete in cleanupRegionData | Open — CI全パス、レビュー待ち |
+| unicode-org/icu | [#3922](https://github.com/unicode-org/icu/pull/3922) | U5-uaf-003 double-delete in cleanupRegionData | Open — markusicu レビュー中。NULL→nullptr 修正 + u_cleanup()テスト方式変更済み (2026-04-10) |
 
 全PRにPoC付き。「Generated with Claude Code」は削除済み。
 
@@ -97,6 +97,16 @@ ccfdef0e  rq2a: human review of Sonnet 4 SPECA results — 2 TP→FP corrections
 |------|------|
 | torvalds/linux (M4, U2) | GitHub PR不可。メーリングリスト必要 |
 | sass/libsass (M1) | リポジトリがアーカイブ済み |
+
+### 最新で修正済みのため PR 不要
+
+| Repo | Finding | 確認日 |
+|------|---------|--------|
+| openldap/openldap | N5-npd-013/014/015 (`ldif_open_url` ber_strdup NULL) | 2026-04-10 — ITS#10309 で修正済み |
+| openldap/openldap | N5-npd-016/017 (`tool_bind`/`tool_args` ber_strdup NULL) | 2026-04-10 — ITS#10309 で修正済み |
+| redis/redis | U1-uaf-004 (processInputBuffer freeClient UAF) | 最新で修正済み |
+| shadowsocks-libev | U3-uaf-002/003/007/008 (複数UAF) | リファクタリングで修正済み |
+| ImageMagick | N2-npd-018 (AddNoiseImage NULL) | 最新で修正済み |
 
 ---
 

@@ -1,0 +1,67 @@
+---
+title: "POST /oauth/token - Main Token Exchange Flow (stem-system OAuth Token Endpoint)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_parse: formData = request.formData()
+    q_parse --> q_validate_grant: extract grant_type, code, redirect_uri, client_id, client_secret, code_verifier
+    q_validate_grant --> q_err_grant: grantType != authorization_code
+    q_validate_grant --> q_validate_params: grantType == authorization_code
+    q_err_grant --> [*]: return 400 unsupported_grant_type
+    q_validate_params --> q_err_params: !code || !redirectUri || !clientId || !clientSecret || !codeVerifier
+    q_validate_params --> q_auth_client: all required params present
+    q_err_params --> [*]: return 400 invalid_request
+    q_auth_client --> q_verify_secret: application found
+    q_auth_client --> q_err_client: appError || !application
+    q_err_client --> [*]: return 401 invalid_client
+    q_verify_secret --> q_get_code: isValidSecret == true
+    q_verify_secret --> q_err_secret: isValidSecret == false
+    q_err_secret --> [*]: return 401 invalid_client
+    q_get_code --> q_validate_code: authCode found
+    q_get_code --> q_err_code: codeError || !authCode
+    q_err_code --> [*]: return 400 invalid_grant
+    q_validate_code --> q_check_expiry: authCode.application_id == application.id AND authCode.redirect_uri == redirectUri
+    q_validate_code --> q_err_code_owner: authCode.application_id != application.id
+    q_validate_code --> q_err_code_redirect: authCode.redirect_uri != redirectUri
+    q_err_code_owner --> [*]: return 400 invalid_grant code issued to different client
+    q_err_code_redirect --> [*]: return 400 invalid_grant redirect URI mismatch
+    q_check_expiry --> q_pkce: expires_at >= now
+    q_check_expiry --> q_delete_expired: expires_at < now
+    q_delete_expired --> [*]: delete code, return 400 invalid_grant expired
+    q_pkce --> q_get_user: PKCE valid
+    q_pkce --> q_err_pkce: PKCE invalid
+    q_err_pkce --> [*]: return 400 invalid_grant PKCE verification failed
+    q_get_user --> q_generate_token: member found
+    q_get_user --> q_err_user: !member
+    q_err_user --> [*]: return 500 server_error user not found
+    q_generate_token --> q_cleanup: accessToken = generateAccessToken(payload, clientId)
+    q_cleanup --> q_respond: delete_authorization_code(code)
+    q_respond --> [*]: return 200 access_token, token_type, expires_in, scope
+
+    note right of q_validate_grant
+        INV-001: Only authorization_code grant type is accepted
+        INV-002: All six parameters are mandatory - no partial requests allowed
+    end note
+
+    note right of q_auth_client
+        INV-003: Client lookup uses RPC get_application_by_client_id bypassing RLS
+        INV-004: Client secret is compared against stored hash via verifyClientSecret
+    end note
+
+    note right of q_validate_code
+        INV-005: Authorization code must belong to the requesting client (application_id match)
+        INV-006: redirect_uri must exactly match the value used during authorization
+    end note
+
+    note right of q_check_expiry
+        INV-007: Expired codes are deleted before returning error (cleanup on reject)
+    end note
+
+    note right of q_pkce
+        INV-008: PKCE code_verifier must match stored code_challenge using code_challenge_method
+    end note
+
+    note right of q_cleanup
+        INV-009: Authorization code is single-use - deleted after successful exchange
+        INV-010: JWT payload includes sub, display_name, discord_id, generation, status, scope
+    end note

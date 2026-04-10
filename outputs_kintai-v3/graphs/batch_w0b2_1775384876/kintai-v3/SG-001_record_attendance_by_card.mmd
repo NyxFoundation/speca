@@ -1,0 +1,36 @@
+---
+title: "record_attendance_by_card (kintai-v3: Attendance Management)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_normalize: cardId = cardId.replace(/:/, '').toLowerCase()
+    q_normalize --> q_rpc: supabase.rpc('record_attendance_by_card', p_card_id)
+    q_rpc --> q_lookup: SELECT user_id FROM attendance.users WHERE card_id = p_card_id
+    q_lookup --> q_not_found: user_id IS NULL
+    q_not_found --> [*]: return {success=false, message='unregistered card'}
+    q_lookup --> q_get_member: user_id found
+    q_get_member --> q_get_display: SELECT display_name, discord_uid FROM member.members
+    q_get_display --> q_fallback_name: display_name IS NULL
+    q_fallback_name --> q_get_last: SELECT global_name FROM auth.users
+    q_get_display --> q_get_last: display_name found
+    q_get_last --> q_determine_type: SELECT type FROM attendances ORDER BY timestamp DESC LIMIT 1
+    q_determine_type --> q_insert: new_type = (last='in' ? 'out' : 'in')
+    q_insert --> q_return_success: INSERT INTO attendances(user_id, card_id, type, timestamp, date)
+    q_return_success --> q_nickname_fallback: success AND user.display_name IS NULL AND discord_uid exists
+    q_return_success --> [*]: return {success=true, type, user}
+    q_nickname_fallback --> q_cache_name: fetchMemberNickname(discord_uid)
+    q_cache_name --> [*]: update display_name in DB (async), return result
+    q_rpc --> q_error: RPC error or exception
+    q_error --> [*]: return {success=false, message='error'}
+
+    note right of q_determine_type
+        INV-001: new_type toggles between 'in' and 'out' based on last record
+        INV-002: first attendance for a user defaults to 'in' (last_type IS NULL)
+        INV-003: SECURITY DEFINER function runs with elevated privileges
+        INV-004: card_id is normalized (lowercase, colons removed) before lookup
+    end note
+
+    note right of q_insert
+        INV-005: date is computed as JST timezone date, not UTC
+        INV-006: Single RPC call replaces 3 separate HTTP requests
+    end note

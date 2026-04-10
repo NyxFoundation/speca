@@ -1,0 +1,68 @@
+---
+title: "oauth_token (stem-system: OAuth 2.0 Token Endpoint)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_parse: parse formData (grant_type, code, redirect_uri, client_id, client_secret, code_verifier)
+    q_parse --> q_check_grant: grant_type == authorization_code?
+    q_check_grant --> q_bad_grant: unsupported grant_type
+    q_check_grant --> q_check_params: grant_type valid
+    q_bad_grant --> [*]: return 400 unsupported_grant_type
+    q_check_params --> q_missing: any required param missing?
+    q_check_params --> q_lookup_client: all present
+    q_missing --> [*]: return 400 invalid_request
+    q_lookup_client --> q_rpc_app: rpc get_application_by_client_id(client_id) via adminClient
+    q_rpc_app --> q_check_client: application found?
+    q_check_client --> q_unknown: not found
+    q_check_client --> q_verify_secret: found
+    q_unknown --> [*]: return 401 invalid_client
+    q_verify_secret --> q_bcrypt: verifyClientSecret(secret, hash) via bcrypt.compare
+    q_bcrypt --> q_bad_secret: invalid
+    q_bcrypt --> q_lookup_code: valid
+    q_bad_secret --> [*]: return 401 invalid_client (invalid credentials)
+    q_lookup_code --> q_rpc_code: rpc get_authorization_code(code) via adminClient
+    q_rpc_code --> q_check_code: auth code found?
+    q_check_code --> q_no_code: not found
+    q_check_code --> q_validate_code: found
+    q_no_code --> [*]: return 400 invalid_grant
+    q_validate_code --> q_check_app_match: code.application_id == application.id?
+    q_check_app_match --> q_mismatch_app: mismatch
+    q_check_app_match --> q_check_redirect: match
+    q_mismatch_app --> [*]: return 400 code was issued to different client
+    q_check_redirect --> q_check_uri: code.redirect_uri == redirect_uri?
+    q_check_uri --> q_mismatch_uri: mismatch
+    q_check_uri --> q_check_expiry: match
+    q_mismatch_uri --> [*]: return 400 redirect URI mismatch
+    q_check_expiry --> q_expired: expires_at < now
+    q_check_expiry --> q_pkce: not expired
+    q_expired --> q_delete_expired: rpc delete_authorization_code(code)
+    q_delete_expired --> [*]: return 400 authorization code expired
+    q_pkce --> q_verify_pkce: verifyCodeChallenge(verifier, challenge, S256)
+    q_verify_pkce --> q_pkce_fail: invalid
+    q_verify_pkce --> q_get_member: valid
+    q_pkce_fail --> [*]: return 400 PKCE verification failed
+    q_get_member --> q_query_member: select from members where supabase_auth_user_id = code.user_id
+    q_query_member --> q_no_member: not found
+    q_query_member --> q_gen_token: found
+    q_no_member --> [*]: return 500 user not found
+    q_gen_token --> q_jwt: generateAccessToken(payload, clientId)
+    q_jwt --> q_delete_code: rpc delete_authorization_code(code)
+    q_delete_code --> [*]: return access_token, token_type=Bearer, expires_in=3600, scope
+
+    note right of q_verify_secret
+        INV-001: client_secret is verified via bcrypt comparison against stored hash
+    end note
+
+    note right of q_pkce
+        INV-002: PKCE uses S256 (SHA-256 + base64url) to verify code_verifier against code_challenge
+    end note
+
+    note right of q_delete_code
+        INV-003: authorization code is single-use (deleted after exchange)
+        INV-004: expired codes are also deleted on detection
+    end note
+
+    note right of q_gen_token
+        INV-005: JWT signed with HS256, contains sub, display_name, discord_id, generation, status, scope
+        INV-006: token endpoint uses adminClient (bypasses RLS) for server-to-server communication
+    end note

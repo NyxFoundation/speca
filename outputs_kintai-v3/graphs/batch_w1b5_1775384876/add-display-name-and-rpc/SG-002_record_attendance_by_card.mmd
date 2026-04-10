@@ -1,0 +1,48 @@
+---
+title: "record_attendance_by_card (20260317 Migration: Add display_name and RPC)"
+---
+stateDiagram-v2
+    direction TB
+    [*] --> q_lookup_user: SELECT supabase_auth_user_id FROM attendance.users WHERE card_id = p_card_id
+    q_lookup_user --> q_check_user: v_user_id assigned
+    q_check_user --> q_return_not_found: v_user_id IS NULL
+    q_return_not_found --> [*]: return json(success=false, message=unregistered card)
+
+    q_check_user --> q_get_member: v_user_id IS NOT NULL
+    q_get_member --> q_check_display_name: SELECT display_name, discord_uid FROM member.members WHERE supabase_auth_user_id = v_user_id
+
+    q_check_display_name --> q_fallback_global_name: v_display_name IS NULL
+    q_fallback_global_name --> q_get_last_type: SELECT global_name FROM auth.users WHERE id = v_user_id
+
+    q_check_display_name --> q_get_last_type: v_display_name IS NOT NULL
+
+    q_get_last_type --> q_decide_type: SELECT type FROM attendance.attendances WHERE user_id = v_user_id ORDER BY timestamp DESC LIMIT 1
+
+    q_decide_type --> q_set_out: v_last_type = 'in'
+    q_set_out --> q_insert: v_new_type = 'out'
+
+    q_decide_type --> q_set_in: v_last_type != 'in' OR v_last_type IS NULL
+    q_set_in --> q_insert: v_new_type = 'in'
+
+    q_insert --> q_return_success: INSERT INTO attendance.attendances(user_id, card_id, type, timestamp, date)
+    q_return_success --> [*]: return json(success=true, user, type)
+
+    q_insert --> q_exception: EXCEPTION WHEN OTHERS
+    q_exception --> [*]: return json(success=false, message=error SQLERRM)
+
+    note right of q_lookup_user
+        INV-001: p_card_id must map to at most one user (card_id is unique key)
+        INV-002: SECURITY DEFINER executes with function owner privileges, not caller
+        INV-003: search_path restricted to attendance, member schemas
+    end note
+
+    note right of q_decide_type
+        INV-004: Toggle logic - if last record is 'in' then new is 'out', otherwise 'in'
+        INV-005: First attendance for a user defaults to 'in' (v_last_type IS NULL case)
+    end note
+
+    note right of q_insert
+        INV-006: v_date derived from v_now AT TIME ZONE Asia/Tokyo, ensuring JST date
+        INV-007: timestamp and date are consistent (date = date portion of timestamp in JST)
+        INV-008: All exceptions caught and returned as JSON error, never raised to caller
+    end note
