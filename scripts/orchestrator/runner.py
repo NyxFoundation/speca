@@ -899,8 +899,10 @@ class ClaudeRunner:
         # misinterpret as an option flag (e.g. YAML frontmatter '---').
         if prompt_content.lstrip().startswith("-"):
             prompt_content = "\n" + prompt_content
+        import shutil
+        claude_bin = shutil.which("claude") or "claude"
         cmd = [
-            "claude",
+            claude_bin,
             "--dangerously-skip-permissions",
             "--verbose",
             "--output-format", "stream-json",

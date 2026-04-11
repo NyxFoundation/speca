@@ -1,0 +1,163 @@
+{
+  "repo": "sf-kosen/discord-pow",
+  "audit_date": "2026-04-11",
+  "findings": [
+    {
+      "id": "DP-001",
+      "severity": "High",
+      "title": "No rate limiting on /api/submit endpoint",
+      "description": "The /api/submit endpoint has no rate limiting at the application layer. An attacker can brute-force PoW nonces offline and submit them at will, or repeatedly submit invalid tokens to cause load on the Durable Object nonce store and Discord API. The README acknowledges this ('Rate limit recommended: apply WAF/Rate Limit to /interactions and /api/submit') but no implementation exists. This makes the PoW anti-spam measure significantly weaker since an attacker with moderate compute can solve the PoW quickly and automate role grants for many accounts.",
+      "file": "src/index.ts",
+      "line": "722-755",
+      "cwe": "CWE-770",
+      "recommendation": "Implement rate limiting via Cloudflare Rate Limiting rules, or add application-level throttling per IP/user_id using a Durable Object or KV counter. Limit submissions to e.g. 5 per minute per IP."
+    },
+    {
+      "id": "DP-002",
+      "severity": "Medium",
+      "title": "Token exposed in URL fragment leaks via client-side logging and browser history",
+      "description": "The PoW token (containing guild_id, user_id, role_id, expiry, and HMAC signature) is passed via URL fragment (#token=...). While fragments are not sent to the server in HTTP requests, they are visible in browser history, may be logged by browser extensions, and are accessible to any JavaScript on the page. If the verify page were ever to include third-party scripts or be subject to XSS, the token would be fully exposed. The CSP mitigates XSS to some degree, but the token still persists in browser history.",
+      "file": "src/index.ts",
+      "line": "653-672",
+      "cwe": "CWE-200",
+      "recommendation": "Consider a server-side session approach where the token is stored server-side and the client receives only an opaque session ID. Alternatively, add 'Clear-Site-Data' header on the verify page response to reduce persistence."
+    },
+    {
+      "id": "DP-003",
+      "severity": "Medium",
+      "title": "PoW difficulty is too low for determined attackers",
+      "description": "Default difficulty is 20 bits (desktop) and 16 bits (mobile). A difficulty of 20 bits means approximately 1 million SHA-256 hashes on average to find a valid nonce, which takes under 1 second on modern hardware. Difficulty 16 requires only ~65,536 hashes. A GPU-equipped attacker or small botnet can solve these in milliseconds, rendering the PoW ineffective as an anti-automation measure against determined adversaries.",
+      "file": "src/index.ts",
+      "line": "15-16",
+      "cwe": "CWE-693",
+      "recommendation": "Increase difficulty to at least 24-28 bits for desktop. Consider adaptive difficulty based on solve time feedback. For mobile, consider a CAPTCHA fallback instead of very low PoW difficulty."
+    },
+    {
+      "id": "DP-004",
+      "severity": "Medium",
+      "title": "No CORS restrictions on /api/submit",
+      "description": "The /api/submit endpoint does not set CORS headers or validate the Origin/Referer header. Any website can make cross-origin POST requests to this endpoint. While the token is needed, if an attacker obtains a token (e.g., by social engineering a user to share a URL), they can submit from any origin. More critically, this means the endpoint is callable from automated scripts without any origin restrictions.",
+      "file": "src/index.ts",
+      "line": "722-755",
+      "cwe": "CWE-346",
+      "recommendation": "Add CORS headers restricting Access-Control-Allow-Origin to the worker's own origin. Validate the Origin header on POST requests and reject requests from unexpected origins."
+    },
+    {
+      "id": "DP-005",
+      "severity": "Medium",
+      "title": "Client-side token parsing reveals internal structure to attackers",
+      "description": "The full token structure (version, nonce, guildId, userId, roleId, expiry, difficulty, HMAC) is parsed client-side in verify.js. This reveals the complete token format to attackers, making it easier to understand the system and attempt attacks. The guildId, userId, and roleId are embedded in plaintext, and the difficulty is visible, allowing attackers to know exactly what PoW difficulty they need to meet.",
+      "file": "src/index.ts",
+      "line": "481-501",
+      "cwe": "CWE-200",
+      "recommendation": "Consider encrypting the token payload (AES-GCM) so the client only sees an opaque blob. The difficulty parameter could be provided separately via a lightweight API call."
+    },
+    {
+      "id": "DP-006",
+      "severity": "Low",
+      "title": "user_id and guild_id in /api/submit body are client-supplied and redundant",
+      "description": "The /api/submit endpoint accepts user_id and guild_id from the request body and validates them against the token. However, since these values are already embedded in the HMAC-signed token, the client-supplied values only serve as a check. The actual role grant uses the token's embedded values (v.guildId, v.userId). While not directly exploitable because the token signature prevents tampering, this pattern is confusing and could lead to future bugs if the check is accidentally removed.",
+      "file": "src/index.ts",
+      "line": "734-741",
+      "cwe": "CWE-807",
+      "recommendation": "Extract user_id and guild_id exclusively from the verified token rather than requiring them in the request body. This eliminates a potential source of confusion."
+    },
+    {
+      "id": "DP-007",
+      "severity": "Low",
+      "title": "Debug information leaked in PoW failure response",
+      "description": "When PoW verification fails due to insufficient leading zero bits, the response includes debug information containing the difficulty and the first 4 bytes of the hash (hash_first4). This information could help an attacker understand how close their attempt was and optimize brute-force strategies.",
+      "file": "src/index.ts",
+      "line": "278-285",
+      "cwe": "CWE-209",
+      "recommendation": "Remove the debug field from production responses. If needed for development, gate it behind a debug environment variable."
+    },
+    {
+      "id": "DP-008",
+      "severity": "Low",
+      "title": "No Content-Length or body size limit on /api/submit",
+      "description": "The /api/submit endpoint calls req.json() without checking Content-Length or enforcing a maximum body size. An attacker could send extremely large JSON payloads to consume worker memory and CPU time during parsing. While Cloudflare Workers have built-in limits, explicitly enforcing a small body size (e.g., 4KB) would be a defense-in-depth measure.",
+      "file": "src/index.ts",
+      "line": "725-730",
+      "cwe": "CWE-400",
+      "recommendation": "Check Content-Length header and reject requests exceeding a reasonable limit (e.g., 4096 bytes) before parsing JSON."
+    },
+    {
+      "id": "DP-009",
+      "severity": "Low",
+      "title": "Interaction body parsed as JSON without size limit",
+      "description": "The /interactions endpoint reads the full request body with req.text() and then JSON.parse()s it without any size validation. While Discord controls this endpoint, a malicious actor who discovers the endpoint URL could send large payloads. The Ed25519 signature check occurs before role operations but after the body is fully read and parsed.",
+      "file": "src/index.ts",
+      "line": "628-633",
+      "cwe": "CWE-400",
+      "recommendation": "Add a Content-Length check before reading the body. Reject requests larger than a reasonable limit (e.g., 64KB)."
+    },
+    {
+      "id": "DP-010",
+      "severity": "Low",
+      "title": "Single VERIFIED_ROLE_ID limits multi-server flexibility",
+      "description": "The worker uses a single VERIFIED_ROLE_ID environment variable, meaning all guilds sharing the same worker instance must use the same role ID for verification. If the worker is used across multiple guilds, the role ID check (parsed.roleId !== env.VERIFIED_ROLE_ID) would fail for guilds with different role IDs, or worse, could grant the wrong role if guild-specific configuration is not maintained.",
+      "file": "src/index.ts",
+      "line": "259",
+      "cwe": "CWE-284",
+      "recommendation": "If multi-guild support is intended, store role mappings per guild (e.g., in KV) and validate the role ID against the specific guild's configuration."
+    },
+    {
+      "id": "DP-011",
+      "severity": "Informational",
+      "title": "CSP blocks inline scripts but verify page relies on external JS file",
+      "description": "The verify page sets a strict CSP (default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none') which is a good practice. However, the JS is served from the same origin via /verify.js and /verify-worker.js. The CSP is well-configured and does not allow unsafe-inline or unsafe-eval, which is a positive security measure.",
+      "file": "src/index.ts",
+      "line": "103",
+      "cwe": "CWE-1021",
+      "recommendation": "No action needed. The CSP is appropriately configured. Consider adding a report-uri or report-to directive to monitor CSP violations."
+    },
+    {
+      "id": "DP-012",
+      "severity": "Informational",
+      "title": "Constant-time comparison correctly implemented",
+      "description": "The constantTimeEq function properly implements constant-time string comparison using XOR accumulation, preventing timing side-channel attacks on HMAC signature verification. However, the early length check (line 76) could leak length information via timing, though in this case both strings are always base64url-encoded SHA-256 HMAC outputs of identical length, so this is not exploitable.",
+      "file": "src/index.ts",
+      "line": "75-82",
+      "cwe": "CWE-208",
+      "recommendation": "No action needed. The implementation is correct for the use case since both compared strings are always the same length (base64url-encoded 256-bit HMAC)."
+    },
+    {
+      "id": "DP-013",
+      "severity": "Informational",
+      "title": "Nonce replay protection uses Durable Objects with TTL-based expiration",
+      "description": "The NonceStore Durable Object correctly prevents token replay by marking nonces as used and storing them with TTL-based expiration aligned to the token's expiry time. This is a solid design. After the token expires, the nonce storage is automatically cleaned up.",
+      "file": "src/index.ts",
+      "line": "761-792",
+      "cwe": "CWE-294",
+      "recommendation": "No action needed. The replay protection is well-implemented."
+    },
+    {
+      "id": "DP-014",
+      "severity": "Informational",
+      "title": "Secrets properly externalized via Wrangler secrets",
+      "description": "All sensitive values (DISCORD_PUBLIC_KEY, DISCORD_BOT_TOKEN, VERIFIED_ROLE_ID, POW_SECRET) are configured as Wrangler secrets and not hardcoded in source code. The .gitignore properly excludes .dev.vars and .env files. No secrets were found in the git history.",
+      "file": "wrangler.jsonc",
+      "line": "1-63",
+      "cwe": "CWE-798",
+      "recommendation": "No action needed. Secret management follows best practices."
+    },
+    {
+      "id": "DP-015",
+      "severity": "Informational",
+      "title": "Discord interaction signature verification is correctly implemented",
+      "description": "The verifyDiscordSig function correctly verifies Ed25519 signatures using the tweetnacl library, checking both the x-signature-ed25519 and x-signature-timestamp headers. This prevents forged interaction requests.",
+      "file": "src/index.ts",
+      "line": "197-206",
+      "cwe": "CWE-347",
+      "recommendation": "No action needed. The signature verification is correctly implemented per Discord's requirements."
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 1,
+    "medium": 3,
+    "low": 4,
+    "informational": 5
+  }
+}
