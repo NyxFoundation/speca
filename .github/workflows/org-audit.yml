@@ -1,0 +1,221 @@
+name: "Organization Security Audit"
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: 'GitHub organization (e.g., sf-kosen)'
+        required: true
+        type: string
+      repos:
+        description: 'Comma-separated repo names (leave empty for all non-archived)'
+        required: false
+        type: string
+        default: ''
+      workers:
+        description: 'Number of parallel workers per repo'
+        required: false
+        type: number
+        default: 4
+      max_concurrent:
+        description: 'Max concurrent Claude calls per repo'
+        required: false
+        type: number
+        default: 64
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: self-hosted
+    outputs:
+      matrix: ${{ steps.matrix.outputs.repos }}
+      branch: ${{ steps.git_config.outputs.branch }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: Fujisawa
+          fetch-depth: 0
+
+      - name: Prepare Git & Branch
+        id: git_config
+        run: |
+          git config --local user.name "Security Agent Bot"
+          git config --local user.email "bot@nyxfoundation.org"
+          RUN_ID=$(date +'%Y%m%d-%H%M%S')
+          BRANCH="audit/${{ inputs.org }}/${RUN_ID}"
+          git checkout -b "${BRANCH}"
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: "Pre-flight: Tests"
+        run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: Setup Scope Files
+        run: |
+          REPOS_ARG=""
+          if [ -n "${{ inputs.repos }}" ]; then
+            REPOS_ARG="--repos ${{ inputs.repos }}"
+          fi
+          uv run python3 scripts/setup_org_audit.py \
+            --org ${{ inputs.org }} \
+            ${REPOS_ARG} \
+            --output-base outputs_${{ inputs.org }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Matrix
+        id: matrix
+        run: |
+          REPOS=$(python3 -c "
+          import json
+          manifest = json.load(open('outputs_${{ inputs.org }}/AUDIT_MANIFEST.json'))
+          print(json.dumps([m['repo'].split('/')[1] for m in manifest]))
+          ")
+          echo "repos=${REPOS}" >> $GITHUB_OUTPUT
+
+      - name: Push Setup
+        run: |
+          git add outputs_${{ inputs.org }}/
+          git commit -m "audit: setup ${{ inputs.org }} org scope files"
+          git push origin "${{ steps.git_config.outputs.branch }}" --force-with-lease
+
+  audit:
+    needs: setup
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        repo: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    env:
+      CLAUDE_CODE_PERMISSIONS: bypassPermissions
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
+      SPECA_OUTPUT_DIR: outputs_${{ inputs.org }}/${{ matrix.repo }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            echo "claude already installed"
+          else
+            npm install -g @anthropic-ai/claude-code
+          fi
+
+      - name: Setup MCP Servers
+        run: FILESYSTEM_DIRS="." bash scripts/setup_mcp.sh
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Checkout Target: ${{ matrix.repo }}"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.org }}/${{ matrix.repo }}
+          fetch-depth: 0
+          path: target_workspace
+          persist-credentials: false
+
+      - name: "Phase 01a: Spec Discovery"
+        run: |
+          EXTRACTED="outputs_${{ inputs.org }}/${{ matrix.repo }}/EXTRACTED_INPUTS.json"
+          KEYWORDS=$(python3 -c "import json; print(json.load(open('${EXTRACTED}'))['keywords'])")
+          SPEC_URLS=$(python3 -c "import json; print(json.load(open('${EXTRACTED}'))['spec_urls'])")
+          KEYWORDS="${KEYWORDS}" SPEC_URLS="${SPEC_URLS}" \
+            uv run python3 scripts/run_phase.py --phase 01a
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Phase 01b: Subgraph Extraction"
+        run: |
+          uv run python3 scripts/run_phase.py --phase 01b \
+            --workers ${{ inputs.workers }}
+
+      - name: "Phase 01e: Property Generation"
+        run: |
+          uv run python3 scripts/run_phase.py --phase 01e \
+            --workers ${{ inputs.workers }}
+
+      - name: "Phase 02c: Code Pre-resolution"
+        run: |
+          uv run python3 scripts/run_phase.py --phase 02c \
+            --workers ${{ inputs.workers }} \
+            --max-concurrent ${{ inputs.max_concurrent }}
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Phase 03: Audit Map"
+        run: |
+          uv run python3 scripts/run_phase.py --phase 03 \
+            --workers ${{ inputs.workers }} \
+            --max-concurrent ${{ inputs.max_concurrent }}
+
+      - name: "Phase 04: Review"
+        run: |
+          uv run python3 scripts/run_phase.py --phase 04 \
+            --workers ${{ inputs.workers }} \
+            --max-concurrent ${{ inputs.max_concurrent }}
+
+      - name: Push Results
+        if: always()
+        run: |
+          git config --local user.name "Security Agent Bot"
+          git config --local user.email "bot@nyxfoundation.org"
+          git add outputs_${{ inputs.org }}/${{ matrix.repo }}/
+          if ! git diff --staged --quiet; then
+            git pull origin "${{ needs.setup.outputs.branch }}" --rebase || true
+            git commit -m "audit: ${{ inputs.org }}/${{ matrix.repo }} complete"
+            git push origin "${{ needs.setup.outputs.branch }}" --force-with-lease
+          fi
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: audit-logs-${{ matrix.repo }}-${{ github.run_id }}
+          path: outputs_${{ inputs.org }}/${{ matrix.repo }}/logs/
+          retention-days: 14
+
+  summary:
+    needs: [setup, audit]
+    runs-on: self-hosted
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup.outputs.branch }}
+          fetch-depth: 0
+
+      - name: Generate Summary
+        run: |
+          echo "## Organization Audit: ${{ inputs.org }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | Phase 01a | 01b | 01e | 02c | 03 | 04 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|-----------|-----|-----|-----|----|----|" >> $GITHUB_STEP_SUMMARY
+
+          for repo_dir in outputs_${{ inputs.org }}/*/; do
+            repo_name=$(basename "${repo_dir}")
+            [ "${repo_name}" = "AUDIT_MANIFEST.json" ] && continue
+            row="| ${repo_name} |"
+            for phase in 01a 01b 01e 02c 03 04; do
+              count=$(ls "${repo_dir}${phase}_PARTIAL_"*.json 2>/dev/null | wc -l | tr -d ' ')
+              row="${row} ${count} |"
+            done
+            echo "${row}" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ needs.setup.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
