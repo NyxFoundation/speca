@@ -1,0 +1,153 @@
+{
+  "repo": "sf-kosen/brir-spatializer",
+  "audit_date": "2026-04-11",
+  "findings": [
+    {
+      "id": "BS-001",
+      "severity": "High",
+      "title": "Path traversal in static file server",
+      "description": "The ServeStaticAsync method in WebUiBridgeController constructs a file path by combining a root directory with a user-supplied URL path. Although Path.GetFullPath is not used to canonicalize the final candidate path, the use of Path.Combine with a user-controlled 'relativePath' (derived from the HTTP request URL) can allow directory traversal via sequences like '../' to read arbitrary files from the filesystem. The code does not validate that the resolved 'candidate' path remains under the 'root' directory. An attacker who can reach the HTTP listener on 127.0.0.1:4176 could craft a request such as GET /../../etc/passwd or GET /..\\..\\Windows\\System32\\config\\SAM to read sensitive files.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "491-534",
+      "cwe": "CWE-22",
+      "recommendation": "After resolving the candidate path, canonicalize it with Path.GetFullPath and verify that it starts with the root directory (also canonicalized). Return 404 if the path escapes the root. Example: if (!Path.GetFullPath(candidate).StartsWith(Path.GetFullPath(root))) { response.StatusCode = 404; response.Close(); return; }"
+    },
+    {
+      "id": "BS-002",
+      "severity": "Medium",
+      "title": "Unauthenticated local HTTP API accepts arbitrary commands",
+      "description": "The embedded HTTP server on 127.0.0.1:4176 exposes /api/command (POST) and /api/state (GET) endpoints with no authentication, no CSRF protection, and no origin validation. Any application or script running on the same machine (including malicious web pages via CSRF if the browser permits localhost requests) can issue commands to change audio routing, start/stop playback, and modify device settings. The HandleCommand method processes 'setInputDevice', 'setOutputDevice', 'startLive', 'stopLive', and other commands without verifying the caller's identity.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "420-458",
+      "cwe": "CWE-306",
+      "recommendation": "Add authentication to the local HTTP API (e.g., a random bearer token generated at startup and passed to the WebView). Validate the Origin header on incoming requests to block cross-origin CSRF. Consider binding to a random port instead of a fixed port to reduce predictability."
+    },
+    {
+      "id": "BS-003",
+      "severity": "Medium",
+      "title": "Arbitrary file read via preset BrirPath deserialization",
+      "description": "Preset JSON files loaded via PresetStore.Load can specify arbitrary filesystem paths in the 'BrirPath' and 'BrirSet.Paths' fields. When a malicious preset is loaded, IrLoader.LoadBrir will attempt to open and read any file on the filesystem as a WAV file. While the file must be a valid 4-channel WAV to be fully processed, the attempt to read arbitrary paths can be used for information disclosure (file existence checks) or denial of service (attempting to read very large files into memory). The OfflineRenderer and MainViewModel also pass user/preset-supplied paths directly to AudioFileReader and WaveFileWriter with no path validation.",
+      "file": "BrirSpatializer.Audio/Ir/IrLoader.cs",
+      "line": "14-21",
+      "cwe": "CWE-73",
+      "recommendation": "Validate and restrict file paths from preset files to an allowlist of directories (e.g., an Assets folder). Reject paths containing '..' sequences or absolute paths outside expected directories. Apply similar validation in OfflineRenderer.Render for inputPath and outputPath."
+    },
+    {
+      "id": "BS-004",
+      "severity": "Medium",
+      "title": "Arbitrary file write via OfflineRenderer output path",
+      "description": "OfflineRenderer.Render accepts an outputPath parameter and calls Directory.CreateDirectory on its parent, then writes a WAV file to it. When invoked from MainViewModel.TryExportCurrentPreset or MainShellViewModel.TryConvertFile, the outputPath originates from user input (file dialog). A manipulated path could write files to sensitive locations. The method also creates directories as needed, which could be used to create arbitrary directory structures.",
+      "file": "BrirSpatializer.Audio/OfflineRenderer.cs",
+      "line": "47-48",
+      "cwe": "CWE-73",
+      "recommendation": "Validate the output path against an allowlist of safe directories before writing. Canonicalize with Path.GetFullPath and ensure it does not escape the intended output location."
+    },
+    {
+      "id": "BS-005",
+      "severity": "Medium",
+      "title": "Unbounded memory allocation from malicious WAV file",
+      "description": "IrLoader.LoadBrir reads WAV file samples into a List<float> with no upper bound check on the total data size before accumulation. A crafted WAV file with an extremely large declared sample count (or an infinite stream from a corrupted header) could cause unbounded memory allocation leading to OutOfMemoryException and application crash (denial of service). The _maxLengthFrames limit is only applied after all samples have already been read into memory.",
+      "file": "BrirSpatializer.Audio/Ir/IrLoader.cs",
+      "line": "35-48",
+      "cwe": "CWE-770",
+      "recommendation": "Check the declared file length (reader.Length / reader.WaveFormat.BlockAlign) against _maxLengthFrames before reading samples. Stop reading once the maximum allowed samples have been accumulated rather than reading all samples first and truncating afterward."
+    },
+    {
+      "id": "BS-006",
+      "severity": "Low",
+      "title": "Exception message disclosure in HTTP error response",
+      "description": "The HandleHttpRequestAsync method catches all exceptions and returns the exception message as JSON in the HTTP response body (status 500). Exception messages can contain internal implementation details, file paths, and stack information that could aid an attacker in understanding the application's internals.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "465-473",
+      "cwe": "CWE-209",
+      "recommendation": "Return a generic error message to the client. Log the detailed exception internally for debugging purposes only."
+    },
+    {
+      "id": "BS-007",
+      "severity": "Low",
+      "title": "Fixed well-known port for local HTTP server",
+      "description": "The local web server always binds to http://127.0.0.1:4176/. Any local process or user can predict this port and interact with the API. If another application is already bound to this port, the application may fail to start or may connect to a rogue server.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "14",
+      "cwe": "CWE-289",
+      "recommendation": "Use a dynamically allocated port (bind to port 0 and retrieve the assigned port) and pass the port to the WebView. This prevents port squatting and reduces the attack surface for local CSRF."
+    },
+    {
+      "id": "BS-008",
+      "severity": "Low",
+      "title": "Parent directory traversal in legacy settings path construction",
+      "description": "Multiple classes (WebUiBridgeController.LoadInitialRouteState, LivePlaybackSession.LoadLegacyPreset, MainShellViewModel.GetLegacyLastSettingsPath) construct a settings file path by navigating four parent directories up from AppContext.BaseDirectory using repeated '..' segments. This hard-coded relative path navigation is fragile and could reference unintended directories if the application is deployed in an unexpected location, potentially reading or trusting a settings file placed by an attacker in a predictable path.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "537-548",
+      "cwe": "CWE-426",
+      "recommendation": "Use a well-defined configuration directory (e.g., %APPDATA% or a subdirectory of the application's base directory) rather than navigating multiple parent directories. Validate the resolved path before reading."
+    },
+    {
+      "id": "BS-009",
+      "severity": "Low",
+      "title": "Deserialization of untrusted JSON preset files without schema validation",
+      "description": "PresetStore.Load deserializes JSON preset files using System.Text.Json without any schema validation or content sanitization. While System.Text.Json is not vulnerable to the deserialization attacks that affect BinaryFormatter or Newtonsoft.Json with TypeNameHandling, malformed or adversarial JSON input could set unexpected property values (e.g., extreme numeric values for audio parameters like DriftTargetBufferMs, BlockSize) leading to resource exhaustion or unexpected behavior.",
+      "file": "BrirSpatializer.Audio/Presets/PresetStore.cs",
+      "line": "18-24",
+      "cwe": "CWE-502",
+      "recommendation": "Validate deserialized preset values against acceptable ranges after loading. Add bounds checks for numeric parameters (e.g., BlockSize, DriftTargetBufferMs, XfadeMs) to prevent extreme values."
+    },
+    {
+      "id": "BS-010",
+      "severity": "Low",
+      "title": "Python script uses ctypes.windll to call Win32 API without error handling",
+      "description": "The generate_brir.py script calls ctypes.windll.kernel32.GetShortPathNameW with a large buffer (32768 chars) but only checks for zero return. The function could potentially be called with untrusted path input that, while unlikely in this context, could interact unexpectedly with the Win32 API layer.",
+      "file": "Scripts/generate_brir.py",
+      "line": "40-48",
+      "cwe": "CWE-242",
+      "recommendation": "Ensure the path parameter is validated before passing to the native API. Consider using Python's pathlib for path manipulation instead of ctypes calls to native Win32 functions."
+    },
+    {
+      "id": "BS-011",
+      "severity": "Informational",
+      "title": "Python dependencies pinned without versions in requirements.txt",
+      "description": "The requirements.txt file lists dependencies (pyroomacoustics, numpy, scipy, soundfile, sofar) without version constraints. This means pip install will fetch the latest versions, which could introduce breaking changes or, in a supply chain attack scenario, pull a compromised package version.",
+      "file": "requirements.txt",
+      "line": "1-5",
+      "cwe": "CWE-1104",
+      "recommendation": "Pin dependencies to specific tested versions (e.g., numpy==1.26.4) or use version ranges with upper bounds. Use a lock file (pip-compile, pipenv, or poetry) for reproducible builds."
+    },
+    {
+      "id": "BS-012",
+      "severity": "Informational",
+      "title": "WebView2 context menu disabled but browser accelerator keys remain enabled",
+      "description": "The WebView2 configuration disables context menus (AreDefaultContextMenusEnabled = false) but leaves browser accelerator keys enabled (AreBrowserAcceleratorKeysEnabled = true). This allows users to use keyboard shortcuts like Ctrl+P (print), Ctrl+U (view source), F12 (dev tools), and Ctrl+Shift+I (inspector) which could expose internal application state or allow page navigation away from the intended UI.",
+      "file": "BrirPlayer.Next.App/Web/WebUiBridgeController.cs",
+      "line": "40-42",
+      "cwe": "CWE-668",
+      "recommendation": "Set AreBrowserAcceleratorKeysEnabled to false if developer tools and browser navigation are not needed in production builds. Alternatively, selectively handle specific accelerator keys through the AcceleratorKeyPressed event."
+    },
+    {
+      "id": "BS-013",
+      "severity": "Informational",
+      "title": "Workspace state stored in localStorage without integrity protection",
+      "description": "The React WebUI stores workspace configuration (device IDs, preset, seat position, volume, exclusive mode) in browser localStorage under the key 'brirplayer-next-workspace'. Since the content is loaded within a WebView2 control, any code injection via the WebView (XSS or browser extension) could tamper with these settings to alter audio routing behavior on the next application launch.",
+      "file": "BrirPlayer.Next.WebUI/src/App.tsx",
+      "line": "213-225",
+      "cwe": "CWE-922",
+      "recommendation": "Since this is a local desktop application, the risk is limited. For defense in depth, validate all loaded workspace values against acceptable ranges before use."
+    },
+    {
+      "id": "BS-014",
+      "severity": "Informational",
+      "title": "No hardcoded secrets or tokens found",
+      "description": "A comprehensive review of all source files found no hardcoded API keys, tokens, passwords, or other secrets. The codebase handles only local audio device IDs and file paths, with no network authentication or remote service integration.",
+      "file": "N/A",
+      "line": "N/A",
+      "cwe": "N/A",
+      "recommendation": "No action required. Continue following this practice."
+    }
+  ],
+  "summary": {
+    "critical": 0,
+    "high": 1,
+    "medium": 3,
+    "low": 4,
+    "informational": 4
+  }
+}
