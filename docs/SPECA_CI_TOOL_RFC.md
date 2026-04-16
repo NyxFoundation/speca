@@ -1,61 +1,59 @@
 # SPECA CI ツール化 要件定義書
 
-> **目的:** Ethereum Foundation グラント (採択済) の成果物として、SPECA を EF の CI パイプラインに統合可能な1コマンドツールにする。
-> **バージョン:** 1.0 (Draft)
+> **目的:** Ethereum Foundation グラント (採択済) の成果物として、SPECA を任意の CI 環境に統合可能な1コマンドツールにする。
+> **バージョン:** 2.0 (SaaS モデル採用)
 > **最終更新:** 2026-04-16
 
 ---
 
 ## 0. エグゼクティブサマリ
 
-本リポジトリには既に **`.github/workflows/full-audit.yml`** ("hiro Full Audit Pipeline") という形で、`workflow_dispatch` に入力を送るだけでパイプライン全体が走り、結果ブランチ `audit/{target}/{timestamp}` に成果物が出る仕組みが存在する。
+本リポジトリには既に 2 つの「入力 → 成果物返却」フローが存在する:
 
-> **つまり「入力 → Action 実行 → 成果物が返ってくる」というフローは既に完成している。**
+1. **`.github/workflows/full-audit.yml`** — `workflow_dispatch` にパラメータを送るとパイプライン全体が走り結果ブランチが作られる
+2. **Web クライアント (PR #100)** — Web フォームから上記ワークフローを起動し、ユーザーはプロンプト等の中身を一切見ない
 
-本 RFC のゴールは、このパターンを **再利用可能な GitHub Action** (`nyxfoundation/speca-action@v1`) として切り出し、**EF の任意のリポジトリから1行呼び出すだけで同じフローが動く**状態にすることである。
+**本 RFC のゴール:** Web クライアントが実現している「中身を見せずに結果だけ返す」パターンを、**CI ツール版**として切り出す。どの CI (GitHub Actions / GitLab CI / CircleCI / Jenkins / ローカル) からでも 1 コマンドで呼び出せ、SARIF/JSON が返る。
 
-検出ロジック（プロンプト・スキル・キャリブレーション）は**業界最高水準ツールとして逆解析攻撃から保護するため非公開**とし、Worker 外殻のみ OSS 公開する（Semgrep Pro / CrowdStrike / Cloudflare WAF と同じ方針）。
+> **プロダクトの本体は `speca` CLI / Docker イメージ (CI 非依存)**。
+> GitHub Action 等は、それを呼ぶ薄いラッパーの 1 つに過ぎない。
 
-### 現行 `full-audit.yml` とツール版の対応
+### Web クライアントと CI ツールの構造対応
 
-| 項目 | 現行 `full-audit.yml` | ツール版 (`speca-action@v1`) |
+| | Web クライアント (既存) | **CI ツール (今回)** |
 |---|---|---|
-| トリガー | `workflow_dispatch` (本リポ内のみ) | `uses:` (任意のリポジトリから) |
-| 入力 | `bug_bounty_url`, `target_repo`, `spec_urls` 等 | 同等（Action `inputs` として公開） |
-| 実行主体 | `self-hosted` ランナー | EF の `ubuntu-latest` or self-hosted |
-| `claude` バイナリ | `npm install -g @anthropic-ai/claude-code` | Docker イメージに内蔵 |
-| MCP セットアップ | `bash scripts/setup_mcp.sh` | Docker イメージに内蔵 |
-| プロンプト・スキル | リポ内 `prompts/` `.claude/skills/` を参照 | **暗号化 Payload として Nyx から配信** |
-| 成果物出力 | 結果ブランチ `audit/{target}/{timestamp}` にコミット | SARIF + PR コメント + Workflow Artifact |
-| 結果の閲覧 | 結果ブランチを手動で確認 | GitHub Security タブ自動表示 |
-
-**要するに、既存フローの「外殻化・汎用化・秘匿化」が今回の作業。**
+| ユーザー入口 | Web フォーム | CLI / Docker コマンド |
+| 転送手段 | `workflow_dispatch` API | HTTPS REST API |
+| 実行主体 | Nyx のプライベートリポで `full-audit.yml` | Nyx のバックエンドで同等パイプライン |
+| ユーザーが見るもの | Findings のみ | Findings のみ (SARIF/JSON) |
+| プロンプト・スキル・DB | **見えない** (private repo 内) | **見えない** (Nyx バックエンド内) |
+| ローテ・暗号化・TEE | 不要 | 不要 |
 
 ---
 
 ## 1. ユーザーストーリー
 
-### 1.1 プライマリユースケース
+### 1.1 プライマリユースケース (CI 非依存)
 
-**EF コントリビューターとして、**
-PR を作成すると、SPECA が自動で:
+**任意のプロジェクトのメンテナとして、**
+CI に `speca` を組み込むと:
 
-1. 変更コードと関連仕様を読み取り
+1. PR またはコミット単位でターゲットコードと関連仕様を読み取り
 2. 仕様逸脱・既知脆弱性パターン・STRIDE/CWE リスクを検出
-3. GitHub Security タブと PR コメントに結果を表示
-4. High 深刻度以上があれば CI を失敗させる
+3. SARIF / JSON / Markdown で結果を出力
+4. 深刻度閾値を超える findings があれば exit code 1 で CI を失敗させる
 
-**設定は GitHub Secrets に API キー2枚 + workflow に 6 行追加するだけ。**
+### 1.2 ユースケース例
 
-### 1.2 対象 EF リポジトリ (パイロット候補)
-
-| 優先度 | リポジトリ | 理由 |
+| ユーザー | ユースケース | 想定 CI |
 |---|---|---|
-| P0 | `ethereum/execution-specs` | 仕様駆動、Python、スコープ明確 |
-| P0 | `paradigmxyz/reth` | Rust EL クライアント、活発 |
-| P1 | `ethereum/consensus-specs` | CL 仕様 |
-| P1 | `prysmaticlabs/prysm` | Go CL クライアント |
-| P2 | `ethereum/go-ethereum` | Go EL クライアント |
+| Ethereum Foundation (最初のパイロット) | `execution-specs` / `reth` 等の PR ごと監査 | GitHub Actions |
+| DeFi プロトコルチーム | Solidity 変更前の自動監査 | GitHub Actions / GitLab CI |
+| 監査会社 | コンテスト支援・プレ監査 | ローカル CLI |
+| エンタープライズ | 内部 Jenkins パイプラインへの組込 | Jenkins |
+| 個人監査人 | ラップトップで手元実行 | ローカル CLI |
+
+※ EF グラントでの最初のパイロット先は Ethereum 関連だが、**プロダクト自体は汎用 CI ツール**。
 
 ---
 
@@ -63,98 +61,114 @@ PR を作成すると、SPECA が自動で:
 
 | ID | 成果物 | 配布先 | ライセンス |
 |---|---|---|---|
-| D1 | `speca-worker` Docker イメージ | `ghcr.io/nyxfoundation/speca-worker:vX.Y.Z` | Apache-2.0 (外殻) |
-| D2 | `speca-action` GitHub Action | `nyxfoundation/speca-action@v1` | Apache-2.0 |
-| D3 | 暗号化 Payload (プロンプト・スキル・DB) | Nyx 配信鯖 (月次ローテ) | **Proprietary (非公開)** |
-| D4 | EF リポジトリ統合 PR | EF 側リポジトリ | — |
-| D5 | ベンチマーク・論文 | arXiv / EF レポート | CC-BY-4.0 |
-| D6 | セキュリティ保証書 (脅威モデル) | EF 提出 | — |
+| D1 | `speca` CLI (Python パッケージ) | PyPI `speca` | Apache-2.0 (外殻) |
+| D2 | `speca` Docker イメージ | `ghcr.io/nyxfoundation/speca:v1` | Apache-2.0 |
+| D3 | Nyx バックエンド API (実行基盤) | Nyx 自己ホスト | **Proprietary (非公開)** |
+| D4 | GitHub Action ラッパー (例) | `nyxfoundation/speca-action@v1` | Apache-2.0 |
+| D5 | GitLab CI テンプレート・CircleCI Orb (例) | 各マーケットプレイス | Apache-2.0 |
+| D6 | EF パイロットリポ統合 PR | EF 側リポ | — |
+| D7 | ベンチマーク・論文 | arXiv | CC-BY-4.0 |
+| D8 | セキュリティ保証書 (脅威モデル) | EF 提出 | — |
 
 ---
 
 ## 3. ユーザー体験 (UX)
 
-### 3.1 セットアップ (1回のみ)
+### 3.1 共通: 必要な Secret
+
+CI の secret に以下を登録:
 
 ```
-GitHub Secrets に登録:
-  ANTHROPIC_API_KEY = sk-ant-xxxxx   # EF が Anthropic と契約
-  SPECA_LICENSE_KEY = spc_xxxxx      # Nyx から EF に発行
+SPECA_API_KEY = spc_xxxxx   # Nyx から発行
 ```
 
-### 3.2 Workflow (最小構成、6 行)
+これだけ。Anthropic API キーは Nyx 側で管理する (グラント枠) ので、EF は持つ必要なし。
 
-**本リポジトリの `full-audit.yml` と同じ入力を、EF 側は 1 行の `uses:` で呼ぶだけ:**
+### 3.2 GitHub Actions
 
 ```yaml
-# .github/workflows/speca.yml (EF リポジトリ側)
-on:
-  workflow_dispatch:
-    inputs:
-      bug_bounty_url: { required: true }
-      spec_urls: { required: false, default: "" }
-
+# .github/workflows/speca.yml
+on: [pull_request]
 jobs:
-  speca-audit:
+  audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: nyxfoundation/speca-action@v1
         with:
-          anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          license-key: ${{ secrets.SPECA_LICENSE_KEY }}
-          bug-bounty-url: ${{ inputs.bug_bounty_url }}
-          spec-urls: ${{ inputs.spec_urls }}
-```
-
-**PR トリガーで自動実行するバージョン (推奨):**
-
-```yaml
-# .github/workflows/speca-on-pr.yml
-on:
-  pull_request:
-    branches: [main]
-
-jobs:
-  speca:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: nyxfoundation/speca-action@v1
-        with:
-          anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          license-key: ${{ secrets.SPECA_LICENSE_KEY }}
+          api-key: ${{ secrets.SPECA_API_KEY }}
           spec-urls: https://eips.ethereum.org/EIPS/eip-7702
-          mode: incremental      # PR の diff のみ監査
+          mode: incremental
 ```
 
-### 3.3 高度な設定 (オプション)
+### 3.3 GitLab CI
 
 ```yaml
-- uses: nyxfoundation/speca-action@v1
-  with:
-    anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
-    license-key: ${{ secrets.SPECA_LICENSE_KEY }}
-    spec-urls: |
-      https://eips.ethereum.org/EIPS/eip-7702
-      https://eips.ethereum.org/EIPS/eip-4844
-    scope-include: "src/**/*.rs,crates/**/*.rs"
-    scope-exclude: "**/test/**,**/mocks/**"
-    mode: incremental          # full | incremental | properties_only
-    diff-base: main            # incremental 時の比較元
-    fail-on: high              # none | low | medium | high
-    budget-usd: 50
-    budget-minutes: 30
-    output-format: sarif       # sarif | json | markdown
+speca:
+  image: ghcr.io/nyxfoundation/speca:v1
+  script:
+    - speca scan
+        --repo=$CI_PROJECT_PATH
+        --commit=$CI_COMMIT_SHA
+        --spec-url=https://eips.ethereum.org/EIPS/eip-7702
+        --api-key=$SPECA_API_KEY
+        --output=findings.sarif
+  artifacts:
+    reports:
+      sast: findings.sarif
 ```
 
-### 3.4 出力
+### 3.4 CircleCI
+
+```yaml
+jobs:
+  audit:
+    docker:
+      - image: ghcr.io/nyxfoundation/speca:v1
+    steps:
+      - run: speca scan --repo=<< pipeline.project.git_url >>
+                        --commit=$CIRCLE_SHA1
+                        --api-key=$SPECA_API_KEY
+                        --output=findings.sarif
+      - store_artifacts:
+          path: findings.sarif
+```
+
+### 3.5 Jenkins (Declarative Pipeline)
+
+```groovy
+pipeline {
+  agent any
+  stages {
+    stage('SPECA Audit') {
+      steps {
+        sh '''docker run ghcr.io/nyxfoundation/speca:v1 scan \
+              --repo="${GIT_URL}" --commit="${GIT_COMMIT}" \
+              --api-key="${SPECA_API_KEY}" --output=findings.sarif'''
+        archiveArtifacts 'findings.sarif'
+      }
+    }
+  }
+}
+```
+
+### 3.6 ローカル CLI
+
+```bash
+pip install speca
+speca scan --repo=ethereum/execution-specs --commit=abc123 \
+           --spec-url=https://eips.ethereum.org/EIPS/eip-7702 \
+           --api-key=$SPECA_API_KEY \
+           --output=findings.sarif
+```
+
+### 3.7 出力
 
 | 出力先 | 形式 | 用途 |
 |---|---|---|
-| GitHub Security タブ | SARIF v2.1.0 | 脆弱性一覧・トリアージ |
-| PR コメント | Markdown | 要約・インラインコメント |
-| Workflow Artifact | `speca-findings.json` + `speca-findings.sarif` | ダウンロード・長期保存 |
+| SARIF ファイル | v2.1.0 | GitLab/GitHub Security UI / エディタ連携 |
+| JSON ファイル | 独自形式 | 機械可読・長期保存 |
+| Markdown ファイル | PR/MR コメント用 | サマリ表示 |
+| Stdout (JSON stream) | 進捗・ライブ findings | リアルタイム監視 |
 | Exit code | `0`=clean / `1`=findings≥threshold / `2`=tool error | CI ゲート |
 
 ---
@@ -164,203 +178,257 @@ jobs:
 ### 4.1 全体像
 
 ```
-┌───────────────────────────────────────────────┐        ┌──────────────────────┐
-│ EF リポジトリ CI (GitHub-hosted runner)        │        │ Nyx 配信鯖           │
-│                                                │        │ (小規模 VPS 1台)     │
-│ ┌──────────────────────────────────────────┐  │        │                      │
-│ │ speca-action (OSS, 約 100 行)             │  │        │ /v1/auth             │
-│ │   ├─ inputs パース                        │  │        │ /v1/payload/latest   │
-│ │   ├─ worker コンテナ起動                  │  │        │ /v1/telemetry        │
-│ │   └─ 結果を GitHub API へ投稿             │  │        │                      │
-│ └──────────┬───────────────────────────────┘  │        └──────────────────────┘
-│            ↓                                   │                  ▲
-│ ┌──────────────────────────────────────────┐  │                  │ HTTPS
-│ │ speca-worker (Docker, Cosign 署名済)      │  │                  │
-│ │   ├─ License 認証                         │──┼──────────────────┘
-│ │   ├─ 暗号化 Payload ダウンロード           │←─┤
-│ │   ├─ メモリ上で復号 (ディスク書き込み禁止) │  │                  ×
-│ │   ├─ 対象リポを読み取り                    │  │    ❌ Nyx にコードは送信されない
-│ │   ├─ Anthropic API 呼び出し                │──┼──► Anthropic
-│ │   │  (EF の API キーで、EF が課金)         │  │
-│ │   └─ Findings 生成 → SARIF 変換            │  │
-│ └──────────┬───────────────────────────────┘  │
-│            ↓                                   │
-│   speca-findings.sarif (ローカル出力)         │
-└───────────────────────────────────────────────┘
+┌─────────────────────────────┐        ┌──────────────────────────────────┐
+│ User's CI (任意環境)         │        │ Nyx Backend (private)             │
+│                             │        │                                  │
+│ ┌─────────────────────────┐ │        │ ┌──────────────────────────────┐ │
+│ │ speca CLI / Docker       │ │ HTTPS │ │ API Gateway                   │ │
+│ │                          │─┼───────►│ │   POST /v1/scans             │ │
+│ │ 約 300 行の HTTP クライ   │ │        │ │   GET  /v1/scans/{id}        │ │
+│ │ アント + SARIF 整形       │ │        │ │   GET  /v1/scans/{id}/results│ │
+│ │                          │◄┼────────│ └──────────────────────────────┘ │
+│ └─────────────────────────┘ │        │             ↓                    │
+│                             │        │ ┌──────────────────────────────┐ │
+│ 出力:                       │        │ │ Job Scheduler                │ │
+│   findings.sarif            │        │ │ (Redis / PostgreSQL queue)   │ │
+│   findings.json             │        │ └──────────────────────────────┘ │
+│                             │        │             ↓                    │
+└─────────────────────────────┘        │ ┌──────────────────────────────┐ │
+                                       │ │ Worker Fleet                  │ │
+                                       │ │ (security-agent を clone した │ │
+                                       │ │  private repo を実行)         │ │
+                                       │ │                              │ │
+                                       │ │  ・ターゲットリポ clone       │ │
+                                       │ │  ・full-audit.yml 相当を実行 │ │
+                                       │ │    (01a → 04 パイプライン)   │ │
+                                       │ │  ・Anthropic API 呼び出し    │ │
+                                       │ │    (Nyx のキー, グラント枠)  │ │
+                                       │ └──────────────────────────────┘ │
+                                       │             ↓                    │
+                                       │ ┌──────────────────────────────┐ │
+                                       │ │ Result Store (S3 / DB)       │ │
+                                       │ │   SARIF / JSON / ログ         │ │
+                                       │ └──────────────────────────────┘ │
+                                       └──────────────────────────────────┘
 ```
 
 ### 4.2 データフロー
 
-| データ | 流れ | 秘匿 |
+| データ | 誰 → 誰 | 備考 |
 |---|---|---|
-| EF のコード | EF CI ローカル → Anthropic (EF 契約) | Nyx に届かない |
-| 仕様 URL | EF CI ローカル → Anthropic | Nyx に届かない |
-| Payload (プロンプト等) | Nyx → Worker メモリ (暗号化) | 暗号化 + RAM のみ |
-| Findings | Worker → GitHub Security タブ (ローカル) | EF ローカルのみ |
-| テレメトリ | Worker → Nyx (使用量・成功失敗・所要時間) | コード/仕様は含まない |
+| Scan request | User CI → Nyx API | `{repo, commit, spec_urls, scope}` |
+| ターゲットコード | GitHub → Nyx Worker | Nyx が直接 git clone (パブリックリポの場合) |
+| プロンプト・スキル・DB | Nyx 内部のみ | 外部に出ない |
+| Anthropic 呼び出し | Nyx Worker → Anthropic | Nyx のキー使用 |
+| Findings | Nyx → User CI | SARIF/JSON のみ |
+| テレメトリ | User CI → Nyx | 使用量のみ (findings の統計は含まない) |
 
 ### 4.3 コンポーネント詳細
 
-#### (A) `speca-action` (OSS, Apache-2.0)
+#### (A) `speca` CLI (OSS, Apache-2.0)
+
+- Python 実装、`pip install speca`
+- Docker イメージとしても配布 (`ghcr.io/nyxfoundation/speca:v1`)
+- 役割:
+  - 引数パース・設定読み込み (`.speca.yml`)
+  - Nyx API への HTTPS リクエスト
+  - ジョブ進捗ポーリング
+  - SARIF/JSON/Markdown 整形・出力
+  - Exit code 判定
+- コードベース規模: 約 300〜500 行
+- **内部ロジック (プロンプト等) は一切含まない** — 全て API 越し
+
+#### (B) Nyx Backend (Proprietary)
+
+- **API Gateway**: FastAPI / Cloudflare Workers
+- **Job Queue**: Redis Stream / PostgreSQL LISTEN/NOTIFY
+- **Worker Fleet**: Kubernetes Jobs / Fly Machines / AWS Batch
+  - 各 Worker は `security-agent` リポ (private fork) をベースに動作
+  - 既存の `full-audit.yml` 相当のパイプラインを内部実行
+  - プロンプト・スキル・過去 DB は Worker ローカルに存在
+- **Result Store**: S3 互換 (Cloudflare R2 / Wasabi) + PostgreSQL メタデータ
+- **Anthropic API**: Nyx が直接契約、グラント枠で EF 負担ゼロ
+
+#### (C) GitHub Action ラッパー (OSS)
 
 - `action.yml` + `entrypoint.sh`
-- Docker ベース Action
-- 入力検証・worker 起動・結果整形・GitHub API 投稿
-- 約 100〜200 行
-
-#### (B) `speca-worker` (OSS 外殻 + 非公開 Payload)
-
-**OSS 部分 (Apache-2.0):**
-- `entrypoint.py`: メインエントリ
-- `license.py`: ライセンス認証・Payload 取得
-- `crypto.py`: AES-256-GCM 復号
-- `runner.py`: Anthropic SDK 呼び出しラッパー
-- `sarif.py`: SARIF v2.1.0 エクスポート
-- `diff.py`: incremental モード用 diff 解析
-
-**非公開 Payload (暗号化):**
-- プロンプト (01a〜04)
-- スキル (spec-discovery, subgraph-extractor)
-- 過去 DB (`past_defi_patterns.csv` 等)
-- 重大度キャリブレーション・3ゲート FP フィルタロジック
-- オーケストレーション制御パラメータ
-
-#### (C) Nyx 配信鯖
-
-- FastAPI + SQLite/PostgreSQL
-- エンドポイント:
-  - `POST /v1/auth`: ライセンス検証 → セッション鍵発行
-  - `GET /v1/payload/latest`: 暗号化 Payload 配布
-  - `POST /v1/telemetry`: 使用量収集 (コード送信なし)
-- 小規模 VPS 1 台で運用可能 (Hetzner Cloud 等、月額 $10 程度)
-- 月次で Payload を再ビルドして配信
+- 単に `docker run ghcr.io/nyxfoundation/speca:v1 scan ...` を実行
+- GitHub イベント (`pull_request`, `push`) から自動的に `repo`/`commit`/`diff-base` を抽出
+- 結果を GitHub Security タブに投稿
 
 ---
 
-## 5. 機密性 (秘匿) 要件
+## 5. API 設計 (抜粋)
 
-### 5.1 脅威モデル
+### 5.1 スキャン開始
+
+```http
+POST /v1/scans
+Authorization: Bearer spc_xxxxx
+Content-Type: application/json
+
+{
+  "target": {
+    "repo": "ethereum/execution-specs",
+    "commit": "abc123...",
+    "scope": {
+      "include": ["src/**/*.py"],
+      "exclude": ["tests/**"]
+    }
+  },
+  "spec": {
+    "sources": ["https://eips.ethereum.org/EIPS/eip-7702"]
+  },
+  "mode": "incremental",
+  "diff_base": "main",
+  "gate": { "fail_on": "high" }
+}
+```
+
+レスポンス:
+```http
+202 Accepted
+{ "scan_id": "scn_xyz", "status_url": "/v1/scans/scn_xyz" }
+```
+
+### 5.2 進捗確認
+
+```http
+GET /v1/scans/scn_xyz
+→ 200 OK
+{
+  "scan_id": "scn_xyz",
+  "status": "running",
+  "progress": 0.42,
+  "phase": "03_audit_map",
+  "partial_findings_count": 3,
+  "eta_seconds": 245
+}
+```
+
+### 5.3 結果取得
+
+```http
+GET /v1/scans/scn_xyz/results?format=sarif
+→ 200 OK
+Content-Type: application/sarif+json
+
+{ "version": "2.1.0", "runs": [...] }
+```
+
+---
+
+## 6. 機密性 (秘匿) 要件
+
+### 6.1 何を守るか
+
+| 資産 | 秘匿手段 |
+|---|---|
+| プロンプト (01a〜04) | Nyx バックエンド内のみに存在、外部に出ない |
+| スキル (spec-discovery 等) | 同上 |
+| 過去 DB パターン | 同上 |
+| 重大度キャリブレーション | 同上 |
+| オーケストレーター内部ロジック | 同上 |
+| **プロダクトの独自価値** | API 越しに結果だけ返すため **逆解析不可能** |
+
+### 6.2 脅威モデル
 
 | 脅威 | 対象 | 対策 |
 |---|---|---|
-| T1: 攻撃者がプロンプトを入手し、検出を回避する攻撃パターンを作成 | プロンプト・スキル | 暗号化 + RAM 復号 + 月次ローテ |
-| T2: Payload バイナリの改竄 | Worker イメージ | Cosign 署名 + SLSA Level 3 |
-| T3: Nyx 鯖への侵入 | Payload ソース | アクセス制御 + 監査ログ |
-| T4: メモリダンプによる復号済 Payload 抽出 | Worker 実行中メモリ | プロセス分離 + (オプション) TEE |
-| T5: EF 側からの漏洩 | ライセンス鍵 | ローテ機構 + EF との NDA |
+| T1: プロンプト抽出攻撃 (findings からの逆推論) | 出力データ | 出力を必要最小限に絞る (内部 property ID をハッシュ化) |
+| T2: Nyx バックエンドへの侵入 | プロンプト・DB | 一般的なセキュリティ対策 (IAM, 監査ログ, WAF) |
+| T3: API キー流出 | スキャン枠の悪用 | 使用量上限 + 失効機能 + ログ監視 |
+| T4: ターゲットコードの漏洩 | ユーザーのコード | TLS + 完了後自動削除 + 監査ログ |
 
-### 5.2 秘匿層
+### 6.3 Web クライアントと同じ秘匿性が得られる理由
 
-| レイヤー | 実装 |
-|---|---|
-| 1. **暗号化** | AES-256-GCM、ライセンス鍵派生 |
-| 2. **RAM-only 復号** | tmpfs 不使用、`mlock()` で swap 防止 |
-| 3. **署名検証** | Cosign + SLSA provenance |
-| 4. **月次ローテ** | プロンプトを毎月再生成、漏洩の時限化 |
-| 5. **NDA** | EF との法的拘束 |
-| 6. **TEE (将来)** | AWS Nitro Enclaves / Intel SGX |
+Web クライアントは `workflow_dispatch` で Nyx の private repo 上でパイプラインを動かし、ユーザーは結果だけ見る構造。
 
-### 5.3 何を守れないか (受け入れるリスク)
+CI ツールは HTTPS API で Nyx の private backend 上で同等のパイプラインを動かし、ユーザーは結果だけ見る構造。
 
-- 十分なリソースを持つ攻撃者による active memory inspection (live debugger 接続)
-- 出力 (findings) からのプロンプト挙動の部分的逆推論 (十分な試行で可能)
-- Anthropic API トラフィックの観察 (EF 側ネットワーク管理者は可能)
-
-これらは **月次ローテ** と **findings の情報量削減 (内部プロパティ ID をハッシュ化)** で影響を限定する。
+**どちらも「実行環境が Nyx 側」であることが秘匿の源泉。** 暗号化・TEE・ローテといった複雑な仕組みは不要。
 
 ---
 
-## 6. 機能要件 (Functional Requirements)
+## 7. 機能要件 (Functional Requirements)
 
 ### FR-1: 実行モード
 
-- **full mode**: 対象リポジトリ全体を監査 (週次などの定期実行向け)
-- **incremental mode**: `diff-base` からの変更ファイルに関連するプロパティのみ評価 (PR ごと、< 10 分)
-- **properties_only mode**: 仕様からプロパティ生成のみ (`05` PoC や手動分析前処理)
+- **full mode**: リポ全体を監査 (週次・リリース前)
+- **incremental mode**: `diff-base` からの変更ファイルに関連するプロパティのみ (PR ごと、< 10 分)
+- **properties_only mode**: 仕様からプロパティ生成のみ
 
 ### FR-2: 入力
 
-- 対象リポジトリ (GitHub Action の checkout 済ディレクトリ)
+- ターゲットリポ (URL + commit SHA)
 - 仕様 URL リスト (EIP / markdown / PDF)
 - スコープ (glob include/exclude)
-- 予算 (USD / 分)
 - 深刻度ゲート
 
 ### FR-3: 出力
 
-- SARIF v2.1.0 (必須)
-- JSON (機械可読)
-- Markdown (PR コメント用)
-- GitHub Security タブ自動投稿
-- PR コメント自動投稿 (インライン対応)
+- SARIF v2.1.0
+- JSON (独自、機械可読)
+- Markdown (人間可読)
+- Stdout stream (ライブ進捗)
+- Exit code 規約
 
-### FR-4: Ethereum 特化
+### FR-4: プライベートリポ対応 (オプション機能)
+
+パブリックリポは Nyx が直接 clone 可能。プライベートリポの場合:
+
+- **Option A**: GitHub App 連携 (ユーザーが Nyx GitHub App をインストール、Nyx は OAuth トークンで一時 clone)
+- **Option B**: ユーザー側で tar 化して API にアップロード (完了後自動削除)
+- **Option C** (将来): On-premise エンタープライズ版 (暗号化 payload + Self-hosted Worker)
+
+### FR-5: Ethereum 特化
 
 - EIP 標準チェック (ERC-20/721/1155/4337)
-- ハードフォーク仕様差分 (Altair/Bellatrix/Deneb/Electra)
-- ビーコンチェーン特化プロパティ (fork choice / attestation)
-- EL クライアント特化 (Rust: reth / Go: geth, prysm)
+- ハードフォーク仕様差分認識
+- ビーコンチェーン特化プロパティ
+- EL/CL クライアント特化 (reth / geth / prysm / lighthouse)
 
-### FR-5: 決定論・再現性
+### FR-6: 決定論・再現性
 
-- モデルバージョンピン (`claude-opus-4-6` 等)
-- LLM レスポンスキャッシュ (キー: `hash(spec) + hash(code) + model_id + prompt_version`)
-- `replay` モードでキャッシュから再実行可能
+- モデルバージョンピン
+- LLM レスポンスキャッシュ (Nyx 側、同一入力で再実行時高速化)
+- `replay` API で過去のスキャンを再実行
 
-### FR-6: コスト制御
+### FR-7: コスト制御
 
-- Worker 起動時に USD 上限・時間上限を設定
+- スキャン単位で budget 設定可能
 - 上限到達で即時中断、部分結果を返す
-- `BudgetExceeded` を SARIF notification として記録
 
 ---
 
-## 7. 非機能要件 (Non-Functional Requirements)
+## 8. 非機能要件 (NFR)
 
 | NFR | 目標 |
 |---|---|
-| NFR-1: 実行時間 (incremental) | < 10 分 (PR ゲート許容範囲) |
-| NFR-2: 実行時間 (full) | < 4 時間 |
+| NFR-1: incremental mode 実行時間 | < 10 分 |
+| NFR-2: full mode 実行時間 | < 4 時間 |
 | NFR-3: Issue Recall (Sherlock ベンチ) | ≥ 0.3 (現状 0.273) |
 | NFR-4: FP Rate (Phase 04 後) | ≤ 20% |
-| NFR-5: Nyx 配信鯖の可用性 | 99.5% (障害時は Worker がキャッシュで動作) |
-| NFR-6: Worker イメージサイズ | < 500 MB |
-| NFR-7: Payload ダウンロード時間 | < 30 秒 |
-| NFR-8: SARIF 準拠 | v2.1.0 完全準拠、GitHub UI で正常表示 |
+| NFR-5: API 可用性 | 99.5% |
+| NFR-6: CLI 起動時間 | < 3 秒 |
+| NFR-7: SARIF 準拠 | v2.1.0 完全準拠 |
+| NFR-8: CI 統合の最小記述 | 5 行以内 |
 
 ---
 
-## 8. インフラ要件
+## 9. インフラ要件 (Nyx 側)
 
-### 8.1 Nyx 側
-
-| コンポーネント | 技術候補 |
-|---|---|
-| 配信鯖 | FastAPI on Hetzner Cloud / Fly.io |
-| DB (ライセンス・テレメトリ) | SQLite or PostgreSQL |
-| Payload ストレージ | S3 互換 (Wasabi / R2) |
-| シークレット管理 | HashiCorp Vault / age |
-| CDN (Payload 配信) | Cloudflare |
-| 監視 | Grafana Cloud free tier |
-
-### 8.2 CI 側 (EF)
-
-| 要件 | 詳細 |
-|---|---|
-| Runner | GitHub-hosted `ubuntu-latest` or self-hosted |
-| Docker | `speca-worker` を docker/OCI で実行 |
-| 必要リソース | 2 vCPU / 4 GB RAM 最低 |
-| ネットワーク | Anthropic API + Nyx 配信鯖への outbound 許可 |
-
----
-
-## 9. セキュリティ要件 (EF 側)
-
-- EF は `ANTHROPIC_API_KEY` を自己管理 (Anthropic 直接契約)
-- `SPECA_LICENSE_KEY` は EF のセキュリティチームが管理
-- Worker コンテナは `--read-only` で起動可能 (書き込みは `/tmp` のみ)
-- ネットワークは Anthropic API + Nyx 鯖以外を遮断可能 (Docker `--network` 制約対応)
-- テレメトリは opt-out 可能 (`send-telemetry: false`)
+| コンポーネント | 技術候補 | 用途 |
+|---|---|---|
+| API Gateway | FastAPI + uvicorn on Fly.io | HTTPS エンドポイント |
+| Job Queue | Redis Streams / Celery | 非同期ジョブ管理 |
+| Worker Fleet | Kubernetes / Fly Machines / AWS Batch | パイプライン実行 |
+| Worker Image | `security-agent` private fork | 現行コードそのまま流用 |
+| Result Store | Cloudflare R2 / S3 | SARIF・ログ保存 |
+| メタデータ DB | PostgreSQL | ジョブ状態・使用量 |
+| 監視 | Grafana Cloud / Sentry | SLA 監視 |
+| シークレット | HashiCorp Vault / AWS Secrets Manager | Anthropic キー等 |
+| CDN | Cloudflare | API レイテンシ削減 |
 
 ---
 
@@ -368,30 +436,33 @@ jobs:
 
 | M | 期間 | 目標 | 検証可能な成果 |
 |---|---|---|---|
-| **M1** | 3週 | Anthropic SDK 移行 + 外殻 worker スケルトン | 空 SARIF 出力が `ghcr` から動作 |
-| **M2** | 2週 | 暗号化 Payload + 軽量ライセンス鯖 | 月次ローテ可能な最小鯖が動作 |
-| **M3** | 2週 | `speca-action` v1 + SARIF 完全対応 | テストリポで GitHub Security タブ表示 |
-| **M4** | 3週 | Incremental mode + diff 解析 + PR コメント | PR 単位で < 10 分実行達成 |
-| **M5** | 3週 | EF リポジトリパイロット (`execution-specs` or `reth`) | 実 PR で監査実行・レポート提出 |
-| **M6** | 2週 | Cosign 署名 + SLSA L3 + ドキュメント | 署名検証可能 + EF 向け報告書完成 |
+| **M1** | 2週 | Nyx API Gateway + Job Queue 最小構成 | `curl POST /v1/scans` が受理される |
+| **M2** | 3週 | Worker で既存 `full-audit.yml` 相当を実行 | 1スキャンが通して完了する |
+| **M3** | 2週 | `speca` CLI (Python, pip 配布) | `speca scan` で SARIF が返る |
+| **M4** | 2週 | Docker イメージ + GitHub Action ラッパー | `uses: nyxfoundation/speca-action@v1` が動く |
+| **M5** | 2週 | Incremental mode + diff 解析 + キャッシュ | PR 単位 < 10 分達成 |
+| **M6** | 3週 | EF リポパイロット (`execution-specs` or `reth`) | 実 PR で監査・レポート提出 |
+| **M7** | 2週 | GitLab CI / CircleCI / Jenkins のサンプル + ドキュメント | 複数 CI 統合デモ |
+| **M8** | 2週 | Cosign 署名 + ベンチマーク論文 + EF 報告書 | グラント完了書類提出 |
 
-**合計: 15 週 (約 4 ヶ月)**
+**合計: 18 週 (約 4.5 ヶ月)**
 
 ---
 
 ## 11. 成功判定基準
 
 ### EF グラント成果としての定義
-- [ ] EF 指定リポジトリ (少なくとも 1 つ) で `speca-action` が CI に統合され、PR 単位で動作している
-- [ ] Issue Recall ≥ 0.3、FP Rate ≤ 20% を達成
-- [ ] GitHub Security タブに SARIF findings が正常表示
-- [ ] EF セキュリティチームから秘匿性・運用性について承認を得ている
-- [ ] ベンチマーク論文 (RQ1/RQ2a) を arXiv 投稿済み
+- [ ] EF 指定リポジトリ (少なくとも 1 つ) に `speca` が CI 統合され PR 単位で動作
+- [ ] Issue Recall ≥ 0.3、FP Rate ≤ 20% 達成
+- [ ] SARIF が各 CI の標準 UI (GitHub Security タブ / GitLab SAST レポート等) に表示
+- [ ] 3 種類以上の CI (GitHub Actions / GitLab CI / ローカル CLI) で動作確認済み
+- [ ] ベンチマーク論文 arXiv 投稿済み
 
-### ユーザー (EF 開発者) としての成功
-- [ ] `uses:` 1 行追加だけで監査が走る
+### ユーザーとしての成功
+- [ ] `docker run` or `uses:` 1 行で監査開始
 - [ ] PR ごとに自動実行され、開発フローを阻害しない (< 10 分)
 - [ ] 誤検知で CI が無駄に失敗しない (FP ≤ 20%)
+- [ ] ツールの中身を一切意識する必要がない
 
 ---
 
@@ -399,115 +470,74 @@ jobs:
 
 | リスク | 影響 | 緩和策 |
 |---|---|---|
-| R1: Claude モデル仕様変更 | 出力フォーマット破綻 | モデルピン + レスポンスキャッシュテスト |
-| R2: Anthropic API レートリミット | CI が失敗 | Worker 内リトライ + 段階的バックオフ |
-| R3: Nyx 配信鯖の障害 | Worker 起動不可 | キャッシュで最後の Payload を使用 (N 日間) |
-| R4: プロンプト漏洩 | 攻撃者による回避 | 月次ローテで影響時限化 |
-| R5: EF 側の `ANTHROPIC_API_KEY` 流出 | 金銭被害 | EF 側の責任、ドキュメントで明記 |
-| R6: SPECA 出力の過検出 | 開発者信頼失墜 | `fail-on` デフォルトを `high` に限定、段階的引き上げ |
+| R1: Nyx バックエンド障害 | 全ユーザーの CI が失敗 | マルチリージョン冗長化 + フェイルオープンオプション |
+| R2: Anthropic API レートリミット | スキャン遅延 | Nyx 側で queue 管理 + バックオフ |
+| R3: Claude モデル仕様変更 | 出力破綻 | モデルピン + 回帰テスト自動化 |
+| R4: API キー流出 | スキャン枠悪用 | 使用量上限 + rate limit + 失効機構 |
+| R5: プライベートリポ対応遅延 | エンタープライズ採用不可 | GitHub App 連携を M7 以降で追加 |
+| R6: EF リポの clone 権限問題 | Nyx がパブリックリポを落とせない | GitHub トークン併用 + フォールバック tarball アップロード |
+| R7: Nyx 運用コスト超過 | 持続可能性リスク | グラント期間中はグラント負担、以後は段階的課金検討 |
 
 ---
 
-## 13. オープン課題 (議論が必要)
+## 13. オープン課題
 
-1. **EF リポジトリの具体的なパイロット対象** — `execution-specs` と `reth` のどちらを先に？
-2. **Payload 配信先** — Nyx 自己ホスト vs. Cloudflare R2 / S3 署名 URL
-3. **ライセンス鍵管理** — EF 内で部署ごとに発行？ 単一鍵？
-4. **テレメトリ範囲** — 成功/失敗のみ？ findings カテゴリ統計も含める？
-5. **月次 Payload ローテ運用** — 誰が毎月リリースするか、ローテ失敗時の手動復旧手順
-6. **リソース見積もり** — 15 週のエンジニアリング体制 (何人月か)
+1. **パイロット先**: `execution-specs` と `reth` どちらを先に？
+2. **プライベートリポ対応優先度**: M3 に前倒すか？ M7 で良いか？
+3. **Anthropic API 負担**: 全面 Nyx 負担か、ユーザー提供 API キーでの動作モードも残すか？
+4. **Result 保持期間**: SARIF/JSON は何日保存するか？ GDPR 対応?
+5. **GitHub App の名前空間**: `nyxfoundation/speca-app` で良いか？
+6. **18 週の開発体制**: 何人月か？ フロントエンド (ダッシュボード) は含めるか？
 
 ---
 
 ## 14. 参考情報
 
-- 現行パイプライン: `scripts/orchestrator/`, `prompts/01*-04*.md`
-- 秘匿配信の類似事例: Semgrep Pro Rules, CrowdStrike Falcon, Cloudflare WAF
+- 現行パイプライン: `scripts/orchestrator/`, `prompts/01*-04*.md`, `.github/workflows/full-audit.yml`
+- Web クライアント (構造の元): PR #100 (`web/src/pages/AuditWizardPage.tsx`)
+- 類似プロダクト: Snyk / Semgrep Cloud / Checkmarx One (SaaS 型セキュリティスキャナ)
 - SARIF 仕様: https://sarifweb.azurewebsites.net/
-- GitHub Action ベストプラクティス: https://docs.github.com/en/actions/creating-actions/about-custom-actions
 - SLSA: https://slsa.dev/
-- Cosign: https://docs.sigstore.dev/cosign/overview/
 
 ---
 
 ## 15. 次のアクション
 
 1. 本 RFC のレビュー・承認
-2. **`.github/workflows/full-audit.yml` を `action.yml` に変換** (既存フローの再利用可能化)
-3. M1 着手: `worker/` ディレクトリ作成 + Anthropic SDK 移行開始
-4. `speca-action` リポジトリの新規作成 (または本リポ内 `action/` で開発)
-5. Payload 配信鯖用 Hetzner Cloud インスタンス準備
+2. **M1 着手**: Nyx API Gateway の最小スケルトン (`api/` ディレクトリ)
+3. **M2 準備**: 現行 `full-audit.yml` を Worker image に内包する仕組みの設計
+4. **M3 並行**: `speca` CLI の OSS リポジトリ分離検討 (`nyxfoundation/speca-cli`)
+5. Nyx バックエンド用クラウドインフラ準備 (Fly.io / Cloudflare R2 等)
 
 ---
 
-## 16. 現行 `full-audit.yml` からの移行パス
+## 16. 旧モデル (暗号化 Payload + Self-hosted Worker) との比較
 
-### Step 1: 既存フローの抽象化
-現行 `full-audit.yml` の各ステップを汎用化:
+参考として、RFC v1.0 で検討していた「暗号化 Payload + Self-hosted Worker」モデルとの比較:
 
-| ステップ | 現行 | Action 化後 |
+| 項目 | 旧モデル (暗号化 Payload) | **新モデル (SaaS)** |
 |---|---|---|
-| 0a: Bug Bounty スコープ抽出 | リポ内スクリプト | Docker イメージ内に内蔵 |
-| 0b: ターゲットリポ checkout | `actions/checkout` + ref 指定 | 入力から自動実行 |
-| 0c: TARGET_INFO.json 生成 | インライン bash | Worker が生成 |
-| 0d: 入力解決 | Claude --print | Worker が SDK で実行 |
-| Phase 01a〜04 | `uv run scripts/run_phase.py` | Worker が SDK で実行 |
-| 結果ブランチ commit & push | `git` コマンド | オプション (SARIF 出力がデフォルト) |
+| 実行場所 | ユーザー環境 | **Nyx バックエンド** |
+| プロンプト秘匿 | 暗号化 + RAM 復号 + 月次ローテ | **サーバー側にのみ存在** |
+| 実装複雑度 | 高 (Cosign / mlock / TEE 検討) | **低 (既存パイプラインをAPI越しに提供)** |
+| ユーザーのコード流出リスク | なし (ローカル実行) | あり (Nyx 側で一時処理) → TLS + 自動削除 |
+| Anthropic API 負担 | ユーザー | **Nyx** |
+| ユーザーから中身抽出の困難さ | 中 (メモリダンプリスク) | **極めて困難** (API 越しのため) |
+| 運用コスト | 低 (配信鯖のみ) | 中 (実行基盤必要) |
+| パブリックリポ対応 | ✓ | ✓ |
+| プライベートリポ対応 | ✓ (自動) | △ (GitHub App 連携等) |
 
-### Step 2: `action.yml` ドラフト
+**結論:** Ethereum のパブリックリポ前提なら SaaS モデルが優位。プライベートリポ対応が必須のエンタープライズ向けにのみ旧モデルを選択肢として残す (Section 17)。
 
-```yaml
-# action.yml (公開 Action の定義)
-name: 'SPECA Security Audit'
-description: 'Automated security audit powered by SPECA'
-branding:
-  icon: 'shield'
-  color: 'blue'
+---
 
-inputs:
-  anthropic-key:
-    description: 'Anthropic API key (your own account)'
-    required: true
-  license-key:
-    description: 'SPECA license key from Nyx Foundation'
-    required: true
-  bug-bounty-url:
-    description: 'Bug bounty program URL (optional)'
-    required: false
-  spec-urls:
-    description: 'Specification URLs (comma/newline separated)'
-    required: false
-  scope-include:
-    description: 'Glob patterns for files to include'
-    required: false
-  scope-exclude:
-    description: 'Glob patterns for files to exclude'
-    required: false
-  mode:
-    description: 'full | incremental | properties_only'
-    default: 'incremental'
-  fail-on:
-    description: 'Severity threshold for CI failure'
-    default: 'high'
-  budget-usd:
-    description: 'Maximum USD budget'
-    default: '50'
-  output-format:
-    description: 'sarif | json | markdown'
-    default: 'sarif'
+## 17. 補足: オンプレミス版 (将来オプション)
 
-outputs:
-  findings-count:
-    description: 'Total number of findings'
-  high-count:
-    description: 'Number of high severity findings'
-  sarif-path:
-    description: 'Path to generated SARIF file'
+プライベートコード・機密案件向けに、将来的にオンプレミス版を提供する場合:
 
-runs:
-  using: 'docker'
-  image: 'docker://ghcr.io/nyxfoundation/speca-worker:v1'
-```
+- `speca-onprem` Docker イメージ
+- 暗号化 Payload を Nyx 配信鯖からダウンロード
+- ユーザー環境内で完結、コードも結果も外に出ない
+- 月次ローテ + Cosign 署名 + (オプション) TEE
 
-### Step 3: 本リポで動作確認
-`maketool` ブランチで `action.yml` を作成し、本リポの別 workflow から `uses: ./` で呼び出して動作確認。これが通ったら外部リポジトリへ `v1` タグで公開。
+これは EF グラントのスコープ外。グラント完了後の商用オプションとして検討。
