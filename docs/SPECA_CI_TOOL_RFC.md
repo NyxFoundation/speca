@@ -8,9 +8,28 @@
 
 ## 0. エグゼクティブサマリ
 
-研究用非同期パイプライン (`scripts/run_phase.py` + 6 フェーズ) として運用されている現行 SPECA を、**GitHub Action のワンライナーで動く CI ツール**に再構成する。EF 開発者は `speca-action@v1` を workflow に1行追加するだけで、仕様整合性監査・脆弱性検出・SARIF レポート生成が自動実行される。
+本リポジトリには既に **`.github/workflows/full-audit.yml`** ("hiro Full Audit Pipeline") という形で、`workflow_dispatch` に入力を送るだけでパイプライン全体が走り、結果ブランチ `audit/{target}/{timestamp}` に成果物が出る仕組みが存在する。
+
+> **つまり「入力 → Action 実行 → 成果物が返ってくる」というフローは既に完成している。**
+
+本 RFC のゴールは、このパターンを **再利用可能な GitHub Action** (`nyxfoundation/speca-action@v1`) として切り出し、**EF の任意のリポジトリから1行呼び出すだけで同じフローが動く**状態にすることである。
 
 検出ロジック（プロンプト・スキル・キャリブレーション）は**業界最高水準ツールとして逆解析攻撃から保護するため非公開**とし、Worker 外殻のみ OSS 公開する（Semgrep Pro / CrowdStrike / Cloudflare WAF と同じ方針）。
+
+### 現行 `full-audit.yml` とツール版の対応
+
+| 項目 | 現行 `full-audit.yml` | ツール版 (`speca-action@v1`) |
+|---|---|---|
+| トリガー | `workflow_dispatch` (本リポ内のみ) | `uses:` (任意のリポジトリから) |
+| 入力 | `bug_bounty_url`, `target_repo`, `spec_urls` 等 | 同等（Action `inputs` として公開） |
+| 実行主体 | `self-hosted` ランナー | EF の `ubuntu-latest` or self-hosted |
+| `claude` バイナリ | `npm install -g @anthropic-ai/claude-code` | Docker イメージに内蔵 |
+| MCP セットアップ | `bash scripts/setup_mcp.sh` | Docker イメージに内蔵 |
+| プロンプト・スキル | リポ内 `prompts/` `.claude/skills/` を参照 | **暗号化 Payload として Nyx から配信** |
+| 成果物出力 | 結果ブランチ `audit/{target}/{timestamp}` にコミット | SARIF + PR コメント + Workflow Artifact |
+| 結果の閲覧 | 結果ブランチを手動で確認 | GitHub Security タブ自動表示 |
+
+**要するに、既存フローの「外殻化・汎用化・秘匿化」が今回の作業。**
 
 ---
 
@@ -65,8 +84,16 @@ GitHub Secrets に登録:
 
 ### 3.2 Workflow (最小構成、6 行)
 
+**本リポジトリの `full-audit.yml` と同じ入力を、EF 側は 1 行の `uses:` で呼ぶだけ:**
+
 ```yaml
-# .github/workflows/speca.yml
+# .github/workflows/speca.yml (EF リポジトリ側)
+on:
+  workflow_dispatch:
+    inputs:
+      bug_bounty_url: { required: true }
+      spec_urls: { required: false, default: "" }
+
 jobs:
   speca-audit:
     runs-on: ubuntu-latest
@@ -76,6 +103,29 @@ jobs:
         with:
           anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
           license-key: ${{ secrets.SPECA_LICENSE_KEY }}
+          bug-bounty-url: ${{ inputs.bug_bounty_url }}
+          spec-urls: ${{ inputs.spec_urls }}
+```
+
+**PR トリガーで自動実行するバージョン (推奨):**
+
+```yaml
+# .github/workflows/speca-on-pr.yml
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  speca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nyxfoundation/speca-action@v1
+        with:
+          anthropic-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          license-key: ${{ secrets.SPECA_LICENSE_KEY }}
+          spec-urls: https://eips.ethereum.org/EIPS/eip-7702
+          mode: incremental      # PR の diff のみ監査
 ```
 
 ### 3.3 高度な設定 (オプション)
@@ -383,6 +433,81 @@ jobs:
 ## 15. 次のアクション
 
 1. 本 RFC のレビュー・承認
-2. M1 着手: `worker/` ディレクトリ作成 + Anthropic SDK 移行開始
-3. `speca-action` リポジトリの新規作成 (または本リポ内 `action/` で開発)
-4. Payload 配信鯖用 Hetzner Cloud インスタンス準備
+2. **`.github/workflows/full-audit.yml` を `action.yml` に変換** (既存フローの再利用可能化)
+3. M1 着手: `worker/` ディレクトリ作成 + Anthropic SDK 移行開始
+4. `speca-action` リポジトリの新規作成 (または本リポ内 `action/` で開発)
+5. Payload 配信鯖用 Hetzner Cloud インスタンス準備
+
+---
+
+## 16. 現行 `full-audit.yml` からの移行パス
+
+### Step 1: 既存フローの抽象化
+現行 `full-audit.yml` の各ステップを汎用化:
+
+| ステップ | 現行 | Action 化後 |
+|---|---|---|
+| 0a: Bug Bounty スコープ抽出 | リポ内スクリプト | Docker イメージ内に内蔵 |
+| 0b: ターゲットリポ checkout | `actions/checkout` + ref 指定 | 入力から自動実行 |
+| 0c: TARGET_INFO.json 生成 | インライン bash | Worker が生成 |
+| 0d: 入力解決 | Claude --print | Worker が SDK で実行 |
+| Phase 01a〜04 | `uv run scripts/run_phase.py` | Worker が SDK で実行 |
+| 結果ブランチ commit & push | `git` コマンド | オプション (SARIF 出力がデフォルト) |
+
+### Step 2: `action.yml` ドラフト
+
+```yaml
+# action.yml (公開 Action の定義)
+name: 'SPECA Security Audit'
+description: 'Automated security audit powered by SPECA'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  anthropic-key:
+    description: 'Anthropic API key (your own account)'
+    required: true
+  license-key:
+    description: 'SPECA license key from Nyx Foundation'
+    required: true
+  bug-bounty-url:
+    description: 'Bug bounty program URL (optional)'
+    required: false
+  spec-urls:
+    description: 'Specification URLs (comma/newline separated)'
+    required: false
+  scope-include:
+    description: 'Glob patterns for files to include'
+    required: false
+  scope-exclude:
+    description: 'Glob patterns for files to exclude'
+    required: false
+  mode:
+    description: 'full | incremental | properties_only'
+    default: 'incremental'
+  fail-on:
+    description: 'Severity threshold for CI failure'
+    default: 'high'
+  budget-usd:
+    description: 'Maximum USD budget'
+    default: '50'
+  output-format:
+    description: 'sarif | json | markdown'
+    default: 'sarif'
+
+outputs:
+  findings-count:
+    description: 'Total number of findings'
+  high-count:
+    description: 'Number of high severity findings'
+  sarif-path:
+    description: 'Path to generated SARIF file'
+
+runs:
+  using: 'docker'
+  image: 'docker://ghcr.io/nyxfoundation/speca-worker:v1'
+```
+
+### Step 3: 本リポで動作確認
+`maketool` ブランチで `action.yml` を作成し、本リポの別 workflow から `uses: ./` で呼び出して動作確認。これが通ったら外部リポジトリへ `v1` タグで公開。
