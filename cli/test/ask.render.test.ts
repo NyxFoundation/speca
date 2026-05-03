@@ -15,7 +15,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(workDir, { recursive: true, force: true });
+  // The chat component persists session.json on its own async tail (we don't
+  // await it from inside the test). Give it a moment to settle so rmdir
+  // doesn't race the writer on macOS (ENOTEMPTY otherwise). `maxRetries`
+  // is the Node 16+ way to soak up that residual race on Windows too.
+  await new Promise((r) => setTimeout(r, 50));
+  await fs.rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 function delay(ms: number): Promise<void> {
@@ -115,13 +120,16 @@ describe("<AskChat /> message rendering", () => {
     await delay(20);
     // Ctrl-D byte = 0x04
     stdin.write("");
-    // Allow the async event iteration to finish.
-    await delay(150);
+    // Allow the async event iteration AND the post-turn persistSession
+    // write to finish before unmount + tmpdir teardown.
+    await delay(300);
     const frame = lastFrame() ?? "";
     expect(frame).toContain("You:");
     expect(frame).toContain("hi");
     expect(frame).toContain("Claude:");
     expect(frame).toContain("Hello from the fake assistant.");
     unmount();
+    // One more tick so any Promise resolutions queued by unmount drain.
+    await delay(50);
   });
 });
