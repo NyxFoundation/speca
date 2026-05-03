@@ -7,6 +7,7 @@ import meow from "meow";
 import { createElement } from "react";
 import { LOGIN_HELP, loginCommand } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
+import { BROWSE_HELP, runBrowseCommand } from "./commands/browse.js";
 import { DoctorCommand } from "./commands/doctor.js";
 import { VersionCommand } from "./commands/version.js";
 
@@ -39,6 +40,7 @@ const cli = meow(
     version            Print speca-cli version
     doctor             Check Node / uv / git / claude-code / auth status
     auth <subcommand>  Manage Anthropic credentials (login | status)
+    browse [glob]      Open the finding browser on Phase 03/04 PARTIAL JSON
     help               Print this help
 
   Common flags (reserved for future milestones)
@@ -50,12 +52,19 @@ const cli = meow(
     --mode <max|console>
                        OAuth entitlement source (default: max)
 
+  Browse-specific flags
+    --filter <dsl>     Initial filter expression (severity:/verdict:/prop:/repo:/text:)
+    --severity <lvl>   Shorthand for "severity:<lvl>"
+    --verdict <vrd>    Shorthand for "verdict:<vrd>"
+
   Examples
     $ speca doctor
     $ speca version
     $ speca auth status
     $ speca auth login
     $ speca auth login --api-key sk-ant-api03-...
+    $ speca browse
+    $ speca browse "outputs/04_PARTIAL_*.json" --severity High
 `,
   {
     importMeta: import.meta,
@@ -64,6 +73,9 @@ const cli = meow(
       json: { type: "boolean", default: false },
       apiKey: { type: "string" },
       mode: { type: "string" },
+      filter: { type: "string" },
+      severity: { type: "string" },
+      verdict: { type: "string" },
     },
     autoHelp: false,
     autoVersion: false,
@@ -143,6 +155,27 @@ async function run(): Promise<number> {
     }
     case "auth":
       return runAuth();
+    case "browse": {
+      if (subcommand === "help" || isHelpFlag()) {
+        process.stdout.write(BROWSE_HELP);
+        return 0;
+      }
+      const positional = cli.input.slice(1);
+      const noTui =
+        cli.flags.noTui === true ||
+        process.argv.includes("--no-tui") ||
+        process.argv.includes("--no-tty");
+      return runBrowseCommand({
+        flags: {
+          filter: cli.flags.filter,
+          severity: cli.flags.severity,
+          verdict: cli.flags.verdict,
+          noTui,
+          json: cli.flags.json,
+        },
+        positional,
+      });
+    }
     case "help":
     case "--help":
     case "-h":
