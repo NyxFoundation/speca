@@ -23,6 +23,10 @@ Security-critical software is routinely audited by tools that reason about vulne
 2. **Controlled cross-implementation comparison** under a shared property vocabulary.
 3. **False positives that decompose into interpretable, pipeline-phase-traceable root causes.**
 
+### speca-cli (TUI front-end)
+
+A Node.js + Ink terminal UI for SPECA — `npx speca-cli@next doctor` to bootstrap, then `speca auth login` and `speca init` to configure a target without hand-editing JSON. Currently shipping M2 (`auth` + `init`); pipeline run / browse land in M3+. Full docs: [`cli/README.md`](cli/README.md). Japanese 5-minute quickstart for hirorogo team: [`docs/hiro/cli-quickstart.md`](docs/hiro/cli-quickstart.md).
+
 ### Headline Results
 
 - **Sherlock Ethereum Fusaka Audit Contest** (366 submissions, 10 implementations): SPECA recovers **all 15** in-scope H/M/L vulnerabilities (5H/2M/8L) and independently discovers **4 bugs confirmed by developer fix commits** — including a cryptographic invariant violation absent from all 366 adjudicated contest submissions.
@@ -34,6 +38,7 @@ See [Evaluation](#evaluation) for full numbers and charts.
 ## Table of Contents
 
 - [Why SPECA?](#why-speca)
+- [speca-cli (TUI front-end)](#speca-cli-tui-front-end)
 - [Quick Start](#quick-start)
 - [Demo](#demo)
 - [Architecture](#architecture)
