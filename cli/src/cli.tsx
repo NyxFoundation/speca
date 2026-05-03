@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { render } from "ink";
 import meow from "meow";
 import { createElement } from "react";
+import { printAskHelp, runAskCommand } from "./commands/ask.js";
 import { LOGIN_HELP, loginCommand } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
 import { DoctorCommand } from "./commands/doctor.js";
@@ -39,6 +40,7 @@ const cli = meow(
     version            Print speca-cli version
     doctor             Check Node / uv / git / claude-code / auth status
     auth <subcommand>  Manage Anthropic credentials (login | status)
+    ask [finding-id]   Chat with Claude about a finding (claude-code session)
     help               Print this help
 
   Common flags (reserved for future milestones)
@@ -50,20 +52,34 @@ const cli = meow(
     --mode <max|console>
                        OAuth entitlement source (default: max)
 
+  Ask-specific flags
+    --from <file>      PARTIAL JSON file containing the finding
+    --session <id>     Resume an existing chat session
+    --max-context <n>  Context cap in bytes (default 50000)
+
   Examples
     $ speca doctor
     $ speca version
     $ speca auth status
     $ speca auth login
     $ speca auth login --api-key sk-ant-api03-...
+    $ speca ask --from outputs/04_PARTIAL_W0B0.json finding-001
 `,
   {
     importMeta: import.meta,
     flags: {
+      // `--no-tui` is translated by meow into `tui: false`. We model the
+      // positive form here so subcommands can do `flags.tui === false` to
+      // detect the no-tui flag without depending on meow internals.
+      tui: { type: "boolean", default: true },
       noTui: { type: "boolean", default: false },
       json: { type: "boolean", default: false },
       apiKey: { type: "string" },
       mode: { type: "string" },
+      // `speca ask` flags (ignored by other commands)
+      from: { type: "string" },
+      session: { type: "string" },
+      maxContext: { type: "number" },
     },
     autoHelp: false,
     autoVersion: false,
@@ -143,6 +159,23 @@ async function run(): Promise<number> {
     }
     case "auth":
       return runAuth();
+    case "ask": {
+      const wantsHelp = subcommand === "help" || isHelpFlag();
+      if (wantsHelp) {
+        printAskHelp();
+        return 0;
+      }
+      const positional = cli.input.slice(1);
+      return runAskCommand({
+        positional,
+        flags: {
+          from: cli.flags.from,
+          session: cli.flags.session,
+          maxContext: cli.flags.maxContext,
+          noTui: cli.flags.noTui === true || cli.flags.tui === false,
+        },
+      });
+    }
     case "help":
     case "--help":
     case "-h":
