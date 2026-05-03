@@ -348,6 +348,65 @@ cli/
 
 `macos-14`, `ubuntu-22.04`, `windows-2022`. Every PR must keep all three green. The test suite is `vitest` plus `ink-testing-library` snapshots.
 
+## Polish & customization
+
+`speca-cli` ships a small polish layer that the M3+ subcommands consume — themes, keybind overrides, a generic error modal, and a non-TUI / JSON output mode. None of these change pipeline semantics; they just make the TUI tolerable on a wider range of terminals and embeddable in CI.
+
+### Themes
+
+Three themes ship in v1: `dark` (default), `light`, and `solarized`. Set the active theme in `~/.config/speca/config.toml` (Windows: `%APPDATA%\speca\config.toml`):
+
+```toml
+theme = "dark"   # or "light" / "solarized"
+```
+
+Unknown theme names fall back to `dark` silently — a typo will not crash the CLI. The theme controls the colour palette only; layout is identical across themes so you can switch mid-audit without re-learning the screens.
+
+### Keybind overrides
+
+Every interactive surface routes input through abstract action names (`exit`, `toggle-log`, `filter-mode`, ...). Override the default bindings per action in `config.toml`:
+
+```toml
+[keybinds]
+exit         = ["q", "ctrl+c"]
+toggle-log   = ["l"]
+filter-mode  = ["/"]
+focus-chat   = ["i"]
+```
+
+Each value is a list of key descriptors. A descriptor is one of:
+
+- a single character (`"q"`, `"/"`),
+- an Ink modifier name (`"escape"`, `"return"`, `"upArrow"`, `"pageDown"`, …),
+- a `ctrl+<letter>` chord (`"ctrl+c"`, `"ctrl+l"`).
+
+Actions absent from the config keep their defaults; an empty list disables the override and falls back to the default. The default map is the source of truth — see `cli/src/lib/keybinds/defaults.ts`.
+
+### `--no-tui` / `--json`
+
+Two flags govern non-interactive output and apply to every subcommand once that subcommand integrates them (currently a stub for M3/M4/M5):
+
+- `--no-tui` forces line-by-line plain-text output. Implied automatically when stdout is not a TTY (CI, `tee`, pipes). Override the auto-detection with `SPECA_FORCE_TUI=1` if you really want to keep the TUI under a pipe.
+- `--json` emits one JSON object per line (NDJSON) on stdout. Implies `--no-tui`. Each record carries at minimum `{ "type": "...", "ts": "<ISO8601>" }`; per-subcommand schemas are documented alongside each subcommand once it ships.
+
+Examples (the `--json` schemas are stubbed until M3 lands):
+
+```bash
+# CI-friendly headless run
+speca run --target 04 --no-tui
+
+# NDJSON for downstream dashboards / log shipping
+speca run --target 04 --json | jq -c 'select(.type == "phase-completed")'
+```
+
+### Demos
+
+asciinema recordings of the three flagship flows (`doctor`, `init`, `browse`) live at the URLs below. Recording instructions, scenario list, and re-recording policy are in [`cli/asciinema/README.md`](asciinema/README.md).
+
+- `speca doctor` — _`<TODO>` add asciinema URL once recorded_
+- `speca init` — _`<TODO>` add asciinema URL once recorded_
+- `speca browse` (M4) — _`<TODO>` add asciinema URL once M4 lands_
+
 ## License
 
 MIT. See [`LICENSE`](../LICENSE) at the repository root.
