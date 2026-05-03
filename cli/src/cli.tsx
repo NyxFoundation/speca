@@ -8,6 +8,7 @@ import { createElement } from "react";
 import { LOGIN_HELP, loginCommand } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
 import { DoctorCommand } from "./commands/doctor.js";
+import { printInitHelp, runInitCommand } from "./commands/init.js";
 import { VersionCommand } from "./commands/version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +40,7 @@ const cli = meow(
     version            Print speca-cli version
     doctor             Check Node / uv / git / claude-code / auth status
     auth <subcommand>  Manage Anthropic credentials (login | status)
+    init               Create a new audit project (TARGET_INFO + BUG_BOUNTY_SCOPE)
     help               Print this help
 
   Common flags (reserved for future milestones)
@@ -56,6 +58,7 @@ const cli = meow(
     $ speca auth status
     $ speca auth login
     $ speca auth login --api-key sk-ant-api03-...
+    $ speca init
 `,
   {
     importMeta: import.meta,
@@ -64,6 +67,17 @@ const cli = meow(
       json: { type: "boolean", default: false },
       apiKey: { type: "string" },
       mode: { type: "string" },
+      // `speca init` flags (ignored by other commands)
+      projectName: { type: "string" },
+      targetRepo: { type: "string" },
+      targetCommit: { type: "string" },
+      targetLanguage: { type: "string" },
+      targetLayer: { type: "string" },
+      rubric: { type: "string" },
+      outputDir: { type: "string" },
+      force: { type: "boolean", default: false },
+      yes: { type: "boolean", default: false },
+      nonInteractive: { type: "boolean", default: false },
     },
     autoHelp: false,
     autoVersion: false,
@@ -143,6 +157,28 @@ async function run(): Promise<number> {
     }
     case "auth":
       return runAuth();
+    case "init": {
+      const wantsHelp = subcommand === "help" || isHelpFlag();
+      if (wantsHelp) {
+        printInitHelp();
+        return 0;
+      }
+      const code = await runInitCommand({
+        flags: {
+          projectName: cli.flags.projectName,
+          targetRepo: cli.flags.targetRepo,
+          targetCommit: cli.flags.targetCommit,
+          targetLanguage: cli.flags.targetLanguage,
+          targetLayer: cli.flags.targetLayer,
+          rubric: cli.flags.rubric,
+          outputDir: cli.flags.outputDir,
+          force: cli.flags.force,
+          yes: cli.flags.yes,
+          nonInteractive: cli.flags.nonInteractive,
+        },
+      });
+      return code;
+    }
     case "help":
     case "--help":
     case "-h":
