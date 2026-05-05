@@ -5,9 +5,13 @@ import { fileURLToPath } from "node:url";
 import { render } from "ink";
 import meow from "meow";
 import { createElement } from "react";
+import { AskCommand } from "./commands/ask.js";
+import { BrowseCommand } from "./commands/browse.js";
 import { LOGIN_HELP, loginCommand } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
 import { DoctorCommand } from "./commands/doctor.js";
+import { initCommand } from "./commands/init.js";
+import { RunCommand } from "./commands/run.js";
 import { VersionCommand } from "./commands/version.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -36,12 +40,23 @@ const cli = meow(
     $ speca <command>
 
   Commands
+    init               Set up a new SPECA project (writes TARGET_INFO + scope)
+    run                Launch pipeline with live dashboard
+    browse             Browse findings (interactive table + detail view)
+    ask                Ask Claude about a finding (interactive chat)
     version            Print speca-cli version
     doctor             Check Node / uv / git / claude-code / auth status
     auth <subcommand>  Manage Anthropic credentials (login | status)
     help               Print this help
 
-  Common flags (reserved for future milestones)
+  Run flags
+    --phase <ids...>   Run specific phases (e.g. --phase 01a 01b)
+    --target <id>      Run all phases up to target (resolves deps)
+    --workers <n>      Number of parallel workers (default: 4)
+    --max-concurrent <n>  Max concurrent tasks per worker
+    --force            Force re-execution (bypass resume)
+
+  Common flags
     --no-tui           Force plain-text output (M6)
     --json             Emit machine-readable events on stdout (M3)
 
@@ -64,6 +79,11 @@ const cli = meow(
       json: { type: "boolean", default: false },
       apiKey: { type: "string" },
       mode: { type: "string" },
+      phase: { type: "string", isMultiple: true },
+      target: { type: "string" },
+      workers: { type: "number" },
+      maxConcurrent: { type: "number" },
+      force: { type: "boolean", default: false },
     },
     autoHelp: false,
     autoVersion: false,
@@ -140,6 +160,31 @@ async function run(): Promise<number> {
       } catch {
         return 1;
       }
+    }
+    case "init":
+      return initCommand();
+    case "run": {
+      const app = render(
+        createElement(RunCommand, {
+          phases: cli.flags.phase && cli.flags.phase.length > 0 ? cli.flags.phase : undefined,
+          target: cli.flags.target,
+          workers: cli.flags.workers,
+          maxConcurrent: cli.flags.maxConcurrent,
+          force: cli.flags.force || undefined,
+        }),
+      );
+      await app.waitUntilExit();
+      return 0;
+    }
+    case "browse": {
+      const app = render(createElement(BrowseCommand, {}));
+      await app.waitUntilExit();
+      return 0;
+    }
+    case "ask": {
+      const app = render(createElement(AskCommand, {}));
+      await app.waitUntilExit();
+      return 0;
     }
     case "auth":
       return runAuth();
