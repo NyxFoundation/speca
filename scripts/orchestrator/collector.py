@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -26,6 +26,9 @@ from .schemas import (
     Phase04Partial,
     PartialMetadata,
 )
+
+if TYPE_CHECKING:
+    from .archiver import Archiver
 
 
 # Map phase_id → Pydantic model for the *result_key* wrapper.
@@ -49,8 +52,9 @@ class ResultCollector:
     - Report validation warnings without blocking saves (lenient mode)
     """
 
-    def __init__(self, config: PhaseConfig):
+    def __init__(self, config: PhaseConfig, archiver: "Archiver | None" = None):
         self.config = config
+        self.archiver = archiver
         self.output_dir = get_output_root()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +138,10 @@ class ResultCollector:
             except OSError:
                 pass
             raise
+
+        # Mirror into the archive when one is active.
+        if self.archiver is not None:
+            self.archiver.record_partial(self.config.phase_id, output_path)
 
         return output_path
 

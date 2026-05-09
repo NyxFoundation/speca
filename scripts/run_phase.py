@@ -20,21 +20,122 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import json
+import re
+import subprocess
 import sys
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from orchestrator import create_orchestrator
+from orchestrator.archiver import Archiver
 from orchestrator.base import PhaseAbortError
 from orchestrator.config import get_phase_config, get_phase_chain, PHASE_CONFIGS, resolve_pattern
 from orchestrator.json_events import JsonEventEmitter
 from orchestrator.paths import get_output_root
 from orchestrator.resume import ResumeManager
+
+
+# ---------------------------------------------------------------------------
+# Run-id generation helpers
+# ---------------------------------------------------------------------------
+
+def _get_short_sha() -> str:
+    """Return the first 7 chars of HEAD in the speca repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()[:7]
+    except Exception:
+        pass
+    return "0000000"
+
+
+def _derive_spec_slug() -> str:
+    """Derive a spec slug from BUG_BOUNTY_SCOPE.json, SPEC_URLS, or 'unknown'."""
+    output_root = get_output_root()
+
+    # 1. Try BUG_BOUNTY_SCOPE.json
+    scope_path = output_root / "BUG_BOUNTY_SCOPE.json"
+    if scope_path.exists():
+        try:
+            with open(scope_path, encoding="utf-8") as f:
+                scope = json.load(f)
+            # Look for a program name or similar field
+            name = (
+                scope.get("program_name")
+                or scope.get("name")
+                or scope.get("target")
+                or ""
+            )
+            if name:
+                return _slugify(str(name), 40)
+        except Exception:
+            pass
+        # File exists but we couldn't get a name — still use a hash so it's stable
+        try:
+            content = scope_path.read_bytes()
+            return "scope-" + hashlib.sha256(content).hexdigest()[:6]
+        except Exception:
+            pass
+
+    # 2. Try SPEC_URLS env or first entry
+    spec_urls = os.environ.get("SPEC_URLS", "")
+    if spec_urls:
+        first_url = spec_urls.split(",")[0].strip()
+        if first_url:
+            # Use the last meaningful path segment
+            stem = Path(first_url.rstrip("/")).name or Path(first_url.rstrip("/")).parent.name
+            if stem:
+                return _slugify(stem, 40)
+
+    return "unknown"
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    """Convert *text* to ``[a-z0-9-]+`` slug (max *max_len* chars)."""
+    # Normalize unicode to ASCII approximation by encoding + ignoring errors
+    try:
+        text = text.encode("ascii", errors="ignore").decode("ascii")
+    except Exception:
+        pass
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:max_len].rstrip("-") or "unknown"
+
+
+def make_run_id(spec_slug: str | None = None, sha: str | None = None) -> str:
+    """Generate a run-id in the format ``<ts>-<sha>-<spec-slug>``.
+
+    ``<ts>`` uses ``YYYY-MM-DDTHH-MM-SSZ`` (hyphens instead of colons so the
+    string is a valid path segment on Windows and all POSIX systems).
+    """
+    now = datetime.now(timezone.utc)
+    ts = now.strftime("%Y-%m-%dT%H-%M-%SZ")
+    sha = sha or _get_short_sha()
+    slug = spec_slug if spec_slug is not None else _derive_spec_slug()
+    return f"{ts}-{sha}-{slug}"
+
+
+def _build_env_snapshot(phases: list[str]) -> dict:
+    """Capture a sanitised snapshot of the runtime environment."""
+    return {
+        "KEYWORDS": os.environ.get("KEYWORDS", ""),
+        "SPEC_URLS": os.environ.get("SPEC_URLS", ""),
+        "SPECA_OUTPUT_DIR": os.environ.get("SPECA_OUTPUT_DIR", ""),
+        "ORCHESTRATOR_RUNNER": os.environ.get("ORCHESTRATOR_RUNNER", "claude"),
+        "phases": phases,
+    }
 
 
 # Default configuration (migrated from Makefile)
@@ -185,6 +286,7 @@ async def run_phase(
     min_severity: str | None = None,
     model: str | None = None,
     emitter: JsonEventEmitter | None = None,
+    archiver: Archiver | None = None,
 ) -> bool:
     """Run a single phase with all checks and cleanup."""
     emitter = emitter or JsonEventEmitter(enabled=False)
@@ -254,13 +356,25 @@ async def run_phase(
             # Clear it if not requested, to avoid accidental persistence from outer shell
             del os.environ["FORCE_EXECUTE"]
 
-        orchestrator = create_orchestrator(phase_id, num_workers, max_concurrent)
+        orchestrator = create_orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
 
         # Override model from CLI if provided
         if model is not None:
             prev = orchestrator.config.model
             orchestrator.config.model = model
             print(f"  --model override: {prev} -> {model}")
+
+        # Record model and rendered prompt in the archive
+        if archiver is not None:
+            effective_model = orchestrator.config.model or ""
+            archiver.set_model(phase_id, effective_model)
+            try:
+                prompt_path = Path(orchestrator.config.prompt_path)
+                if prompt_path.exists():
+                    prompt_text = prompt_path.read_text(encoding="utf-8")
+                    archiver.record_prompt(phase_id, prompt_text)
+            except Exception as _arc_e:
+                print(f"[Archiver] warning: could not record prompt for {phase_id}: {_arc_e}", file=sys.stderr)
 
         # Override min_severity from CLI if provided
         if min_severity is not None and orchestrator.config.min_severity is not None:
@@ -347,6 +461,7 @@ async def run_pipeline(
     model: str | None = None,
     target_phase: str | None = None,
     emitter: JsonEventEmitter | None = None,
+    archiver: Archiver | None = None,
 ) -> dict[str, bool]:
     """Run a pipeline of multiple phases."""
     emitter = emitter or JsonEventEmitter(enabled=False)
@@ -361,6 +476,7 @@ async def run_pipeline(
             min_severity=min_severity,
             model=model,
             emitter=emitter,
+            archiver=archiver,
         )
         results[phase_id] = success
         if not success and stop_on_failure:
@@ -448,6 +564,19 @@ def main():
              "event schema.",
     )
 
+    # Archive flags
+    parser.add_argument(
+        "--archive-root",
+        default=None,
+        help="Root directory for run archives (default: <repo>/.speca/runs). "
+             "Also settable via SPECA_ARCHIVE_ROOT env var.",
+    )
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Disable run archiving entirely. Outputs still land in outputs/ as usual.",
+    )
+
     args = parser.parse_args()
 
     # In --json mode, route all decorative output (including the orchestrator's
@@ -477,6 +606,25 @@ def main():
         # Flatten list if nargs=+ was used (['01a', '01b'])
         phases = args.phase
 
+    # --- Archiver setup ---
+    archiver: Archiver | None = None
+    if not args.no_archive:
+        # Determine archive root: CLI flag > env var > default
+        archive_root_str = (
+            args.archive_root
+            or os.environ.get("SPECA_ARCHIVE_ROOT")
+            or str(Path(__file__).resolve().parent.parent / ".speca" / "runs")
+        )
+        archive_root = Path(archive_root_str)
+        run_id = make_run_id()
+        archiver = Archiver(run_id, archive_root)
+        # Write env snapshot
+        archiver.set_env_snapshot(_build_env_snapshot(phases))
+        archiver.set_commit(_get_short_sha())
+        print(f"  Archive: {archiver.run_dir}")
+    else:
+        print(f"  Archive: disabled (--no-archive)")
+
     print(f"Configuration:")
     print(f"  Workers: {args.workers}")
     print(f"  Max Concurrent: {args.max_concurrent}")
@@ -505,20 +653,37 @@ def main():
         force=args.force,
     )
 
-    results = asyncio.run(
-        run_pipeline(
-            phases,
-            args.workers,
-            args.max_concurrent,
-            args.force,
-            target_layer=args.target_layer,
-            out_of_scope_layers=args.out_of_scope_layers,
-            min_severity=args.min_severity,
-            model=args.model,
-            target_phase=args.target if args.target else None,
-            emitter=emitter,
+    pipeline_error: str | None = None
+    try:
+        results = asyncio.run(
+            run_pipeline(
+                phases,
+                args.workers,
+                args.max_concurrent,
+                args.force,
+                target_layer=args.target_layer,
+                out_of_scope_layers=args.out_of_scope_layers,
+                min_severity=args.min_severity,
+                model=args.model,
+                target_phase=args.target if args.target else None,
+                emitter=emitter,
+                archiver=archiver,
+            )
         )
-    )
+    except Exception as _pipe_err:
+        pipeline_error = str(_pipe_err)
+        results = {}
+
+    # Finalize the archive
+    if archiver is not None:
+        all_ok = pipeline_error is None and all(results.values()) if results else pipeline_error is None
+        if all_ok:
+            archiver.finalize("ok")
+        else:
+            archiver.finalize("error", reason=pipeline_error or "one or more phases failed")
+
+    if pipeline_error is not None:
+        raise RuntimeError(pipeline_error)
 
     emitter.emit(
         "pipeline-completed",
@@ -526,7 +691,7 @@ def main():
         results=results,
         duration_s=round(time.time() - pipeline_start, 2),
     )
-    
+
     print(f"\n{'='*60}")
     print("Pipeline Summary")
     print(f"{'='*60}")
@@ -534,14 +699,14 @@ def main():
     for phase_id in phases:
         if phase_id in results:
             success = results[phase_id]
-            status = "✅ Success" if success else "❌ Failed"
+            status = "Success" if success else "Failed"
             print(f"  Phase {phase_id}: {status}")
             if not success:
                 all_success = False
         else:
-             print(f"  Phase {phase_id}: ⏭️  Skipped/Not reached")
+             print(f"  Phase {phase_id}: Skipped/Not reached")
 
-    
+
     if not all_success:
         sys.exit(1)
 
