@@ -140,6 +140,29 @@ class TestRecordPartial:
         missing = tmp_path / "does_not_exist.json"
         archiver.record_partial("01a", missing)  # should not raise
 
+    def test_idempotent_short_circuits_when_dest_exists(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        """Re-mirroring the same partial on a re-run must short-circuit:
+        no os.link, no shutil.copy2 (avoids the noisy fallback that PR #55
+        review called out)."""
+        src = tmp_path / "01a_PARTIAL_W0B0_444.json"
+        src.write_text('{"x": 1}', encoding="utf-8")
+
+        # First mirror — actually links/copies into the archive.
+        archiver.record_partial("01a", src)
+        dest = archiver.run_dir / "phases" / "01a" / "partials" / src.name
+        assert dest.exists()
+
+        # Second mirror — must not invoke os.link OR shutil.copy2.
+        with (
+            patch("os.link") as mock_link,
+            patch("shutil.copy2") as mock_copy,
+        ):
+            archiver.record_partial("01a", src)
+            mock_link.assert_not_called()
+            mock_copy.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 3. RunManifest round-trip
@@ -381,7 +404,159 @@ class TestSpecSlug:
 
 
 # ---------------------------------------------------------------------------
-# 9. record_prompt records sha in manifest
+# 9. record_cost — manifest delta accounting (regression for PR #55 review)
+# ---------------------------------------------------------------------------
+
+class TestRecordCost:
+    def test_multi_batch_uses_delta_not_cumulative(self, archiver: Archiver):
+        """record_cost receives a monotonically increasing cumulative figure
+        per phase; the manifest total must reflect the final cumulative,
+        not the sum-of-cumulatives.
+
+        Regression for PR #55 review (grandchildrice): the original code
+        added ``snapshot['total_cost_usd']`` directly, so N batches in one
+        phase reported ``sum_{i=1..N}(cumulative_i)`` ≈ N(N+1)/2 * batch_avg.
+        """
+        archiver.record_cost("01a", {"total_cost_usd": 4.0})
+        archiver.record_cost("01a", {"total_cost_usd": 8.0})
+        archiver.record_cost("01a", {"total_cost_usd": 12.0})
+
+        # Final cumulative is $12 — not 4 + 8 + 12 = $24.
+        assert archiver._manifest.cost_usd_total == pytest.approx(12.0)
+        assert archiver._manifest.phases_completed == ["01a"]
+
+    def test_costs_sum_across_phases(self, archiver: Archiver):
+        """Different phases each have a fresh per-phase CostTracker; their
+        cumulative totals must sum into the manifest, not interfere."""
+        # Phase 01a, two batches
+        archiver.record_cost("01a", {"total_cost_usd": 4.0})
+        archiver.record_cost("01a", {"total_cost_usd": 10.0})
+        # Phase 01b begins (its own tracker starts at 0)
+        archiver.record_cost("01b", {"total_cost_usd": 3.0})
+        # 01a continues with another batch
+        archiver.record_cost("01a", {"total_cost_usd": 12.0})
+
+        # Final: 01a=$12 + 01b=$3 = $15.
+        assert archiver._manifest.cost_usd_total == pytest.approx(15.0)
+        assert set(archiver._manifest.phases_completed) == {"01a", "01b"}
+
+    def test_cost_json_written_with_snapshot(self, archiver: Archiver):
+        """The cost.json file mirrors the most recent snapshot for the phase."""
+        snapshot = {
+            "total_cost_usd": 2.5,
+            "total_input_tokens": 5000,
+            "batch_count": 3,
+        }
+        archiver.record_cost("01a", snapshot)
+        cost_path = archiver.run_dir / "phases" / "01a" / "cost.json"
+        assert cost_path.exists()
+        data = json.loads(cost_path.read_text(encoding="utf-8"))
+        assert data["total_cost_usd"] == 2.5
+        assert data["batch_count"] == 3
+
+    def test_missing_total_cost_usd_defaults_to_zero(self, archiver: Archiver):
+        """A snapshot without total_cost_usd must not crash; treat as 0."""
+        archiver.record_cost("01a", {"total_input_tokens": 100})
+        assert archiver._manifest.cost_usd_total == pytest.approx(0.0)
+
+    def test_out_of_order_snapshot_does_not_subtract(self, archiver: Archiver):
+        """When a later snapshot lands before an earlier one (concurrent
+        batches racing on the archiver lock), the manifest total must NOT
+        drop. We track the per-phase max, so a stale snapshot is a no-op."""
+        # Highest snapshot lands first
+        archiver.record_cost("01a", {"total_cost_usd": 10.0})
+        # Older / lower snapshot races in afterward
+        archiver.record_cost("01a", {"total_cost_usd": 4.0})
+
+        # Manifest must still reflect $10, not $10 + (-6) = $4.
+        assert archiver._manifest.cost_usd_total == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# 10. Concurrent record_cost — atomic write must not corrupt cost.json
+# ---------------------------------------------------------------------------
+
+class TestConcurrentRecordCost:
+    def test_parallel_writes_produce_valid_json(self, archiver: Archiver):
+        """Concurrent record_cost calls into the same phase must not interleave
+        partial JSON content in cost.json or leak .tmp files.
+
+        Regression for PR #55 review (grandchildrice): the original
+        ``_atomic_write_json`` used ``path.with_suffix('.tmp')`` so parallel
+        writers to the same cost.json shared one tempfile path. Now
+        ``tempfile.mkstemp`` gives each writer a unique tempfile.
+        """
+        n_threads = 16
+        errors: list[Exception] = []
+        barrier = threading.Barrier(n_threads)
+
+        def _record(i: int) -> None:
+            try:
+                # Synchronize start across threads to maximize contention
+                barrier.wait()
+                archiver.record_cost("01a", {
+                    "total_cost_usd": float(i),
+                    "total_input_tokens": i * 1000,
+                    "batch_index": i,
+                })
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_record, args=(i,)) for i in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"thread errors: {errors}"
+
+        cost_path = archiver.run_dir / "phases" / "01a" / "cost.json"
+        assert cost_path.exists(), "cost.json was never produced"
+
+        # The file must be a complete, valid JSON object — never half-written.
+        data = json.loads(cost_path.read_text(encoding="utf-8"))
+        assert "total_cost_usd" in data
+        assert "batch_index" in data
+        # The last writer wins, but its value must be one of the snapshots —
+        # never an interleaved frankenstein.
+        assert 0 <= data["batch_index"] < n_threads
+
+        # No stale temp files should be left behind.
+        leftover = list(cost_path.parent.glob(cost_path.name + ".*.tmp"))
+        assert not leftover, f"tmp files leaked under contention: {leftover}"
+
+    def test_parallel_writes_different_phases_independent(self, archiver: Archiver):
+        """Concurrent writers to *different* phases must not interfere."""
+        phases = [f"phase_{i:02d}" for i in range(8)]
+        errors: list[Exception] = []
+        barrier = threading.Barrier(len(phases))
+
+        def _record(phase: str) -> None:
+            try:
+                barrier.wait()
+                archiver.record_cost(phase, {"total_cost_usd": 1.5})
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_record, args=(p,)) for p in phases]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"thread errors: {errors}"
+        for phase in phases:
+            cost_path = archiver.run_dir / "phases" / phase / "cost.json"
+            assert cost_path.exists(), f"missing cost.json for {phase}"
+            data = json.loads(cost_path.read_text(encoding="utf-8"))
+            assert data["total_cost_usd"] == 1.5
+
+        # Manifest must sum all phases ($1.5 * 8 = $12).
+        assert archiver._manifest.cost_usd_total == pytest.approx(1.5 * len(phases))
+
+
+# ---------------------------------------------------------------------------
+# 10. record_prompt records sha in manifest
 # ---------------------------------------------------------------------------
 
 class TestRecordPrompt:

@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +53,12 @@ class Archiver:
             run_id=run_id,
             started_at=datetime.now(timezone.utc),
         )
+
+        # Per-phase last-seen cumulative cost. record_cost receives a
+        # monotonically increasing cumulative figure from CostTracker after
+        # every batch; we add only the delta so the manifest total reflects
+        # the true cumulative, not sum-of-cumulatives.
+        self._phase_cost_seen: dict[str, float] = {}
 
         # Eagerly create the directory skeleton so callers don't have to worry.
         for sub in ("inputs", "prompts", "phases", "final"):
@@ -92,18 +99,35 @@ class Archiver:
     def record_cost(self, phase: str, snapshot: dict[str, Any]) -> None:
         """Write a cost snapshot to ``phases/<phase>/cost.json``.
 
-        Also accumulates ``total_cost_usd`` into the manifest.
+        ``snapshot['total_cost_usd']`` is treated as the **cumulative** cost
+        for *this phase* (CostTracker is per-phase and monotonically
+        increasing). The manifest total is updated by the delta since the
+        last snapshot for this phase, so multi-batch invocations don't
+        compound (N batches would otherwise over-count by a factor of
+        ~N(N+1)/2).
         """
         cost_dir = self.run_dir / "phases" / phase
         cost_dir.mkdir(parents=True, exist_ok=True)
         cost_path = cost_dir / "cost.json"
 
-        # Atomic write so concurrent readers always see a complete file.
-        _atomic_write_json(cost_path, snapshot)
-
         usd = float(snapshot.get("total_cost_usd", 0.0))
+        # Hold the lock across the file write *and* the manifest mutation:
+        # on Windows, concurrent ``os.replace`` calls into the same
+        # destination can fail with ``PermissionError(13)`` even when each
+        # writer uses a unique temp file. Serialising the rename also keeps
+        # cost.json and the in-memory manifest mutually consistent.
         with self._lock:
-            self._manifest.cost_usd_total += usd
+            _atomic_write_json(cost_path, snapshot)
+
+            prev = self._phase_cost_seen.get(phase, 0.0)
+            # CostTracker is monotonically non-decreasing within a phase, but
+            # concurrent batches can acquire this lock out of temporal order
+            # (later snapshot lands first). Track the running max so a late
+            # arriving older snapshot doesn't subtract from the total.
+            new_seen = max(prev, usd)
+            delta = new_seen - prev
+            self._phase_cost_seen[phase] = new_seen
+            self._manifest.cost_usd_total += delta
             if phase not in self._manifest.phases_completed:
                 self._manifest.phases_completed.append(phase)
 
@@ -152,12 +176,19 @@ class Archiver:
     # ------------------------------------------------------------------
 
     def _mirror_file(self, src: Path, dest: Path) -> None:
-        """Hard-link *src* to *dest*; fall back to copy2 on OSError."""
+        """Hard-link *src* to *dest*; fall back to copy2 on OSError.
+
+        Short-circuits when *dest* already exists (the archive is
+        append-only, so re-mirroring the same partial on a re-run is a
+        no-op rather than a noisy copy2 overwrite).
+        """
         if not src.exists():
             print(
                 f"[Archiver] warning: source file not found, skipping: {src}",
                 file=sys.stderr,
             )
+            return
+        if dest.exists():
             return
         try:
             os.link(str(src), str(dest))
@@ -171,11 +202,24 @@ class Archiver:
 # ------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write *data* as JSON to *path* atomically via a temp file."""
+    """Write *data* as JSON to *path* atomically via a unique temp file.
+
+    The temp filename is unique per call (``tempfile.mkstemp`` in the same
+    directory), so concurrent writers to the same *path* never share an
+    intermediate file. The final rename (``os.replace``) is atomic on POSIX
+    and Windows, so a partial write is never visible to readers.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    # tempfile.mkstemp creates the file with mode 0600 and an O_EXCL flag,
+    # guaranteeing the path is unique across processes/threads.
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_path)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False, default=str)
         os.replace(str(tmp), str(path))
     except BaseException:
