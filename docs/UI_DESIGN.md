@@ -15,12 +15,17 @@ issue #54 が要求する Findings Browser を内包する。具体的な達成�
 - 複数 run を切り替え可能 (`.speca/runs/<run-id>/` を一次 index に使う)
 - claude.ai OAuth (Pro/Max subscription) でログインして API key 不要で動かせる
 
-### 1.2 非ゴール
+### 1.2 非ゴール (v0 〜 v2 時点)
 
-- 認証 / 多ユーザ管理: localhost binding のみ
-- finding 編集 / 承認ワークフロー: read-only ビューに留める
 - リアルタイム pipeline 進捗を speca-cli TUI と統合する: 共存とする
 - Cloudflare Pages / 外部ホスティング: ローカル前提
+
+### 1.3 将来スコープ (v5 以降に検討、本書では設計余地のみ確保)
+
+- **認証 / 多ユーザ**: localhost binding のままだが、同マシンに複数監査人がアクセスする / リモート転送する将来に備えてユーザ識別の層を切れるようにしておく
+- **コメント機能**: finding ごとにレビューコメントを残せる
+- **finding の編集 / 承認ワークフロー**: read-only から進めて、verdict 変更や approve/reject を扱えるようにする
+- **永続化レイヤ**: 上記を実現するには local SQLite (or JSON file DB) が要る。subprocess + ファイル設計の純度は保ちつつ、UI 由来の状態だけ DB に切り出す
 
 ## 2. 設計方針
 
@@ -61,10 +66,15 @@ refactor は web UI に影響しない。
 | レイヤ | 選定 | 理由 |
 |---|---|---|
 | Backend 言語 | Python (FastAPI) | uv 環境既存、subprocess + ファイル監視で完結する |
-| Frontend | React 19 + Vite | Docusaurus 既存 (React 19) と揃う。Docusaurus 拡張ではなく独立 SPA とする (ローカル限定なので overkill) |
+| Frontend 言語 | TypeScript | 既存 cli/ (TypeScript) と揃う。schema 型を共有しやすい |
+| Frontend フレームワーク | React 19 + Vite | Docusaurus 既存 (React 19) と揃う。Docusaurus 拡張ではなく独立 SPA とする (ローカル限定なので overkill) |
+| ルーティング | React Router v6 | ファイルベースでなく宣言的にする (Next.js は overkill) |
+| 状態管理 | TanStack Query + Zustand | サーバ状態は Query、UI 状態は Zustand |
+| UI コンポーネント | Tailwind CSS + shadcn/ui (radix base) | 軽量、a11y 確保、ダーク対応 |
 | リアルタイム | WebSocket | stream-json の行単位 tail に向く |
 | 検索 | Fuse.js (client-side fuzzy) | 静的 JSON を読むだけで動く |
 | run index | `.speca/runs/<run-id>/manifest.json` (PR #55) | append-only 設計が web UI からの「読むだけ」と相性良い |
+| 永続化 (将来) | SQLite (sqlite-utils or sqlmodel) | コメント・編集ログを v5 以降で持つ。orchestrator の outputs/ には触らず web UI 由来の状態のみ |
 | 配布 | 同 repo `web/` 配下 | 別 repo に分けるほどの規模ではない |
 | 既存 cli/ (TUI) | 共存・補完 | TUI は単一 phase 監視、Web は run 横断 |
 
@@ -274,6 +284,31 @@ type Finding = {
 
 - Fuse.js 全文検索
 - HF `vulnerability-reports/ethereum/` から類似 past-fix 引っ張る
+
+### 8.6 v5 — 認証 / 多ユーザ (issue #54 で当初 non-goal だった項目)
+
+- backend に local user テーブル (SQLite) を追加
+- ログイン session は token cookie + httpOnly
+- 各 run / コメントに `created_by` を持たせる
+- 既存 localhost 単独利用との互換性は維持 (single-user モードがデフォルト)
+- リモート転送 (SSH トンネル等) で複数監査人が同 backend を共有するシナリオを想定
+
+### 8.7 v6 — コメント / 編集 / 承認ワークフロー
+
+- finding に対するレビューコメント (markdown 対応)
+- verdict の手動上書き (Phase 04 の自動判定を監査人が override)
+- approve / reject / re-audit リクエストの状態遷移
+- 全変更を audit log に残す (誰がいつ何を変えたか追跡可能)
+- 永続化先: `~/.speca/web.db` (SQLite)。orchestrator 側 outputs/ には触らない
+
+### 8.8 スコープ境界の維持
+
+v5 / v6 を追加しても、CLI との疎結合 (Section 2.1) は変えない:
+
+- web UI 由来の状態 (ユーザ / コメント / 編集) は **すべて web UI の DB に閉じる**
+- orchestrator の `outputs/` / `.speca/runs/` には書き込まない
+- subprocess 経由の audit 起動契約 (env var + 標準入力) は不変
+- => CLI 側を将来書き換えても、web UI の付加機能は影響を受けない
 
 ## 9. オープン課題
 
