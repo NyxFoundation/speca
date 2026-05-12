@@ -22,10 +22,11 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
+import secrets
 import subprocess
 import sys
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,7 +60,7 @@ def _get_short_sha() -> str:
             return result.stdout.strip()[:7]
     except Exception:
         pass
-    return "0000000"
+    return ""
 
 
 def _derive_spec_slug() -> str:
@@ -114,17 +115,31 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return slug[:max_len].rstrip("-") or "unknown"
 
 
-def make_run_id(spec_slug: str | None = None, sha: str | None = None) -> str:
-    """Generate a run-id in the format ``<ts>-<sha>-<spec-slug>``.
+def make_run_id(
+    spec_slug: str | None = None,
+    sha: str | None = None,
+    nonce: str | None = None,
+) -> str:
+    """Generate a run-id in the format ``<ts>-<sha>-<spec-slug>-<nonce>``.
 
     ``<ts>`` uses ``YYYY-MM-DDTHH-MM-SSZ`` (hyphens instead of colons so the
-    string is a valid path segment on Windows and all POSIX systems).
+    string is a valid path segment on Windows and all POSIX systems). The
+    trailing ``<nonce>`` is 4 random hex chars so two invocations within the
+    same second on the same commit and slug never collide on disk.
+
+    When the speca git sha is unavailable (no .git, detached state, etc.),
+    the sha segment is filled with 7 random hex chars so the run-id still
+    matches the documented shape and remains unique across invocations.
     """
     now = datetime.now(timezone.utc)
     ts = now.strftime("%Y-%m-%dT%H-%M-%SZ")
-    sha = sha or _get_short_sha()
+    resolved_sha = sha if sha is not None else _get_short_sha()
+    if not resolved_sha:
+        # No git context — use a hex placeholder so the run-id keeps its shape.
+        resolved_sha = secrets.token_hex(4)[:7]
     slug = spec_slug if spec_slug is not None else _derive_spec_slug()
-    return f"{ts}-{sha}-{slug}"
+    resolved_nonce = nonce if nonce is not None else secrets.token_hex(2)
+    return f"{ts}-{resolved_sha}-{slug}-{resolved_nonce}"
 
 
 def _build_env_snapshot(phases: list[str]) -> dict:
@@ -653,7 +668,8 @@ def main():
         force=args.force,
     )
 
-    pipeline_error: str | None = None
+    pipeline_exc: BaseException | None = None
+    results: dict[str, bool] = {}
     try:
         results = asyncio.run(
             run_pipeline(
@@ -671,19 +687,20 @@ def main():
             )
         )
     except Exception as _pipe_err:
-        pipeline_error = str(_pipe_err)
-        results = {}
+        pipeline_exc = _pipe_err
 
-    # Finalize the archive
+    # Finalize the archive — always, even on exception, so the manifest is
+    # complete and downstream tooling can tell ok from error runs.
     if archiver is not None:
-        all_ok = pipeline_error is None and all(results.values()) if results else pipeline_error is None
-        if all_ok:
+        if pipeline_exc is None and (not results or all(results.values())):
             archiver.finalize("ok")
         else:
-            archiver.finalize("error", reason=pipeline_error or "one or more phases failed")
+            reason = str(pipeline_exc) if pipeline_exc else "one or more phases failed"
+            archiver.finalize("error", reason=reason)
 
-    if pipeline_error is not None:
-        raise RuntimeError(pipeline_error)
+    if pipeline_exc is not None:
+        # Preserve the original traceback rather than wrapping with str().
+        raise pipeline_exc
 
     emitter.emit(
         "pipeline-completed",

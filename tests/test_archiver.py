@@ -63,37 +63,57 @@ def archiver(tmp_archive: Path) -> Archiver:
 
 class TestRunId:
     def test_format_conforms_to_spec(self):
-        """run-id must match <YYYY-MM-DDTHH-MM-SSZ>-<7hex>-<slug>."""
+        """run-id must match <YYYY-MM-DDTHH-MM-SSZ>-<7hex>-<slug>-<4hex>."""
         import re
         run_id = make_run_id(spec_slug="uniswap-v4", sha="a1b2c3d")
-        # Pattern: timestamp-sha-slug
+        # Pattern: timestamp-sha-slug-nonce
         pattern = re.compile(
-            r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{7}-[a-z0-9-]+$"
+            r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{7}-[a-z0-9-]+-[0-9a-f]{4}$"
         )
         assert pattern.match(run_id), f"run-id does not match spec: {run_id!r}"
 
-    def test_deterministic_given_inputs(self):
-        """Same (sha, slug) produces same suffix (timestamp varies by second)."""
+    def test_nonce_disambiguates_same_second(self):
+        """Two run-ids generated back-to-back with identical sha+slug must differ."""
         id1 = make_run_id(spec_slug="my-slug", sha="deadbee")
         id2 = make_run_id(spec_slug="my-slug", sha="deadbee")
-        # Both must end with the same sha-slug suffix
-        suffix = "-deadbee-my-slug"
-        assert id1.endswith(suffix), id1
-        assert id2.endswith(suffix), id2
+        # Random nonce makes a same-second collision astronomically unlikely.
+        assert id1 != id2, f"collision: {id1!r} == {id2!r}"
+        # Both still share the timestamp+sha+slug prefix (modulo the second tick).
+        prefix = "-deadbee-my-slug-"
+        assert prefix in id1 and prefix in id2
+
+    def test_explicit_nonce_is_respected(self):
+        """When `nonce` is passed explicitly, make_run_id must use it verbatim."""
+        run_id = make_run_id(spec_slug="my-slug", sha="deadbee", nonce="abcd")
+        assert run_id.endswith("-deadbee-my-slug-abcd"), run_id
 
     def test_uses_hyphens_not_colons_in_timestamp(self):
         """Timestamp must not contain colons (invalid path segment on Windows)."""
-        run_id = make_run_id(spec_slug="s", sha="0000000")
+        run_id = make_run_id(spec_slug="s", sha="0000000", nonce="0000")
         # The timestamp portion is before the first sha separator
         ts_part = run_id.split("-0000000-")[0]
         assert ":" not in ts_part, f"timestamp contains colon: {ts_part!r}"
 
     def test_slug_max_40_chars(self):
         long_name = "a" * 100
-        run_id = make_run_id(spec_slug=_slugify(long_name, 40), sha="0000000")
-        # slug segment (after sha) must be <= 40 chars
-        slug = run_id.split("-0000000-", 1)[1]
-        assert len(slug) <= 40, f"slug too long: {len(slug)}"
+        run_id = make_run_id(
+            spec_slug=_slugify(long_name, 40), sha="0000000", nonce="0000",
+        )
+        # Trailing nonce is fixed-width 4; strip it before measuring the slug.
+        assert run_id.endswith("-0000")
+        slug_segment = run_id.split("-0000000-", 1)[1].rsplit("-", 1)[0]
+        assert len(slug_segment) <= 40, f"slug too long: {len(slug_segment)}"
+
+    def test_missing_git_sha_uses_hex_placeholder(self):
+        """When _get_short_sha returns '', make_run_id must still match the shape."""
+        import re
+        from unittest.mock import patch
+        with patch("run_phase._get_short_sha", return_value=""):
+            run_id = make_run_id(spec_slug="x")
+        pattern = re.compile(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{7}-[a-z0-9-]+-[0-9a-f]{4}$"
+        )
+        assert pattern.match(run_id), f"missing-git fallback broke shape: {run_id!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -572,3 +592,59 @@ class TestRecordPrompt:
         prompt_path = archiver.run_dir / "prompts" / "01b.md"
         assert prompt_path.exists()
         assert prompt_path.read_text(encoding="utf-8") == "# My Prompt\n\nDo stuff."
+
+
+# ---------------------------------------------------------------------------
+# 11. record_log mirrors the stream-json log into phases/<phase>/logs/
+# ---------------------------------------------------------------------------
+
+class TestRecordLog:
+    def test_log_mirrored_into_phase_logs_dir(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        src = tmp_path / "01a_W0B0_111.jsonl"
+        src.write_text('{"event": "started"}\n{"event": "done"}\n', encoding="utf-8")
+
+        archiver.record_log("01a", src)
+
+        dest = archiver.run_dir / "phases" / "01a" / "logs" / src.name
+        assert dest.exists(), "log was not mirrored"
+        assert dest.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+    def test_log_missing_source_is_silent(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        archiver.record_log("01a", tmp_path / "nope.jsonl")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# 12. Manifest mutators and env snapshot
+# ---------------------------------------------------------------------------
+
+class TestManifestMutators:
+    def test_set_env_snapshot_writes_inputs_env_json(self, archiver: Archiver):
+        env_data = {"KEYWORDS": "geth,ethereum", "SPEC_URLS": "https://example.com"}
+        archiver.set_env_snapshot(env_data)
+        env_path = archiver.run_dir / "inputs" / "env.json"
+        assert env_path.exists()
+        assert json.loads(env_path.read_text(encoding="utf-8")) == env_data
+
+    def test_set_commit_set_model_set_spec_sources_land_on_manifest(
+        self, archiver: Archiver
+    ):
+        archiver.set_commit("abcdef1")
+        archiver.set_model("01a", "claude-sonnet-4-6")
+        archiver.set_model("01b", "claude-opus-4-7")
+        archiver.set_spec_sources(["https://a.example/spec", "https://b.example/spec"])
+
+        archiver.finalize("ok")
+
+        manifest = json.loads(
+            (archiver.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["speca_commit"] == "abcdef1"
+        assert manifest["model"] == {"01a": "claude-sonnet-4-6", "01b": "claude-opus-4-7"}
+        assert manifest["spec_sources"] == [
+            "https://a.example/spec",
+            "https://b.example/spec",
+        ]

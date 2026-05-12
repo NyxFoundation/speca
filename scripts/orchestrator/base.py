@@ -18,21 +18,21 @@ from typing import Any
 from pydantic import ValidationError
 from tqdm import tqdm
 
+from .archiver import Archiver
+from .api_runner import APIRunner
+from .batch import BatchStrategy, CountBasedBatch, TokenBasedBatch
+from .collector import ResultCollector
 from .config import PhaseConfig, get_phase_config
 from .paths import get_output_root
 from .queue import QueueManager
-from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
-from .runner import ClaudeRunner, CircuitBreaker, CircuitBreakerTripped, BudgetExceeded
-from .api_runner import APIRunner
+from .resume import ResumeManager
+from .runner import BudgetExceeded, CircuitBreaker, CircuitBreakerTripped, ClaudeRunner
 from .watchdog import CostTracker
 
 
 class PhaseAbortError(Exception):
     """Raised when a phase must abort (replaces sys.exit calls)."""
     pass
-from .archiver import Archiver
-from .collector import ResultCollector
-from .resume import ResumeManager
 from .schemas import (
     Phase01aState,
     Phase01bPartial,
