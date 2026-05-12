@@ -298,6 +298,35 @@ Nyx tokens (B&W 基調) に対し、状態色のみ最小限のアクセント:
 - キャンセル / スキップ = グレー `oklch(0.55 0.005 258)`
 - ライト/ダーク両モードで oklch chroma を保ち WCAG AA 維持
 
+### 4.10.5 外部連携 (オプション)
+
+#### Fork to GitHub
+
+- 用途: finding を見つけたら user の GH アカウントに target_repo を fork して、fix PR の準備に入れる
+- 配置: Run Detail のアクション列に `[Fork to GitHub]` ボタン
+- 実装: backend が `gh repo fork <target_repo> --clone=false` を spawn、結果の fork_url を返す
+- 承認ゲート: dry-run プレビュー (どこへ fork するか) → user 承認 → 実行
+- 前提: `gh` CLI がインストール済み + `gh auth login` 済み。未設定なら設定画面に誘導 (強制しない)
+
+#### Open in VSCode (多箇所配置)
+
+`code` CLI が PATH に通っていれば、以下すべての箇所でワンクリックで開ける:
+
+- **Run Detail ヘッダ**: `[VSCode で target を開く]` → `code <target_workspace_<run_id>>`
+- **各 Phase 行**: `[VSCode で log を開く]` → `code <outputs/logs/<phase>_*.jsonl>`
+- **Finding 詳細の引用箇所**: `file: src/net.cpp::L80-91` 行に `[VSCode で開く]` → `code -g <target_workspace>/src/net.cpp:80`
+- **Findings 一覧の各行**: code_path セルが clickable、クリックで該当ファイル + 行を VSCode で開く
+- **Run List の各行**: コンテキストメニュー (右クリック / `…`) から "VSCode で audit branch を開く" → `code <speca repo path>` (audit ブランチ checkout 済み状態)
+- **Settings**: "VSCode で `.speca/` を開く" / "VSCode で `~/.claude/` を開く" 等のメンテ用エントリ
+
+DRY のため `<OpenInVSCode>` という共通コンポーネントを 1 つ用意し、すべての場所で再利用:
+
+```tsx
+<OpenInVSCode path={absPath} line={lineNumber?} label="VSCode で開く" />
+```
+
+副作用: なし (`code` プロセス起動のみ、外部書き込みは行わない)。前提 CLI 未設定なら disabled 表示にして tooltip で誘導。
+
 ### 4.10 初心者フレンドリー原則
 
 設計全体に共通する UX 原則。実装時に「これ初心者わかる?」のチェックリスト:
@@ -390,6 +419,9 @@ PR #55 の archive substrate と git branch は役割が異なるので両方走
 | `/chat/conversations/<id>` | GET | - | 1 conversation の全 message |
 | `/chat/conversations/<id>/messages` | POST | `{ text }` | user message を append、SSE で response stream |
 | `/chat/tool_approve` | POST | `{ tool_call_id, action: "approve"\|"edit"\|"cancel" }` | 副作用 tool の承認応答 |
+| `/integrations/fork` | POST | `{ target_repo, into_owner? }` | `gh repo fork` spawn、`{ fork_url }` |
+| `/integrations/open-in-vscode` | POST | `{ path, line? }` | `code` (or `code -g <path>:<line>`) spawn |
+| `/integrations/status` | GET | - | `{ gh: { installed, authed }, code: { installed } }` |
 
 ### 7.2 Backend ↔ Frontend (WebSocket / SSE)
 
