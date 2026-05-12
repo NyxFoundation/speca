@@ -588,9 +588,12 @@ class ClaudeRunner:
                 )
 
         # --- Archive: mirror log + cost snapshot ---
+        # Run off the event loop: the archiver holds a threading.Lock across
+        # blocking file I/O (os.link / os.replace), and we don't want every
+        # batch finish to stall the asyncio scheduler.
         if self.archiver is not None:
             try:
-                self.archiver.record_log(phase_id, log_file)
+                await asyncio.to_thread(self.archiver.record_log, phase_id, log_file)
             except Exception as _arc_err:
                 print(
                     f"[Archiver] warning: failed to record log for {phase_id}: {_arc_err}",
@@ -598,7 +601,11 @@ class ClaudeRunner:
                 )
             if self.cost_tracker:
                 try:
-                    self.archiver.record_cost(phase_id, self.cost_tracker.get_stats())
+                    await asyncio.to_thread(
+                        self.archiver.record_cost,
+                        phase_id,
+                        self.cost_tracker.get_stats(),
+                    )
                 except Exception as _arc_err:
                     print(
                         f"[Archiver] warning: failed to record cost for {phase_id}: {_arc_err}",

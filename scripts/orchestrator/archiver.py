@@ -10,6 +10,12 @@ on ``OSError`` (cross-fs, Windows ACL restrictions, etc.).
 The archive is entirely optional: all callers check ``if archiver is not None``
 before calling any method, so the existing behaviour is completely unchanged
 when the archiver is disabled via ``--no-archive``.
+
+Retention: there is no automatic GC. Logs grow proportional to API turns
+and accumulate forever under ``.speca/runs/``. The ``speca corpus gc``
+subcommand (out of scope for this PR, tracked under issue #32 follow-ups)
+will provide the cleanup story; until then, operators should periodically
+prune ``.speca/runs/`` manually.
 """
 
 from __future__ import annotations
@@ -119,14 +125,15 @@ class Archiver:
         with self._lock:
             _atomic_write_json(cost_path, snapshot)
 
+            # CostTracker reports a per-phase cumulative figure that is
+            # monotonically non-decreasing. We add only the positive delta
+            # since the last seen snapshot, so multi-batch invocations don't
+            # compound. `max(0, ...)` is belt-and-braces: if a snapshot ever
+            # regresses (a bug elsewhere), we refuse to subtract from the
+            # manifest rather than silently masking it.
             prev = self._phase_cost_seen.get(phase, 0.0)
-            # CostTracker is monotonically non-decreasing within a phase, but
-            # concurrent batches can acquire this lock out of temporal order
-            # (later snapshot lands first). Track the running max so a late
-            # arriving older snapshot doesn't subtract from the total.
-            new_seen = max(prev, usd)
-            delta = new_seen - prev
-            self._phase_cost_seen[phase] = new_seen
+            delta = max(0.0, usd - prev)
+            self._phase_cost_seen[phase] = max(prev, usd)
             self._manifest.cost_usd_total += delta
             if phase not in self._manifest.phases_completed:
                 self._manifest.phases_completed.append(phase)
@@ -192,8 +199,16 @@ class Archiver:
             return
         try:
             os.link(str(src), str(dest))
+        except FileExistsError:
+            # Lost a race against a concurrent writer for the same (phase,
+            # filename) — they already produced a valid hard-link. Don't
+            # downgrade it to a copy.
+            return
         except OSError:
-            # Cross-fs, Windows ACL, or dest already exists — use copy.
+            # Cross-fs, Windows ACL, etc. — use copy. Re-check existence to
+            # avoid clobbering a winning concurrent hard-link with a copy.
+            if dest.exists():
+                return
             shutil.copy2(str(src), str(dest))
 
 

@@ -73,19 +73,43 @@ class TestRunId:
         assert pattern.match(run_id), f"run-id does not match spec: {run_id!r}"
 
     def test_nonce_disambiguates_same_second(self):
-        """Two run-ids generated back-to-back with identical sha+slug must differ."""
-        id1 = make_run_id(spec_slug="my-slug", sha="deadbee")
-        id2 = make_run_id(spec_slug="my-slug", sha="deadbee")
-        # Random nonce makes a same-second collision astronomically unlikely.
-        assert id1 != id2, f"collision: {id1!r} == {id2!r}"
-        # Both still share the timestamp+sha+slug prefix (modulo the second tick).
+        """Two run-ids generated back-to-back with identical sha+slug must differ.
+
+        The 4-hex nonce has 65536 values, so 100 iterations gives birthday-paradox
+        collision probability under 1e-4 — well below CI-flake threshold.
+        """
+        ids = {make_run_id(spec_slug="my-slug", sha="deadbee") for _ in range(100)}
+        # Worst case: all 100 share the same second, so at minimum the nonce
+        # must give us a healthy spread of distinct values.
+        assert len(ids) >= 95, f"too many collisions over 100 runs: {len(ids)} unique"
+        # All share the deterministic prefix segment.
         prefix = "-deadbee-my-slug-"
-        assert prefix in id1 and prefix in id2
+        for run_id in ids:
+            assert prefix in run_id
 
     def test_explicit_nonce_is_respected(self):
-        """When `nonce` is passed explicitly, make_run_id must use it verbatim."""
-        run_id = make_run_id(spec_slug="my-slug", sha="deadbee", nonce="abcd")
-        assert run_id.endswith("-deadbee-my-slug-abcd"), run_id
+        """When `nonce` is passed explicitly, make_run_id must use it verbatim.
+
+        Negative case: changing the sha must change the resulting id (proves
+        the function actually uses its inputs, not just appends the nonce).
+        """
+        id_a = make_run_id(spec_slug="my-slug", sha="deadbee", nonce="abcd")
+        id_b = make_run_id(spec_slug="my-slug", sha="cafebab", nonce="abcd")
+        assert id_a.endswith("-deadbee-my-slug-abcd"), id_a
+        assert id_b.endswith("-cafebab-my-slug-abcd"), id_b
+        assert id_a != id_b, "sha did not influence the id"
+
+    def test_speca_run_id_env_pin(self, monkeypatch):
+        """SPECA_RUN_ID env var (when set by caller) pins the run-id verbatim.
+
+        Note: make_run_id itself does not consult the env — run_phase.main()
+        does, before calling make_run_id. This test documents the contract.
+        """
+        # Just verify make_run_id has no env-coupling — its output depends
+        # only on its arguments + clock.
+        monkeypatch.setenv("SPECA_RUN_ID", "should-be-ignored-by-make_run_id")
+        run_id = make_run_id(spec_slug="x", sha="0000000", nonce="0000")
+        assert "should-be-ignored" not in run_id
 
     def test_uses_hyphens_not_colons_in_timestamp(self):
         """Timestamp must not contain colons (invalid path segment on Windows)."""

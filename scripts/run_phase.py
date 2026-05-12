@@ -631,7 +631,9 @@ def main():
             or str(Path(__file__).resolve().parent.parent / ".speca" / "runs")
         )
         archive_root = Path(archive_root_str)
-        run_id = make_run_id()
+        # SPECA_RUN_ID lets CI / replay pin a deterministic id; otherwise we
+        # generate one with a random nonce.
+        run_id = os.environ.get("SPECA_RUN_ID") or make_run_id()
         archiver = Archiver(run_id, archive_root)
         # Write env snapshot
         archiver.set_env_snapshot(_build_env_snapshot(phases))
@@ -686,17 +688,31 @@ def main():
                 archiver=archiver,
             )
         )
-    except Exception as _pipe_err:
+    except BaseException as _pipe_err:
+        # Catch BaseException so KeyboardInterrupt / SystemExit / asyncio
+        # cancellation still trigger archive finalize. The original is
+        # re-raised below with traceback preserved.
         pipeline_exc = _pipe_err
-
-    # Finalize the archive — always, even on exception, so the manifest is
-    # complete and downstream tooling can tell ok from error runs.
-    if archiver is not None:
-        if pipeline_exc is None and (not results or all(results.values())):
-            archiver.finalize("ok")
-        else:
-            reason = str(pipeline_exc) if pipeline_exc else "one or more phases failed"
-            archiver.finalize("error", reason=reason)
+    finally:
+        # Finalize the archive *always* — even on Ctrl-C, even if finalize
+        # itself raises. A swallowed finalize-error must never shadow the
+        # original pipeline traceback.
+        if archiver is not None:
+            try:
+                if pipeline_exc is None and (not results or all(results.values())):
+                    archiver.finalize("ok")
+                else:
+                    reason = (
+                        str(pipeline_exc)
+                        if pipeline_exc is not None
+                        else "one or more phases failed"
+                    )
+                    archiver.finalize("error", reason=reason)
+            except Exception as _fin_err:
+                print(
+                    f"[Archiver] warning: finalize failed: {_fin_err}",
+                    file=sys.stderr,
+                )
 
     if pipeline_exc is not None:
         # Preserve the original traceback rather than wrapping with str().
