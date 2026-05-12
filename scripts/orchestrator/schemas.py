@@ -12,6 +12,7 @@ Each model corresponds to a specific data structure used in the pipeline.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -556,6 +557,33 @@ class TargetInfo(BaseModel):
     target_ref_label: str = ""
     target_commit: str = ""
     target_commit_short: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Run archive manifest
+# ---------------------------------------------------------------------------
+
+class RunManifest(BaseModel):
+    """Provenance record written to .speca/runs/<run-id>/manifest.json.
+
+    One manifest is created per invocation of run_phase.py (or per speca run
+    from the CLI).  It accumulates cost/timing/prompt information as the run
+    progresses and is finalised by ``Archiver.finalize()``.
+    """
+
+    run_id: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    speca_commit: str = ""
+    cli_version: str = ""
+    model: dict[str, str] = Field(default_factory=dict)       # phase_id -> model name
+    prompt_shas: dict[str, str] = Field(default_factory=dict) # phase_id -> sha256 of rendered prompt
+    spec_sources: list[str] = Field(default_factory=list)     # URLs from SPEC_URLS / 01a state
+    target_info: dict | None = None
+    bug_bounty_scope_sha: str | None = None
+    phases_completed: list[str] = Field(default_factory=list)
+    cost_usd_total: float = 0.0
+    notes: str | None = None
 
 
 # ---------------------------------------------------------------------------

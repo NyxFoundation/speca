@@ -95,3 +95,5 @@ Phases 01e, 02c, 03, and 04 use **inlined prompts** (no skill fork) — all anal
 - `CLAUDE_CODE_PERMISSIONS=bypassPermissions` — Used in CI
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS=100000` — Used in CI
 - `GITHUB_PERSONAL_ACCESS_TOKEN` — For GitHub MCP server
+- `SPECA_ARCHIVE_ROOT` — Override the per-run archive root (default: `<repo>/.speca/runs`). Use `--no-archive` to disable archiving entirely.
+- `SPECA_RUN_ID` — Pin a deterministic run-id (skips the timestamp+nonce generation). Useful for CI replay or for stitching together multi-invocation runs.

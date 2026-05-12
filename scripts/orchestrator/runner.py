@@ -22,9 +22,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiofiles
+
+if TYPE_CHECKING:
+    from .archiver import Archiver
 
 _CLAUDE_BIN = (
     shutil.which("claude.cmd") if sys.platform == "win32" else None
@@ -275,12 +278,14 @@ class ClaudeRunner:
         max_retries: int = 2,
         circuit_breaker: CircuitBreaker | None = None,
         cost_tracker: CostTracker | None = None,
+        archiver: "Archiver | None" = None,
     ):
         self.config = config
         self.semaphore = semaphore
         self.max_retries = max_retries
         self.circuit_breaker = circuit_breaker or CircuitBreaker(config)
         self.cost_tracker = cost_tracker
+        self.archiver = archiver
 
         # Ensure directories exist
         self.output_dir = get_output_root()
@@ -581,6 +586,31 @@ class ClaudeRunner:
                     f"+${batch_cost:.4f}, total=${cost_stats['total_cost_usd']:.2f}/"
                     f"${cost_stats['max_budget_usd']:.2f}",
                 )
+
+        # --- Archive: mirror log + cost snapshot ---
+        # Run off the event loop: the archiver holds a threading.Lock across
+        # blocking file I/O (os.link / os.replace), and we don't want every
+        # batch finish to stall the asyncio scheduler.
+        if self.archiver is not None:
+            try:
+                await asyncio.to_thread(self.archiver.record_log, phase_id, log_file)
+            except Exception as _arc_err:
+                print(
+                    f"[Archiver] warning: failed to record log for {phase_id}: {_arc_err}",
+                    file=sys.stderr,
+                )
+            if self.cost_tracker:
+                try:
+                    await asyncio.to_thread(
+                        self.archiver.record_cost,
+                        phase_id,
+                        self.cost_tracker.get_stats(),
+                    )
+                except Exception as _arc_err:
+                    print(
+                        f"[Archiver] warning: failed to record cost for {phase_id}: {_arc_err}",
+                        file=sys.stderr,
+                    )
 
         # --- Detect error_max_turns (may arrive with returncode 0 or 1) ---
         # Claude CLI can exit with code 0 while the result event carries

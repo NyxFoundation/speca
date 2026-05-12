@@ -18,20 +18,21 @@ from typing import Any
 from pydantic import ValidationError
 from tqdm import tqdm
 
+from .archiver import Archiver
+from .api_runner import APIRunner
+from .batch import BatchStrategy, CountBasedBatch, TokenBasedBatch
+from .collector import ResultCollector
 from .config import PhaseConfig, get_phase_config
 from .paths import get_output_root
 from .queue import QueueManager
-from .batch import BatchStrategy, TokenBasedBatch, CountBasedBatch
-from .runner import ClaudeRunner, CircuitBreaker, CircuitBreakerTripped, BudgetExceeded
-from .api_runner import APIRunner
+from .resume import ResumeManager
+from .runner import BudgetExceeded, CircuitBreaker, CircuitBreakerTripped, ClaudeRunner
 from .watchdog import CostTracker
 
 
 class PhaseAbortError(Exception):
     """Raised when a phase must abort (replaces sys.exit calls)."""
     pass
-from .collector import ResultCollector
-from .resume import ResumeManager
 from .schemas import (
     Phase01aState,
     Phase01bPartial,
@@ -140,12 +141,14 @@ class BaseOrchestrator(ABC):
         phase_id: str,
         num_workers: int = 4,
         max_concurrent: int = 8,
+        archiver: Archiver | None = None,
     ):
         self.config = get_phase_config(phase_id)
         self.num_workers = max(1, num_workers)
         self.max_concurrent = max(1, max_concurrent)
         self.semaphore: asyncio.Semaphore | None = None
-        
+        self.archiver = archiver
+
         # Shared circuit breaker for all workers in this phase
         self.circuit_breaker = CircuitBreaker(self.config)
 
@@ -160,7 +163,7 @@ class BaseOrchestrator(ABC):
         self.queue_manager = QueueManager(self.config)
         self.batch_strategy = self._create_batch_strategy()
         self.runner: ClaudeRunner | APIRunner | None = None
-        self.collector = ResultCollector(self.config)
+        self.collector = ResultCollector(self.config, archiver=archiver)
         self.resume_manager = ResumeManager(self.config)
         
         # State
@@ -212,6 +215,7 @@ class BaseOrchestrator(ABC):
                 self.semaphore,
                 circuit_breaker=self.circuit_breaker,
                 cost_tracker=self.cost_tracker,
+                archiver=self.archiver,
             )
 
         print(f"\n{'='*60}")
@@ -1246,8 +1250,8 @@ class Phase02cOrchestrator(BaseOrchestrator):
 class Phase03Orchestrator(BaseOrchestrator):
     """Orchestrator for Phase 03 (Audit Map Generation)."""
 
-    def __init__(self, num_workers: int = 4, max_concurrent: int = 8):
-        super().__init__("03", num_workers, max_concurrent)
+    def __init__(self, num_workers: int = 4, max_concurrent: int = 8, archiver: Archiver | None = None):
+        super().__init__("03", num_workers, max_concurrent, archiver=archiver)
 
     def load_items(self) -> list[dict[str, Any]]:
         """Load properties with code from 02c partials with Pydantic validation."""
