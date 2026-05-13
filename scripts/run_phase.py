@@ -541,7 +541,33 @@ async def run_pipeline(
     return results
 
 
+def _configure_io_for_utf8() -> None:
+    """Reconfigure stdout/stderr to UTF-8 (errors='replace').
+
+    On Windows the default console encoding is often cp932/cp1252, which
+    cannot encode the emoji glyphs ('✅', '❌', '⚠️', '🛑') used in
+    decorative print() calls across the orchestrator. Any such print()
+    raises UnicodeEncodeError mid-pipeline and prevents post-run
+    finalization (e.g. `_finalize_01a_state`, archiver.finalize).
+
+    We reconfigure once at the entry point so the rest of the pipeline can
+    keep using readable emoji output without each call site needing to
+    sanitise its strings. ``errors='replace'`` keeps us safe on any exotic
+    terminal that still rejects UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            # AttributeError: stream is a non-TextIOWrapper (already wrapped
+            # by a test capture / IDE shim). OSError: the underlying file
+            # rejects reconfigure. Either way, fall back silently.
+            pass
+
+
 def main():
+    _configure_io_for_utf8()
+
     parser = argparse.ArgumentParser(
         description="Unified phase runner for security audit pipeline (Makefile replacement)",
         formatter_class=argparse.RawTextHelpFormatter,
@@ -679,6 +705,14 @@ def main():
         # Write env snapshot
         archiver.set_env_snapshot(_build_env_snapshot(phases))
         archiver.set_commit(_get_short_sha())
+        # Capture spec sources from SPEC_URLS env (CLI --spec-urls promoted
+        # this above). Manifest field merges with any value loaded from an
+        # existing manifest on re-entry.
+        spec_urls_env = os.environ.get("SPEC_URLS", "")
+        if spec_urls_env:
+            urls = [u.strip() for u in spec_urls_env.split(",") if u.strip()]
+            if urls:
+                archiver.add_spec_sources(urls)
         print(f"  Archive: {archiver.run_dir}")
     else:
         print(f"  Archive: disabled (--no-archive)")

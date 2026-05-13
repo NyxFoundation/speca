@@ -672,3 +672,213 @@ class TestManifestMutators:
             "https://a.example/spec",
             "https://b.example/spec",
         ]
+
+
+# ---------------------------------------------------------------------------
+# 11. Manifest reentry (#58A)
+# ---------------------------------------------------------------------------
+
+class TestManifestReentry:
+    """Second Archiver instance with the same run_id must resume the manifest.
+
+    Reproduces the scenario where `--phase 01a` finishes and a follow-up
+    `--phase 01b 01e` is launched in a separate process with SPECA_RUN_ID
+    pinned: prior to the fix, the manifest written by the second invocation
+    overwrote the first, dropping the earlier phases / model / cost.
+    """
+
+    def test_existing_manifest_is_loaded_on_construct(self, tmp_archive: Path):
+        run_id = "2026-01-02T03-04-05Z-abc1234-resume"
+        first = Archiver(run_id, tmp_archive)
+        first.set_commit("deadbee")
+        first.set_model("01a", "claude-sonnet-4-6")
+        first.set_spec_sources(["https://a.example/spec"])
+        first.record_cost("01a", {"total_cost_usd": 0.15})
+        first.finalize("ok")
+
+        # Second invocation — separate process simulated by a fresh instance.
+        second = Archiver(run_id, tmp_archive)
+        # Pre-finalize, the in-memory manifest should already reflect the
+        # first invocation's state. Drive a record_cost to confirm the
+        # cost_usd_total accumulates onto the loaded value, not from zero.
+        second.set_model("01b", "claude-sonnet-4-6")
+        second.record_cost("01b", {"total_cost_usd": 0.25})
+        second.finalize("ok")
+
+        manifest = json.loads(
+            (second.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["speca_commit"] == "deadbee"
+        assert manifest["model"] == {
+            "01a": "claude-sonnet-4-6",
+            "01b": "claude-sonnet-4-6",
+        }
+        assert manifest["spec_sources"] == ["https://a.example/spec"]
+        assert sorted(manifest["phases_completed"]) == ["01a", "01b"]
+        assert manifest["cost_usd_total"] == pytest.approx(0.40, abs=1e-9)
+
+    def test_started_at_preserved_across_invocations(self, tmp_archive: Path):
+        run_id = "2026-01-02T03-04-05Z-abc1234-started"
+        first = Archiver(run_id, tmp_archive)
+        first.finalize("ok")
+        original_started_at = json.loads(
+            (first.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )["started_at"]
+
+        time.sleep(0.01)  # ensure the new instance would otherwise pick a later ts
+        second = Archiver(run_id, tmp_archive)
+        second.finalize("ok")
+        replayed = json.loads(
+            (second.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert replayed["started_at"] == original_started_at
+        # ended_at should be refreshed to the second invocation's finalize.
+        assert replayed["ended_at"] >= original_started_at
+
+    def test_corrupt_existing_manifest_falls_back_to_fresh(
+        self, tmp_archive: Path, capsys
+    ):
+        run_id = "2026-01-02T03-04-05Z-abc1234-corrupt"
+        run_dir = tmp_archive / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text("not json", encoding="utf-8")
+
+        # Should not raise; should emit a warning and proceed with a fresh
+        # manifest.
+        arc = Archiver(run_id, tmp_archive)
+        arc.finalize("ok")
+        captured = capsys.readouterr()
+        assert "unreadable" in captured.err.lower()
+        # Final manifest is well-formed.
+        manifest = json.loads(
+            (arc.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["run_id"] == run_id
+
+
+# ---------------------------------------------------------------------------
+# 12. add_spec_sources merge semantics (#58B)
+# ---------------------------------------------------------------------------
+
+class TestAddSpecSources:
+    def test_add_merges_with_existing_preserving_order(self, archiver: Archiver):
+        archiver.set_spec_sources(["https://a.example", "https://b.example"])
+        archiver.add_spec_sources(["https://b.example", "https://c.example"])
+        archiver.finalize("ok")
+
+        manifest = json.loads(
+            (archiver.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["spec_sources"] == [
+            "https://a.example",
+            "https://b.example",
+            "https://c.example",
+        ]
+
+    def test_add_on_empty_initial_state(self, archiver: Archiver):
+        archiver.add_spec_sources(["https://only.example"])
+        archiver.finalize("ok")
+        manifest = json.loads(
+            (archiver.run_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["spec_sources"] == ["https://only.example"]
+
+
+# ---------------------------------------------------------------------------
+# 13. record_graphs_dir (#58C)
+# ---------------------------------------------------------------------------
+
+class TestRecordGraphsDir:
+    def _seed(self, root: Path) -> Path:
+        """Create a fake outputs/graphs/batch_w0b0_<ts>/<spec>/ layout."""
+        batch_dir = root / "batch_w0b0_1700000000"
+        spec_dir = batch_dir / "EIP-7951"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "SG-001_P256VERIFY.mmd").write_text("graph A\n", encoding="utf-8")
+        (spec_dir / "SG-002_validate_pk.mmd").write_text("graph B\n", encoding="utf-8")
+        (batch_dir / "manifest.txt").write_text("meta\n", encoding="utf-8")
+        return batch_dir
+
+    def test_mirror_all_files_recursively(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        batch_dir = self._seed(tmp_path / "graphs")
+        n = archiver.record_graphs_dir("01b", batch_dir)
+        assert n == 3
+        dest_root = archiver.run_dir / "phases" / "01b" / "graphs" / batch_dir.name
+        assert (dest_root / "EIP-7951" / "SG-001_P256VERIFY.mmd").exists()
+        assert (dest_root / "EIP-7951" / "SG-002_validate_pk.mmd").exists()
+        assert (dest_root / "manifest.txt").exists()
+
+    def test_mirror_uses_hardlink_when_same_fs(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        batch_dir = self._seed(tmp_path / "graphs")
+        archiver.record_graphs_dir("01b", batch_dir)
+        src = batch_dir / "EIP-7951" / "SG-001_P256VERIFY.mmd"
+        dest = (
+            archiver.run_dir
+            / "phases"
+            / "01b"
+            / "graphs"
+            / batch_dir.name
+            / "EIP-7951"
+            / "SG-001_P256VERIFY.mmd"
+        )
+        # Same inode == hard link succeeded.
+        if hasattr(os, "stat"):
+            assert src.stat().st_ino == dest.stat().st_ino
+
+    def test_missing_dir_returns_zero(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        # Directory does not exist.
+        assert archiver.record_graphs_dir("01b", tmp_path / "nope") == 0
+        # Path exists but is a file, not a directory.
+        f = tmp_path / "afile"
+        f.write_text("x", encoding="utf-8")
+        assert archiver.record_graphs_dir("01b", f) == 0
+
+    def test_idempotent_on_rerun(
+        self, archiver: Archiver, tmp_path: Path
+    ):
+        batch_dir = self._seed(tmp_path / "graphs")
+        n1 = archiver.record_graphs_dir("01b", batch_dir)
+        n2 = archiver.record_graphs_dir("01b", batch_dir)
+        # Both calls walk the same file set; the second is a no-op per
+        # file because dest already exists.
+        assert n1 == n2 == 3
+
+
+# ---------------------------------------------------------------------------
+# 14. UTF-8 stdio reconfig (#57)
+# ---------------------------------------------------------------------------
+
+class TestUtf8IoReconfig:
+    """The helper is best-effort and must never raise.
+
+    The on-disk side effect (stdout/stderr now accept emoji) is hard to
+    observe in pytest because pytest captures via its own readers, but we
+    can at least verify the function is callable and idempotent against
+    streams that don't support reconfigure().
+    """
+
+    def test_does_not_raise_on_normal_streams(self):
+        import importlib
+        rp = importlib.import_module("run_phase")
+        # Should be a no-op-ish (or a real reconfigure, depending on
+        # captured stream type) — either way: no exception.
+        rp._configure_io_for_utf8()
+        rp._configure_io_for_utf8()  # idempotent
+
+    def test_handles_streams_without_reconfigure(self, monkeypatch):
+        import importlib
+        rp = importlib.import_module("run_phase")
+
+        class _DummyStream:
+            pass  # no .reconfigure attribute
+
+        monkeypatch.setattr(sys, "stdout", _DummyStream())
+        monkeypatch.setattr(sys, "stderr", _DummyStream())
+        # Must swallow AttributeError without raising.
+        rp._configure_io_for_utf8()

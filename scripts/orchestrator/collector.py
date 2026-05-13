@@ -142,6 +142,20 @@ class ResultCollector:
         # Mirror into the archive when one is active.
         if self.archiver is not None:
             self.archiver.record_partial(self.config.phase_id, output_path)
+            # Phase 01b writes Mermaid subgraphs out-of-band to
+            # ``outputs/graphs/batch_w<W>b<B>_<ts>/<spec>/SG-*.mmd``. Those
+            # files are the actual corpus payload, so the archive is
+            # useless without them. Mirror every batch directory whose
+            # (worker_id, batch_index) prefix matches this save.
+            if self.config.phase_id == "01b":
+                graphs_root = self.output_dir / "graphs"
+                if graphs_root.exists():
+                    prefix = f"batch_w{worker_id}b{batch_index}_"
+                    for batch_dir in graphs_root.glob(f"{prefix}*"):
+                        if batch_dir.is_dir():
+                            self.archiver.record_graphs_dir(
+                                self.config.phase_id, batch_dir
+                            )
 
         return output_path
 

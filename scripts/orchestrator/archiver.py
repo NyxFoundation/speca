@@ -53,22 +53,54 @@ class Archiver:
         self._lock = threading.Lock()
         self._finalized = False
 
-        # Manifest is kept in memory and written atomically on finalize().
-        # started_at uses timezone-aware UTC so it round-trips through JSON.
-        self._manifest = RunManifest(
-            run_id=run_id,
-            started_at=datetime.now(timezone.utc),
-        )
+        # Eagerly create the directory skeleton so callers don't have to worry.
+        # Done before manifest load so the load path can access run_dir.
+        for sub in ("inputs", "prompts", "phases", "final"):
+            (self.run_dir / sub).mkdir(parents=True, exist_ok=True)
 
         # Per-phase last-seen cumulative cost. record_cost receives a
         # monotonically increasing cumulative figure from CostTracker after
         # every batch; we add only the delta so the manifest total reflects
         # the true cumulative, not sum-of-cumulatives.
+        #
+        # NOTE: when resuming an existing manifest (cross-invocation re-entry
+        # with the same SPECA_RUN_ID), the current process starts a fresh
+        # CostTracker per phase, so prev=0 on the first snapshot of the
+        # second invocation is correct — the delta machinery then accumulates
+        # this invocation's contribution on top of the loaded total.
         self._phase_cost_seen: dict[str, float] = {}
 
-        # Eagerly create the directory skeleton so callers don't have to worry.
-        for sub in ("inputs", "prompts", "phases", "final"):
-            (self.run_dir / sub).mkdir(parents=True, exist_ok=True)
+        # Manifest is kept in memory and written atomically on finalize().
+        # If an existing manifest.json is present (re-entry with the same
+        # SPECA_RUN_ID across separate `--phase` invocations), load it so
+        # phases_completed / cost_usd_total / model / prompt_shas / etc.
+        # accumulate across invocations instead of being overwritten.
+        existing_path = self.run_dir / "manifest.json"
+        loaded = False
+        if existing_path.exists():
+            try:
+                with open(existing_path, encoding="utf-8") as f:
+                    existing = json.load(f)
+                self._manifest = RunManifest.model_validate(existing)
+                # Mid-run we don't want a stale ended_at confusing readers
+                # — clear it so this invocation's finalize() sets a fresh one.
+                self._manifest.ended_at = None
+                loaded = True
+            except (OSError, ValueError) as e:
+                # Corrupt / unreadable manifest — fall through to a fresh one
+                # but warn so the operator notices the lost provenance.
+                print(
+                    f"[Archiver] warning: existing manifest at {existing_path} "
+                    f"is unreadable ({e}); starting a fresh manifest.",
+                    file=sys.stderr,
+                )
+
+        if not loaded:
+            # started_at uses timezone-aware UTC so it round-trips through JSON.
+            self._manifest = RunManifest(
+                run_id=run_id,
+                started_at=datetime.now(timezone.utc),
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -87,6 +119,33 @@ class Archiver:
         dest_dir = self.run_dir / "phases" / phase / "logs"
         dest_dir.mkdir(parents=True, exist_ok=True)
         self._mirror_file(src, dest_dir / src.name)
+
+    def record_graphs_dir(self, phase: str, src_dir: Path | str) -> int:
+        """Recursively mirror a batch graphs directory into the archive.
+
+        Used by Phase 01b's collector: subgraphs (``.mmd`` + any sibling
+        files) live under ``outputs/graphs/batch_w<W>b<B>_<ts>/<spec>/`` and
+        are written by the worker (not by the collector itself), so the
+        usual ``record_partial`` hook doesn't reach them. This walks the
+        batch directory and hard-links every file into
+        ``phases/<phase>/graphs/<batch-dir-name>/<relative-path>``.
+
+        Returns the number of files mirrored (useful for tests / metrics).
+        """
+        src = Path(src_dir)
+        if not src.exists() or not src.is_dir():
+            return 0
+        dest_root = self.run_dir / "phases" / phase / "graphs" / src.name
+        mirrored = 0
+        for path in src.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(src)
+            dest = dest_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self._mirror_file(path, dest)
+            mirrored += 1
+        return mirrored
 
     def record_prompt(self, phase: str, text: str) -> None:
         """Write the rendered prompt text to ``prompts/<phase>.md``.
@@ -144,9 +203,23 @@ class Archiver:
         _atomic_write_json(env_path, env_data)
 
     def set_spec_sources(self, urls: list[str]) -> None:
-        """Record spec source URLs in the manifest."""
+        """Record spec source URLs in the manifest (replace)."""
         with self._lock:
             self._manifest.spec_sources = list(urls)
+
+    def add_spec_sources(self, urls: list[str]) -> None:
+        """Merge spec source URLs into the manifest, preserving insertion order.
+
+        Use this instead of ``set_spec_sources`` when the archive may already
+        carry sources from a prior invocation (re-entry with the same
+        ``SPECA_RUN_ID``). Duplicates are deduplicated.
+        """
+        with self._lock:
+            seen = {u: None for u in self._manifest.spec_sources}
+            for u in urls:
+                if u not in seen:
+                    seen[u] = None
+            self._manifest.spec_sources = list(seen.keys())
 
     def set_commit(self, sha: str) -> None:
         """Record the speca git commit in the manifest."""
