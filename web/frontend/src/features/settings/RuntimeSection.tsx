@@ -48,9 +48,15 @@ function availabilityFor(
     case "gemini":
       if (!view.gemini_cli_available)
         return { ok: false, hintKey: "settings.runtime.hint_gemini_cli_missing" };
-      if (!view.gemini_api_key_present)
-        return { ok: false, hintKey: "settings.runtime.hint_gemini_key_missing" };
-      return { ok: true, hintKey: "settings.runtime.hint_gemini_ready" };
+      // Either auth path satisfies us: an API key in the env var, OR a
+      // Google ADC token (gcloud auth application-default login +
+      // GOOGLE_GENAI_USE_GCA=true). The hint distinguishes the active
+      // path so users see how they authenticated.
+      if (view.gemini_api_key_present)
+        return { ok: true, hintKey: "settings.runtime.hint_gemini_ready_key" };
+      if (view.gemini_adc_available)
+        return { ok: true, hintKey: "settings.runtime.hint_gemini_ready_adc" };
+      return { ok: false, hintKey: "settings.runtime.hint_gemini_auth_missing" };
     case "ollama":
       if (
         view.ollama_host.includes("ollama.com") &&

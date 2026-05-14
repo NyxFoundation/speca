@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
@@ -54,6 +55,12 @@ class RuntimeView(BaseModel):
     codex_logged_in: bool
     gemini_cli_available: bool
     gemini_api_key_present: bool
+    # Google Application Default Credentials path — Gemini CLI accepts
+    # an OAuth-managed token written by `gcloud auth application-default
+    # login`, enabled by setting ``GOOGLE_GENAI_USE_GCA=true``. The
+    # SPA's runtime selector treats this as a valid auth source so
+    # users on a Google personal account do not need to mint an API key.
+    gemini_adc_available: bool
     copilot_cli_available: bool
     ollama_api_key_present: bool
 
@@ -106,6 +113,49 @@ def _gemini_status() -> bool:
     return _which("gemini") is not None
 
 
+def _gemini_adc_available() -> bool:
+    """Return True when Google Application Default Credentials are usable.
+
+    Two conditions must both hold:
+
+    1. ``GOOGLE_GENAI_USE_GCA`` is truthy in the server environment.
+       Gemini's auth code only consults the ADC when this opt-in is set;
+       otherwise it ignores the credentials file entirely.
+    2. The ADC JSON file exists (the canonical location is
+       ``$CLOUDSDK_CONFIG/application_default_credentials.json``, falling
+       back to ``~/.config/gcloud/application_default_credentials.json``
+       on POSIX or ``%APPDATA%/gcloud/application_default_credentials.json``
+       on Windows).
+
+    Both checks are file-existence only — we never read the token contents
+    (the SPA must not see secret material). A user who has run
+    ``gcloud auth application-default login`` and exported
+    ``GOOGLE_GENAI_USE_GCA=true`` in the shell that started ``speca-web``
+    will see ``gemini_adc_available=true`` in the Settings page.
+    """
+
+    flag = (os.environ.get("GOOGLE_GENAI_USE_GCA") or "").strip().lower()
+    if flag in ("", "0", "false", "no", "off"):
+        return False
+
+    # Cross-platform ADC file resolution mirrors gcloud's own search order.
+    candidate_paths: list[Path] = []
+    cloudsdk = os.environ.get("CLOUDSDK_CONFIG")
+    if cloudsdk:
+        candidate_paths.append(Path(cloudsdk) / "application_default_credentials.json")
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidate_paths.append(
+                Path(appdata) / "gcloud" / "application_default_credentials.json"
+            )
+    candidate_paths.append(
+        Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+    )
+
+    return any(p.exists() for p in candidate_paths)
+
+
 def _copilot_status() -> bool:
     """Return whether the gh CLI is installed (Copilot is downloaded on demand)."""
 
@@ -125,6 +175,7 @@ def _view_of(prefs: runtime_preferences.RuntimePreferences) -> RuntimeView:
         codex_logged_in=codex_in,
         gemini_cli_available=_gemini_status(),
         gemini_api_key_present=bool(os.environ.get("GEMINI_API_KEY")),
+        gemini_adc_available=_gemini_adc_available(),
         copilot_cli_available=_copilot_status(),
         ollama_api_key_present=bool(os.environ.get("OLLAMA_API_KEY")),
     )
