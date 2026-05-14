@@ -74,8 +74,35 @@ Flags:
 | `--output-dir <path>` | Output directory (sets `SPECA_OUTPUT_DIR`) |
 | `--no-tui` | Plain-text pass-through (CI-friendly) |
 | `--json` | Raw NDJSON event stream on stdout |
+| `--runtime <name>` | Select the execution backend (`claude` / `api` / `codex` / `gemini` / `ollama` / `copilot`) |
+| `--list-runtimes` | Print the registered runtimes with availability and exit |
+| `--01a-scope <mode>` | Filter Phase 01a state (`all` / `primary` / `primary+1hop` / `<N>`) |
 
 Resume is automatic: items recorded in any `<phase>_PARTIAL_*.json` are skipped. Use `--force` to override. The pipeline can be interrupted with `Ctrl-C` and re-run safely.
+
+### Runtime selection
+
+`--runtime` switches the agentic backend driving the pipeline. See
+[Multi-runtime backends](../operations/multi-runtime.md) for per-backend
+setup, env vars, and known limits.
+
+```bash
+# List registered runtimes with availability
+speca run --list-runtimes
+
+# JSON for CI / speca-cli consumers
+speca run --list-runtimes --json
+
+# Drive the audit via OpenRouter
+speca run --target 04 --runtime api --workers 4
+
+# Refuses to silently fall back to claude when the runtime is a stub
+speca run --target 04 --runtime copilot   # → exit code 2
+```
+
+`--runtime` overrides `ORCHESTRATOR_RUNNER`. Picking a stub runtime
+aborts with exit 2 instead of silently falling back, which would
+otherwise produce misleading PARTIALs.
 
 For phase IDs see [Pipeline overview](../pipeline/overview.md).
 
