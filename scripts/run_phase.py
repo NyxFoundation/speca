@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -149,6 +149,7 @@ def _build_env_snapshot(phases: list[str]) -> dict:
         "KEYWORDS": os.environ.get("KEYWORDS", ""),
         "SPEC_URLS": os.environ.get("SPEC_URLS", ""),
         "SPECA_OUTPUT_DIR": os.environ.get("SPECA_OUTPUT_DIR", ""),
+        "SPECA_01A_SCOPE": os.environ.get("SPECA_01A_SCOPE", ""),
         "ORCHESTRATOR_RUNNER": os.environ.get("ORCHESTRATOR_RUNNER", "claude"),
         "phases": phases,
     }
@@ -159,12 +160,152 @@ DEFAULT_KEYWORDS = "geth,ethereum client,execution specs,EIP"
 DEFAULT_SPEC_URLS = "https://ethereum.github.io/execution-specs/src/,https://geth.ethereum.org/docs"
 
 
+_VALID_01A_SCOPES = {"all", "primary", "primary+1hop"}
+
+
+def _parse_01a_scope(raw: str) -> str:
+    """Argparse ``type=`` validator for ``--01a-scope``.
+
+    Accepts the literals ``all`` / ``primary`` / ``primary+1hop`` (case
+    insensitive) plus any positive integer string. Anything else raises
+    ``argparse.ArgumentTypeError`` so typos surface at parse time instead
+    of being silently passed through to a warn-and-fallback path at
+    finalize time.
+    """
+    if raw is None:
+        return "all"
+    s = raw.strip().lower()
+    if not s or s in _VALID_01A_SCOPES:
+        return s or "all"
+    if s.isdigit() and int(s) >= 1:
+        return s
+    import argparse as _ap  # local import to keep top-level lean
+    raise _ap.ArgumentTypeError(
+        f"invalid --01a-scope value {raw!r}; "
+        f"expected one of {sorted(_VALID_01A_SCOPES)!r} or a positive integer."
+    )
+
+
+def _filter_01a_state(payload: dict, scope: str) -> dict:
+    """Apply ``--01a-scope`` filter to a Phase 01a state payload.
+
+    Phase 01a's spec-discovery skill expands a seed URL into many related
+    documents (rendered EIP, raw markdown, PR thread, predecessor RIP, ...).
+    Feeding all of them straight into Phase 01b multiplies the LLM cost
+    linearly with no clear benefit for demo / small-spec runs (see issue #60).
+
+    Supported scopes:
+
+    - ``all`` (default): no filter, downstream sees every discovered URL.
+    - ``primary``: keep only the spec that matches ``start_url`` (or its
+      filename stem) so 01b runs against a single canonical source.
+    - ``primary+1hop``: primary plus one additional fall-back match. Useful
+      when the primary doc has a sibling test-vectors / errata page that
+      adds invariants without doubling subgraph count.
+    - integer string (e.g. ``"3"``): keep the first N entries in
+      ``found_specs`` order.
+
+    Returns a *new* dict with the filtered ``found_specs`` list; the original
+    is not mutated. Unknown scope values fall back to ``all`` with a warning.
+    """
+    found_specs = list(payload.get("found_specs") or [])
+    start_url = (payload.get("start_url") or "").strip()
+    scope = (scope or "all").strip().lower()
+
+    if not found_specs or scope == "all":
+        return payload
+
+    if scope.isdigit():
+        n = max(1, int(scope))
+        new_specs = found_specs[:n]
+    elif scope in ("primary", "primary+1hop"):
+        new_specs = _select_primary_specs(
+            found_specs,
+            start_url,
+            include_one_hop=(scope == "primary+1hop"),
+        )
+    else:
+        print(
+            f"Warning: unknown --01a-scope value {scope!r}; falling back to 'all'.",
+            file=sys.stderr,
+        )
+        return payload
+
+    if not new_specs:
+        # The filter eliminated everything — refuse to silently strip the
+        # whole state, downstream 01b would have no input. Fall back to the
+        # first discovered entry so the pipeline can still progress.
+        print(
+            f"Warning: --01a-scope={scope} matched no specs; keeping first entry.",
+            file=sys.stderr,
+        )
+        new_specs = found_specs[:1]
+
+    out = dict(payload)
+    out["found_specs"] = new_specs
+    return out
+
+
+def _select_primary_specs(
+    found_specs: list[dict],
+    start_url: str,
+    *,
+    include_one_hop: bool,
+) -> list[dict]:
+    """Pick the primary spec from a 01a found_specs list.
+
+    Match strategy (in order):
+        1. Exact URL match with ``start_url``.
+        2. Filename-stem match (e.g. ``eip-7951.md`` substring).
+        3. First entry as a last-resort fallback.
+
+    When ``include_one_hop`` is true and the primary was picked by exact /
+    stem match, also include the first *other* entry from ``found_specs``
+    that survived. This typically catches the rendered/raw companion of a
+    GitHub markdown source.
+    """
+    if not found_specs:
+        return []
+    if not start_url:
+        return found_specs[:1]
+
+    # 1. Exact match
+    exact = [s for s in found_specs if (s.get("url") or "") == start_url]
+    primary = exact[0] if exact else None
+
+    # 2. Stem match
+    if primary is None:
+        stem = PurePosixPath(start_url.rstrip("/")).name.lower()
+        if stem:
+            stem_hits = [
+                s for s in found_specs if stem in (s.get("url") or "").lower()
+            ]
+            if stem_hits:
+                primary = stem_hits[0]
+
+    # 3. Fallback
+    if primary is None:
+        primary = found_specs[0]
+
+    selected = [primary]
+    if include_one_hop:
+        for s in found_specs:
+            if s is primary:
+                continue
+            selected.append(s)
+            break
+    return selected
+
+
 def _finalize_01a_state() -> None:
     """Consolidate the latest 01a PARTIAL into outputs/<root>/01a_STATE.json.
 
     Phase 01a is single-batch (one seed item) and the worker writes the result
     to 01a_PARTIAL_W0B0_<ts>.json wrapped as ``{"items": [<phase01a_state>]}``.
     Downstream phases (01b) expect the unwrapped payload at 01a_STATE.json.
+
+    Applies ``--01a-scope`` (or ``SPECA_01A_SCOPE`` env) to optionally
+    narrow the discovered spec list before downstream phases consume it.
     """
     output_root = get_output_root()
     state_path = output_root / "01a_STATE.json"
@@ -183,6 +324,11 @@ def _finalize_01a_state() -> None:
     if isinstance(data, dict) and isinstance(data.get("items"), list) and data["items"]:
         payload = data["items"][0]
 
+    scope = os.environ.get("SPECA_01A_SCOPE", "all")
+    pre_count = len(payload.get("found_specs", []))
+    payload = _filter_01a_state(payload, scope)
+    post_count = len(payload.get("found_specs", []))
+
     try:
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -190,7 +336,13 @@ def _finalize_01a_state() -> None:
         print(f"Warning: failed to write {state_path}: {e}", file=sys.stderr)
         return
 
-    print(f"  ✓ Wrote 01a_STATE.json from {latest.name} ({len(payload.get('found_specs', []))} specs)")
+    if scope != "all" and post_count != pre_count:
+        print(
+            f"  ✓ Wrote 01a_STATE.json from {latest.name} "
+            f"({post_count}/{pre_count} specs, scope={scope})"
+        )
+    else:
+        print(f"  ✓ Wrote 01a_STATE.json from {latest.name} ({post_count} specs)")
 
 
 def check_dependencies(phase_id: str) -> bool:
@@ -637,6 +789,24 @@ def main():
              "Pass explicit URLs when running against a non-Ethereum target.",
     )
 
+    # Phase 01a: scope filter applied between PARTIAL consolidation and the
+    # 01a_STATE.json write that 01b consumes. See _filter_01a_state for
+    # supported values. Settable via SPECA_01A_SCOPE env var too.
+    parser.add_argument(
+        "--01a-scope",
+        dest="scope_01a",
+        type=_parse_01a_scope,
+        default=None,
+        help="Filter Phase 01a state before 01b consumes it. Values: "
+             "'all' (default, no filter), 'primary' (keep only the spec "
+             "matching start_url / its filename stem), 'primary+1hop' "
+             "(primary plus the next entry in found_specs order — not a "
+             "graph-distance hop), or a positive integer N to keep the "
+             "first N specs. Also settable via SPECA_01A_SCOPE env var; "
+             "the CLI flag takes precedence. Unknown values are rejected "
+             "at parse time.",
+    )
+
     parser.add_argument(
         "--json",
         action="store_true",
@@ -680,6 +850,10 @@ def main():
         os.environ["KEYWORDS"] = args.keywords
     if args.spec_urls:
         os.environ["SPEC_URLS"] = args.spec_urls
+    if args.scope_01a is not None:
+        # Promote CLI flag into env so _finalize_01a_state() (a
+        # parameter-less helper called from inside run_phase) can pick it up.
+        os.environ["SPECA_01A_SCOPE"] = args.scope_01a
 
     # Determine execution order
     if args.target:
