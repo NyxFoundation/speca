@@ -9,9 +9,18 @@ The `speca-web` frontend mirrors the `speca-cli` TUI from
 browser. This page collects every shipped feature in one place, with
 CLI-spec section references so you can map web ↔ TUI.
 
+## Dashboard
+
+`/runs` lists past audit runs. Start a new run, filter, re-run failed
+phases — all from the dashboard.
+
+![Dashboard default](/img/web-ui/01_dashboard_default.png)
+
 ## Authentication
 
 ### Paste-code OAuth (CLI spec §4.5.1)
+
+![Login screen with paste-code OAuth](/img/web-ui/10_login_paste_code.png)
 
 The login screen's **Continue with claude.ai (paste-code)** button
 spawns `claude auth login` server-side, extracts the auth URL from its
@@ -28,7 +37,9 @@ Users without a subscription can paste an `ANTHROPIC_API_KEY` directly.
 It lands in `~/.claude/credentials.json` (note: separate from the CLI's
 `.credentials.json`).
 
-## Dashboard / Run detail
+## Run detail
+
+![Run detail with phase rows and budget gauge](/img/web-ui/05_run_detail_budget_phases.png)
 
 ### Phase-row keybindings (CLI spec §10.3)
 
@@ -45,15 +56,21 @@ With a phase row focused:
 
 The budget gauge colours by `spent / cap` (yellow at 80%, red at 100%).
 Click it to open the **cap-bump modal** and raise / clear
-`max_budget_usd`. Persisted via `POST /api/runs/<id>/budget_cap`.
+`max_budget_usd`:
+
+![Budget cap-bump modal](/img/web-ui/06_budget_cap_bump_modal.png)
+
+Persisted via `POST /api/runs/<id>/budget_cap`.
 
 ## Findings
 
-### Code highlighting (CLI spec §5.4.4 `[c]`)
+### List — filter chips + DSL + Markdown export
 
-Prism highlights `evidence_snippet`. Solidity / TS / JS / Python / Rust
-/ Go / Java / C / C++ grammars ship; unknown languages fall through to
-plain text. Solarized theme has its own Prism palette.
+![Findings list](/img/web-ui/03_findings_list.png)
+
+Severity / verdict / phase chips filter server-side; the DSL input
+overlays an AND filter client-side. **Export Markdown** generates a
+severity-bucketed one-file report.
 
 ### Filter DSL (CLI spec §5.4.1)
 
@@ -78,16 +95,36 @@ existing DSL filter.
 
 ### Markdown export (CLI spec §3.1)
 
-The **Export Markdown** button on the findings list generates a
-severity-bucketed Markdown report. Embedded backticks are wrapped in
-dynamic fences; CRLF is normalised to LF.
+The **Export Markdown** button generates a severity-bucketed Markdown
+report. Embedded backticks are wrapped in dynamic fences; CRLF is
+normalised to LF.
+
+### Code highlighting (CLI spec §5.4.4 `[c]`)
+
+![Finding detail with code highlight](/img/web-ui/04_finding_detail_code_highlight.png)
+
+Prism highlights `evidence_snippet`. Solidity / TS / JS / Python / Rust
+/ Go / Java / C / C++ grammars ship; unknown languages fall through to
+plain text. Solarized theme has its own Prism palette.
 
 ## Chat panel
 
-### Multi-runtime (CLI spec issue #3)
+![Chat panel](/img/web-ui/07_chat_panel_empty.png)
 
-Five backends: `claude` (default) / `codex` / `gemini` / `ollama` /
-`copilot`. See [Multi-runtime backends](./multi-runtime.md).
+### Multi-runtime switching (CLI spec issue #3)
+
+Five backends:
+
+- `claude` (default) — Anthropic Claude
+- `codex` — OpenAI Codex (`codex exec --json`)
+- `gemini` — Google Gemini (`gemini -p --output-format stream-json`)
+- `ollama` — Ollama (HTTP `/api/chat`, cloud or self-hosted)
+- `copilot` — GitHub Copilot (`gh copilot suggest`, single-shot)
+
+Switchable in real time from Settings (see
+[Multi-runtime backends](./multi-runtime.md)):
+
+![Runtime selector](/img/web-ui/11_runtime_selector.png)
 
 ### Ask Claude about this finding (CLI spec §3.1.6)
 
@@ -98,8 +135,8 @@ evidence_snippet / …).
 ### Context cap (CLI spec §8.5)
 
 The prefilled context block is truncated to **50 KB** (TextEncoder
-byte-accurate, multi-byte safe). Over-cap context is replaced with a
-trailing `…(context truncated to 50 KB budget…)` marker.
+byte-accurate, multi-byte safe). Over-cap context gets a trailing
+`…(context truncated to 50 KB budget…)` marker.
 
 ### Approval gate (three layers)
 
@@ -117,7 +154,15 @@ Side-effect tools that the chat can fire (`launch_pipeline` /
 
 `light` / `dark` / `system` / **`solarized`**. Solarized uses Ethan
 Schoonover's canonical palette layered on the Nyx tokens. Prism syntax
-highlighting tracks the theme.
+highlighting tracks the theme:
+
+| Default | Solarized |
+| --- | --- |
+| ![dashboard default](/img/web-ui/01_dashboard_default.png) | ![dashboard solarized](/img/web-ui/02_solarized_dashboard.png) |
+
+Toggle from the header `L D A S` buttons:
+
+![Theme toggle 4 buttons](/img/web-ui/09_settings_theme_4buttons.png)
 
 ### i18n
 
@@ -148,6 +193,8 @@ the initial stub matches `speca init` and is inspectable by external
 tooling.
 
 ## Keyboard shortcuts (full list, CLI spec §10.3)
+
+![Keyboard shortcuts help modal](/img/web-ui/08_keyboard_shortcuts_help.png)
 
 | Key | Scope | Action |
 | --- | --- | --- |

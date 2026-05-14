@@ -6,9 +6,17 @@ sidebar_position: 11
 
 `speca-web` のフロントエンドは、CLI spec ([issue #3](https://github.com/NyxFoundation/speca/issues/3)) の `speca-cli` をブラウザ上で再現することがゴールです。本ドキュメントは現在実装済みの主要機能を 1 ページに集約したものです。CLI spec のセクション番号も併記しているので、対応関係が分かるようにしてあります。
 
+## ダッシュボード
+
+`/runs` で過去の audit run の一覧。新規 run の起動 / フィルタリング / 再実行などができます。
+
+![Dashboard default](/img/web-ui/01_dashboard_default.png)
+
 ## 認証
 
 ### Paste-code OAuth (CLI spec §4.5.1)
+
+![Login screen with paste-code OAuth](/img/web-ui/10_login_paste_code.png)
 
 ログイン画面の **Continue with claude.ai (paste-code)** ボタンを押すと、サーバが `claude auth login` をサブプロセスで起動し、stdout から認証 URL を抽出してブラウザの新タブで開きます。claude.ai 側で表示される verification code を Web UI のフォームに貼り付けると、サーバがそれをサブプロセスの stdin に流して `~/.claude/.credentials.json` を更新します。
 
@@ -18,7 +26,9 @@ sidebar_position: 11
 
 サブスクリプションを持たないユーザは `ANTHROPIC_API_KEY` を直接入力できます。`~/.claude/credentials.json` (CLI が書き込む `.credentials.json` とは別) に保存します。
 
-## ダッシュボード / Run 詳細
+## Run 詳細
+
+![Run detail with phase rows and budget gauge](/img/web-ui/05_run_detail_budget_phases.png)
 
 ### Phase 行のキーバインド (CLI spec §10.3)
 
@@ -33,13 +43,19 @@ Phase 行に focus 中:
 
 ### Budget gauge + cap-bump モーダル (CLI spec §5.3.3)
 
-予算ゲージは `spent / cap` を 3 段階で着色 (~80% で黄、>=100% で赤)。ゲージをクリックすると **cap-bump モーダル** が開き、`max_budget_usd` を引き上げ / クリアできます。バックエンドは `POST /api/runs/<id>/budget_cap` で `state.json` に round-trip。
+予算ゲージは `spent / cap` を 3 段階で着色 (~80% で黄、>=100% で赤)。ゲージをクリックすると **cap-bump モーダル** が開き、`max_budget_usd` を引き上げ / クリアできます:
+
+![Budget cap-bump modal](/img/web-ui/06_budget_cap_bump_modal.png)
+
+バックエンドは `POST /api/runs/<id>/budget_cap` で `state.json` に round-trip します。
 
 ## Findings
 
-### コードハイライト (CLI spec §5.4.4 `[c]` keybinding)
+### 一覧 — Filter chip + DSL + Markdown export
 
-Findings 詳細ページの `evidence_snippet` を Prism で構文ハイライト。Solidity / TS / JS / Python / Rust / Go / Java / C / C++ 同梱、未知言語はプレーンテキストにフォールバック。Solarized テーマも別パレットで対応。
+![Findings list](/img/web-ui/03_findings_list.png)
+
+severity / verdict / phase の chip で server side filter、追加の DSL 入力で client side のさらに細かい filter を AND 合成できます。`Export Markdown` ボタンで severity 別の Markdown 1 ファイル生成。
 
 ### Filter DSL (CLI spec §5.4.1)
 
@@ -64,21 +80,31 @@ severity:HIGH|CRITICAL verdict:CONFIRMED_VULNERABILITY prop:PROP-6a4* path:src/*
 
 ### Markdown export (CLI spec §3.1)
 
-Findings 一覧の **Export Markdown** ボタンで severity 別バケットの Markdown を 1 ファイル生成。embedded backtick は dynamic fence で安全に出力、CRLF → LF 正規化済。
+`Export Markdown` ボタンで severity 別バケットの Markdown を 1 ファイル生成。embedded backtick は dynamic fence で安全に出力、CRLF → LF 正規化済。
+
+### コードハイライト (CLI spec §5.4.4 `[c]` keybinding)
+
+![Finding detail with code highlight](/img/web-ui/04_finding_detail_code_highlight.png)
+
+`FindingDetailPage` の evidence_snippet を Prism で highlight。Solidity / TS / JS / Python / Rust / Go / Java / C / C++ 同梱、未知言語はプレーンテキストにフォールバック。Solarized テーマも別パレットで対応。
 
 ## Chat パネル
 
-### Multi-runtime (CLI spec issue #3 / 「multi-agent CLI」)
+![Chat panel](/img/web-ui/07_chat_panel_empty.png)
+
+### Multi-runtime 切替 (CLI spec issue #3)
 
 Chat パネルは 5 つのバックエンドに対応:
 
-- `claude` (既定)
-- `codex` (`codex exec --json`)
-- `gemini` (`gemini -p --output-format stream-json`)
-- `ollama` (HTTP `/api/chat`, cloud or self-hosted)
-- `copilot` (`gh copilot suggest`, 単発のみ)
+- `claude` (既定) — Anthropic Claude
+- `codex` — OpenAI Codex (`codex exec --json`)
+- `gemini` — Google Gemini (`gemini -p --output-format stream-json`)
+- `ollama` — Ollama (HTTP `/api/chat`, cloud or self-hosted)
+- `copilot` — GitHub Copilot (`gh copilot suggest`, 単発)
 
-詳細は [Multi-runtime バックエンド](./multi-runtime.md) を参照。
+Settings ページから即座に切替可能 (詳細は [Multi-runtime バックエンド](./multi-runtime.md) を参照):
+
+![Runtime selector](/img/web-ui/11_runtime_selector.png)
 
 ### Ask Claude about this finding (CLI spec §3.1.6)
 
@@ -100,7 +126,15 @@ Chat から起動可能な side-effect tool (`launch_pipeline` / `stop_pipeline`
 
 ### テーマ (CLI spec §10.5)
 
-`light` / `dark` / `system` / **`solarized`** の 4 種。Solarized は Ethan Schoonover の正準パレットを Nyx tokens に重ねたもの。Prism シンタックスハイライトも追従。
+`light` / `dark` / `system` / **`solarized`** の 4 種。Solarized は Ethan Schoonover の正準パレットを Nyx tokens に重ねたもの。Prism シンタックスハイライトも追従:
+
+| Default | Solarized |
+| --- | --- |
+| ![dashboard default](/img/web-ui/01_dashboard_default.png) | ![dashboard solarized](/img/web-ui/02_solarized_dashboard.png) |
+
+ヘッダの `L D A S` ボタンで 4-way 切替:
+
+![Theme toggle 4 buttons](/img/web-ui/09_settings_theme_4buttons.png)
 
 ### i18n (EN / JA)
 
@@ -121,6 +155,8 @@ i18next で全画面の文言を切替。ヘッダで `EN` / `JA` ボタンか�
 新規 run を作成すると、`outputs/<run_id>/TARGET_INFO.json` と `BUG_BOUNTY_SCOPE.json` を Wizard の入力から即座に書き出します。Phase 0a / 0c が後で上書きしますが、最初の stub は `speca init` 同等で、外部ツールから検査可能です。
 
 ## キーボードショートカット 全リスト (CLI spec §10.3)
+
+![Keyboard shortcuts help modal](/img/web-ui/08_keyboard_shortcuts_help.png)
 
 | キー | スコープ | 動作 |
 | --- | --- | --- |
