@@ -65,17 +65,52 @@ claude auth status --json
 # → { "loggedIn": true, "authMethod": "claude.ai", "email": "...", "subscriptionType": "max" }
 ```
 
-**Or pick a different auth source:**
+**Or pick a different auth source (API key or OAuth):**
 
 ```bash
-# Anthropic API key (no subscription)
+# --- Anthropic ---
+# OAuth (Pro/Max subscription)
+claude auth login
+# Or API key
 export ANTHROPIC_API_KEY=sk-ant-api-...
 
-# Or OpenAI / Gemini / Ollama (multi-runtime)
+# --- OpenAI Codex ---
+# OAuth (ChatGPT plan)
+npm install -g @openai/codex
+codex login
+# Or API key via the CLI
+printenv OPENAI_API_KEY | codex login --with-api-key
+# Or just export it (audit pipeline path)
 export OPENAI_API_KEY=sk-...
-export GEMINI_API_KEY=...
-ollama serve   # in another terminal for self-hosted Ollama
+
+# --- Google Gemini ---
+# API key (simplest)
+export GEMINI_API_KEY=...                     # https://aistudio.google.com/apikey
+# Or Google OAuth (Application Default Credentials)
+gcloud auth application-default login
+export GOOGLE_GENAI_USE_GCA=true
+
+# --- Ollama (no OAuth) ---
+# Self-hosted (no auth)
+ollama serve   # in another terminal
+export OLLAMA_HOST=http://localhost:11434
+# Cloud (API key)
+export OLLAMA_HOST=https://ollama.com
+export OLLAMA_API_KEY=...
+
+# --- GitHub Copilot (chat only, audit unsupported) ---
+gh auth login                                  # GitHub OAuth
+gh extension install github/gh-copilot
 ```
+
+:::tip OAuth vs API key
+- **OAuth** rides your subscription (Pro/Max plan, ChatGPT plan,
+  Google personal account, GitHub login). The CLI manages tokens for
+  you.
+- **API key** is pay-per-use. Better for CI / scripts.
+- `/diagnostics` and `--list-runtimes` both surface which path is
+  currently usable.
+:::
 
 ### 3. Start the Web server
 
@@ -109,15 +144,18 @@ Open http://127.0.0.1:7411/ in a browser:
 
 ![Runtime selector](/img/web-ui/11_runtime_selector.png)
 
-- **Claude** → default, no extra setup
-- **Codex** → export `OPENAI_API_KEY` first
-- **Gemini** → export `GEMINI_API_KEY`
-- **Ollama** → self-hosted (`OLLAMA_HOST=http://localhost:11434`) or
-  cloud (`OLLAMA_HOST=https://ollama.com` + `OLLAMA_API_KEY`)
-- **Copilot** → `gh auth login` + Copilot subscription (chat only, no audit)
+| Runtime | OAuth | API key | What the server needs |
+|---|---|---|---|
+| **Claude** | `claude auth login` | `ANTHROPIC_API_KEY` | Default — nothing extra |
+| **Codex** | `codex login` (ChatGPT plan) | `OPENAI_API_KEY` | CLI logged in, or `OPENAI_API_KEY` exported |
+| **Gemini** | `gcloud auth application-default login` + `GOOGLE_GENAI_USE_GCA=true` | `GEMINI_API_KEY` | Either path exported in the server env |
+| **Ollama** | — (no OAuth) | cloud: `OLLAMA_API_KEY`, self-hosted: none | Set `OLLAMA_HOST` (default cloud) |
+| **Copilot** | `gh auth login` (GitHub OAuth) | — (subscription required) | Chat only; orchestrator is unsupported |
 
-See [Multi-runtime backends](../operations/multi-runtime.md) for the
-deep dive.
+The `✓` / `!` badge reflects "what the server process sees right now"
+— export env vars before starting / restarting the Web server. Full
+per-runtime details in
+[Multi-runtime backends](../operations/multi-runtime.md).
 
 ### 5. Start an audit run
 
@@ -187,51 +225,363 @@ bounty submission or internal review.
 
 ---
 
-## Route B — CLI only (CI / scripts)
+## Route B — Run an audit from the CLI (CI / scripts / fine control)
+
+Use this route when you want to skip the Web UI entirely (CI, scripted
+batches) or need finer control than the wizard surfaces. Same setup
+(clone + `uv sync`) as Route A.
+
+### B-1. Preflight
 
 ```bash
-# Same clone + uv sync as before
-export KEYWORDS="ethereum execution client"
-export SPEC_URLS="https://ethereum.github.io/execution-specs/src/"
+# Python / Node / git / claude CLI / MCP server all present?
+uv run python -c "import sys; print(sys.version)"
+node --version
+which claude    # or where claude on Windows
+bash scripts/setup_mcp.sh --verify
+```
 
+`--verify` checks MCP registration. If something is missing, run
+`bash scripts/setup_mcp.sh` (no flag) to re-register.
+
+### B-2. Write target info
+
+The CLI route is straightforward: hand-write the two JSON files the
+pipeline expects.
+
+```bash
+mkdir -p outputs
+```
+
+```json title="outputs/TARGET_INFO.json"
+{
+  "repository": "OpenZeppelin/openzeppelin-contracts",
+  "ref": "v5.0.0",
+  "project_type": "smart_contract"
+}
+```
+
+```json title="outputs/BUG_BOUNTY_SCOPE.json"
+{
+  "url": "https://www.immunefi.com/bounty/openzeppelin",
+  "scope_summary": "Core ERC-20/721 + access control contracts",
+  "in_scope_assets": [
+    "contracts/access/Ownable.sol",
+    "contracts/access/AccessControl.sol",
+    "contracts/token/ERC20/**/*.sol"
+  ],
+  "spec_urls": [
+    "https://docs.openzeppelin.com/contracts/5.x/access-control"
+  ]
+}
+```
+
+Full schema in [Config files](../getting-started/config-files.md).
+Without these, Phase 01a halts with "Empty results"
+([Troubleshooting C](../operations/troubleshooting.md)).
+
+### B-3. (Optional) Override Phase 01a env
+
+If you don't bake `spec_urls` into `BUG_BOUNTY_SCOPE.json`, you can
+pass them via env:
+
+```bash
+export KEYWORDS="ethereum execution client EIP"
+export SPEC_URLS="https://ethereum.github.io/execution-specs/src/,https://geth.ethereum.org/docs"
+```
+
+With neither set, Phase 01a falls back to the built-in Ethereum seed
+defaults.
+
+### B-4. Run the pipeline
+
+#### Pattern 1: All phases at once
+
+```bash
 uv run python scripts/run_phase.py --target 04 --workers 4
 ```
 
-Outputs land in `outputs/`. Resume is automatic (reads processed IDs
-from `<phase>_PARTIAL_*.json`) — Ctrl-C and rerun and you pick up
-where you left off.
+`--target 04` resolves the dependency chain and runs
+`01a → 01b → 01e → 02c → 03 → 04`.
 
-### Pick a runtime
+#### Pattern 2: One phase at a time
 
 ```bash
-# What's available?
-uv run python scripts/run_phase.py --list-runtimes
+uv run python scripts/run_phase.py --phase 01a --workers 4
+# → outputs/01a_STATE.json + outputs/01a_PARTIAL_*.json
+cat outputs/01a_STATE.json | python -m json.tool | head -30
 
-# Drive the audit via OpenRouter
-export API_RUNNER_API_KEY=sk-or-v1-...
-uv run python scripts/run_phase.py --target 04 --runtime api --workers 4
+uv run python scripts/run_phase.py --phase 01b --workers 4
+# → outputs/01b_PARTIAL_*.json + outputs/graphs/
 
-# JSON event stream for CI / speca-cli
-uv run python scripts/run_phase.py --target 04 --runtime api --json | tee pipeline.ndjson
+uv run python scripts/run_phase.py --phase 01e --workers 4
+uv run python scripts/run_phase.py --phase 02c --workers 4
+uv run python scripts/run_phase.py --phase 03 --workers 4
+uv run python scripts/run_phase.py --phase 04 --workers 4
 ```
 
-See [Multi-runtime backends](../operations/multi-runtime.md).
+#### Pattern 3: Skip a phase
 
-### Recovery
+Skip Phase 02c (it depends on MCP tree-sitter, which only the claude
+runtime drives today):
 
 ```bash
-# Force re-run a failed phase
+uv run python scripts/run_phase.py --phase 01a 01b 01e 03 04 --workers 4
+```
+
+#### Useful flags
+
+```bash
+--force                    # Ignore resume state and re-execute
+--workers 4                # Parallel worker count
+--max-concurrent 8         # Max parallel claude invocations per phase
+--budget 50                # Cost ceiling in USD (exit 64 when reached)
+--output-dir outputs-test  # Separate output directory (parallel runs)
+--cleanup-dry-run          # Show what would be re-executed, do not run
+--json                     # NDJSON event stream (CI-friendly)
+--no-tui                   # Plain text (combines with --json)
+--01a-scope primary        # Filter Phase 01a state (PR #65)
+--runtime <name>           # Switch runtime (PR #64)
+--list-runtimes            # List registered runtimes with availability
+```
+
+### B-5. Switch runtimes
+
+```bash
+# See what's available
+uv run python scripts/run_phase.py --list-runtimes
+```
+
+```text
+Active runtime: claude
+[OK] claude       Anthropic claude CLI (stream-json). ...
+[..] api          OpenRouter-style HTTP. - Set API_RUNNER_API_KEY ...
+[..] codex (stub) OpenAI codex CLI. - codex CLI present; run `codex login`. ...
+[..] gemini (stub) Google gemini. - Set GEMINI_API_KEY ...
+[..] ollama (stub) Ollama HTTP. ...
+[OK] copilot (stub) GitHub Copilot. (orchestrator unsupported)
+```
+
+For CI / `speca-cli` consumers, JSON:
+
+```bash
+uv run python scripts/run_phase.py --list-runtimes --json | python -m json.tool
+```
+
+#### Per-runtime examples
+
+```bash
+# --- Claude (default) — nothing extra
+uv run python scripts/run_phase.py --target 04 --workers 4
+
+# --- OpenRouter (generic OpenAI-compatible) ---
+export API_RUNNER_API_KEY=sk-or-v1-...
+export API_RUNNER_BASE_URL=https://openrouter.ai/api/v1
+export API_RUNNER_MODEL=deepseek/deepseek-r1
+uv run python scripts/run_phase.py --target 04 --runtime api --workers 4
+
+# --- OpenAI Codex (after PR #67) ---
+# OAuth (ChatGPT plan)
+codex login
+# Or API key
+export OPENAI_API_KEY=sk-...
+uv run python scripts/run_phase.py --target 04 --runtime codex --workers 4
+# Custom model
+export OPENAI_MODEL=gpt-4-turbo
+uv run python scripts/run_phase.py --target 04 --runtime codex
+
+# --- Google Gemini (after PR #67) ---
+# API key
+export GEMINI_API_KEY=...
+# Or Google OAuth (ADC)
+gcloud auth application-default login
+export GOOGLE_GENAI_USE_GCA=true
+uv run python scripts/run_phase.py --target 04 --runtime gemini
+
+# --- Ollama self-hosted (after PR #67) ---
+# Terminal A
+ollama serve
+ollama pull llama3.2
+# Terminal B
+export OLLAMA_HOST=http://localhost:11434
+uv run python scripts/run_phase.py --target 04 --runtime ollama --workers 2
+
+# --- Ollama cloud ---
+export OLLAMA_HOST=https://ollama.com
+export OLLAMA_API_KEY=...
+uv run python scripts/run_phase.py --target 04 --runtime ollama
+```
+
+Full per-runtime auth / env reference is in
+[Multi-runtime backends](../operations/multi-runtime.md).
+
+### B-6. Tail logs / inspect progress
+
+The TUI dashboard (default) renders phase progress + cost live. To
+tail detailed logs in another terminal:
+
+```bash
+# Tail the most recent phase log
+tail -f outputs/logs/03_W0B0_*.jsonl | jq .
+
+# Count PARTIALs (progress indicator)
+ls -1 outputs/03_PARTIAL_*.json | wc -l
+
+# Read the manifest (useful when resuming after a Ctrl-C)
+cat .speca/runs/*/state.json | jq '{run_id, status, current_phase, cost_usd_total}'
+```
+
+### B-7. Browse findings
+
+#### Read PARTIAL files directly
+
+```bash
+# All findings
+ls outputs/04_PARTIAL_*.json
+cat outputs/04_PARTIAL_W0B0_*.json | jq '.findings[] | {property_id, severity, verdict, file}'
+
+# Severity filter
+cat outputs/04_PARTIAL_*.json | jq '.findings[] | select(.severity=="High")'
+```
+
+#### `speca browse` TUI
+
+```bash
+speca browse
+speca browse --severity Critical
+speca browse --filter "verdict:CONFIRMED_*"
+speca browse --filter "path:contracts/**/*.sol severity:HIGH"
+```
+
+`c` for code peek, `f` to edit the filter, `q` to quit. Full DSL in
+the [CLI reference](../getting-started/cli-reference.md#speca-browse).
+
+#### Markdown export from the CLI
+
+```bash
+uv run python -c "
+from pathlib import Path
+import json
+findings = []
+for p in Path('outputs').glob('04_PARTIAL_*.json'):
+    findings.extend(json.loads(p.read_text())['findings'])
+findings.sort(key=lambda f: ('Critical High Medium Low Informational'.index(f['severity']), f['property_id']))
+for f in findings:
+    print(f'## {f[\"property_id\"]} — {f[\"severity\"]} / {f.get(\"verdict\", \"?\")}')
+    if f.get('file'): print(f'`{f[\"file\"]}::{f.get(\"line_range\", \"\")}`')
+    print()
+    print(f.get('evidence_snippet', '_(no snippet)_'))
+    print()
+" > findings.md
+```
+
+### B-8. Ask Claude about one finding
+
+```bash
+speca ask                                       # pick first finding
+speca ask PROP-abc-001 --from outputs/04_PARTIAL_*.json
+speca ask --severity High --filter "verdict:CONFIRMED_*"
+```
+
+Opens a Claude Code session with that finding loaded as context — the
+CLI equivalent of "Ask Claude about this finding" in the Web UI.
+
+### B-9. Manual recovery
+
+| Symptom | Check | Fix |
+|---|---|---|
+| Phase 03 circuit breaker (exit 65) | `tail -50 outputs/logs/03_*.jsonl \| jq .` | Re-run with lower concurrency: `--force --workers 2 --max-concurrent 4` |
+| One batch is broken | Inspect `outputs/<phase>_PARTIAL_W<W>B<B>_*.json` | Delete that one file → resume |
+| Budget reached (exit 64) | `cat .speca/runs/*/state.json \| jq .cost_usd_total` | `--budget 100` or narrow scope |
+| `BUG_BOUNTY_SCOPE.json missing` | `ls outputs/BUG_BOUNTY_SCOPE.json` | Hand-write per B-2 |
+| `outputs/01a_STATE.json` empty | `cat outputs/01a_STATE.json` | Export `SPEC_URLS` then `--phase 01a --force` |
+| Phase 02c MCP failure | `bash scripts/setup_mcp.sh --verify` | Re-register MCP, then `--phase 02c --force` |
+
+```bash
+# Force re-run just the failed phase
 uv run python scripts/run_phase.py --phase 03 --force --workers 4
 
-# Skip a phase (e.g. 02c when MCP isn't available)
-uv run python scripts/run_phase.py --phase 01a 01b 01e 03 04 --workers 4
+# Delete one broken batch and resume
+rm outputs/03_PARTIAL_W0B5_*.json
+uv run python scripts/run_phase.py --phase 03
 
-# Inspect cleanup before forcing
+# Show what cleanup would do before forcing
 uv run python scripts/run_phase.py --phase 03 --cleanup-dry-run
 ```
 
-See [Troubleshooting](../operations/troubleshooting.md) for the long
-list.
+The exhaustive recovery procedures live in
+[Troubleshooting](../operations/troubleshooting.md).
+
+### B-10. CI example (GitHub Actions)
+
+```yaml title=".github/workflows/audit.yml"
+name: Nightly SPECA audit
+on:
+  schedule: [{ cron: "0 18 * * *" }]   # 03:00 JST nightly
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: astral-sh/setup-uv@v3
+      - name: install claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: install deps
+        run: uv sync
+      - name: write target info
+        run: |
+          cat > outputs/TARGET_INFO.json <<EOF
+          {"repository":"${{ github.repository }}","ref":"${{ github.sha }}","project_type":"smart_contract"}
+          EOF
+          cat > outputs/BUG_BOUNTY_SCOPE.json <<EOF
+          {"in_scope_assets":["contracts/**/*.sol"],"spec_urls":[]}
+          EOF
+      - name: speca audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run python scripts/run_phase.py \
+            --target 04 \
+            --workers 4 \
+            --budget 50 \
+            --json --no-tui > audit-events.ndjson
+      - name: upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speca-${{ github.run_id }}
+          path: |
+            outputs/
+            audit-events.ndjson
+            .speca/runs/
+```
+
+The `--json` NDJSON is typed and consumable by `speca-cli` (issue #3)
+or any JS reader.
+
+### B-11. Parallel audits
+
+```bash
+# Terminal A
+export SPECA_OUTPUT_DIR=outputs-target1
+mkdir -p $SPECA_OUTPUT_DIR
+# (place target1's TARGET_INFO.json / BUG_BOUNTY_SCOPE.json under it)
+uv run python scripts/run_phase.py --target 04 --output-dir $SPECA_OUTPUT_DIR
+
+# Terminal B
+export SPECA_OUTPUT_DIR=outputs-target2
+# (likewise)
+uv run python scripts/run_phase.py --target 04 --output-dir $SPECA_OUTPUT_DIR
+```
+
+`SPECA_OUTPUT_DIR` (env) and `--output-dir` (flag) are equivalent.
+Watch the Claude subscription parallel quota
+([Troubleshooting B](../operations/troubleshooting.md)).
 
 ---
 
