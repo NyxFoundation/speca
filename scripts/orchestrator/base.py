@@ -199,8 +199,15 @@ class BaseOrchestrator(ABC):
         # Lazily create asyncio primitives now that the event loop is running
         self.semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        # Select runner: API runner (for non-Claude models) vs Claude CLI
-        runner_type = os.environ.get("ORCHESTRATOR_RUNNER", "claude")
+        # Select runner via the runtime registry — see scripts/orchestrator/
+        # runtime_registry.py for the supported ids. Today only ``claude``
+        # (default) and ``api`` are wired; ``codex`` / ``gemini`` /
+        # ``ollama`` / ``copilot`` are registered for the CLI's
+        # ``--list-runtimes`` surface but selecting them aborts at the CLI
+        # boundary (see run_phase.py) rather than silently falling back.
+        from . import runtime_registry
+
+        runner_type = runtime_registry.resolve_active()
         if runner_type == "api":
             self.runner = APIRunner(
                 self.config,

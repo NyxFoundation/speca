@@ -42,6 +42,7 @@ from orchestrator.json_events import JsonEventEmitter
 from orchestrator.paths import get_output_root
 from orchestrator.phase0_runner import get_phase0_runner, is_phase0
 from orchestrator.resume import ResumeManager
+from orchestrator import runtime_registry
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +145,17 @@ def make_run_id(
 
 
 def _build_env_snapshot(phases: list[str]) -> dict:
-    """Capture a sanitised snapshot of the runtime environment."""
+    """Capture a sanitised snapshot of the runtime environment.
+
+    We deliberately read ``ORCHESTRATOR_RUNNER`` via the registry helper
+    so a typo'd value lands in the manifest as ``claude`` (the actual
+    runtime that was executed) rather than the misspelling.
+    """
     return {
         "KEYWORDS": os.environ.get("KEYWORDS", ""),
         "SPEC_URLS": os.environ.get("SPEC_URLS", ""),
         "SPECA_OUTPUT_DIR": os.environ.get("SPECA_OUTPUT_DIR", ""),
-        "ORCHESTRATOR_RUNNER": os.environ.get("ORCHESTRATOR_RUNNER", "claude"),
+        "ORCHESTRATOR_RUNNER": runtime_registry.resolve_active(),
         "phases": phases,
     }
 
@@ -573,7 +579,13 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter,
     )
     
-    phase_group = parser.add_mutually_exclusive_group(required=True)
+    # --list-runtimes is a query that exits before scheduling any phase,
+    # so we relax the otherwise-required --phase / --target group when
+    # the user is just inspecting which backends are installed. We sniff
+    # raw argv (cheaper than a full pre-parse) and treat it as a one-off
+    # override for argparse's required= constraint.
+    listing_runtimes = "--list-runtimes" in sys.argv
+    phase_group = parser.add_mutually_exclusive_group(required=not listing_runtimes)
     phase_group.add_argument("--phase", nargs="+", help="Specific phase(s) to run (e.g. 01a 01b)")
     phase_group.add_argument("--target", help="Target phase (runs all dependencies up to this phase)")
     
@@ -646,6 +658,24 @@ def main():
              "event schema.",
     )
 
+    # Runtime selection (issue #3 / multi-agent CLI groundwork)
+    parser.add_argument(
+        "--runtime",
+        default=None,
+        choices=list(runtime_registry.all_runtime_ids()),
+        help="Which agentic backend drives the audit pipeline. Sets the "
+             "ORCHESTRATOR_RUNNER env var so subprocesses see the same "
+             "choice. Default: 'claude'. Use --list-runtimes to inspect "
+             "what is installed and what each runtime needs to be usable.",
+    )
+    parser.add_argument(
+        "--list-runtimes",
+        action="store_true",
+        help="Print a table of registered runtimes with availability + "
+             "implementation status, then exit. Useful before kicking off "
+             "a long run on a fresh machine.",
+    )
+
     # Archive flags
     parser.add_argument(
         "--archive-root",
@@ -660,6 +690,53 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # `--list-runtimes` is a query, not a run. Print and exit cleanly so
+    # users can sanity-check their machine before kicking off a long
+    # pipeline. Honours --json by emitting a single JSON document on
+    # stdout instead of the table.
+    if args.list_runtimes:
+        snapshot = runtime_registry.list_runtimes()
+        active = runtime_registry.resolve_active()
+        if args.json:
+            json.dump(
+                {"active": active, "runtimes": snapshot},
+                sys.stdout,
+                indent=2,
+                ensure_ascii=False,
+            )
+            sys.stdout.write("\n")
+            sys.exit(0)
+        print(f"Active runtime: {active}  (ORCHESTRATOR_RUNNER env / --runtime flag)")
+        print()
+        for row in snapshot:
+            tag = "[OK]" if row["available"] else "[..]"
+            impl = " (stub)" if not row["implemented"] else ""
+            print(f"{tag} {row['runtime_id']}{impl}")
+            print(f"     {row['summary']}")
+            for note in row["notes"]:
+                print(f"     - {note}")
+            print()
+        sys.exit(0)
+
+    # --runtime <name> wins over a pre-set ORCHESTRATOR_RUNNER env var
+    # so a one-shot CLI invocation is fully reproducible. We refuse to
+    # start when the user asked for a runtime that exists in the
+    # registry but isn't yet wired in the orchestrator — silently
+    # falling back to claude would generate misleading PARTIALs.
+    if args.runtime:
+        descr = runtime_registry.get(args.runtime)
+        if not descr.implemented:
+            avail = descr.probe()
+            print(
+                f"ERROR: runtime {args.runtime!r} is registered but not yet implemented "
+                f"in the orchestrator (Web chat side has it).\nNotes:",
+                file=sys.stderr,
+            )
+            for note in avail.notes:
+                print(f"  - {note}", file=sys.stderr)
+            sys.exit(2)
+        os.environ["ORCHESTRATOR_RUNNER"] = args.runtime
 
     # In --json mode, route all decorative output (including the orchestrator's
     # own print() calls) to stderr so stdout stays NDJSON-only. The emitter
