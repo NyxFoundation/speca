@@ -28,6 +28,7 @@ import {
 } from "@/features/integrations/useIntegrationsStatus";
 import { useT } from "@/i18n/useT";
 
+import { RuntimeSection } from "./RuntimeSection";
 import styles from "./SettingsPage.module.css";
 
 // Same regex the B4 ForkRequest validator uses. Keeping it inline (rather
@@ -296,6 +297,16 @@ export function SettingsPage(): ReactElement {
       <section className={styles.section}>
         <h2 className={styles.sectionTitle}>{t("settings.page.section_auth")}</h2>
         <AuthSection />
+      </section>
+
+      <section className={styles.section}>
+        <h2 className={styles.sectionTitle}>
+          {t("settings.page.section_runtime")}
+        </h2>
+        <p className={styles.sectionHint}>
+          {t("settings.page.runtime_hint")}
+        </p>
+        <RuntimeSection />
       </section>
 
       <section className={styles.section}>

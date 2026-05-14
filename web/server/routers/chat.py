@@ -34,10 +34,8 @@ from web.server.schemas.chat import (
 from web.server.services import (
     chat_approvals,
     chat_history,
-    chat_runtime,
-    chat_runtime_cli,
+    chat_runtime_registry,
 )
-from web.server.services.chat_runtime import _OAUTH_TOKEN_PREFIX, get_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -95,28 +93,15 @@ async def post_message_route(
     if not text:
         raise HTTPException(status_code=400, detail="text must not be empty")
 
-    # Route subscription users (claude.ai OAuth tokens) through the CLI
-    # subprocess runtime; API-key users keep the SDK path so the custom
-    # server-side tools (list_runs / read_run_detail / launch_pipeline /
-    # stop_pipeline) remain available.
-    credential = get_api_key()
-    use_cli = isinstance(credential, str) and credential.startswith(
-        _OAUTH_TOKEN_PREFIX
-    )
-
+    # Runtime dispatch — the registry inspects RuntimePreferences and
+    # picks between Anthropic SDK / claude CLI subprocess / codex CLI /
+    # Ollama HTTP. The SPA wire shape is identical across runtimes.
     async def event_source() -> AsyncIterator[dict]:
         try:
-            if use_cli:
-                event_iter = chat_runtime_cli.stream_response(
-                    conversation_id=conversation_id,
-                    user_text=text,
-                )
-            else:
-                event_iter = chat_runtime.stream_response(
-                    conversation_id=conversation_id,
-                    user_text=text,
-                )
-            async for event in event_iter:
+            async for event in chat_runtime_registry.stream_response(
+                conversation_id=conversation_id,
+                user_text=text,
+            ):
                 yield {"data": json.dumps(event, ensure_ascii=False, default=str)}
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("chat: unexpected runtime error (%s)", exc)
