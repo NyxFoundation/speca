@@ -91,6 +91,7 @@ Phases 01e, 02c, 03, and 04 use **inlined prompts** (no skill fork) — all anal
 ### Environment Variables
 
 - `KEYWORDS`, `SPEC_URLS` — Phase 01a discovery inputs
+- `SPECA_01A_SCOPE` — Filter Phase 01a state before 01b consumes it. Values: `all` (default), `primary`, `primary+1hop`, or a positive integer N. Equivalent to the `--01a-scope` CLI flag (the flag wins when both are set).
 - `FORCE_EXECUTE=1` — Bypass resume (set automatically by `--force` flag)
 - `CLAUDE_CODE_PERMISSIONS=bypassPermissions` — Used in CI
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS=100000` — Used in CI

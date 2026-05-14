@@ -27,6 +27,8 @@ from web.server.routers import picker as picker_router
 from web.server.routers import runs_ws as runs_ws_router
 # === routers: diagnostics ===
 from web.server.routers import diagnostics as diagnostics_router
+# === routers: runtime ===
+from web.server.routers import runtime as runtime_router
 
 # === services: bootstrap ===
 # Imported lazily inside the startup hook so importing ``main`` for the
@@ -99,6 +101,8 @@ def create_app() -> FastAPI:
     app.include_router(runs_ws_router.router, prefix="/api")
     # === include_router: diagnostics ===
     app.include_router(diagnostics_router.router, prefix="/api", tags=["diagnostics"])
+    # === include_router: runtime ===
+    app.include_router(runtime_router.router)
 
     return app
 
