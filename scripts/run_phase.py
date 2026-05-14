@@ -899,8 +899,8 @@ def main():
         if not descr.implemented:
             avail = descr.probe()
             print(
-                f"ERROR: runtime {args.runtime!r} is registered but not yet implemented "
-                f"in the orchestrator (Web chat side has it).\nNotes:",
+                f"ERROR: runtime {args.runtime!r} cannot drive the orchestrator.\n"
+                f"{descr.summary}\nNotes:",
                 file=sys.stderr,
             )
             for note in avail.notes:

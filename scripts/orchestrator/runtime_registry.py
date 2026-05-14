@@ -165,82 +165,100 @@ def _probe_api() -> RuntimeAvailability:
 
 
 def _probe_codex() -> RuntimeAvailability:
-    codex = _which("codex")
-    if codex is None:
-        return RuntimeAvailability(
-            runtime_id="codex",
-            available=False,
-            implemented=False,
-            notes=(
-                "codex CLI not found on PATH.",
-                "Install via `npm install -g @openai/codex`.",
-                "Note: orchestrator runner not yet implemented (Web chat works today).",
-            ),
+    """Orchestrator codex path goes through CodexAPIRunner → OpenAI Chat API.
+
+    We do NOT require the ``codex`` CLI to be installed; the orchestrator
+    only needs ``OPENAI_API_KEY`` to authenticate against
+    ``api.openai.com/v1``. The CLI is still useful for chat-side flows
+    (see web/server/services/chat_runtime_codex.py) but is optional here.
+    """
+
+    has_key = bool(os.environ.get("OPENAI_API_KEY"))
+    codex_cli = _which("codex")
+    notes_list = [
+        "Routes through CodexAPIRunner -> https://api.openai.com/v1 (OpenAI Chat API).",
+        f"OPENAI_MODEL: {os.environ.get('OPENAI_MODEL', 'gpt-4o')}",
+        "OPENAI_API_KEY is set." if has_key else "Set OPENAI_API_KEY to authenticate.",
+    ]
+    if codex_cli is not None:
+        proc = _run([codex_cli, "login", "status"])
+        logged_in = bool(
+            proc
+            and "logged in" in (proc.stdout or "").lower()
+            and "not logged" not in (proc.stdout or "").lower()
         )
-    proc = _run([codex, "login", "status"])
-    logged_in = bool(proc and "logged in" in (proc.stdout or "").lower()
-                     and "not logged" not in (proc.stdout or "").lower())
+        notes_list.append(
+            f"codex CLI on PATH ({'logged in' if logged_in else 'logged out'}) — only used by Web chat side."
+        )
     return RuntimeAvailability(
         runtime_id="codex",
-        available=logged_in,
-        implemented=False,
-        notes=(
-            ("codex CLI present; "
-             + ("logged in." if logged_in else "run `codex login`.")),
-            "Note: orchestrator runner not yet implemented (Web chat works today).",
-        ),
+        available=has_key,
+        implemented=True,
+        notes=tuple(notes_list),
     )
 
 
 def _probe_gemini() -> RuntimeAvailability:
-    gemini = _which("gemini")
-    if gemini is None:
-        return RuntimeAvailability(
-            runtime_id="gemini",
-            available=False,
-            implemented=False,
-            notes=(
-                "gemini CLI not found on PATH.",
-                "Install via `npm install -g @google/gemini-cli`.",
-                "Note: orchestrator runner not yet implemented (Web chat works today).",
-            ),
-        )
+    """Orchestrator gemini path uses Google's OpenAI compatibility layer.
+
+    The optional ``gemini`` CLI is only used by Web chat; the orchestrator
+    speaks directly to ``generativelanguage.googleapis.com``.
+    """
+
     has_key = bool(os.environ.get("GEMINI_API_KEY"))
+    gemini_cli = _which("gemini")
+    notes_list = [
+        "Routes through GeminiAPIRunner -> Google's OpenAI compatibility endpoint.",
+        f"GEMINI_MODEL: {os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')}",
+        "GEMINI_API_KEY is set." if has_key else "Set GEMINI_API_KEY to authenticate.",
+    ]
+    if gemini_cli is not None:
+        notes_list.append("gemini CLI on PATH — only used by Web chat side.")
     return RuntimeAvailability(
         runtime_id="gemini",
         available=has_key,
-        implemented=False,
-        notes=(
-            "gemini CLI present.",
-            ("GEMINI_API_KEY is set." if has_key else "Set GEMINI_API_KEY to authenticate."),
-            "Note: orchestrator runner not yet implemented (Web chat works today).",
-        ),
+        implemented=True,
+        notes=tuple(notes_list),
     )
 
 
 def _probe_ollama() -> RuntimeAvailability:
+    """Orchestrator ollama path uses Ollama's OpenAI-compatible endpoint.
+
+    Self-hosted (``http://localhost:11434``) does not need a key; cloud
+    (``https://ollama.com``) does.
+    """
+
     host = os.environ.get("OLLAMA_HOST", "https://ollama.com")
     cloud = "ollama.com" in host
     has_key = bool(os.environ.get("OLLAMA_API_KEY"))
     return RuntimeAvailability(
         runtime_id="ollama",
         available=(not cloud) or has_key,
-        implemented=False,
+        implemented=True,
         notes=(
+            "Routes through OllamaAPIRunner -> <OLLAMA_HOST>/v1/chat/completions.",
             f"OLLAMA_HOST: {host}",
+            f"OLLAMA_MODEL: {os.environ.get('OLLAMA_MODEL', 'llama3.2')}",
             (
                 "OLLAMA_API_KEY is set."
                 if has_key
-                else (
-                    "Cloud host requires OLLAMA_API_KEY; self-hosted (localhost) does not."
-                )
+                else "Cloud host requires OLLAMA_API_KEY; self-hosted (localhost) does not."
             ),
-            "Note: orchestrator runner not yet implemented (Web chat works today).",
         ),
     )
 
 
 def _probe_copilot() -> RuntimeAvailability:
+    """GitHub Copilot — Web-chat-only.
+
+    ``gh copilot suggest`` is a single-shot suggestion API with no
+    tool-calling protocol, so it cannot drive the audit pipeline (every
+    SPECA phase needs Read/Grep/Glob/Write tool calls). We keep the
+    runtime registered so ``--list-runtimes`` surfaces it, but the
+    ``implemented`` flag stays ``False`` and the CLI refuses to start.
+    """
+
     gh = _which("gh")
     if gh is None:
         return RuntimeAvailability(
@@ -250,7 +268,7 @@ def _probe_copilot() -> RuntimeAvailability:
             notes=(
                 "gh CLI not found on PATH.",
                 "Install GitHub CLI from https://cli.github.com/.",
-                "Note: orchestrator runner not yet implemented (Web chat works today).",
+                "Note: orchestrator does NOT support copilot (no tool-calling API). Web chat works today.",
             ),
         )
     proc = _run([gh, "auth", "status"])
@@ -266,8 +284,8 @@ def _probe_copilot() -> RuntimeAvailability:
         notes=(
             ("gh CLI present; "
              + ("logged in." if logged_in else "run `gh auth login`.")),
-            "Copilot subscription required.",
-            "Note: orchestrator runner not yet implemented (Web chat works today).",
+            "Copilot subscription required for Web chat side.",
+            "Note: orchestrator does NOT support copilot (no tool-calling API). Web chat works today.",
         ),
     )
 
@@ -292,25 +310,25 @@ REGISTRY: dict[str, RuntimeDescriptor] = {
     ),
     "codex": RuntimeDescriptor(
         runtime_id="codex",
-        summary="OpenAI codex CLI (`codex exec --json`). Registered but stubbed.",
+        summary="OpenAI Chat API (codex CLI authenticates against this). Tool-calling enabled.",
         probe=_probe_codex,
-        implemented=False,
+        implemented=True,
     ),
     "gemini": RuntimeDescriptor(
         runtime_id="gemini",
-        summary="Google gemini CLI (`gemini -p --output-format stream-json`). Registered but stubbed.",
+        summary="Google Gemini via its OpenAI compatibility endpoint. Tool-calling enabled.",
         probe=_probe_gemini,
-        implemented=False,
+        implemented=True,
     ),
     "ollama": RuntimeDescriptor(
         runtime_id="ollama",
-        summary="Ollama HTTP (`/api/chat`, cloud or self-hosted). Registered but stubbed.",
+        summary="Ollama via /v1/chat/completions (cloud or self-hosted). Tool-calling enabled.",
         probe=_probe_ollama,
-        implemented=False,
+        implemented=True,
     ),
     "copilot": RuntimeDescriptor(
         runtime_id="copilot",
-        summary="GitHub Copilot CLI (`gh copilot suggest`, no streaming). Registered but stubbed.",
+        summary="GitHub Copilot (Web-chat-only). Orchestrator unsupported — no tool-calling API.",
         probe=_probe_copilot,
         implemented=False,
     ),

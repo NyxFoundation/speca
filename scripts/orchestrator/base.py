@@ -200,22 +200,45 @@ class BaseOrchestrator(ABC):
         self.semaphore = asyncio.Semaphore(self.max_concurrent)
 
         # Select runner via the runtime registry — see scripts/orchestrator/
-        # runtime_registry.py for the supported ids. Today only ``claude``
-        # (default) and ``api`` are wired; ``codex`` / ``gemini`` /
-        # ``ollama`` / ``copilot`` are registered for the CLI's
-        # ``--list-runtimes`` surface but selecting them aborts at the CLI
-        # boundary (see run_phase.py) rather than silently falling back.
+        # runtime_registry.py for the supported ids. ``claude`` (default)
+        # routes through ClaudeRunner (stream-json + MCP); ``api`` / ``codex``
+        # / ``gemini`` / ``ollama`` all share APIRunner / its subclasses
+        # because every one of them speaks OpenAI chat-completions wire +
+        # function-calling. ``copilot`` cannot drive the audit loop
+        # (no tool-calling protocol on `gh copilot suggest`) — the CLI
+        # boundary aborts before we land here.
         from . import runtime_registry
+        from .api_runner import (
+            APIRunner,
+            CodexAPIRunner,
+            GeminiAPIRunner,
+            OllamaAPIRunner,
+        )
 
         runner_type = runtime_registry.resolve_active()
+        runner_kwargs = dict(
+            config=self.config,
+            semaphore=self.semaphore,
+            circuit_breaker=self.circuit_breaker,
+            cost_tracker=self.cost_tracker,
+        )
+
         if runner_type == "api":
-            self.runner = APIRunner(
-                self.config,
-                self.semaphore,
-                circuit_breaker=self.circuit_breaker,
-                cost_tracker=self.cost_tracker,
+            self.runner = APIRunner(**runner_kwargs)
+            print(
+                f"  Runner: APIRunner ({os.environ.get('API_RUNNER_MODEL', 'deepseek/deepseek-r1')})"
             )
-            print(f"  Runner: APIRunner ({os.environ.get('API_RUNNER_MODEL', 'deepseek/deepseek-r1')})")
+        elif runner_type == "codex":
+            self.runner = CodexAPIRunner(**runner_kwargs)
+            print(f"  Runner: CodexAPIRunner (model={self.runner.model})")
+        elif runner_type == "gemini":
+            self.runner = GeminiAPIRunner(**runner_kwargs)
+            print(f"  Runner: GeminiAPIRunner (model={self.runner.model})")
+        elif runner_type == "ollama":
+            self.runner = OllamaAPIRunner(**runner_kwargs)
+            print(
+                f"  Runner: OllamaAPIRunner (host={self.runner.base_url}, model={self.runner.model})"
+            )
         else:
             self.runner = ClaudeRunner(
                 self.config,

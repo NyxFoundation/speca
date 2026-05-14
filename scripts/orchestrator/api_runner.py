@@ -292,6 +292,15 @@ class APIRunner:
     circuit breaker, and cost tracker integration.
     """
 
+    # Subclasses override these so the parent constructor's env fallback
+    # picks runtime-appropriate defaults (e.g. OpenAI / Gemini / Ollama).
+    DEFAULT_BASE_URL: str = "https://openrouter.ai/api/v1"
+    DEFAULT_MODEL: str = "deepseek/deepseek-r1"
+    BASE_URL_ENV: str = "API_RUNNER_BASE_URL"
+    API_KEY_ENV: str = "API_RUNNER_API_KEY"
+    MODEL_ENV: str = "API_RUNNER_MODEL"
+    RUNTIME_LABEL: str = "api"
+
     def __init__(
         self,
         config: PhaseConfig,
@@ -299,6 +308,10 @@ class APIRunner:
         max_retries: int = 2,
         circuit_breaker: CircuitBreaker | None = None,
         cost_tracker: CostTracker | None = None,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
     ):
         self.config = config
         self.semaphore = semaphore
@@ -306,12 +319,22 @@ class APIRunner:
         self.circuit_breaker = circuit_breaker or CircuitBreaker(config)
         self.cost_tracker = cost_tracker
 
-        # API configuration from environment
-        self.base_url = os.environ.get(
-            "API_RUNNER_BASE_URL", "https://openrouter.ai/api/v1"
+        # Resolution order for each setting: explicit kwarg > env var >
+        # class default. This lets subclasses bake in the right defaults
+        # while still respecting an operator-set env override.
+        self.base_url = (
+            base_url
+            if base_url is not None
+            else os.environ.get(self.BASE_URL_ENV, self.DEFAULT_BASE_URL)
         )
-        self.api_key = os.environ.get("API_RUNNER_API_KEY", "")
-        self.model = os.environ.get("API_RUNNER_MODEL", "deepseek/deepseek-r1")
+        self.api_key = (
+            api_key if api_key is not None else os.environ.get(self.API_KEY_ENV, "")
+        )
+        self.model = (
+            model
+            if model is not None
+            else os.environ.get(self.MODEL_ENV, self.DEFAULT_MODEL)
+        )
 
         # Directories
         self.output_dir = get_output_root()
@@ -696,3 +719,94 @@ class APIRunner:
         with open(path, "w") as f:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Multi-runtime subclasses
+#
+# Each subclass exists *only* to bake in the right base_url / api_key env
+# / model defaults for one provider. The whole tool-execution loop, cost
+# tracker, circuit breaker, and result normaliser are inherited from
+# :class:`APIRunner` because all three of these providers speak the OpenAI
+# chat-completions function-calling wire format:
+#
+#   * OpenAI (codex CLI authenticates against this):
+#       https://api.openai.com/v1/chat/completions
+#   * Gemini's OpenAI compatibility layer (added late 2024):
+#       https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+#   * Ollama:
+#       <host>/v1/chat/completions   (host: https://ollama.com OR a self-
+#       hosted endpoint like http://localhost:11434)
+#
+# GitHub Copilot is intentionally NOT subclassed here: ``gh copilot
+# suggest`` is a single-shot suggestion API with no tool-calling protocol,
+# so it cannot drive the audit pipeline. The CLI keeps it registered for
+# the chat side (see web/server/services/chat_runtime_copilot.py) and the
+# orchestrator surface refuses to start an audit run against it.
+# ---------------------------------------------------------------------------
+
+
+class CodexAPIRunner(APIRunner):
+    """OpenAI codex authenticates against the standard OpenAI Chat API.
+
+    We accept ``OPENAI_API_KEY`` because it is the canonical name (and the
+    one ``codex login --with-api-key`` writes into the env). Model defaults
+    to ``gpt-4o``; set ``OPENAI_MODEL`` (or pass ``--model`` on the CLI) to
+    pick a different model.
+    """
+
+    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+    DEFAULT_MODEL = "gpt-4o"
+    BASE_URL_ENV = "OPENAI_BASE_URL"
+    API_KEY_ENV = "OPENAI_API_KEY"
+    MODEL_ENV = "OPENAI_MODEL"
+    RUNTIME_LABEL = "codex"
+
+
+class GeminiAPIRunner(APIRunner):
+    """Google Gemini's OpenAI compatibility endpoint.
+
+    Requires ``GEMINI_API_KEY`` from Google AI Studio. The base URL is
+    Google's compatibility shim that maps OpenAI chat/completions calls
+    onto the Gemini API; tool-calling works identically.
+    """
+
+    DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+    DEFAULT_MODEL = "gemini-2.0-flash"
+    BASE_URL_ENV = "GEMINI_BASE_URL"
+    API_KEY_ENV = "GEMINI_API_KEY"
+    MODEL_ENV = "GEMINI_MODEL"
+    RUNTIME_LABEL = "gemini"
+
+
+class OllamaAPIRunner(APIRunner):
+    """Ollama via its OpenAI-compatible endpoint.
+
+    Host comes from ``OLLAMA_HOST`` (cloud default: ``https://ollama.com``;
+    self-hosted convention: ``http://localhost:11434``). Cloud calls
+    require ``OLLAMA_API_KEY`` as a Bearer token; self-hosted does not.
+    Model defaults to ``llama3.2``.
+    """
+
+    DEFAULT_BASE_URL = "https://ollama.com/v1"
+    DEFAULT_MODEL = "llama3.2"
+    BASE_URL_ENV = "OLLAMA_BASE_URL"  # explicit override
+    API_KEY_ENV = "OLLAMA_API_KEY"
+    MODEL_ENV = "OLLAMA_MODEL"
+    RUNTIME_LABEL = "ollama"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # If the operator set OLLAMA_HOST but not OLLAMA_BASE_URL, derive
+        # the chat-completions base URL from it. This matches the same
+        # convention the Web chat runtime uses (web/server/services/
+        # chat_runtime_ollama.py) so toggling between cloud / self-hosted
+        # is a single env var.
+        if (
+            os.environ.get(self.BASE_URL_ENV) is None
+            and (host := os.environ.get("OLLAMA_HOST"))
+        ):
+            host = host.rstrip("/")
+            if "://" not in host:
+                host = f"http://{host}"
+            self.base_url = f"{host}/v1"

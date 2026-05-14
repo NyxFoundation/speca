@@ -45,15 +45,16 @@ def test_get_returns_descriptor_with_summary_and_probe() -> None:
 
 
 def test_implemented_split() -> None:
-    """Today only claude + api are wired in the orchestrator."""
+    """claude / api / codex / gemini / ollama are wired; copilot is unsupported."""
 
-    assert rr.get("claude").implemented is True
-    assert rr.get("api").implemented is True
-    for stubbed in ("codex", "gemini", "ollama", "copilot"):
-        assert rr.get(stubbed).implemented is False, (
-            f"{stubbed} should still be stubbed at the orchestrator boundary; "
-            "the Web chat side has it but the CLI runner is not yet wired."
+    for impl in ("claude", "api", "codex", "gemini", "ollama"):
+        assert rr.get(impl).implemented is True, (
+            f"{impl} should be implemented — OpenAI-compat function-calling "
+            "routes through APIRunner / its subclasses."
         )
+    # Copilot stays stubbed: `gh copilot suggest` has no tool-calling API
+    # so it cannot drive the audit pipeline. Web chat side still works.
+    assert rr.get("copilot").implemented is False
 
 
 def test_resolve_active_defaults_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,13 +116,117 @@ def test_probe_claude_returns_availability_struct() -> None:
     assert isinstance(result.implemented, bool)
 
 
-def test_probe_stubbed_runtimes_flag_implemented_false() -> None:
-    """Every stubbed runtime must self-report implemented=False."""
+def test_probe_implemented_runtimes_flag_true() -> None:
+    """codex / gemini / ollama probes must self-report implemented=True."""
 
-    for stubbed in ("codex", "gemini", "ollama", "copilot"):
-        result = rr.probe(stubbed)
-        assert result.implemented is False, stubbed
-        # Notes should call out the "not yet implemented" caveat so a
-        # user reading --list-runtimes doesn't expect it to work.
-        joined = " ".join(result.notes).lower()
-        assert "not yet implemented" in joined, stubbed
+    for impl in ("codex", "gemini", "ollama"):
+        result = rr.probe(impl)
+        assert result.implemented is True, impl
+
+
+def test_probe_copilot_stays_stubbed() -> None:
+    """Copilot has no tool-calling API; orchestrator path must refuse."""
+
+    result = rr.probe("copilot")
+    assert result.implemented is False
+    joined = " ".join(result.notes).lower()
+    assert "does not support copilot" in joined
+
+
+# ---------------------------------------------------------------------------
+# APIRunner subclass defaults
+# ---------------------------------------------------------------------------
+
+
+def test_codex_runner_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodexAPIRunner targets OpenAI's chat-completions endpoint."""
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    import asyncio
+
+    from orchestrator.api_runner import CodexAPIRunner
+    from orchestrator.runner import CircuitBreaker
+
+    from orchestrator.config import get_phase_config
+
+    cfg = get_phase_config("01a")
+    sem = asyncio.Semaphore(1)
+    cb = CircuitBreaker(cfg)
+    r = CodexAPIRunner(cfg, sem, circuit_breaker=cb)
+    assert r.base_url == "https://api.openai.com/v1"
+    assert r.model == "gpt-4o"
+    assert r.RUNTIME_LABEL == "codex"
+
+
+def test_gemini_runner_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GeminiAPIRunner targets Google's OpenAI compatibility endpoint."""
+
+    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+
+    import asyncio
+
+    from orchestrator.api_runner import GeminiAPIRunner
+    from orchestrator.runner import CircuitBreaker
+
+    from orchestrator.config import get_phase_config
+
+    cfg = get_phase_config("01a")
+    sem = asyncio.Semaphore(1)
+    r = GeminiAPIRunner(cfg, sem, circuit_breaker=CircuitBreaker(cfg))
+    assert "googleapis.com" in r.base_url
+    assert "gemini" in r.model
+    assert r.RUNTIME_LABEL == "gemini"
+
+
+def test_ollama_runner_self_hosted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OllamaAPIRunner derives base_url from OLLAMA_HOST when no explicit URL is set."""
+
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+
+    import asyncio
+
+    from orchestrator.api_runner import OllamaAPIRunner
+    from orchestrator.runner import CircuitBreaker
+
+    from orchestrator.config import get_phase_config
+
+    cfg = get_phase_config("01a")
+    sem = asyncio.Semaphore(1)
+    r = OllamaAPIRunner(cfg, sem, circuit_breaker=CircuitBreaker(cfg))
+    assert r.base_url == "http://localhost:11434/v1"
+    assert r.model == "llama3.2"
+
+
+def test_ollama_runner_explicit_kwarg_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructor kwargs win over env vars (operator can pin via Python)."""
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://env-wins.example/v1")
+
+    import asyncio
+
+    from orchestrator.api_runner import OllamaAPIRunner
+    from orchestrator.runner import CircuitBreaker
+
+    from orchestrator.config import get_phase_config
+
+    cfg = get_phase_config("01a")
+    sem = asyncio.Semaphore(1)
+    r = OllamaAPIRunner(
+        cfg,
+        sem,
+        circuit_breaker=CircuitBreaker(cfg),
+        base_url="https://kwarg-wins.example/v1",
+        model="custom-model",
+    )
+    assert r.base_url == "https://kwarg-wins.example/v1"
+    assert r.model == "custom-model"
