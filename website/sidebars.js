@@ -98,6 +98,7 @@ const sidebars = {
         'operations/overview',
         'operations/multi-runtime',
         'operations/web-ui-features',
+        'operations/troubleshooting',
         'operations/dataset-refresh',
         'operations/release-artifacts',
         'operations/benchmark-rq1',
