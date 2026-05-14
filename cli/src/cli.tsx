@@ -9,6 +9,7 @@ import { printAskHelp, runAskCommand } from "./commands/ask.js";
 import { LOGIN_HELP, loginCommand, loginFlagsSchema } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
 import { BROWSE_HELP, runBrowseCommand } from "./commands/browse.js";
+import { CORPUS_HELP, runCorpus } from "./commands/corpus/index.js";
 import { DoctorCommand } from "./commands/doctor.js";
 import { printInitHelp, runInitCommand } from "./commands/init.js";
 import { printRunHelp, runRunCommand } from "./commands/run.js";
@@ -48,6 +49,7 @@ const cli = meow(
     run                Run pipeline phases with a live dashboard
     browse [glob]      Open the finding browser on Phase 03/04 PARTIAL JSON
     ask [finding-id]   Chat with Claude about a finding (claude-code session)
+    corpus <sub>       Browse / export run archives (list | show | export | gc)
     help               Print this help
 
   Common flags (reserved for future milestones)
@@ -104,6 +106,14 @@ const cli = meow(
       from: { type: "string" },
       session: { type: "string" },
       maxContext: { type: "number" },
+      // `speca corpus` flags (shared by gc / export / list / show)
+      archiveRoot: { type: "string" },
+      out: { type: "string" },
+      includeLogs: { type: "boolean", default: false },
+      phases: { type: "string" },
+      olderThan: { type: "string" },
+      dryRun: { type: "boolean", default: true },
+      unsafeIncludeFindings: { type: "boolean", default: false },
     },
     autoHelp: false,
     autoVersion: false,
@@ -269,6 +279,30 @@ async function run(): Promise<number> {
           // accept an explicit `--no-tui` (= `noTui: true`) as a courtesy.
           noTui: cli.flags.noTui === true || cli.flags.tui === false,
         },
+      });
+    }
+    case "corpus": {
+      if ((subcommand === undefined || subcommand === "help") && isHelpFlag()) {
+        process.stdout.write(CORPUS_HELP);
+        return 0;
+      }
+      // `corpus <subcmd> <positional>` — e.g. `corpus show <run-id>`.
+      const positional = cli.input[2];
+      return runCorpus({
+        subcommand,
+        positional,
+        flags: {
+          archiveRoot: cli.flags.archiveRoot,
+          out: cli.flags.out,
+          includeLogs: cli.flags.includeLogs,
+          phases: cli.flags.phases,
+          olderThan: cli.flags.olderThan,
+          // meow translates `--no-dry-run` to `dryRun: false`; pass through.
+          dryRun: cli.flags.dryRun,
+          unsafeIncludeFindings: cli.flags.unsafeIncludeFindings,
+          force: cli.flags.force,
+        },
+        helpRequested: isHelpFlag(),
       });
     }
     case "help":
