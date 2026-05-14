@@ -43,6 +43,7 @@ const sidebars = {
       items: [
         'getting-started/installation',
         'getting-started/quickstart',
+        'getting-started/web-ui-quickstart',
         'getting-started/cli-reference',
         'getting-started/config-files',
       ],
