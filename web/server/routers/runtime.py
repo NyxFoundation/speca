@@ -157,9 +157,15 @@ def _gemini_adc_available() -> bool:
 
 
 def _copilot_status() -> bool:
-    """Return whether the gh CLI is installed (Copilot is downloaded on demand)."""
+    """Return whether the agentic ``copilot`` CLI is installed.
 
-    return _which("gh") is not None
+    The Web chat path uses ``@github/copilot`` (``copilot`` binary,
+    npm-installed), not the older ``gh copilot suggest`` shim. The new
+    CLI handles its own OAuth + tool execution and exposes a JSONL
+    stream-json output that lines up with claude / codex / gemini.
+    """
+
+    return _which("copilot") is not None
 
 
 def _view_of(prefs: runtime_preferences.RuntimePreferences) -> RuntimeView:
