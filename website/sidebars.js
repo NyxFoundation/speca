@@ -3,16 +3,23 @@
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 /**
- * Creating a sidebar enables you to:
- - create an ordered group of docs
- - render a sidebar for each doc of that group
- - provide next/previous navigation
-
- The sidebars can be generated from the filesystem, or explicitly defined here.
-
- Create as many sidebars as you want.
-
- @type {import('@docusaurus/plugin-content-docs').SidebarsConfig}
+ * Sidebar layout.
+ *
+ * Categorisation principles (changed 2026-05):
+ *
+ * - Avoid katakana / loanwords / unusual terms in category labels.
+ *   `リファレンス` (loanword for "references") was renamed `論文` because
+ *   the items underneath are literally papers. `設計の裏側` was
+ *   renamed `設計ノート` for the same reason.
+ * - Collapse 1-item categories into a logical neighbour (no single-row
+ *   parents). The old `実戦チュートリアル` (one walkthrough) moved into
+ *   the setup flow.
+ * - Group everyday usage guides (CLI ref, Web UI tour, multi-runtime,
+ *   troubleshooting at-a-glance) into a single `使い方ガイド` block so
+ *   users do not bounce between "Getting started", "Operations", and
+ *   the generic guide each time.
+ *
+ * @type {import('@docusaurus/plugin-content-docs').SidebarsConfig}
  */
 const sidebars = {
   tutorialSidebar: [
@@ -20,32 +27,36 @@ const sidebars = {
     'results-overview',
     {
       type: 'category',
-      label: 'やさしいガイド',
+      label: '入門',
       collapsed: false,
       items: [
         'guide/what-is-speca',
         'guide/how-it-works',
-        'guide/try-it',
-        'guide/web-ui',
         'guide/faq',
       ],
     },
     {
       type: 'category',
-      label: '実戦チュートリアル',
-      collapsed: false,
-      items: ['tutorial/audit-walkthrough'],
-    },
-    {
-      type: 'category',
-      label: 'はじめに',
+      label: 'セットアップ & 初回実行',
       collapsed: false,
       items: [
         'getting-started/installation',
+        'getting-started/config-files',
         'getting-started/quickstart',
         'getting-started/web-ui-quickstart',
+        'guide/try-it',
+        'tutorial/audit-walkthrough',
+      ],
+    },
+    {
+      type: 'category',
+      label: '使い方ガイド',
+      collapsed: false,
+      items: [
+        'guide/web-ui',
         'getting-started/cli-reference',
-        'getting-started/config-files',
+        'operations/multi-runtime',
+        'operations/web-ui-features',
       ],
     },
     {
@@ -64,7 +75,7 @@ const sidebars = {
     },
     {
       type: 'category',
-      label: '概念',
+      label: '仕組み',
       collapsed: true,
       items: [
         'concepts/spec-driven',
@@ -77,7 +88,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'エージェント設計',
-      collapsed: false,
+      collapsed: true,
       items: [
         'agent-design/overview',
         'agent-design/harness',
@@ -87,18 +98,10 @@ const sidebars = {
     },
     {
       type: 'category',
-      label: 'リファレンス',
-      collapsed: false,
-      items: ['references/paper-fusaka', 'references/paper-multi-impl'],
-    },
-    {
-      type: 'category',
-      label: '運用ガイド',
-      collapsed: false,
+      label: '運用',
+      collapsed: true,
       items: [
         'operations/overview',
-        'operations/multi-runtime',
-        'operations/web-ui-features',
         'operations/troubleshooting',
         'operations/dataset-refresh',
         'operations/release-artifacts',
@@ -107,19 +110,20 @@ const sidebars = {
         'operations/benchmark-rq2b',
       ],
     },
-    'project-structure',
     {
       type: 'category',
-      label: '設計の裏側',
+      label: '論文',
+      collapsed: true,
+      items: ['references/paper-fusaka', 'references/paper-multi-impl'],
+    },
+    {
+      type: 'category',
+      label: '設計ノート',
       collapsed: true,
       items: ['design-notes/why-spec-driven', 'design-notes/model-benchmark-takeaways'],
     },
-    {
-      type: 'category',
-      label: 'コミュニティ',
-      collapsed: false,
-      items: ['community/thanks'],
-    },
+    'project-structure',
+    'community/thanks',
     'achievements',
   ],
 };
