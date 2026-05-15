@@ -119,7 +119,7 @@ Five backends:
 - `codex` — OpenAI Codex (`codex exec --json`)
 - `gemini` — Google Gemini (`gemini -p --output-format stream-json`)
 - `ollama` — Ollama (HTTP `/api/chat`, cloud or self-hosted)
-- `copilot` — GitHub Copilot (`gh copilot suggest`, single-shot)
+- `copilot` — GitHub Copilot (`@github/copilot` agentic CLI, `copilot -p --output-format json`)
 
 Switchable in real time from Settings (see
 [Multi-runtime backends](./multi-runtime.md)):

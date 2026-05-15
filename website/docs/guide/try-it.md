@@ -327,10 +327,10 @@ uv run python scripts/run_phase.py --list-runtimes
 Active runtime: claude
 [OK] claude       Anthropic claude CLI (stream-json). ...
 [..] api          OpenRouter-style HTTP. - Set API_RUNNER_API_KEY ...
-[..] codex (stub) OpenAI codex CLI. - codex CLI present; run `codex login`. ...
-[..] gemini (stub) Google gemini. - Set GEMINI_API_KEY ...
-[..] ollama (stub) Ollama HTTP. ...
-[OK] copilot (stub) GitHub Copilot. (orchestrator unsupported)
+[..] codex        OpenAI Chat API. - Set OPENAI_API_KEY ...
+[..] gemini       Google Gemini (OpenAI-compat endpoint). - Set GEMINI_API_KEY ...
+[..] ollama       Ollama (/v1/chat/completions). ...
+[OK] copilot (stub) GitHub Copilot agentic CLI. Web chat works today; orchestrator runner is a follow-up.
 ```
 
 JSON で吐かせる場合 (CI / `speca-cli` 用):
@@ -351,7 +351,7 @@ export API_RUNNER_BASE_URL=https://openrouter.ai/api/v1
 export API_RUNNER_MODEL=deepseek/deepseek-r1
 uv run python scripts/run_phase.py --target 04 --runtime api --workers 4
 
-# --- OpenAI Codex (PR #67 マージ後) ---
+# --- OpenAI Codex ---
 # OAuth 経由 (ChatGPT plan)
 codex login
 # あるいは API key
@@ -361,7 +361,7 @@ uv run python scripts/run_phase.py --target 04 --runtime codex --workers 4
 export OPENAI_MODEL=gpt-4-turbo
 uv run python scripts/run_phase.py --target 04 --runtime codex
 
-# --- Google Gemini (PR #67 マージ後) ---
+# --- Google Gemini ---
 # API key
 export GEMINI_API_KEY=...
 # あるいは Google OAuth (ADC)
@@ -369,7 +369,7 @@ gcloud auth application-default login
 export GOOGLE_GENAI_USE_GCA=true
 uv run python scripts/run_phase.py --target 04 --runtime gemini
 
-# --- Ollama self-hosted (PR #67 マージ後) ---
+# --- Ollama self-hosted ---
 # ターミナル A
 ollama serve
 ollama pull llama3.2

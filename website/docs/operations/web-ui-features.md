@@ -100,7 +100,7 @@ Chat パネルは 5 つのバックエンドに対応:
 - `codex` — OpenAI Codex (`codex exec --json`)
 - `gemini` — Google Gemini (`gemini -p --output-format stream-json`)
 - `ollama` — Ollama (HTTP `/api/chat`, cloud or self-hosted)
-- `copilot` — GitHub Copilot (`gh copilot suggest`, 単発)
+- `copilot` — GitHub Copilot (`@github/copilot` agentic CLI, `copilot -p --output-format json`)
 
 Settings ページから即座に切替可能 (詳細は [Multi-runtime バックエンド](./multi-runtime.md) を参照):
 

@@ -204,9 +204,9 @@ class BaseOrchestrator(ABC):
         # routes through ClaudeRunner (stream-json + MCP); ``api`` / ``codex``
         # / ``gemini`` / ``ollama`` all share APIRunner / its subclasses
         # because every one of them speaks OpenAI chat-completions wire +
-        # function-calling. ``copilot`` cannot drive the audit loop
-        # (no tool-calling protocol on `gh copilot suggest`) — the CLI
-        # boundary aborts before we land here.
+        # function-calling. ``copilot`` is a stub today (CopilotRunner
+        # subclass is a follow-up) — the CLI boundary aborts before we
+        # land here.
         from . import runtime_registry
         from .api_runner import (
             APIRunner,

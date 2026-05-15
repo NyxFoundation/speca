@@ -24,15 +24,13 @@ Settings or an env var.
 | --- | --- | --- | --- | --- |
 | **claude** (default) | ✅ SDK or CLI subprocess | ✅ ClaudeRunner (stream-json + MCP) | `ANTHROPIC_API_KEY` or `claude auth login` | `claude-sonnet-4-6` |
 | **api** (OpenRouter / etc.) | — | ✅ APIRunner | `API_RUNNER_API_KEY` | `deepseek/deepseek-r1` |
-| **codex** | ✅ `codex exec --json` | 🟡 stub (PR #67) | `codex login` or `OPENAI_API_KEY` | `gpt-4o` |
-| **gemini** | ✅ `gemini -p --output-format stream-json` | 🟡 stub (PR #67) | `GEMINI_API_KEY` | `gemini-2.0-flash` |
-| **ollama** | ✅ HTTP `/api/chat` | 🟡 stub (PR #67) | `OLLAMA_API_KEY` (cloud) / none (self-hosted) | `llama3.2` |
-| **copilot** | ✅ `gh copilot suggest` (single-shot) | ❌ unsupported (no tool-calling API) | `gh auth login` + Copilot subscription | — |
+| **codex** | ✅ `codex exec --json` | ✅ CodexAPIRunner (APIRunner subclass) | `codex login` or `OPENAI_API_KEY` | `gpt-4o` |
+| **gemini** | ✅ `gemini -p --output-format stream-json` | ✅ GeminiAPIRunner (OpenAI-compat endpoint) | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+| **ollama** | ✅ HTTP `/api/chat` | ✅ OllamaAPIRunner (`<host>/v1/chat/completions`) | `OLLAMA_API_KEY` (cloud) / none (self-hosted) | `llama3.2` |
+| **copilot** | ✅ `@github/copilot` agentic CLI | 🟡 stub (CopilotRunner subclass is a follow-up) | GitHub OAuth on first `copilot` launch | — |
 
-:::note After PR #67 lands
-codex / gemini / ollama become fully usable on the audit pipeline side
-too. Copilot stays chat-only because `gh copilot suggest` has no
-tool-calling API and cannot drive Read/Grep/Glob/Write phases.
+:::note Copilot positioning
+`@github/copilot` agentic CLI (`copilot -p --output-format json`) supports tool-calling, so an orchestrator runner is technically feasible. The `implemented=False` flag is a **scope choice** (follow-up PR will add CopilotRunner) — not the hard `gh copilot suggest`-era limitation.
 :::
 
 ---
@@ -66,8 +64,8 @@ See CLI spec §4.5.1 + [Web UI features](./web-ui-features.md#paste-code-oauth-c
 ### Codex (OpenAI)
 
 Via the official `codex` CLI for chat, or `OPENAI_API_KEY` directly
-for audit (after PR #67). The CLI works with either a ChatGPT plan
-subscription or an API key:
+for audit. The CLI works with either a ChatGPT plan subscription or an
+API key:
 
 ```bash
 npm install -g @openai/codex
@@ -83,7 +81,7 @@ printenv OPENAI_API_KEY | codex login --with-api-key
 Spawns `codex exec --json` as a subprocess. `--resume <session_id>`
 keeps multi-turn context. Tools are restricted to `--sandbox read-only`.
 
-**Audit pipeline side (PR #67):**
+**Audit pipeline side:**
 Does NOT need the codex CLI installed — `CodexAPIRunner` (an APIRunner
 subclass) talks to `https://api.openai.com/v1` directly with
 `OPENAI_API_KEY`, reusing the existing Read / Grep / Glob / Write tool
@@ -98,7 +96,7 @@ loop unchanged.
 ### Gemini (Google)
 
 Via the `gemini` CLI for chat, or Google's **OpenAI-compatible
-endpoint** for audit (after PR #67):
+endpoint** for audit:
 
 ```bash
 npm install -g @google/gemini-cli
@@ -112,7 +110,7 @@ so the chat panel is safe. The tolerant parser accepts several
 stream-json event shapes (text / delta / content /
 candidates.content.parts[].text).
 
-**Audit pipeline side (PR #67):**
+**Audit pipeline side:**
 `GeminiAPIRunner` targets
 `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`.
 Function-calling is fully compatible with OpenAI's wire format, so the
@@ -147,7 +145,7 @@ Talks HTTP `/api/chat` with NDJSON streaming via `httpx.AsyncClient`.
 The last 20 turns of conversation history are replayed each request
 (Ollama is stateless).
 
-**Audit pipeline side (PR #67):**
+**Audit pipeline side:**
 Uses Ollama's OpenAI-compatible endpoint at
 `<host>/v1/chat/completions`. `OllamaAPIRunner` derives `base_url`
 from `OLLAMA_HOST`, so self-hosted (`http://localhost:11434/v1`) and
@@ -168,24 +166,26 @@ inference, no per-token charge) — expected.
 
 ### GitHub Copilot
 
-**Chat panel only** — `gh copilot suggest` has no tool-calling API and
-cannot drive the audit pipeline.
+Backed by the `@github/copilot` agentic CLI. Chat side is fully wired;
+the orchestrator side is a deliberate **scope choice** follow-up.
 
 ```bash
-gh auth login
-gh extension install github/gh-copilot
+npm install -g @github/copilot
+copilot                       # First launch performs GitHub OAuth (creds in ~/.copilot)
 ```
 
 **Chat side (working today):**
-Each user message is forwarded to `gh copilot suggest -t shell
-<prompt>` and the result lands in a single `content_block_delta`. No
-streaming. Prefixes select the suggestion type: `git:` / `gh:` /
-`explain:`.
+Spawns `copilot -p <prompt> --output-format json --allow-all-tools
+--no-banner` as a subprocess and converts the JSONL events into SSE
+frames for the client. tool_use events still go through the circuit
+breaker and approval gate. The older `gh copilot suggest` shim was
+retired in PR #73.
 
-**Audit pipeline side:**
-**Unsupported.** Copilot suggest returns one-shot responses and cannot
-chain Read / Grep / Glob / Write tool calls the way SPECA's audit
-phases need. `--runtime copilot` aborts at the CLI boundary with
+**Audit pipeline side (follow-up):**
+The agentic CLI itself supports tool-calling, so an orchestrator runner
+is technically feasible. A `CopilotRunner` subclass (parsing JSONL
+events into the existing CircuitBreaker / CostTracker) is not written
+yet — `--runtime copilot` currently aborts at the CLI boundary with
 exit 2.
 
 ### api (OpenRouter / DeepSeek / any OpenAI-compat)
@@ -220,12 +220,16 @@ Active runtime: claude  (ORCHESTRATOR_RUNNER env / --runtime flag)
      Anthropic claude CLI (stream-json). Production audit path.
      - claude CLI ready.
 
-[..] codex (stub)
-     OpenAI codex CLI (`codex exec --json`). Registered but stubbed.
-     - codex CLI present; run `codex login`.
-     - Note: orchestrator runner not yet implemented (Web chat works today).
+[..] codex
+     OpenAI Chat API (codex CLI authenticates against this). Tool-calling enabled.
+     - Routes through CodexAPIRunner -> https://api.openai.com/v1
+     - OPENAI_MODEL: gpt-4o
+     - Set OPENAI_API_KEY to authenticate.
 
-...
+[OK] copilot (stub)
+     GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.
+     - copilot CLI on PATH.
+     - Note: orchestrator runner not yet implemented (Web chat works today).
 ```
 
 JSON mode (for CI / speca-cli consumers):
@@ -240,25 +244,25 @@ uv run python scripts/run_phase.py --list-runtimes --json | python -m json.tool
 # OpenRouter
 uv run python scripts/run_phase.py --target 04 --runtime api --workers 4
 
-# (after PR #67) codex / gemini / ollama
+# codex / gemini / ollama
 uv run python scripts/run_phase.py --target 04 --runtime codex
 uv run python scripts/run_phase.py --target 04 --runtime gemini -c model=gemini-2.5-pro
 uv run python scripts/run_phase.py --target 04 --runtime ollama
 ```
 
-`--runtime` overrides `ORCHESTRATOR_RUNNER`. Selecting a stub aborts
-with exit 2 instead of silently falling back to claude — so you never
-generate misleading PARTIALs:
+`--runtime` overrides `ORCHESTRATOR_RUNNER`. Selecting a stub (today
+only `copilot`) aborts with exit 2 instead of silently falling back to
+claude — so you never generate misleading PARTIALs:
 
 ```bash
 uv run python scripts/run_phase.py --target 04 --runtime copilot
 # →
 # ERROR: runtime 'copilot' cannot drive the orchestrator.
-# GitHub Copilot (Web-chat-only). Orchestrator unsupported — no tool-calling API.
+# GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.
 # Notes:
-#   - gh CLI present; logged in.
-#   - Copilot subscription required for Web chat side.
-#   - Note: orchestrator does NOT support copilot (no tool-calling API). Web chat works today.
+#   - copilot CLI on PATH.
+#   - Copilot subscription required.
+#   - Note: orchestrator runner not yet implemented (Web chat works today).
 # exit code: 2
 ```
 
@@ -293,6 +297,8 @@ never sees them, so it is safe on shared machines.
 - **Cost tracker** — APIRunner reads `usage` off the OpenAI-compatible
   response, so self-hosted Ollama reports `total_cost_usd = 0` (local
   inference, no per-token charge).
-- **Copilot cannot audit** — `gh copilot suggest` has no tool-calling
-  API and therefore fundamentally cannot chain the Read / Grep / Glob /
-  Write calls SPECA's audit needs.
+- **Copilot is stub on the audit pipeline side** — the
+  `@github/copilot` agentic CLI does support tool-calling, so an
+  orchestrator runner is technically feasible. The CopilotRunner
+  subclass is still pending, and `--runtime copilot` is rejected with
+  exit 2 today. The chat panel side works fine.

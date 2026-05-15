@@ -8,8 +8,8 @@
 //   * codex   — OpenAI's codex CLI (`codex exec --json`).
 //   * gemini  — Google's gemini CLI (`gemini -p --output-format stream-json`).
 //   * ollama  — Ollama HTTP (cloud or self-hosted via the host field).
-//   * copilot — GitHub Copilot via `gh copilot suggest` (read-only,
-//               single-shot — no streaming).
+//   * copilot — GitHub Copilot via the `@github/copilot` agentic CLI
+//               (`copilot -p --output-format json`).
 //
 // Each runtime has a credentials story we do not own (the user runs the
 // CLI's own login). The availability badges (✓ / ⚠) come from the

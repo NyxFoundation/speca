@@ -45,15 +45,16 @@ def test_get_returns_descriptor_with_summary_and_probe() -> None:
 
 
 def test_implemented_split() -> None:
-    """claude / api / codex / gemini / ollama are wired; copilot is unsupported."""
+    """claude / api / codex / gemini / ollama are wired; copilot orchestrator runner is a follow-up."""
 
     for impl in ("claude", "api", "codex", "gemini", "ollama"):
         assert rr.get(impl).implemented is True, (
             f"{impl} should be implemented — OpenAI-compat function-calling "
             "routes through APIRunner / its subclasses."
         )
-    # Copilot stays stubbed: `gh copilot suggest` has no tool-calling API
-    # so it cannot drive the audit pipeline. Web chat side still works.
+    # Copilot stays stubbed for now: the @github/copilot agentic CLI does
+    # support tool-calling, so a CopilotRunner subclass is feasible, but
+    # it hasn't been written yet. Web chat side already works.
     assert rr.get("copilot").implemented is False
 
 
