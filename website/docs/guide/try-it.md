@@ -330,7 +330,7 @@ Active runtime: claude
 [..] codex        OpenAI Chat API. - Set OPENAI_API_KEY ...
 [..] gemini       Google Gemini (OpenAI-compat endpoint). - Set GEMINI_API_KEY ...
 [..] ollama       Ollama (/v1/chat/completions). ...
-[OK] copilot (stub) GitHub Copilot agentic CLI. Web chat works today; orchestrator runner is a follow-up.
+[OK] copilot      GitHub Copilot agentic CLI (`copilot -p --output-format json --allow-all-tools`). Routes through CopilotRunner.
 ```
 
 JSON で吐かせる場合 (CI / `speca-cli` 用):
@@ -381,6 +381,12 @@ uv run python scripts/run_phase.py --target 04 --runtime ollama --workers 2
 export OLLAMA_HOST=https://ollama.com
 export OLLAMA_API_KEY=...
 uv run python scripts/run_phase.py --target 04 --runtime ollama
+
+# --- GitHub Copilot (agentic CLI、サブスク前提) ---
+npm install -g @github/copilot
+copilot                                # 初回 GitHub OAuth (~/.copilot に creds 永続)
+# 任意: COPILOT_MODEL=claude-sonnet-4-6 でモデル上書き
+uv run python scripts/run_phase.py --target 04 --runtime copilot --workers 2
 ```
 
 各 runtime の認証 / env 詳細は [Multi-runtime バックエンド](../operations/multi-runtime.md) に整理してあります。

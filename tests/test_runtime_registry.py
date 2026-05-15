@@ -45,17 +45,13 @@ def test_get_returns_descriptor_with_summary_and_probe() -> None:
 
 
 def test_implemented_split() -> None:
-    """claude / api / codex / gemini / ollama are wired; copilot orchestrator runner is a follow-up."""
+    """All six registered runtimes are now wired on the orchestrator side."""
 
-    for impl in ("claude", "api", "codex", "gemini", "ollama"):
+    for impl in ("claude", "api", "codex", "gemini", "ollama", "copilot"):
         assert rr.get(impl).implemented is True, (
-            f"{impl} should be implemented — OpenAI-compat function-calling "
-            "routes through APIRunner / its subclasses."
+            f"{impl} should be implemented — claude and copilot via dedicated "
+            "subprocess runners, the others via APIRunner / its subclasses."
         )
-    # Copilot stays stubbed for now: the @github/copilot agentic CLI does
-    # support tool-calling, so a CopilotRunner subclass is feasible, but
-    # it hasn't been written yet. Web chat side already works.
-    assert rr.get("copilot").implemented is False
 
 
 def test_resolve_active_defaults_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,20 +114,20 @@ def test_probe_claude_returns_availability_struct() -> None:
 
 
 def test_probe_implemented_runtimes_flag_true() -> None:
-    """codex / gemini / ollama probes must self-report implemented=True."""
+    """codex / gemini / ollama / copilot probes must self-report implemented=True."""
 
-    for impl in ("codex", "gemini", "ollama"):
+    for impl in ("codex", "gemini", "ollama", "copilot"):
         result = rr.probe(impl)
         assert result.implemented is True, impl
 
 
-def test_probe_copilot_stays_stubbed() -> None:
-    """Copilot orchestrator runner is a follow-up; stays implemented=False."""
+def test_probe_copilot_is_implemented() -> None:
+    """Copilot orchestrator runner is now wired via CopilotRunner."""
 
     result = rr.probe("copilot")
-    assert result.implemented is False
+    assert result.implemented is True
     joined = " ".join(result.notes).lower()
-    assert "orchestrator runner not yet implemented" in joined
+    assert "copilotrunner" in joined or "copilot cli" in joined
 
 
 # ---------------------------------------------------------------------------

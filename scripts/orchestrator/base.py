@@ -204,9 +204,10 @@ class BaseOrchestrator(ABC):
         # routes through ClaudeRunner (stream-json + MCP); ``api`` / ``codex``
         # / ``gemini`` / ``ollama`` all share APIRunner / its subclasses
         # because every one of them speaks OpenAI chat-completions wire +
-        # function-calling. ``copilot`` is a stub today (CopilotRunner
-        # subclass is a follow-up) — the CLI boundary aborts before we
-        # land here.
+        # function-calling. ``copilot`` spawns the agentic ``@github/copilot``
+        # CLI in JSONL mode (CopilotRunner) — it owns its own tool loop via
+        # ``--allow-all-tools`` so we just stream events and parse the
+        # final result file.
         from . import runtime_registry
         from .api_runner import (
             APIRunner,
@@ -214,6 +215,7 @@ class BaseOrchestrator(ABC):
             GeminiAPIRunner,
             OllamaAPIRunner,
         )
+        from .copilot_runner import CopilotRunner
 
         runner_type = runtime_registry.resolve_active()
         runner_kwargs = dict(
@@ -239,6 +241,10 @@ class BaseOrchestrator(ABC):
             print(
                 f"  Runner: OllamaAPIRunner (host={self.runner.base_url}, model={self.runner.model})"
             )
+        elif runner_type == "copilot":
+            self.runner = CopilotRunner(**runner_kwargs)
+            model_label = self.runner.model or "(CLI default)"
+            print(f"  Runner: CopilotRunner (model={model_label})")
         else:
             self.runner = ClaudeRunner(
                 self.config,

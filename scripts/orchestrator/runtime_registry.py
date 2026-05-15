@@ -252,13 +252,11 @@ def _probe_ollama() -> RuntimeAvailability:
 def _probe_copilot() -> RuntimeAvailability:
     """Probe the agentic ``copilot`` CLI (``@github/copilot``).
 
-    The Web chat path now uses this CLI directly (replacing the older
-    ``gh copilot suggest`` shim). The orchestrator-side runner is still
-    a follow-up — it needs a CopilotRunner subclass that parses
-    copilot's JSONL events and threads them through the existing cost
-    tracker / circuit breaker. The CLI itself fully supports it, so
-    ``implemented=False`` is a deliberate scope choice, not a
-    fundamental limitation like before.
+    Both Web chat and the orchestrator drive this CLI directly. The
+    chat side spawns ``copilot -p --output-format json`` per turn
+    (chat_runtime_copilot.py); the orchestrator side does the same
+    via ``CopilotRunner`` (scripts/orchestrator/copilot_runner.py),
+    which lets the CLI own its tool loop under ``--allow-all-tools``.
     """
 
     bin_ = _which("copilot")
@@ -266,22 +264,22 @@ def _probe_copilot() -> RuntimeAvailability:
         return RuntimeAvailability(
             runtime_id="copilot",
             available=False,
-            implemented=False,
+            implemented=True,
             notes=(
                 "copilot CLI not found on PATH.",
                 "Install via `npm install -g @github/copilot`, then run "
                 "`copilot` once interactively to OAuth into GitHub.",
-                "Note: orchestrator runner not yet implemented (Web chat works today).",
             ),
         )
     return RuntimeAvailability(
         runtime_id="copilot",
         available=True,
-        implemented=False,
+        implemented=True,
         notes=(
             "copilot CLI on PATH.",
             "Copilot subscription required.",
-            "Note: orchestrator runner not yet implemented (Web chat works today).",
+            "Routes through CopilotRunner (subprocess + JSONL events). "
+            "Set COPILOT_MODEL to override the CLI's default model.",
         ),
     )
 
@@ -324,9 +322,9 @@ REGISTRY: dict[str, RuntimeDescriptor] = {
     ),
     "copilot": RuntimeDescriptor(
         runtime_id="copilot",
-        summary="GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.",
+        summary="GitHub Copilot agentic CLI (`copilot -p --output-format json --allow-all-tools`). Tool-calling owned by the CLI.",
         probe=_probe_copilot,
-        implemented=False,
+        implemented=True,
     ),
 }
 

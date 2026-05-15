@@ -27,11 +27,7 @@ Settings or an env var.
 | **codex** | ✅ `codex exec --json` | ✅ CodexAPIRunner (APIRunner subclass) | `codex login` or `OPENAI_API_KEY` | `gpt-4o` |
 | **gemini** | ✅ `gemini -p --output-format stream-json` | ✅ GeminiAPIRunner (OpenAI-compat endpoint) | `GEMINI_API_KEY` | `gemini-2.0-flash` |
 | **ollama** | ✅ HTTP `/api/chat` | ✅ OllamaAPIRunner (`<host>/v1/chat/completions`) | `OLLAMA_API_KEY` (cloud) / none (self-hosted) | `llama3.2` |
-| **copilot** | ✅ `@github/copilot` agentic CLI | 🟡 stub (CopilotRunner subclass is a follow-up) | GitHub OAuth on first `copilot` launch | — |
-
-:::note Copilot positioning
-`@github/copilot` agentic CLI (`copilot -p --output-format json`) supports tool-calling, so an orchestrator runner is technically feasible. The `implemented=False` flag is a **scope choice** (follow-up PR will add CopilotRunner) — not the hard `gh copilot suggest`-era limitation.
-:::
+| **copilot** | ✅ `@github/copilot` agentic CLI | ✅ CopilotRunner (subprocess + JSONL events) | GitHub OAuth on first `copilot` launch | CLI default (override via `COPILOT_MODEL`) |
 
 ---
 
@@ -166,27 +162,38 @@ inference, no per-token charge) — expected.
 
 ### GitHub Copilot
 
-Backed by the `@github/copilot` agentic CLI. Chat side is fully wired;
-the orchestrator side is a deliberate **scope choice** follow-up.
+Backed by the `@github/copilot` agentic CLI. Chat and audit pipeline
+both drive the same CLI via subprocess.
 
 ```bash
 npm install -g @github/copilot
 copilot                       # First launch performs GitHub OAuth (creds in ~/.copilot)
 ```
 
-**Chat side (working today):**
+**Chat side:**
 Spawns `copilot -p <prompt> --output-format json --allow-all-tools
 --no-banner` as a subprocess and converts the JSONL events into SSE
 frames for the client. tool_use events still go through the circuit
 breaker and approval gate. The older `gh copilot suggest` shim was
 retired in PR #73.
 
-**Audit pipeline side (follow-up):**
-The agentic CLI itself supports tool-calling, so an orchestrator runner
-is technically feasible. A `CopilotRunner` subclass (parsing JSONL
-events into the existing CircuitBreaker / CostTracker) is not written
-yet — `--runtime copilot` currently aborts at the CLI boundary with
-exit 2.
+**Audit pipeline side:**
+`CopilotRunner` (`scripts/orchestrator/copilot_runner.py`) drives the
+CLI in the same JSONL mode and feeds `session.*` / `assistant.delta` /
+`tool.*` / `error` / `complete` events into an accumulator. Tool
+execution stays inside the CLI (`--allow-all-tools`), so unlike
+APIRunner we do not need Python-side Read/Grep/Glob/Write executors.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `COPILOT_MODEL` | (CLI default) | Pass through as `--model <id>` |
+
+:::info Cost tracking
+When a `usage` event carries `input_tokens` / `output_tokens` we feed
+the CostTracker (gpt-4o-class rate as a conservative estimate). Copilot
+is a flat-rate subscription, so when the CLI omits usage we leave
+`total_cost_usd=0` — same convention as self-hosted Ollama.
+:::
 
 ### api (OpenRouter / DeepSeek / any OpenAI-compat)
 
@@ -226,10 +233,11 @@ Active runtime: claude  (ORCHESTRATOR_RUNNER env / --runtime flag)
      - OPENAI_MODEL: gpt-4o
      - Set OPENAI_API_KEY to authenticate.
 
-[OK] copilot (stub)
-     GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.
+[OK] copilot
+     GitHub Copilot agentic CLI (`copilot -p --output-format json --allow-all-tools`). Tool-calling owned by the CLI.
      - copilot CLI on PATH.
-     - Note: orchestrator runner not yet implemented (Web chat works today).
+     - Copilot subscription required.
+     - Routes through CopilotRunner (subprocess + JSONL events). Set COPILOT_MODEL to override the CLI's default model.
 ```
 
 JSON mode (for CI / speca-cli consumers):
@@ -244,27 +252,17 @@ uv run python scripts/run_phase.py --list-runtimes --json | python -m json.tool
 # OpenRouter
 uv run python scripts/run_phase.py --target 04 --runtime api --workers 4
 
-# codex / gemini / ollama
+# codex / gemini / ollama / copilot
 uv run python scripts/run_phase.py --target 04 --runtime codex
 uv run python scripts/run_phase.py --target 04 --runtime gemini -c model=gemini-2.5-pro
 uv run python scripts/run_phase.py --target 04 --runtime ollama
-```
-
-`--runtime` overrides `ORCHESTRATOR_RUNNER`. Selecting a stub (today
-only `copilot`) aborts with exit 2 instead of silently falling back to
-claude — so you never generate misleading PARTIALs:
-
-```bash
 uv run python scripts/run_phase.py --target 04 --runtime copilot
-# →
-# ERROR: runtime 'copilot' cannot drive the orchestrator.
-# GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.
-# Notes:
-#   - copilot CLI on PATH.
-#   - Copilot subscription required.
-#   - Note: orchestrator runner not yet implemented (Web chat works today).
-# exit code: 2
 ```
+
+`--runtime` overrides `ORCHESTRATOR_RUNNER`. Every registered runtime
+is now `implemented=True`, so there are no stubs to fall back from. If
+a future stub gets added (`implemented=False`), selecting it aborts
+with exit 2 instead of silently routing to claude.
 
 ---
 
@@ -297,8 +295,8 @@ never sees them, so it is safe on shared machines.
 - **Cost tracker** — APIRunner reads `usage` off the OpenAI-compatible
   response, so self-hosted Ollama reports `total_cost_usd = 0` (local
   inference, no per-token charge).
-- **Copilot is stub on the audit pipeline side** — the
-  `@github/copilot` agentic CLI does support tool-calling, so an
-  orchestrator runner is technically feasible. The CopilotRunner
-  subclass is still pending, and `--runtime copilot` is rejected with
-  exit 2 today. The chat panel side works fine.
+- **Copilot also misses MCP** — Phase 02c's MCP tree-sitter is
+  claude-only, so running 02c under `--runtime copilot` drops
+  code-pre-resolution accuracy (same caveat as codex/gemini/ollama).
+  Workarounds: skip 02c (`--phase 01a 01b 01e 03 04`) or run 02c under
+  claude and the rest under copilot.

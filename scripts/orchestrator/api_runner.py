@@ -738,11 +738,12 @@ class APIRunner:
 #       <host>/v1/chat/completions   (host: https://ollama.com OR a self-
 #       hosted endpoint like http://localhost:11434)
 #
-# GitHub Copilot is intentionally NOT subclassed here: ``gh copilot
-# suggest`` is a single-shot suggestion API with no tool-calling protocol,
-# so it cannot drive the audit pipeline. The CLI keeps it registered for
-# the chat side (see web/server/services/chat_runtime_copilot.py) and the
-# orchestrator surface refuses to start an audit run against it.
+# GitHub Copilot is NOT subclassed here because it does not speak
+# OpenAI chat-completions wire — it owns its own JSONL agentic protocol
+# via ``copilot -p --output-format json --allow-all-tools``. See
+# ``scripts/orchestrator/copilot_runner.py`` (``CopilotRunner``) for the
+# subprocess-based driver, and ``web/server/services/chat_runtime_copilot.py``
+# for the chat-side counterpart.
 # ---------------------------------------------------------------------------
 
 
