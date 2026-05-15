@@ -18,7 +18,7 @@ snapshot already know about them, which lets a downstream PR drop in a
 * ``codex``   — OpenAI codex CLI (``codex exec --json``).
 * ``gemini``  — Google gemini CLI (``gemini -p --output-format stream-json``).
 * ``ollama``  — Ollama HTTP (``/api/chat``, cloud or self-hosted).
-* ``copilot`` — GitHub Copilot CLI (``gh copilot suggest``).
+* ``copilot`` — GitHub Copilot agentic CLI (``copilot`` from ``@github/copilot``).
 
 The Web side (``web/server/services/chat_runtime_*``) already has
 streaming implementations for all four; the orchestrator side is more
@@ -250,42 +250,38 @@ def _probe_ollama() -> RuntimeAvailability:
 
 
 def _probe_copilot() -> RuntimeAvailability:
-    """GitHub Copilot — Web-chat-only.
+    """Probe the agentic ``copilot`` CLI (``@github/copilot``).
 
-    ``gh copilot suggest`` is a single-shot suggestion API with no
-    tool-calling protocol, so it cannot drive the audit pipeline (every
-    SPECA phase needs Read/Grep/Glob/Write tool calls). We keep the
-    runtime registered so ``--list-runtimes`` surfaces it, but the
-    ``implemented`` flag stays ``False`` and the CLI refuses to start.
+    The Web chat path now uses this CLI directly (replacing the older
+    ``gh copilot suggest`` shim). The orchestrator-side runner is still
+    a follow-up — it needs a CopilotRunner subclass that parses
+    copilot's JSONL events and threads them through the existing cost
+    tracker / circuit breaker. The CLI itself fully supports it, so
+    ``implemented=False`` is a deliberate scope choice, not a
+    fundamental limitation like before.
     """
 
-    gh = _which("gh")
-    if gh is None:
+    bin_ = _which("copilot")
+    if bin_ is None:
         return RuntimeAvailability(
             runtime_id="copilot",
             available=False,
             implemented=False,
             notes=(
-                "gh CLI not found on PATH.",
-                "Install GitHub CLI from https://cli.github.com/.",
-                "Note: orchestrator does NOT support copilot (no tool-calling API). Web chat works today.",
+                "copilot CLI not found on PATH.",
+                "Install via `npm install -g @github/copilot`, then run "
+                "`copilot` once interactively to OAuth into GitHub.",
+                "Note: orchestrator runner not yet implemented (Web chat works today).",
             ),
         )
-    proc = _run([gh, "auth", "status"])
-    logged_in = bool(
-        proc
-        and proc.returncode == 0
-        and "logged in" in (proc.stderr or proc.stdout or "").lower()
-    )
     return RuntimeAvailability(
         runtime_id="copilot",
-        available=logged_in,
+        available=True,
         implemented=False,
         notes=(
-            ("gh CLI present; "
-             + ("logged in." if logged_in else "run `gh auth login`.")),
-            "Copilot subscription required for Web chat side.",
-            "Note: orchestrator does NOT support copilot (no tool-calling API). Web chat works today.",
+            "copilot CLI on PATH.",
+            "Copilot subscription required.",
+            "Note: orchestrator runner not yet implemented (Web chat works today).",
         ),
     )
 
@@ -328,7 +324,7 @@ REGISTRY: dict[str, RuntimeDescriptor] = {
     ),
     "copilot": RuntimeDescriptor(
         runtime_id="copilot",
-        summary="GitHub Copilot (Web-chat-only). Orchestrator unsupported — no tool-calling API.",
+        summary="GitHub Copilot agentic CLI (`copilot -p --output-format json`). Web chat works today; orchestrator runner is a follow-up.",
         probe=_probe_copilot,
         implemented=False,
     ),

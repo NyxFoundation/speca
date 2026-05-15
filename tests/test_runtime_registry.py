@@ -125,12 +125,12 @@ def test_probe_implemented_runtimes_flag_true() -> None:
 
 
 def test_probe_copilot_stays_stubbed() -> None:
-    """Copilot has no tool-calling API; orchestrator path must refuse."""
+    """Copilot orchestrator runner is a follow-up; stays implemented=False."""
 
     result = rr.probe("copilot")
     assert result.implemented is False
     joined = " ".join(result.notes).lower()
-    assert "does not support copilot" in joined
+    assert "orchestrator runner not yet implemented" in joined
 
 
 # ---------------------------------------------------------------------------

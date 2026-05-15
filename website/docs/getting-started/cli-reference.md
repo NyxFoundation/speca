@@ -74,8 +74,31 @@ speca run --phase 03 --force --json
 | `--output-dir <path>` | 出力ディレクトリ (`SPECA_OUTPUT_DIR` を設定) |
 | `--no-tui` | プレーンテキスト出力 (CI 向け) |
 | `--json` | NDJSON イベントを stdout に流す |
+| `--runtime <name>` | 実行 runtime を選択 (`claude` / `api` / `codex` / `gemini` / `ollama` / `copilot`) |
+| `--list-runtimes` | 登録済 runtime の一覧と可用性を表示して終了 |
+| `--01a-scope <mode>` | Phase 01a の状態を `all` / `primary` / `primary+1hop` / `<N>` でフィルタ |
 
 resume は自動です。`<phase>_PARTIAL_*.json` に書かれた項目はスキップされます。`--force` で無効化できます。`Ctrl-C` での中断は安全で、再実行で続きから処理されます。
+
+### Runtime 選択
+
+`--runtime` フラグで claude 以外のエージェント実行系に切替可能です。バックエンドの認証 / 環境変数 / 各 runtime の制限事項は [Multi-runtime バックエンド](../operations/multi-runtime.md) に整理しています。
+
+```bash
+# 登録済 runtime を一覧 + 可用性チェック
+speca run --list-runtimes
+
+# JSON で吐く (CI / speca-cli 連携)
+speca run --list-runtimes --json
+
+# OpenRouter 経由で audit
+speca run --target 04 --runtime api --workers 4
+
+# 未実装 runtime を指定すると exit 2 で安全停止
+speca run --target 04 --runtime copilot   # → exit: 2
+```
+
+`--runtime` は `ORCHESTRATOR_RUNNER` 環境変数を上書きします。stub 状態の runtime を指定した場合は、silent fallback で誤った PARTIAL を吐くことなく exit 2 で停止します。
 
 フェーズ ID の意味は [パイプライン概要](../pipeline/overview.md) を参照してください。
 

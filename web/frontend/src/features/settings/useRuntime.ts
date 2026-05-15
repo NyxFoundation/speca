@@ -32,6 +32,8 @@ export interface RuntimeView {
   codex_logged_in: boolean;
   gemini_cli_available: boolean;
   gemini_api_key_present: boolean;
+  /** Google Application Default Credentials path is configured (OAuth). */
+  gemini_adc_available: boolean;
   copilot_cli_available: boolean;
   ollama_api_key_present: boolean;
 }
