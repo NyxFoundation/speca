@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-06-16
+
+Patch release on the 0.9.x soak line. Adds the `speca corpus` subcommand
+suite — browse, inspect, share, and garbage-collect the per-run trace
+archives written under `.speca/runs/<run-id>/` — built entirely in
+TypeScript/Ink with no Python subprocess. Also de-flakes the `speca ask`
+streaming render test on Windows.
+
+### Added
+
+- **`speca corpus <sub>` subcommand suite** ([#66], closes [#32]) —
+  browse and share per-run trace archives (`.speca/runs/`):
+  - `corpus list` — Ink table over every run-id under the archive root,
+    sorted descending by `started_at`. Unreadable archives float to the
+    bottom with a `broken` status so they stay visible rather than
+    silently dropping out.
+  - `corpus show <run-id>` — manifest plus per-phase summary (partials /
+    logs / graphs / cost per phase) for quick provenance checks before
+    deciding to export or gc.
+  - `corpus export <run-id>` — redacted slice ready to share. Defaults to
+    the spec-derived phases `01a,01b,01e`; the finding-bearing phases
+    (`02c`/`03`/`04`) are gated behind `--unsafe-include-findings`. Ships
+    a generated `README`, an env.json key allowlist
+    (`KEYWORDS` / `SPEC_URLS` / `SPECA_OUTPUT_DIR` / `SPECA_01A_SCOPE` /
+    `ORCHESTRATOR_RUNNER` / phases — unknown keys are dropped and listed
+    under `_redacted_keys`), `manifest.notes` truncation (first line /
+    120 chars, so Python tracebacks and auditor-local paths don't leak),
+    and `target_info.repo_path` stripping.
+  - `corpus gc --older-than <dur>` — soft-delete only (renames into
+    `<root>/.trash/<run-id>-<ts>-<nonce>`, never hard-deletes), with a
+    per-candidate timestamp + 6-hex nonce + `stat()` pre-check so
+    concurrent / two-candidate gc can't silently overwrite. Defaults to
+    `--dry-run`.
+- **Corpus substrate** in `cli/src/lib/corpus/` — `paths` (CLI > env >
+  `<cwd>/.speca/runs` precedence), `manifest` (zod schema +
+  `deriveStatus` + `summarise`), `runs` (tolerant scan), `duration`
+  (`<int><unit>` `--older-than` parser), `gc`, and a stream-JSON log
+  `redact`or (drops `Read`/`Grep`/`Glob` calls under
+  `target_info.repo_path` — `path.relative`-based, case-insensitive on
+  Windows — while keeping `mcp__*` / `Write` / everything else).
+
+### Fixed
+
+- De-flaked the `speca ask` streaming-render test on Windows
+  (`cli/test/ask.render.test.ts`).
+
+### Tests
+
+- +64 vitest cases (290 → 354): corpus export (×many), gc, manifest,
+  redact, runs, paths, and duration suites, all green on the matrix.
+
+[#32]: https://github.com/NyxFoundation/speca/issues/32
+[#66]: https://github.com/NyxFoundation/speca/pull/66
+
 ## [0.9.1] - 2026-05-08
 
 Patch release on the 0.9.x soak line. Closes the four `ErrorKind` paths

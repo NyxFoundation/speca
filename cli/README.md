@@ -1,6 +1,6 @@
 # speca-cli
 
-> v0.9.1 (soft launch ahead of v1.0.0 GA) — TUI front-end for the
+> v0.9.2 (soft launch ahead of v1.0.0 GA) — TUI front-end for the
 > [SPECA](https://github.com/NyxFoundation/speca) specification-anchored
 > security-audit pipeline.
 
