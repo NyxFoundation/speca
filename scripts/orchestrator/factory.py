@@ -29,6 +29,8 @@ def create_orchestrator(
     num_workers: int = 4,
     max_concurrent: int = 8,
     archiver: "Archiver | None" = None,
+    property_provider: str = "prompt",
+    verification_backend: str = "none",
 ) -> BaseOrchestrator:
     """
     Create an orchestrator for the specified phase.
@@ -62,6 +64,12 @@ def create_orchestrator(
 
     # Validate phase exists
     config = get_phase_config(phase_id)
+
+    # Apply provider/backend overrides to the phase config for runtime use.
+    if phase_id == "01e" and property_provider != "prompt":
+        config.property_provider = property_provider
+    if phase_id == "04" and verification_backend != "none":
+        config.verification_backend = verification_backend
 
     # Select appropriate orchestrator class
     if phase_id == "01b":
