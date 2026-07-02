@@ -143,7 +143,7 @@ class BaseOrchestrator(ABC):
         max_concurrent: int = 8,
         archiver: Archiver | None = None,
     ):
-        self.config = get_phase_config(phase_id)
+        self.config = get_phase_config(phase_id).model_copy()
         self.num_workers = max(1, num_workers)
         self.max_concurrent = max(1, max_concurrent)
         self.semaphore: asyncio.Semaphore | None = None
@@ -747,6 +747,67 @@ class Phase01Orchestrator(BaseOrchestrator):
                 file=sys.stderr,
             )
         return items
+
+    async def run(self) -> None:
+        """Route non-prompt property providers away from the Claude CLI batch loop."""
+        if self.config.phase_id == "01e" and self.config.property_provider != "prompt":
+            await self._run_01e_with_provider()
+        else:
+            await super().run()
+
+    async def _run_01e_with_provider(self) -> None:
+        """Execute Phase 01e using a pluggable PropertyProvider (not the Claude CLI runner)."""
+        import glob as glob_mod
+        import time as _time
+        from .config import resolve_pattern
+        from .providers import resolve_provider, run_refinement_pass
+
+        provider_name = self.config.property_provider
+        print(f"\n{'='*60}")
+        print(f"Phase 01e ({provider_name} provider): {self.config.name}")
+        print(f"{'='*60}")
+        start_time = _time.time()
+
+        provider = resolve_provider(provider_name)
+
+        # Load subgraphs from 01b partials
+        subgraphs: list[dict] = []
+        for pattern in self.config.input_patterns:
+            for filepath in sorted(glob_mod.glob(resolve_pattern(pattern))):
+                try:
+                    with open(filepath, encoding="utf-8") as f:
+                        data = json.load(f)
+                    subgraphs.extend(data.get("specs", []))
+                except Exception as e:
+                    print(f"Warning: failed to load {filepath}: {e}", file=sys.stderr)
+        print(f"Loaded {len(subgraphs)} subgraphs from 01b partials")
+
+        # Load bug bounty scope (required)
+        scope_path = get_output_root() / "BUG_BOUNTY_SCOPE.json"
+        if not scope_path.exists():
+            raise PhaseAbortError(
+                f"{scope_path} not found. "
+                f"bug_bounty_scope is required for Phase 01e."
+            )
+        with open(scope_path, encoding="utf-8") as f:
+            bug_bounty_scope = json.load(f)
+
+        properties = provider.generate(
+            subgraphs=subgraphs,
+            bug_bounty_scope=bug_bounty_scope,
+            source=self.config.dataset_source_url,
+        )
+
+        if self.config.refinement_pass_enabled:
+            properties = run_refinement_pass(properties)
+
+        self.results = list(properties)
+        if self.results:
+            self.collector.save_partial(self.results, 0, 0)
+
+        duration = _time.time() - start_time
+        print(f"\n✅ Phase 01e ({provider_name}) completed in {duration:.1f}s")
+        print(f"   Total properties: {len(self.results)}")
 
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich items with necessary context."""
@@ -1513,6 +1574,41 @@ class Phase04Orchestrator(BaseOrchestrator):
                 })
 
         return early_exit_results, items_to_process
+
+    async def run(self) -> None:
+        """Run Phase 04, then invoke the pluggable verification backend if configured."""
+        await super().run()
+
+        if self.config.verification_backend == "none":
+            return
+
+        from .providers import resolve_verification_backend
+
+        backend = resolve_verification_backend(self.config.verification_backend)
+        backend_name = self.config.verification_backend
+
+        target_info_path = get_output_root() / "TARGET_INFO.json"
+        if not target_info_path.exists():
+            print(
+                f"Warning: {target_info_path} not found, skipping {backend_name} verification",
+                file=sys.stderr,
+            )
+            return
+        with open(target_info_path, encoding="utf-8") as f:
+            target_info = json.load(f)
+
+        confirmed_findings = [
+            r for r in self.results
+            if r.get("review_verdict") in {"CONFIRMED", "POTENTIAL"}
+        ]
+        print(f"\nRunning {backend_name} verification on {len(confirmed_findings)} findings...")
+        verification_records = backend.verify(confirmed_findings, target_info)
+
+        if verification_records:
+            ver_path = get_output_root() / "04_VERIFICATION.json"
+            with open(ver_path, "w", encoding="utf-8") as f:
+                json.dump({"verification_records": verification_records}, f, indent=2)
+            print(f"  Verification records saved to {ver_path}")
 
     def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enrich items with original property data from 02c PARTIALs."""

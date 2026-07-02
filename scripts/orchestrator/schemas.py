@@ -128,18 +128,7 @@ class ChecklistMindset(str, Enum):
     FORMAL_VERIFICATION_ENGINEER = "Formal Verification Engineer"
 
 
-class PropertyProviderName(str, Enum):
-    """Recognised property-generation provider names."""
-    PROMPT = "prompt"
-    LEAN = "lean"
-    DATASET = "dataset"
-    EXISTING = "existing"
-
-
-class VerificationBackendName(str, Enum):
-    """Recognised post-04 verification backend names."""
-    NONE = "none"
-    KURTOSIS = "kurtosis"
+from .providers import PropertyProviderName, VerificationBackendName  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

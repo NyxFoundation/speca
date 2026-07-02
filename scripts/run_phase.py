@@ -144,7 +144,11 @@ def make_run_id(
     return f"{ts}-{resolved_sha}-{slug}-{resolved_nonce}"
 
 
-def _build_env_snapshot(phases: list[str]) -> dict:
+def _build_env_snapshot(
+    phases: list[str],
+    property_provider: str = "prompt",
+    verification_backend: str = "none",
+) -> dict:
     """Capture a sanitised snapshot of the runtime environment.
 
     We deliberately read ``ORCHESTRATOR_RUNNER`` via the registry helper
@@ -157,8 +161,8 @@ def _build_env_snapshot(phases: list[str]) -> dict:
         "SPECA_OUTPUT_DIR": os.environ.get("SPECA_OUTPUT_DIR", ""),
         "SPECA_01A_SCOPE": os.environ.get("SPECA_01A_SCOPE", ""),
         "ORCHESTRATOR_RUNNER": runtime_registry.resolve_active(),
-        "SPECA_PROPERTY_PROVIDER": os.environ.get("SPECA_PROPERTY_PROVIDER", ""),
-        "SPECA_VERIFICATION_BACKEND": os.environ.get("SPECA_VERIFICATION_BACKEND", ""),
+        "SPECA_PROPERTY_PROVIDER": property_provider,
+        "SPECA_VERIFICATION_BACKEND": verification_backend,
         "phases": phases,
     }
 
@@ -1009,7 +1013,11 @@ def main():
         run_id = os.environ.get("SPECA_RUN_ID") or make_run_id()
         archiver = Archiver(run_id, archive_root)
         # Write env snapshot
-        archiver.set_env_snapshot(_build_env_snapshot(phases))
+        archiver.set_env_snapshot(_build_env_snapshot(
+            phases,
+            property_provider=args.property_provider,
+            verification_backend=args.verification_backend,
+        ))
         archiver.set_commit(_get_short_sha())
         # Capture spec sources from SPEC_URLS env (CLI --spec-urls promoted
         # this above). Manifest field merges with any value loaded from an

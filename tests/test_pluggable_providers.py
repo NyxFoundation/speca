@@ -8,7 +8,7 @@ from scripts.orchestrator.providers import (
     resolve_provider, resolve_verification_backend,
     run_refinement_pass,
 )
-from scripts.orchestrator.schemas import VerificationRecord, PropertyProviderName as SchemasProviderName
+from scripts.orchestrator.schemas import VerificationRecord, PropertyProviderName as SchemasProviderName  # same object — tested below
 from scripts.orchestrator.config import PhaseConfig, PHASE_CONFIGS
 from scripts.orchestrator.factory import create_orchestrator
 from pathlib import Path
@@ -127,12 +127,10 @@ def test_01e_config_default_provider():
 
 
 def test_create_orchestrator_with_provider_override():
-    original = PHASE_CONFIGS["01e"].property_provider
-    try:
-        orch = create_orchestrator("01e", property_provider="lean")
-        assert orch.config.property_provider == "lean"
-    finally:
-        PHASE_CONFIGS["01e"].property_provider = original
+    # Override must land on the orchestrator's own config copy, not the global singleton.
+    orch = create_orchestrator("01e", property_provider="lean")
+    assert orch.config.property_provider == "lean"
+    assert PHASE_CONFIGS["01e"].property_provider == "prompt"  # global unchanged
 
 
 def test_create_orchestrator_default_provider_unchanged():
@@ -154,3 +152,15 @@ def test_lean_provider_plugin_ref():
 
 def test_kurtosis_backend_plugin_ref():
     assert KurtosisVerificationBackend.plugin_ref == "NyxFoundation/kurtosis-harness"
+
+
+def test_schemas_and_providers_share_enum_identity():
+    # schemas.PropertyProviderName must be the same object as providers.PropertyProviderName
+    # (no duplicate definitions).
+    assert SchemasProviderName is PropertyProviderName
+
+
+def test_create_orchestrator_verification_override_doesnt_mutate_global():
+    orch = create_orchestrator("04", verification_backend="kurtosis")
+    assert orch.config.verification_backend == "kurtosis"
+    assert PHASE_CONFIGS["04"].verification_backend == "none"  # global unchanged
