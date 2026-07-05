@@ -144,7 +144,11 @@ def make_run_id(
     return f"{ts}-{resolved_sha}-{slug}-{resolved_nonce}"
 
 
-def _build_env_snapshot(phases: list[str]) -> dict:
+def _build_env_snapshot(
+    phases: list[str],
+    property_provider: str = "prompt",
+    verification_backend: str = "none",
+) -> dict:
     """Capture a sanitised snapshot of the runtime environment.
 
     We deliberately read ``ORCHESTRATOR_RUNNER`` via the registry helper
@@ -157,6 +161,8 @@ def _build_env_snapshot(phases: list[str]) -> dict:
         "SPECA_OUTPUT_DIR": os.environ.get("SPECA_OUTPUT_DIR", ""),
         "SPECA_01A_SCOPE": os.environ.get("SPECA_01A_SCOPE", ""),
         "ORCHESTRATOR_RUNNER": runtime_registry.resolve_active(),
+        "SPECA_PROPERTY_PROVIDER": property_provider,
+        "SPECA_VERIFICATION_BACKEND": verification_backend,
         "phases": phases,
     }
 
@@ -465,6 +471,10 @@ async def run_phase(
     out_of_scope_layers: list[str] | None = None,
     min_severity: str | None = None,
     model: str | None = None,
+    property_provider: str = "prompt",
+    dataset_source: str | None = None,
+    enable_refinement: bool = False,
+    verification_backend: str = "none",
     emitter: JsonEventEmitter | None = None,
     archiver: Archiver | None = None,
 ) -> bool:
@@ -570,7 +580,21 @@ async def run_phase(
             # Clear it if not requested, to avoid accidental persistence from outer shell
             del os.environ["FORCE_EXECUTE"]
 
-        orchestrator = create_orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orchestrator = create_orchestrator(
+            phase_id,
+            num_workers,
+            max_concurrent,
+            archiver=archiver,
+            property_provider=property_provider,
+            verification_backend=verification_backend,
+        )
+
+        # Apply dataset source / refinement toggle to the config when relevant.
+        if phase_id == "01e":
+            if dataset_source is not None:
+                orchestrator.config.dataset_source_url = dataset_source
+            if enable_refinement:
+                orchestrator.config.refinement_pass_enabled = True
 
         # Override model from CLI if provided
         if model is not None:
@@ -673,6 +697,10 @@ async def run_pipeline(
     out_of_scope_layers: list[str] | None = None,
     min_severity: str | None = None,
     model: str | None = None,
+    property_provider: str = "prompt",
+    dataset_source: str | None = None,
+    enable_refinement: bool = False,
+    verification_backend: str = "none",
     target_phase: str | None = None,
     emitter: JsonEventEmitter | None = None,
     archiver: Archiver | None = None,
@@ -689,6 +717,10 @@ async def run_pipeline(
             out_of_scope_layers=out_of_scope_layers,
             min_severity=min_severity,
             model=model,
+            property_provider=property_provider,
+            dataset_source=dataset_source,
+            enable_refinement=enable_refinement,
+            verification_backend=verification_backend,
             emitter=emitter,
             archiver=archiver,
         )
@@ -782,6 +814,33 @@ def main():
         default=None,
         help="Override min_severity for phases that support severity gating (e.g. phase 02). "
              "Properties below this threshold are skipped. Default comes from PhaseConfig.",
+    )
+
+    # Pluggable property provider / verification backend (issue #87)
+    parser.add_argument(
+        "--property-provider",
+        default="prompt",
+        choices=["prompt", "lean", "dataset", "existing"],
+        help="Property generation method for phase 01e (default: prompt).",
+    )
+    parser.add_argument(
+        "--dataset-source",
+        default=None,
+        metavar="URL_OR_PATH",
+        help="HuggingFace URL, GitHub release URL, or local path for "
+             "--property-provider=dataset or --property-provider=existing.",
+    )
+    parser.add_argument(
+        "--enable-refinement",
+        action="store_true",
+        default=False,
+        help="Run the post-01e refinement pass (dedup/tighten; no-op stub by default).",
+    )
+    parser.add_argument(
+        "--verification-backend",
+        default="none",
+        choices=["none", "kurtosis"],
+        help="Post-04 verification/reproduction backend (default: none).",
     )
 
     # Phase 01a: discovery seed inputs
@@ -954,7 +1013,11 @@ def main():
         run_id = os.environ.get("SPECA_RUN_ID") or make_run_id()
         archiver = Archiver(run_id, archive_root)
         # Write env snapshot
-        archiver.set_env_snapshot(_build_env_snapshot(phases))
+        archiver.set_env_snapshot(_build_env_snapshot(
+            phases,
+            property_provider=args.property_provider,
+            verification_backend=args.verification_backend,
+        ))
         archiver.set_commit(_get_short_sha())
         # Capture spec sources from SPEC_URLS env (CLI --spec-urls promoted
         # this above). Manifest field merges with any value loaded from an
@@ -1009,6 +1072,10 @@ def main():
                 out_of_scope_layers=args.out_of_scope_layers,
                 min_severity=args.min_severity,
                 model=args.model,
+                property_provider=args.property_provider,
+                dataset_source=args.dataset_source,
+                enable_refinement=args.enable_refinement,
+                verification_backend=args.verification_backend,
                 target_phase=args.target if args.target else None,
                 emitter=emitter,
                 archiver=archiver,

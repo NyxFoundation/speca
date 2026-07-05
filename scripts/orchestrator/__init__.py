@@ -34,6 +34,16 @@ from .resume import ResumeManager
 from .factory import create_orchestrator
 from .watchdog import LogWatcher, LogWatcherConfig, CostTracker, BudgetExceeded
 from . import schemas
+from . import providers
+from .providers import (
+    PropertyProviderName,
+    VerificationBackendName,
+    PropertyProvider,
+    VerificationBackend,
+    resolve_provider,
+    resolve_verification_backend,
+    run_refinement_pass,
+)
 
 __all__ = [
     "BaseOrchestrator",
@@ -56,4 +66,12 @@ __all__ = [
     "ResumeManager",
     "create_orchestrator",
     "schemas",
+    "providers",
+    "PropertyProviderName",
+    "VerificationBackendName",
+    "PropertyProvider",
+    "VerificationBackend",
+    "resolve_provider",
+    "resolve_verification_backend",
+    "run_refinement_pass",
 ]

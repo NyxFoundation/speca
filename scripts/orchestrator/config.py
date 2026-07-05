@@ -125,6 +125,23 @@ class PhaseConfig(BaseModel):
     # Value is a Severity enum string: "Critical", "High", "Medium", "Low", "Informational".
     min_severity: str | None = None
 
+    # ---- Pluggable provider / backend ----
+    # Which property-generation method to use for phase 01e.
+    # "prompt" (default) = existing Claude CLI prompt path (no behavior change).
+    # "lean" | "dataset" | "existing" = alternative providers (see providers.py).
+    property_provider: str = "prompt"
+
+    # URL or path for dataset/existing-01e providers. Ignored for "prompt" and "lean".
+    dataset_source_url: str | None = None
+
+    # Whether to run the optional refinement pass after 01e generation.
+    # Off by default; opt-in via --enable-refinement flag or config.
+    refinement_pass_enabled: bool = False
+
+    # Which post-04 verification backend to use. "none" (default) = no verification.
+    # "kurtosis" = NyxFoundation/kurtosis-harness (external plugin).
+    verification_backend: str = "none"
+
     # ---- Context / output field filtering ----
     # Fields to include in the context file sent to workers.
     # None = all fields (no filtering).

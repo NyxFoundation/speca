@@ -29,6 +29,8 @@ def create_orchestrator(
     num_workers: int = 4,
     max_concurrent: int = 8,
     archiver: "Archiver | None" = None,
+    property_provider: str = "prompt",
+    verification_backend: str = "none",
 ) -> BaseOrchestrator:
     """
     Create an orchestrator for the specified phase.
@@ -60,20 +62,29 @@ def create_orchestrator(
             "`create_orchestrator`."
         )
 
-    # Validate phase exists
-    config = get_phase_config(phase_id)
+    # Validate phase exists (raises ValueError for unknown phase_id)
+    get_phase_config(phase_id)
 
-    # Select appropriate orchestrator class
+    # Select appropriate orchestrator class. Each constructor calls
+    # get_phase_config(phase_id).model_copy() internally, so the overrides
+    # below only touch the orchestrator's own copy — never the global singleton.
     if phase_id == "01b":
-        return Phase01bOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orch = Phase01bOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
     elif phase_id.startswith("01"):
-        return Phase01Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orch = Phase01Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
     elif phase_id == "02c":
-        return Phase02cOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orch = Phase02cOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
     elif phase_id == "03":
-        return Phase03Orchestrator(num_workers, max_concurrent, archiver=archiver)
+        orch = Phase03Orchestrator(num_workers, max_concurrent, archiver=archiver)
     elif phase_id == "04":
-        return Phase04Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orch = Phase04Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
     else:
-        # Fallback to base orchestrator
-        return BaseOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+        orch = BaseOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+
+    # Apply provider/backend overrides on the orchestrator's own config copy.
+    if phase_id == "01e" and property_provider != "prompt":
+        orch.config.property_provider = property_provider
+    if phase_id == "04" and verification_backend != "none":
+        orch.config.verification_backend = verification_backend
+
+    return orch

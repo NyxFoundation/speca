@@ -128,6 +128,9 @@ class ChecklistMindset(str, Enum):
     FORMAL_VERIFICATION_ENGINEER = "Formal Verification Engineer"
 
 
+from .providers import PropertyProviderName, VerificationBackendName  # noqa: E402
+
+
 # ---------------------------------------------------------------------------
 # Phase 01a – Discovery
 # ---------------------------------------------------------------------------
@@ -289,6 +292,16 @@ class Phase01ePartial(BaseModel):
     """Output of Phase 01e: properties extracted from trust model (slim)."""
     properties: list[Property] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerificationRecord(BaseModel):
+    """Record produced by a post-04 verification/reproduction backend."""
+    property_id: str
+    verdict: str  # "reproduced" | "not-reproduced" | "error"
+    harness: str = ""  # e.g. "kurtosis", "none"
+    artifact_path: str = ""
+    logs_path: str = ""
+    notes: str = ""
 
 
 # ---------------------------------------------------------------------------
