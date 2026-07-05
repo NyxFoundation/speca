@@ -1599,7 +1599,7 @@ class Phase04Orchestrator(BaseOrchestrator):
 
         confirmed_findings = [
             r for r in self.results
-            if r.get("review_verdict") in {"CONFIRMED", "POTENTIAL"}
+            if r.get("review_verdict") in {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL"}
         ]
         print(f"\nRunning {backend_name} verification on {len(confirmed_findings)} findings...")
         verification_records = backend.verify(confirmed_findings, target_info)

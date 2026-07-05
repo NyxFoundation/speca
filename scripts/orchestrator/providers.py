@@ -78,6 +78,10 @@ class LeanPropertyProvider:
     """Lean 4 formal-verification provider (external plugin)."""
 
     plugin_ref = "NyxFoundation/speca-lean4-plugin"
+    # Version pin for the external plugin boundary (issue #87 requires plugin
+    # boundaries to be version-pinned). The plugin repo has no commits/tags yet,
+    # so the pin is deferred to #88 when it publishes a taggable release.
+    plugin_version: str | None = None
 
     def generate(
         self,
@@ -85,9 +89,10 @@ class LeanPropertyProvider:
         bug_bounty_scope: dict,
         source: str | None = None,
     ) -> list[dict]:
+        pin = f"@{self.plugin_version}" if self.plugin_version else " (version pin TBD by #88)"
         raise NotImplementedError(
-            "lean provider requires speca-lean4-plugin "
-            "(NyxFoundation/speca-lean4-plugin); install and configure it first."
+            f"lean provider requires {self.plugin_ref}{pin}; "
+            "install and configure it first."
         )
 
 
@@ -174,14 +179,19 @@ class KurtosisVerificationBackend:
     """E2E reproduction backend via the Kurtosis harness (external plugin)."""
 
     plugin_ref = "NyxFoundation/kurtosis-harness"
+    # Version pin for the external plugin boundary (issue #87 requires plugin
+    # boundaries to be version-pinned). No tagged release exists yet, so this
+    # pins the current default-branch HEAD; #92 bumps it to a tag when published.
+    plugin_version: str | None = "f92be45cfecb35700ab8e67800151260ac3c5f07"
 
     def verify(
         self,
         confirmed_findings: list[dict],
         target_info: dict,
     ) -> list[dict]:
+        pin = f"@{self.plugin_version}" if self.plugin_version else ""
         raise NotImplementedError(
-            "kurtosis backend requires NyxFoundation/kurtosis-harness; "
+            f"kurtosis backend requires {self.plugin_ref}{pin}; "
             "install and configure it first."
         )
 

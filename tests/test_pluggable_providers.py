@@ -164,3 +164,75 @@ def test_create_orchestrator_verification_override_doesnt_mutate_global():
     orch = create_orchestrator("04", verification_backend="kurtosis")
     assert orch.config.verification_backend == "kurtosis"
     assert PHASE_CONFIGS["04"].verification_backend == "none"  # global unchanged
+
+
+def test_external_plugins_are_version_pinned():
+    # issue #87: plugin boundaries must be version-pinned. The pin mechanism
+    # (a plugin_version field at the resolution point) must exist on both
+    # external plugins so #88/#92 don't have to retrofit it. kurtosis-harness
+    # carries a concrete pin; the (currently empty) lean plugin repo defers its
+    # pin to #88.
+    assert hasattr(LeanPropertyProvider, "plugin_version")
+    assert hasattr(KurtosisVerificationBackend, "plugin_version")
+    assert KurtosisVerificationBackend.plugin_version, "kurtosis pin must be concrete, not None"
+
+
+def test_phase04_run_dispatches_confirmed_findings_to_backend(monkeypatch, tmp_path):
+    """Phase04Orchestrator.run() must filter self.results by the real Phase-04
+    verdict strings and dispatch exactly those to the verification backend.
+
+    Regression guard for the follow-up-review bug where the filter used the
+    bare strings {"CONFIRMED", "POTENTIAL"} instead of the actual Phase-04
+    verdicts {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL"}, making
+    confirmed_findings always empty. Exercises run()'s filter+dispatch path,
+    not just create_orchestrator() construction.
+    """
+    import asyncio
+    from scripts.orchestrator import base as base_mod
+    from scripts.orchestrator import providers as providers_mod
+
+    # Route get_output_root() at tmp and provide the required TARGET_INFO.json.
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
+    (tmp_path / "TARGET_INFO.json").write_text(
+        json.dumps({"repository": "x/y", "commit": "deadbeef"}), encoding="utf-8"
+    )
+
+    dispatched = {}
+
+    class SpyBackend:
+        def verify(self, confirmed_findings, target_info):
+            dispatched["findings"] = confirmed_findings
+            dispatched["target_info"] = target_info
+            return [
+                {"property_id": f["property_id"], "verdict": "reproduced", "harness": "spy"}
+                for f in confirmed_findings
+            ]
+
+    # run() does `from .providers import resolve_verification_backend` at call
+    # time, so patching the providers-module attribute is picked up.
+    monkeypatch.setattr(providers_mod, "resolve_verification_backend", lambda name: SpyBackend())
+
+    # Stub out the heavy base pipeline; only the post-04 dispatch path is under test.
+    async def _noop(self):
+        return None
+    monkeypatch.setattr(base_mod.BaseOrchestrator, "run", _noop)
+
+    orch = create_orchestrator("04", verification_backend="kurtosis")
+    orch.results = [
+        {"property_id": "P-1", "review_verdict": "CONFIRMED_VULNERABILITY"},
+        {"property_id": "P-2", "review_verdict": "CONFIRMED_POTENTIAL"},
+        {"property_id": "P-3", "review_verdict": "DISPUTED_FP"},
+        {"property_id": "P-4", "review_verdict": "PASS_THROUGH"},
+        {"property_id": "P-5", "review_verdict": "CONFIRMED"},  # bare string must NOT match
+    ]
+
+    asyncio.run(orch.run())
+
+    assert "findings" in dispatched, "backend.verify() was never called"
+    assert {f["property_id"] for f in dispatched["findings"]} == {"P-1", "P-2"}
+    assert dispatched["target_info"]["commit"] == "deadbeef"
+
+    ver_path = tmp_path / "04_VERIFICATION.json"
+    assert ver_path.exists(), "04_VERIFICATION.json was not written"
+    records = json.loads(ver_path.read_text(encoding="utf-8"))["verification_records"]
+    assert {r["property_id"] for r in records} == {"P-1", "P-2"}
