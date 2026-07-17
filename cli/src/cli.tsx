@@ -43,7 +43,7 @@ const cli = meow(
 
   Commands
     version            Print speca-cli version
-    doctor             Check Node / uv / git / claude-code / auth status
+    doctor             Check Node / uv / git / claude-code / core / auth status
     auth <subcommand>  Manage Anthropic credentials (login | status)
     init               Create a new audit project (TARGET_INFO + BUG_BOUNTY_SCOPE)
     run                Run pipeline phases with a live dashboard

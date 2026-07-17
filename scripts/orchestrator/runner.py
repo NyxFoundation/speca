@@ -34,7 +34,7 @@ _CLAUDE_BIN = (
 ) or shutil.which("claude") or "claude"
 
 from .config import PhaseConfig
-from .paths import get_output_root
+from .paths import get_output_root, resolve_core_asset
 from .watchdog import (
     LogWatcher,
     LogWatcherConfig,
@@ -291,7 +291,7 @@ class ClaudeRunner:
         self.output_dir = get_output_root()
         self.log_dir = self.output_dir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        Path(".claude/debug").mkdir(parents=True, exist_ok=True)
+        (get_output_root() / "debug").mkdir(parents=True, exist_ok=True)
 
     async def run_batch(
         self,
@@ -843,7 +843,7 @@ class ClaudeRunner:
 
     def _build_prompt(self, **kwargs) -> str:
         """Build the prompt content with arguments."""
-        with open(self.config.prompt_path, encoding="utf-8") as f:
+        with open(resolve_core_asset(self.config.prompt_path), encoding="utf-8") as f:
             prompt_content = f.read()
 
         def _quote(v: Any) -> str:
@@ -868,10 +868,10 @@ class ClaudeRunner:
             env.pop(var, None)
 
         # Use batch-specific debug directory to avoid race conditions
-        # across parallel workers writing to .claude/debug/latest
+        # across parallel workers writing to debug/latest
         w_id = kwargs.get("worker_id", 0)
         b_idx = kwargs.get("iteration", 0)
-        debug_dir = Path(f".claude/debug/W{w_id}B{b_idx}")
+        debug_dir = get_output_root() / "debug" / f"W{w_id}B{b_idx}"
         debug_dir.mkdir(parents=True, exist_ok=True)
 
         env.update({
@@ -893,7 +893,7 @@ class ClaudeRunner:
         Uses atomic write (tempfile + os.replace) to avoid TOCTOU races
         when multiple workers start concurrently.
         """
-        config_dir = Path("outputs/.mcp_configs")
+        config_dir = get_output_root() / ".mcp_configs"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / f"mcp_{self.config.phase_id}.json"
 
@@ -999,9 +999,14 @@ class ClaudeRunner:
         stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
 
         debug_text = ""
-        debug_dir = Path(f".claude/debug/W{worker_id}B{batch_index}")
+        debug_dir = get_output_root() / "debug" / f"W{worker_id}B{batch_index}"
         if not debug_dir.exists():
-            # Fall back to shared latest if batch-specific dir doesn't exist
+            # Fall back to the claude CLI's own default transcript location.
+            # The batch-specific dir above is where WE direct claude via
+            # CLAUDE_CODE_DEBUG_DIR (_build_env); when that env var is not
+            # honored, claude writes to ITS default — cwd-relative
+            # .claude/debug/latest — so this path is claude's behavior, not
+            # speca's choice, and must NOT move under the output root.
             debug_dir = Path(".claude/debug/latest")
         try:
             if debug_dir.exists():
