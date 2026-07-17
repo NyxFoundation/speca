@@ -1,12 +1,22 @@
 name: cli-ci
 
+# Everything vendor-core.mjs copies into cli/vendor/speca-core is CLI runtime
+# surface shipped to npm users, so a change there can break `speca run` without
+# touching cli/ at all. The path lists below must stay a superset of that
+# payload (see cli/scripts/vendor-core.mjs: SCRIPT_FILES, TREES, and the
+# pyproject.toml keys it reads) — otherwise the e2e jobs that exist to guard it
+# never run on the very commit that breaks it.
 on:
   push:
     branches: [main]
     paths:
       - "cli/**"
-      - "scripts/orchestrator/event_models.py"
-      - "scripts/orchestrator/json_events.py"
+      - "scripts/__init__.py"
+      - "scripts/run_phase.py"
+      - "scripts/orchestrator/**"
+      - "prompts/**"
+      - ".claude/skills/**"
+      - "pyproject.toml"
       - "scripts/export_schemas.py"
       - "schemas/**"
       - ".github/workflows/cli-ci.yml"
@@ -14,8 +24,12 @@ on:
     branches: [main]
     paths:
       - "cli/**"
-      - "scripts/orchestrator/event_models.py"
-      - "scripts/orchestrator/json_events.py"
+      - "scripts/__init__.py"
+      - "scripts/run_phase.py"
+      - "scripts/orchestrator/**"
+      - "prompts/**"
+      - ".claude/skills/**"
+      - "pyproject.toml"
       - "scripts/export_schemas.py"
       - "schemas/**"
       - ".github/workflows/cli-ci.yml"
@@ -147,3 +161,105 @@ jobs:
           NODE
           node validate-events.mjs
           rm -f validate-events.mjs
+
+  # Reproduces issue #95 end-to-end: the BUILT CLI, invoked from a directory
+  # outside the checkout, must reach the orchestrator through the VENDORED
+  # core (cli/vendor/speca-core). The e2e-orchestrator job above exercises
+  # `uv run --project <checkout>` directly and bypasses the CLI entirely, so
+  # it stays green even when spawn.ts / resolveCoreRoot are broken.
+  #
+  # Runs on ubuntu AND macos: #95 was reported on macOS, and the fix carries
+  # platform-specific code (spawn.ts picks `python`, not `python3`, and
+  # defaultVenvDir deliberately uses ~/.cache on every platform rather than
+  # ~/Library/Caches). Windows is NOT covered here — its uv venv puts the
+  # interpreter at Scripts\python.exe, so the venv assert below would need a
+  # separate shell; the build matrix only smoke-tests `doctor` from inside the
+  # checkout there, so the foreign-cwd guarantee stays unverified on Windows.
+  e2e-foreign-cwd:
+    # Quoted: in an unquoted YAML scalar a " #" starts a comment, which would
+    # silently truncate this name to "e2e — issue" and drop the matrix suffix,
+    # leaving both legs reporting the same check name.
+    name: "e2e — issue #95, built CLI from a foreign cwd (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      - run: uv python install 3.11
+      - name: npm ci
+        working-directory: cli
+        run: npm ci
+      - name: build CLI (vendors the Python core + uv.lock)
+        working-directory: cli
+        # `npm run build` runs vendor-core.mjs first; with uv on PATH it also
+        # generates vendor/speca-core/uv.lock — the exact payload npm users get.
+        run: npm run build
+      - name: speca doctor from a foreign cwd — core resolves to the vendored copy
+        run: |
+          set -euo pipefail
+          # RUNNER_TEMP, not a hardcoded /tmp: it is the documented per-job
+          # scratch dir on every runner image and sits outside the checkout,
+          # which is the whole point — no speca repo anywhere above the cwd.
+          mkdir -p "${RUNNER_TEMP}/speca-issue95"
+          cd "${RUNNER_TEMP}/speca-issue95"
+          # FORCE_COLOR=0: chalk turns ANSI on under GitHub Actions even
+          # without a TTY, and escape codes between "[OK]" and the check name
+          # would break the greps below.
+          FORCE_COLOR=0 node "${GITHUB_WORKSPACE}/cli/dist/cli.js" doctor | tee doctor.txt
+          # resolveCoreRoot() is vendor-first in the dist layout; the `core`
+          # check must report the VENDORED copy, not the checkout root —
+          # otherwise this job would silently test the wrong core.
+          grep -E "\[OK\] +core" doctor.txt
+          # Ink soft-wraps long lines at 80 columns under a pipe, which can
+          # split the reported path across lines — strip ALL whitespace before
+          # matching it (the runner workspace path contains none). `tr -d`
+          # specifically: newline is in [:space:], so this also RE-JOINS a
+          # wrapped path into one line, which a per-line `sed s///g` would not
+          # do. [:class:] in -d mode is POSIX and works on both GNU and BSD tr.
+          tr -d "[:space:]" < doctor.txt \
+            | grep -F "${GITHUB_WORKSPACE}/cli/vendor/speca-core"
+      - name: speca run from a foreign cwd — full lifecycle via the bundled core
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/speca-issue95"
+          # Pre-fix code spawned `uv run python3 scripts/run_phase.py` with a
+          # cwd-relative script path, so outside a speca checkout it emitted
+          # NO events (issue #95). Phase 01b in an empty directory hits the
+          # dependency check fast and emits the full lifecycle
+          # (started/failed/completed) — a NON-ZERO exit is expected here, so
+          # assert on the emitted events, never on the exit code.
+          node "${GITHUB_WORKSPACE}/cli/dist/cli.js" run --phase 01b --json \
+            > events.ndjson 2> run.stderr || true
+          echo "--- run.stderr ---"; cat run.stderr
+          echo "--- events.ndjson ---"; cat events.ndjson
+          # A failed core resolution or missing uv is routed to spawn-error +
+          # exit 127 with an empty event stream — these asserts fail loudly
+          # on that, which is exactly the #95 symptom.
+          test -s events.ndjson
+          for required in pipeline-started phase-started phase-failed pipeline-completed; do
+            grep -q "\"type\":\"${required}\"" events.ndjson
+          done
+          echo "OK — orchestrator lifecycle observed from a foreign cwd"
+      - name: venv keyed to the VENDORED core root (proof the bundled copy ran)
+        run: |
+          set -euo pipefail
+          # spawn.ts sets UV_PROJECT_ENVIRONMENT to
+          # <cache>/speca/venvs/<sha256(coreRoot)[:16]> (see defaultVenvDir),
+          # so the venv path encodes WHICH core root the run resolved. Had it
+          # resolved the checkout root instead of the vendored copy, this
+          # directory would not exist.
+          key="$(node -e 'const{createHash}=require("node:crypto");process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex").slice(0,16))' "${GITHUB_WORKSPACE}/cli/vendor/speca-core")"
+          venv="${XDG_CACHE_HOME:-$HOME/.cache}/speca/venvs/${key}"
+          echo "expecting venv at: ${venv}"
+          test -x "${venv}/bin/python"
