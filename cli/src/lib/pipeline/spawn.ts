@@ -1,5 +1,5 @@
 /**
- * Process bridge for `uv run python3 scripts/run_phase.py --json`.
+ * Process bridge for `uv run --project <coreRoot> python <coreRoot>/scripts/run_phase.py --json`.
  *
  * Responsibilities:
  *   - Spawn the orchestrator subprocess (no PTY — stdout pipe is sufficient
@@ -13,8 +13,12 @@
  * `claude` chat session (M5), so M3 stays toolchain-light.
  */
 import { type ChildProcessByStdio, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
+import { resolveCoreRoot } from "../core-root.js";
 import { parsePipelineEvent, splitLines, type ParseFailure, type PipelineEvent } from "./events.js";
 
 export interface SpawnPipelineOptions {
@@ -36,7 +40,12 @@ export interface SpawnPipelineOptions {
   budget?: number;
   /** Allow swapping the runner for tests; defaults to `uv`. */
   command?: string;
-  /** Allow custom argv prefix for tests; defaults to ['run','python3','scripts/run_phase.py']. */
+  /**
+   * Allow custom argv prefix for tests; defaults to
+   * `['run', '--project', <coreRoot>, 'python', <coreRoot>/scripts/run_phase.py]`
+   * where `<coreRoot>` comes from {@link resolveCoreRoot} (the vendored
+   * Python core bundled with the npm package, or SPECA_ROOT / a dev checkout).
+   */
   baseArgs?: string[];
   /** Inherit env from parent. */
   env?: NodeJS.ProcessEnv;
@@ -92,10 +101,37 @@ function buildArgs(opts: SpawnPipelineOptions): string[] {
 
 const KILL_GRACE_MS = 5_000;
 
+/**
+ * Default location for the Python core's virtualenv.
+ *
+ * Without `UV_PROJECT_ENVIRONMENT`, uv creates the venv at `<project>/.venv`
+ * — i.e. INSIDE the installed npm package
+ * (node_modules/speca-cli/vendor/speca-core), which is root-owned after
+ * `sudo npm i -g speca-cli`, so the first `speca run` would die with EACCES.
+ * We redirect it to a user-writable cache dir: `$XDG_CACHE_HOME/speca` when
+ * set, else `~/.cache/speca` on every platform. (`~/Library/Caches` would be
+ * more idiomatic on macOS, but a single `~/.cache` convention is simpler,
+ * well established for CLI tools, and keeps the path predictable in docs and
+ * bug reports.) One venv per core root — keyed by a hash of its absolute
+ * path — so a vendored core and a SPECA_ROOT checkout never thrash the same
+ * environment.
+ */
+export function defaultVenvDir(
+  coreRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const xdg = env["XDG_CACHE_HOME"];
+  const cacheBase = xdg && xdg.trim() !== "" ? xdg : join(homedir(), ".cache");
+  const key = createHash("sha256").update(coreRoot).digest("hex").slice(0, 16);
+  return join(cacheBase, "speca", "venvs", key);
+}
+
 export function spawnPipeline(opts: SpawnPipelineOptions): PipelineRunHandleTyped {
+  const phaseArgs = buildArgs(opts);
   const command = opts.command ?? "uv";
-  const baseArgs = opts.baseArgs ?? ["run", "python3", "scripts/run_phase.py"];
-  const args = [...baseArgs, ...buildArgs(opts)];
+  // Effective env for both core-root resolution and the child process, so an
+  // injected `opts.env.SPECA_ROOT` behaves exactly like the real env var.
+  const effectiveEnv: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}) };
 
   const emitter = new EventEmitter() as PipelineRunHandleTyped;
 
@@ -141,10 +177,64 @@ export function spawnPipeline(opts: SpawnPipelineOptions): PipelineRunHandleType
     return child.kill("SIGKILL");
   };
 
+  // Default argv: run the vendored (or SPECA_ROOT / dev-checkout) Python core
+  // via `uv run --project <coreRoot> python <coreRoot>/scripts/run_phase.py`.
+  //
+  //   - The script path is ABSOLUTE: cwd stays in the user's workspace (the
+  //     orchestrator must observe the user's repo and write `outputs/` there),
+  //     so a cwd-relative `scripts/run_phase.py` only worked from a speca
+  //     checkout (issue #95).
+  //   - `--project <coreRoot>` pins uv's project discovery to the bundled
+  //     core; otherwise uv walks UP from the user's cwd looking for a
+  //     pyproject.toml and resolves the wrong (or no) environment.
+  //   - `python`, NOT `python3`: the Windows uv venv ships python.exe only —
+  //     `python3` exits 9009 there (see web/server/services/run_supervisor.py).
+  //   - SPECA_ROOT is exported to the child so the orchestrator resolves its
+  //     own assets (prompts/, schemas/, .claude/skills/) against the core
+  //     root instead of the user's cwd.
+  let baseArgs = opts.baseArgs;
+  let coreRoot: string | undefined;
+  if (baseArgs === undefined) {
+    try {
+      coreRoot = resolveCoreRoot({ env: effectiveEnv });
+    } catch (err) {
+      // Environment problem (no bundled core, bad SPECA_ROOT) — surface it
+      // through the same failure path as a missing `uv` binary so callers
+      // get a spawn-error + non-zero exit instead of a synchronous throw.
+      setImmediate(() => {
+        emitter.emit("spawn-error", err as Error);
+        emitter.emit("exit", 127, null);
+        resolveDone(127);
+      });
+      return emitter;
+    }
+    baseArgs = [
+      "run",
+      "--project",
+      coreRoot,
+      "python",
+      join(coreRoot, "scripts", "run_phase.py"),
+    ];
+  }
+  const args = [...baseArgs, ...phaseArgs];
+  let childEnv: NodeJS.ProcessEnv = effectiveEnv;
+  if (coreRoot !== undefined) {
+    // Default-argv path only (mirrors the SPECA_ROOT export above): steer
+    // uv's venv out of the (possibly root-owned) npm package directory. A
+    // UV_PROJECT_ENVIRONMENT the user already set always wins.
+    childEnv = { ...effectiveEnv, SPECA_ROOT: coreRoot };
+    const userVenv = effectiveEnv["UV_PROJECT_ENVIRONMENT"];
+    if (!userVenv || userVenv.trim() === "") {
+      childEnv["UV_PROJECT_ENVIRONMENT"] = defaultVenvDir(coreRoot, effectiveEnv);
+    }
+  }
+
   try {
     child = spawn(command, args, {
-      cwd: opts.cwd,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      // Deliberately the caller's workspace, NOT the core root: run_phase.py
+      // audits the repo it is started in and writes `outputs/` there.
+      cwd: opts.cwd ?? process.cwd(),
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       // On Windows, `uv` is typically `uv.exe`. Node resolves it without
       // the shell when PATHEXT includes .exe; we avoid `shell: true` to

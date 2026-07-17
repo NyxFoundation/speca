@@ -39,7 +39,7 @@ from typing import Any
 import aiofiles
 
 from .config import PhaseConfig
-from .paths import get_output_root
+from .paths import get_output_root, resolve_core_asset
 from .runner import CircuitBreaker, CircuitBreakerTripped, MaxTurnsExhausted
 from .watchdog import BudgetExceeded, CostTracker
 
@@ -425,7 +425,7 @@ class CopilotRunner:
         return cmd
 
     def _build_prompt(self, **kwargs: Any) -> str:
-        with open(self.config.prompt_path, encoding="utf-8") as f:
+        with open(resolve_core_asset(self.config.prompt_path), encoding="utf-8") as f:
             prompt_content = f.read()
 
         def _quote(v: Any) -> str:

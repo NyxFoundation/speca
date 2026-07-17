@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import which from "which";
+import { isCoreRoot, resolveCoreRoot } from "./core-root.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +88,46 @@ export const checkClaude = (): Promise<CheckResult> =>
     true,
   );
 
+/**
+ * Verify the bundled Python core (issue #95) is present and locatable:
+ * `resolveCoreRoot()` must succeed AND the resolved directory must actually
+ * contain scripts/run_phase.py (SPECA_ROOT is trusted at resolve time, so a
+ * bad override is only caught here).
+ */
+export async function checkCore(
+  opts: { resolve?: () => string } = {},
+): Promise<CheckResult> {
+  const fixHint =
+    "Reinstall speca-cli (npm install -g speca-cli) or point SPECA_ROOT at a speca checkout.";
+  let root: string;
+  try {
+    root = (opts.resolve ?? resolveCoreRoot)();
+  } catch (err) {
+    return {
+      name: "core",
+      status: "fail",
+      detail: (err as Error).message.split("\n")[0] ?? "core root not found",
+      hint: fixHint,
+    };
+  }
+  if (!isCoreRoot(root)) {
+    return {
+      name: "core",
+      status: "fail",
+      detail: `${root} (missing scripts/run_phase.py)`,
+      hint: fixHint,
+    };
+  }
+  return { name: "core", status: "ok", detail: root };
+}
+
 export async function runAllChecks(): Promise<CheckResult[]> {
-  return Promise.all([checkNode(), checkUv(), checkGit(), checkClaude(), checkAuth()]);
+  return Promise.all([
+    checkNode(),
+    checkUv(),
+    checkGit(),
+    checkClaude(),
+    checkCore(),
+    checkAuth(),
+  ]);
 }

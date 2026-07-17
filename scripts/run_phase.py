@@ -39,7 +39,7 @@ from orchestrator.archiver import Archiver
 from orchestrator.base import PhaseAbortError
 from orchestrator.config import get_phase_config, get_phase_chain, PHASE_CONFIGS, resolve_pattern
 from orchestrator.json_events import JsonEventEmitter
-from orchestrator.paths import get_output_root
+from orchestrator.paths import get_output_root, resolve_core_asset
 from orchestrator.phase0_runner import get_phase0_runner, is_phase0
 from orchestrator.resume import ResumeManager
 from orchestrator import runtime_registry
@@ -607,7 +607,7 @@ async def run_phase(
             effective_model = orchestrator.config.model or ""
             archiver.set_model(phase_id, effective_model)
             try:
-                prompt_path = Path(orchestrator.config.prompt_path)
+                prompt_path = resolve_core_asset(orchestrator.config.prompt_path)
                 if prompt_path.exists():
                     prompt_text = prompt_path.read_text(encoding="utf-8")
                     archiver.record_prompt(phase_id, prompt_text)
@@ -909,7 +909,7 @@ def main():
     parser.add_argument(
         "--archive-root",
         default=None,
-        help="Root directory for run archives (default: <repo>/.speca/runs). "
+        help="Root directory for run archives (default: <cwd>/.speca/runs). "
              "Also settable via SPECA_ARCHIVE_ROOT env var.",
     )
     parser.add_argument(
@@ -1002,10 +1002,12 @@ def main():
     archiver: Archiver | None = None
     if not args.no_archive:
         # Determine archive root: CLI flag > env var > default
+        # Default is cwd-relative: the archive is the *user's* run history and
+        # belongs to their workspace (matches cli/src/lib/corpus/paths.ts).
         archive_root_str = (
             args.archive_root
             or os.environ.get("SPECA_ARCHIVE_ROOT")
-            or str(Path(__file__).resolve().parent.parent / ".speca" / "runs")
+            or str(Path.cwd() / ".speca" / "runs")
         )
         archive_root = Path(archive_root_str)
         # SPECA_RUN_ID lets CI / replay pin a deterministic id; otherwise we

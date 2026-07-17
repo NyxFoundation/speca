@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from .config import PhaseConfig
-from .paths import get_output_root
+from .paths import get_output_root, resolve_core_asset
 from .runner import CircuitBreaker, CircuitBreakerTripped, MaxTurnsExhausted
 from .watchdog import CostTracker, BudgetExceeded
 
@@ -630,7 +630,7 @@ class APIRunner:
 
     def _build_prompt(self, **kwargs: Any) -> str:
         """Build the prompt content with template substitution."""
-        with open(self.config.prompt_path) as f:
+        with open(resolve_core_asset(self.config.prompt_path)) as f:
             prompt_content = f.read()
 
         def _quote(v: Any) -> str:
