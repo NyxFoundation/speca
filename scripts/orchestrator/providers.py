@@ -13,6 +13,9 @@ existing behavior exactly.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -75,13 +78,19 @@ class PromptPropertyProvider:
 
 
 class LeanPropertyProvider:
-    """Lean 4 formal-verification provider (external plugin)."""
+    """Lean 4 formal-verification provider (external plugin).
+
+    Two modes:
+    - **source path** (``--existing-01e-source`` / ``source`` arg): load a
+      pre-generated 01e JSON produced by ``speca-lean4 emit-01e``. This is the
+      primary near-term path — the lean CI job produces the 01e, and SPECA
+      ingests it via this provider.
+    - **live invocation** (``source`` is None and ``speca-lean4`` is on PATH):
+      invoke the plugin CLI with the provided scope, writing a temp 01e file.
+    """
 
     plugin_ref = "NyxFoundation/speca-lean4-plugin"
-    # Version pin for the external plugin boundary (issue #87 requires plugin
-    # boundaries to be version-pinned). The plugin repo has no commits/tags yet,
-    # so the pin is deferred to #88 when it publishes a taggable release.
-    plugin_version: str | None = None
+    plugin_version: str | None = "v0.1.0"
 
     def generate(
         self,
@@ -89,11 +98,40 @@ class LeanPropertyProvider:
         bug_bounty_scope: dict,
         source: str | None = None,
     ) -> list[dict]:
-        pin = f"@{self.plugin_version}" if self.plugin_version else " (version pin TBD by #88)"
-        raise NotImplementedError(
-            f"lean provider requires {self.plugin_ref}{pin}; "
-            "install and configure it first."
-        )
+        if source is not None:
+            path = Path(source)
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"LeanPropertyProvider source file not found: {source}"
+                )
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data.get("properties", [])
+
+        cli = shutil.which("speca-lean4")
+        if cli is None:
+            raise NotImplementedError(
+                f"lean provider requires {self.plugin_ref}@{self.plugin_version} "
+                "installed (speca-lean4 CLI on PATH), or pass a pre-generated "
+                "01e file via --existing-01e-source / source=."
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            scope_path = Path(td) / "scope.json"
+            scope_path.write_text(
+                json.dumps(bug_bounty_scope, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            out_path = Path(td) / "01e_lean.json"
+            proc = subprocess.run(
+                [cli, "emit-01e", "--scope", str(scope_path), "--out", str(out_path)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"speca-lean4 emit-01e failed (rc={proc.returncode}):\n{proc.stderr}"
+                )
+            data = json.loads(out_path.read_text(encoding="utf-8"))
+            return data.get("properties", [])
 
 
 class DatasetPropertyProvider:
@@ -214,7 +252,12 @@ _BACKENDS = {
 
 
 def resolve_provider(name: str | PropertyProviderName) -> PropertyProvider:
-    """Return the PropertyProvider instance for *name*."""
+    """Return the PropertyProvider instance for *name*.
+
+    For external-plugin providers (``lean``), logs a warning when the plugin
+    CLI is not on PATH — the provider can still work if a ``source`` file is
+    passed to ``generate()``.
+    """
     try:
         key = PropertyProviderName(name)
     except ValueError as exc:
@@ -222,7 +265,16 @@ def resolve_provider(name: str | PropertyProviderName) -> PropertyProvider:
         raise ValueError(
             f"Unknown property provider: {name!r}. Valid providers: {valid}."
         ) from exc
-    return _PROVIDERS[key]()
+    instance = _PROVIDERS[key]()
+    if key == PropertyProviderName.LEAN and shutil.which("speca-lean4") is None:
+        import sys
+        print(
+            f"note: speca-lean4 CLI not found on PATH; lean provider will "
+            f"require a pre-generated 01e file via source= "
+            f"(plugin: {LeanPropertyProvider.plugin_ref}@{LeanPropertyProvider.plugin_version})",
+            file=sys.stderr,
+        )
+    return instance
 
 
 def resolve_verification_backend(name: str | VerificationBackendName) -> VerificationBackend:

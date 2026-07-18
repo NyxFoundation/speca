@@ -60,11 +60,34 @@ def test_resolve_verification_backend_unknown():
         resolve_verification_backend("bogus")
 
 
-def test_lean_provider_raises_not_implemented():
+def test_lean_provider_loads_source_file():
+    with tempfile.TemporaryDirectory() as td:
+        fp = Path(td) / "01e_lean.json"
+        fp.write_text(
+            json.dumps({"properties": [
+                {"property_id": "PROP-lean-001", "text": "test", "lean_status": "proved"},
+            ]}),
+            encoding="utf-8",
+        )
+        result = LeanPropertyProvider().generate([], {}, source=str(fp))
+    assert len(result) == 1
+    assert result[0]["property_id"] == "PROP-lean-001"
+
+
+def test_lean_provider_source_not_found():
+    with pytest.raises(FileNotFoundError):
+        LeanPropertyProvider().generate([], {}, source="/nonexistent/01e.json")
+
+
+def test_lean_provider_no_source_no_cli():
     provider = LeanPropertyProvider()
     assert provider.plugin_ref == "NyxFoundation/speca-lean4-plugin"
-    with pytest.raises(NotImplementedError):
-        provider.generate([], {})
+    assert provider.plugin_version == "v0.1.0"
+    # Without source and without speca-lean4 on PATH, raises NotImplementedError
+    import shutil
+    if shutil.which("speca-lean4") is None:
+        with pytest.raises(NotImplementedError):
+            provider.generate([], {})
 
 
 def test_kurtosis_backend_raises_not_implemented():
@@ -167,13 +190,9 @@ def test_create_orchestrator_verification_override_doesnt_mutate_global():
 
 
 def test_external_plugins_are_version_pinned():
-    # issue #87: plugin boundaries must be version-pinned. The pin mechanism
-    # (a plugin_version field at the resolution point) must exist on both
-    # external plugins so #88/#92 don't have to retrofit it. kurtosis-harness
-    # carries a concrete pin; the (currently empty) lean plugin repo defers its
-    # pin to #88.
     assert hasattr(LeanPropertyProvider, "plugin_version")
     assert hasattr(KurtosisVerificationBackend, "plugin_version")
+    assert LeanPropertyProvider.plugin_version == "v0.1.0", "lean plugin must be pinned to v0.1.0"
     assert KurtosisVerificationBackend.plugin_version, "kurtosis pin must be concrete, not None"
 
 
