@@ -383,3 +383,104 @@ class TestPromptCaching:
         monkeypatch.setenv("SPECA_PROMPT_CACHE", "auto")
         assert self._make(APIRunner).prompt_cache_enabled is True
         assert self._make(OllamaAPIRunner).prompt_cache_enabled is False
+
+    def test_force_enable_warns_on_unsupported_runtime(self, monkeypatch, capsys):
+        """SPECA_PROMPT_CACHE=1 on a non-supporting runtime emits a warning."""
+        monkeypatch.setenv("SPECA_PROMPT_CACHE", "1")
+        runner = self._make(OllamaAPIRunner)
+        assert runner.prompt_cache_enabled is True
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "SPECA_PROMPT_CACHE" in err
+        assert "[ollama]" in err
+
+    def test_force_enable_no_warning_on_supported_runtime(self, monkeypatch, capsys):
+        monkeypatch.setenv("SPECA_PROMPT_CACHE", "1")
+        runner = self._make(APIRunner)
+        assert runner.prompt_cache_enabled is True
+        assert "WARNING" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn moving cache breakpoint (issue #79 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiTurnBreakpoint:
+    """The moving breakpoint follows the newest message across turns."""
+
+    def _make(self, monkeypatch, cls=APIRunner):
+        monkeypatch.delenv("SPECA_PROMPT_CACHE", raising=False)
+        config = get_phase_config("03")
+        return cls(config, asyncio.Semaphore(1))
+
+    @staticmethod
+    def _breakpoints(messages):
+        found = []
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for j, block in enumerate(content):
+                    if isinstance(block, dict) and "cache_control" in block:
+                        found.append((i, j))
+        return found
+
+    def test_turn0_marks_template_and_args(self, monkeypatch):
+        runner = self._make(monkeypatch)
+        messages = [{"role": "user", "content": runner._build_user_content(**PROMPT_KWARGS)}]
+
+        runner._update_conversation_breakpoint(messages)
+
+        # Static marker on the template block + moving marker on the args
+        # block (the newest content at turn 0). 2 breakpoints total, within
+        # Anthropic's limit of 4.
+        assert self._breakpoints(messages) == [(0, 0), (0, 1)]
+
+    def test_moving_marker_follows_latest_tool_result(self, monkeypatch):
+        runner = self._make(monkeypatch)
+        messages = [{"role": "user", "content": runner._build_user_content(**PROMPT_KWARGS)}]
+        runner._update_conversation_breakpoint(messages)
+
+        # Simulate one assistant tool-call turn + its tool result.
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]})
+        messages.append({"role": "tool", "tool_call_id": "t1", "content": "big tool output"})
+        runner._update_conversation_breakpoint(messages)
+
+        # Moving marker left the args block and landed on the tool result.
+        assert self._breakpoints(messages) == [(0, 0), (2, 0)]
+        assert messages[2]["content"][0]["text"] == "big tool output"
+
+        # Next turn: another tool result — the marker moves again.
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "t2"}]})
+        messages.append({"role": "tool", "tool_call_id": "t2", "content": "second output"})
+        runner._update_conversation_breakpoint(messages)
+        assert self._breakpoints(messages) == [(0, 0), (4, 0)]
+        # Never more than 2 of Anthropic's 4 allowed breakpoints in play.
+        assert len(self._breakpoints(messages)) == 2
+
+    def test_assistant_messages_never_annotated(self, monkeypatch):
+        runner = self._make(monkeypatch)
+        messages = [
+            {"role": "user", "content": runner._build_user_content(**PROMPT_KWARGS)},
+            {"role": "assistant", "content": "final answer, no tool calls"},
+        ]
+        runner._update_conversation_breakpoint(messages)
+
+        assert isinstance(messages[1]["content"], str)
+        # Moving marker stays on our own newest message (the args block).
+        assert self._breakpoints(messages) == [(0, 0), (0, 1)]
+
+    def test_noop_when_cache_disabled(self, monkeypatch):
+        runner = self._make(monkeypatch, OllamaAPIRunner)
+        assert runner.prompt_cache_enabled is False
+        prompt = runner._build_user_content(**PROMPT_KWARGS)
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]},
+            {"role": "tool", "tool_call_id": "t1", "content": "tool output"},
+        ]
+        import copy
+
+        before = copy.deepcopy(messages)
+        runner._update_conversation_breakpoint(messages)
+        assert messages == before  # byte-identical shapes when caching is off

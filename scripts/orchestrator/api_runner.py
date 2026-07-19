@@ -12,7 +12,11 @@ Environment variables:
   - API_RUNNER_MODEL:     Model ID override (default: deepseek/deepseek-r1)
   - SPECA_PROMPT_CACHE:   Prompt-caching override ("1"/"on" force-enable,
                           "0"/"off" disable, unset/"auto" = per-runtime
-                          default). See issue #79.
+                          default). Enabling REQUESTS caching; whether it
+                          takes effect depends on the provider and on the
+                          prefix reaching the model's minimum cacheable
+                          length — check the prompt_cache_usage fields in
+                          the api_response log entries. See issue #79.
 """
 
 from __future__ import annotations
@@ -312,8 +316,21 @@ class APIRunner:
     # Anthropic renders tools -> system -> messages, and both the tool
     # definitions and the template are byte-stable across batches, so a
     # single breakpoint on the template block caches the whole stable
-    # prefix (well under Anthropic's 4-breakpoint limit). Cache reads bill
-    # at ~0.1x of normal input.
+    # prefix. A second, *moving* breakpoint is re-placed on the newest
+    # message every turn of the tool loop so the growing conversation
+    # history (including large tool results) is served from cache instead
+    # of being re-billed at full price each turn (Anthropic's multi-turn
+    # pattern). Total: 2 of the 4 allowed breakpoints. Cache reads bill at
+    # ~0.1x of normal input.
+    #
+    # Honesty note: enabling this REQUESTS caching, it does not guarantee
+    # it. Prefixes below the model's minimum cacheable length (1024-4096
+    # tokens depending on the model) silently no-op — no error, just no
+    # cache activity. The only ground truth is the provider's usage
+    # counters (cache_read_input_tokens / cache_creation_input_tokens,
+    # or OpenAI-style prompt_tokens_details.cached_tokens), which the
+    # per-turn ``api_response`` log entries surface as
+    # ``prompt_cache_usage`` when present.
     #
     # The base runner targets OpenRouter, which passes ``cache_control``
     # through to Anthropic models and drops it for others — safe default
@@ -491,6 +508,11 @@ class APIRunner:
             for turn in range(self.max_turns):
                 num_turns += 1
 
+                # Multi-turn caching: move the conversation breakpoint to
+                # the newest message before every request (no-op when
+                # caching is off).
+                self._update_conversation_breakpoint(messages)
+
                 request_body: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
@@ -504,7 +526,11 @@ class APIRunner:
                     "timestamp": time.time(),
                     "model": self.model,
                     "message_count": len(messages),
-                    "prompt_cache": self.prompt_cache_enabled,
+                    # "requested", not "effective": below the model's
+                    # minimum cacheable prefix (1024-4096 tokens) the
+                    # marker silently no-ops. Check prompt_cache_usage on
+                    # the matching api_response entry for the real hit.
+                    "prompt_cache_requested": self.prompt_cache_enabled,
                 })
 
                 try:
@@ -539,12 +565,30 @@ class APIRunner:
                 total_input_tokens += usage.get("prompt_tokens", 0)
                 total_output_tokens += usage.get("completion_tokens", 0)
 
-                log_entries.append({
+                response_entry: dict[str, Any] = {
                     "type": "api_response",
                     "turn": turn,
                     "usage": usage,
                     "finish_reason": data.get("choices", [{}])[0].get("finish_reason"),
-                })
+                }
+                # Ground truth for cache effectiveness: the provider's own
+                # counters. Anthropic/OpenRouter report cache_read_ /
+                # cache_creation_input_tokens; OpenAI reports
+                # prompt_tokens_details.cached_tokens. Absent fields mean
+                # the provider reported nothing — NOT a confirmed miss.
+                cache_usage = {
+                    k: usage[k]
+                    for k in ("cache_read_input_tokens", "cache_creation_input_tokens")
+                    if isinstance(usage.get(k), int)
+                }
+                details = usage.get("prompt_tokens_details")
+                if isinstance(details, dict) and isinstance(
+                    details.get("cached_tokens"), int
+                ):
+                    cache_usage["cached_tokens"] = details["cached_tokens"]
+                if cache_usage:
+                    response_entry["prompt_cache_usage"] = cache_usage
+                log_entries.append(response_entry)
 
                 choice = data.get("choices", [{}])[0]
                 message = choice.get("message", {})
@@ -665,6 +709,14 @@ class APIRunner:
         """
         raw = os.environ.get(self.PROMPT_CACHE_ENV, "auto").strip().lower()
         if raw in ("1", "on", "true", "yes"):
+            if not self.SUPPORTS_PROMPT_CACHE:
+                print(
+                    f"[{self.RUNTIME_LABEL}] WARNING: {self.PROMPT_CACHE_ENV}={raw} "
+                    "force-enables cache_control on a runtime that does not "
+                    "support it; strict providers (e.g. OpenAI) reject the "
+                    "field and every request will fail.",
+                    file=sys.stderr,
+                )
             return True
         if raw in ("0", "off", "false", "no"):
             return False
@@ -716,6 +768,60 @@ class APIRunner:
             },
             {"type": "text", "text": args_block},
         ]
+
+    def _update_conversation_breakpoint(
+        self, messages: list[dict[str, Any]]
+    ) -> None:
+        """Re-place the moving multi-turn cache breakpoint (issue #79 f/u).
+
+        Anthropic's multi-turn pattern: keep one static breakpoint on the
+        stable prefix (the template block of the first message) and one
+        MOVING breakpoint on the newest message. Each turn the previous
+        moving marker is removed and re-placed on the last user/tool
+        message, so the whole conversation up to that point — including
+        the large tool results of earlier turns — becomes a cache read
+        on the next request instead of full-price input.
+
+        Budget: static template marker + one moving marker = 2 of the 4
+        breakpoints Anthropic allows. Assistant messages come back from
+        the provider verbatim and are never annotated. No-op when prompt
+        caching is off (message shapes stay byte-identical to pre-#79).
+        """
+        if not self.prompt_cache_enabled:
+            return
+
+        # Strip the previous moving marker. The static marker lives on
+        # block 0 of message 0 and is left untouched.
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            start = 1 if i == 0 else 0
+            for block in content[start:]:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+        # Mark the newest cacheable message. We only annotate messages we
+        # authored (role user/tool); the loop appends tool results after
+        # every assistant turn, so this is always the true tail of the
+        # conversation at request time.
+        for msg in reversed(messages):
+            if msg.get("role") not in ("user", "tool"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            elif isinstance(content, list) and content:
+                last = content[-1]
+                if isinstance(last, dict):
+                    last["cache_control"] = {"type": "ephemeral"}
+            return
 
     def _parse_results(self, result_path: Path) -> list[dict[str, Any]] | None:
         """Parse results from the output JSON file."""
