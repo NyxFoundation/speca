@@ -23,14 +23,17 @@ on:
       - '.github/workflows/01e-properties-lean.yml'
       - 'scripts/orchestrator/providers.py'
       - 'scripts/orchestrator/base.py'
+      - 'scripts/orchestrator/collector.py'
+      - 'scripts/orchestrator/factory.py'
+      - 'scripts/orchestrator/config.py'
       - 'tests/test_pluggable_providers.py'
   workflow_dispatch:
     inputs:
       plugin_version:
-        description: 'speca-lean4-plugin git tag/ref to resolve (the provider pin is v0.1.0)'
+        description: 'speca-lean4-plugin git tag/ref to resolve. Empty = the code pin (LeanPropertyProvider.plugin_version).'
         required: false
         type: string
-        default: 'v0.1.0'
+        default: ''
       run_lean:
         description: 'Run the real Lean exporter (heavy: installs elan and builds lean/; off = plugin sample health fixture)'
         required: false
@@ -74,14 +77,32 @@ jobs:
       - name: "Pre-flight: Schema & Config Tests"
         run: uv run python3 -m pytest tests/ -v --tb=short
 
+      - name: Resolve plugin version pin
+        # Single source of truth: the code pin (LeanPropertyProvider.
+        # plugin_version). A dispatch input can override it for ad-hoc
+        # testing; bumping the pin in providers.py moves this workflow
+        # automatically — no version literals in this file.
+        env:
+          INPUT_PLUGIN_VERSION: ${{ inputs.plugin_version }}
+        run: |
+          set -e
+          if [ -n "$INPUT_PLUGIN_VERSION" ]; then
+            PIN="$INPUT_PLUGIN_VERSION"
+            echo "Using dispatch-input plugin version override: $PIN"
+          else
+            PIN=$(uv run python3 -c "import sys; sys.path.insert(0, 'scripts'); from orchestrator.providers import LeanPropertyProvider; print(LeanPropertyProvider.plugin_version)")
+            echo "Using the code pin (LeanPropertyProvider.plugin_version): $PIN"
+          fi
+          echo "PLUGIN_VERSION=$PIN" >> "$GITHUB_ENV"
+
       - name: Resolve pinned plugin
         run: |
           set -e
           PLUGIN_DIR="$RUNNER_TEMP/speca-lean4-plugin"
-          git clone --depth 1 --branch "${{ inputs.plugin_version || 'v0.1.0' }}" \
+          git clone --depth 1 --branch "$PLUGIN_VERSION" \
             https://github.com/NyxFoundation/speca-lean4-plugin.git "$PLUGIN_DIR"
           echo "SPECA_LEAN4_PLUGIN_DIR=$PLUGIN_DIR" >> "$GITHUB_ENV"
-          echo "Resolved speca-lean4-plugin@${{ inputs.plugin_version || 'v0.1.0' }} ($(git -C "$PLUGIN_DIR" rev-parse HEAD))"
+          echo "Resolved speca-lean4-plugin@$PLUGIN_VERSION ($(git -C "$PLUGIN_DIR" rev-parse HEAD))"
 
       - name: Select proof-health source (fixture)
         if: ${{ !inputs.run_lean }}
@@ -101,10 +122,15 @@ jobs:
           echo "SPECA_LEAN4_RUN_LEAN=1" >> "$GITHUB_ENV"
 
       - name: Write Bug Bounty Scope
+        # The input reaches the shell via env, never by expanding ${{ }}
+        # inside the script body (GitHub's documented injection anti-pattern;
+        # also breaks on quotes in the JSON).
+        env:
+          BUG_BOUNTY_SCOPE: ${{ inputs.bug_bounty_scope }}
         run: |
           mkdir -p outputs
-          if [ -n '${{ inputs.bug_bounty_scope }}' ]; then
-            printf '%s\n' '${{ inputs.bug_bounty_scope }}' > outputs/BUG_BOUNTY_SCOPE.json
+          if [ -n "$BUG_BOUNTY_SCOPE" ]; then
+            printf '%s\n' "$BUG_BOUNTY_SCOPE" > outputs/BUG_BOUNTY_SCOPE.json
             echo "Wrote BUG_BOUNTY_SCOPE.json from workflow input"
           else
             cp "$SPECA_LEAN4_PLUGIN_DIR/tests/fixtures/bug_bounty_scope.sample.json" outputs/BUG_BOUNTY_SCOPE.json
@@ -153,7 +179,7 @@ jobs:
         run: |
           {
             echo "## provider:lean smoke"
-            echo "- plugin: NyxFoundation/speca-lean4-plugin@${{ inputs.plugin_version || 'v0.1.0' }}"
+            echo "- plugin: NyxFoundation/speca-lean4-plugin@$PLUGIN_VERSION"
             echo "- proof health: ${{ inputs.run_lean && 'real lake exe speca-export run' || 'plugin sample fixture (certifies nothing; plumbing smoke)' }}"
             echo "- output: outputs/01e_PARTIAL_*.json (uploaded as artifact)"
           } >> "$GITHUB_STEP_SUMMARY"
