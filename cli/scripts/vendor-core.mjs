@@ -121,6 +121,45 @@ for (const rel of TREES) {
 }
 
 // ---------------------------------------------------------------------------
+// Default MCP config (issue #98): npm installs have no scripts/setup_mcp.sh,
+// so without this file the MCP-declaring phases (01a: fetch, 01b:
+// fetch+filesystem, 02c: tree_sitter+filesystem) would start with ZERO
+// servers. The orchestrator resolves .mcp.json in this order (see
+// scripts/orchestrator/runner.py, _load_base_mcp_config):
+//   $SPECA_MCP_CONFIG  ->  ./.mcp.json (user's workspace)  ->  THIS file.
+// Only the servers a phase declares are actually started
+// (--strict-mcp-config + per-phase filtering), so listing a server here does
+// not launch it for phases that never asked for it. The `filesystem` entry
+// uses "." — the server resolves it against its own cwd, which is the user's
+// workspace when Claude spawns it there.
+// ---------------------------------------------------------------------------
+const defaultMcpConfig = {
+  mcpServers: {
+    fetch: {
+      type: "stdio",
+      command: "uvx",
+      args: ["mcp-server-fetch"],
+    },
+    filesystem: {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    },
+    tree_sitter: {
+      type: "stdio",
+      command: "uvx",
+      args: ["mcp-server-tree-sitter"],
+    },
+  },
+};
+writeFileSync(
+  join(targetRoot, ".mcp.json"),
+  `${JSON.stringify(defaultMcpConfig, null, 2)}\n`,
+  "utf8",
+);
+copied.push(".mcp.json");
+
+// ---------------------------------------------------------------------------
 // Project metadata so `uv run --project <coreRoot>` can resolve the core's
 // Python dependencies without a speca checkout.
 //
@@ -256,6 +295,10 @@ const readme = [
   "`[tool.speca].core-dependencies` table, plus `[tool.uv] package = false`",
   "so uv never invokes a build backend).",
   "`uv.lock` is generated against it at build time when uv is available.",
+  "",
+  "`.mcp.json` here is a generated default MCP server config, used by the",
+  "orchestrator only when neither `SPECA_MCP_CONFIG` nor a workspace",
+  "`.mcp.json` provides one (see scripts/orchestrator/runner.py).",
   "",
 ].join("\n");
 writeFileSync(join(targetRoot, "README.md"), readme, "utf8");
