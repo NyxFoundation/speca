@@ -21,6 +21,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from orchestrator.api_runner import (
     APIRunner,
+    CodexAPIRunner,
+    GeminiAPIRunner,
+    OllamaAPIRunner,
     _execute_read,
     _execute_grep,
     _execute_glob,
@@ -297,3 +300,86 @@ class TestRunnerInterface:
         sem = asyncio.Semaphore(1)
         runner = APIRunner(config, sem)
         assert runner.model  # Should have a default model
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching (issue #79)
+# ---------------------------------------------------------------------------
+
+
+PROMPT_KWARGS = dict(
+    worker_id=1,
+    queue_file="/tmp/q.json",
+    context_file="/tmp/c.json",
+    batch_size=2,
+    iteration=0,
+    timestamp=1700000000,
+    output_file="/tmp/out.json",
+)
+
+
+class TestPromptCaching:
+    """cache_control breakpoints on the stable template block (issue #79)."""
+
+    def _make(self, cls, monkeypatch=None):
+        if monkeypatch is not None:
+            monkeypatch.delenv("SPECA_PROMPT_CACHE", raising=False)
+        config = get_phase_config("03")
+        sem = asyncio.Semaphore(1)
+        return cls(config, sem)
+
+    def test_openrouter_default_enabled(self, monkeypatch):
+        runner = self._make(APIRunner, monkeypatch)
+        assert runner.prompt_cache_enabled is True
+
+        content = runner._build_user_content(**PROMPT_KWARGS)
+        assert isinstance(content, list)
+        assert len(content) == 2
+
+        template_block, args_block = content
+        # Breakpoint on the large stable prefix only.
+        assert template_block["cache_control"] == {"type": "ephemeral"}
+        assert "cache_control" not in args_block
+        # Anthropic allows at most 4 breakpoints; we use exactly 1.
+        assert sum("cache_control" in b for b in content) == 1
+        # Dynamic args stay in the uncached suffix.
+        assert "QUEUE_FILE=/tmp/q.json" in args_block["text"]
+        assert "QUEUE_FILE=/tmp/q.json" not in template_block["text"]
+        # Template block is the phase prompt (stable across batches).
+        assert len(template_block["text"]) > len(args_block["text"])
+
+    def test_blocks_join_matches_legacy_prompt(self, monkeypatch):
+        """Cached-block content must be byte-equivalent to the legacy string."""
+        runner = self._make(APIRunner, monkeypatch)
+        content = runner._build_user_content(**PROMPT_KWARGS)
+        legacy = runner._build_prompt(**PROMPT_KWARGS)
+        assert f"{content[0]['text']}\n\n{content[1]['text']}" == legacy
+
+    @pytest.mark.parametrize("cls", [CodexAPIRunner, GeminiAPIRunner, OllamaAPIRunner])
+    def test_non_anthropic_runtimes_default_off(self, cls, monkeypatch):
+        """OpenAI / Gemini / Ollama keep the legacy single-string prompt."""
+        runner = self._make(cls, monkeypatch)
+        assert runner.prompt_cache_enabled is False
+
+        content = runner._build_user_content(**PROMPT_KWARGS)
+        assert isinstance(content, str)
+        assert content == runner._build_prompt(**PROMPT_KWARGS)
+
+    def test_env_force_disable(self, monkeypatch):
+        monkeypatch.setenv("SPECA_PROMPT_CACHE", "0")
+        runner = self._make(APIRunner)
+        assert runner.prompt_cache_enabled is False
+        assert isinstance(runner._build_user_content(**PROMPT_KWARGS), str)
+
+    def test_env_force_enable(self, monkeypatch):
+        monkeypatch.setenv("SPECA_PROMPT_CACHE", "on")
+        runner = self._make(OllamaAPIRunner)
+        assert runner.prompt_cache_enabled is True
+        content = runner._build_user_content(**PROMPT_KWARGS)
+        assert isinstance(content, list)
+        assert content[0]["cache_control"] == {"type": "ephemeral"}
+
+    def test_env_auto_falls_back_to_class_default(self, monkeypatch):
+        monkeypatch.setenv("SPECA_PROMPT_CACHE", "auto")
+        assert self._make(APIRunner).prompt_cache_enabled is True
+        assert self._make(OllamaAPIRunner).prompt_cache_enabled is False
