@@ -803,6 +803,13 @@ class Phase01Orchestrator(BaseOrchestrator):
 
         self.results = list(properties)
         if self.results:
+            # Providers emit deterministic, schema-shaped properties, and their
+            # additive provenance fields (e.g. the lean provider's lean_* /
+            # kurtosis_test fields, per speca#88's additive-only contract) must
+            # survive into the PARTIAL. Bypass the prompt-path output_fields
+            # compaction — this mutates only the orchestrator's own config
+            # copy, which self.collector shares.
+            self.config.output_fields = []
             self.collector.save_partial(self.results, 0, 0)
 
         duration = _time.time() - start_time
