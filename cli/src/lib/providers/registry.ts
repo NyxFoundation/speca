@@ -36,6 +36,29 @@ export interface ProviderDescriptor {
 
 const OLLAMA_DEFAULT_HOST = "https://ollama.com";
 
+/**
+ * True when `host` points at ollama cloud (ollama.com or a subdomain).
+ *
+ * A substring test (`host.includes("ollama.com")`) misfires on hosts like
+ * `myollama.company.com` or URLs that merely mention ollama.com in a query
+ * string, so parse the hostname and compare label-wise. Kept in sync with
+ * `is_ollama_cloud_host` in scripts/orchestrator/runtime_registry.py — an
+ * unparseable host counts as self-hosted on both sides (the runner will
+ * surface the real error).
+ */
+export function isOllamaCloudHost(host: string): boolean {
+  let raw = host.trim();
+  if (raw === "") raw = OLLAMA_DEFAULT_HOST;
+  if (!raw.includes("://")) raw = `http://${raw}`;
+  let hostname: string;
+  try {
+    hostname = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return hostname === "ollama.com" || hostname.endsWith(".ollama.com");
+}
+
 function ok(): ProviderValidation {
   return { ok: true, messages: [] };
 }
@@ -78,7 +101,7 @@ export const PROVIDERS: Record<ProviderId, ProviderDescriptor> = {
       // Mirrors scripts/orchestrator/runtime_registry.py::_probe_ollama —
       // cloud hosts need OLLAMA_API_KEY; self-hosted (localhost etc.) do not.
       const host = (env["OLLAMA_HOST"] ?? OLLAMA_DEFAULT_HOST).trim() || OLLAMA_DEFAULT_HOST;
-      const cloud = host.includes("ollama.com");
+      const cloud = isOllamaCloudHost(host);
       if (!cloud) return ok();
       return requireEnv(
         env,
