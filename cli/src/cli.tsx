@@ -98,6 +98,7 @@ const cli = meow(
       workers: { type: "number" },
       maxConcurrent: { type: "number" },
       budget: { type: "number" },
+      runtime: { type: "string" },
       // `speca browse` flags (ignored by other commands)
       filter: { type: "string" },
       severity: { type: "string" },
@@ -257,6 +258,7 @@ async function run(): Promise<number> {
           noTui: cli.flags.noTui,
           json: cli.flags.json,
           outputDir: cli.flags.outputDir,
+          runtime: cli.flags.runtime,
         },
       });
       return code;

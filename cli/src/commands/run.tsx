@@ -23,6 +23,7 @@ import type { PipelineEvent } from "../lib/pipeline/events.js";
 import { startLogWatcher } from "../lib/pipeline/log-watcher.js";
 import { isKnownPhaseId, KNOWN_PHASE_IDS } from "../lib/pipeline/phase-names.js";
 import { spawnPipeline, type SpawnPipelineOptions } from "../lib/pipeline/spawn.js";
+import { validateRuntime } from "../lib/providers/registry.js";
 import { PipelineStore } from "../lib/pipeline/store.js";
 import { ThemeProvider } from "../lib/theme/index.js";
 import { assertNever } from "../lib/util/assertNever.js";
@@ -37,6 +38,8 @@ export interface RunCommandFlags {
   noTui?: boolean;
   json?: boolean;
   outputDir?: string;
+  /** Model runtime id (issue #113) — see src/lib/providers/registry.ts. */
+  runtime?: string;
 }
 
 const HELP_TEXT = `\
@@ -52,6 +55,11 @@ Flags
   --workers <N>              Worker count (default 4)
   --max-concurrent <N>       Max concurrent Claude executions (default 8)
   --force                    Ignore resume state, re-run everything
+  --runtime <id>             Model runtime: claude (default) | api | codex |
+                             gemini | ollama | copilot. Credentials are
+                             checked up front (e.g. ollama cloud needs
+                             OLLAMA_API_KEY); forwarded to the orchestrator
+                             as run_phase.py --runtime <id>.
   --budget <usd>             Cost cap (forwarded to orchestrator when supported)
   --output-dir <path>        Output directory (sets SPECA_OUTPUT_DIR)
   --no-tui                   Force plain-text pass-through (M6)
@@ -62,6 +70,7 @@ Examples
   $ speca run --phase 01a
   $ speca run --target 03 --workers 4 --max-concurrent 8
   $ speca run --phase 01b --force
+  $ speca run --target 03 --runtime ollama    # ollama cloud instead of claude
 `;
 
 export function printRunHelp(): void {
@@ -177,14 +186,33 @@ export async function runRunCommand(opts: RunOptions): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
   const outputDir = opts.flags.outputDir ? resolve(cwd, opts.flags.outputDir) : undefined;
 
+  // Runtime selection (issue #113). Validate the id and its credentials
+  // against the ProviderRegistry BEFORE spawning, so `--runtime ollama`
+  // without OLLAMA_API_KEY fails in milliseconds with a fix hint instead
+  // of burning a pipeline start. No flag = orchestrator default (claude).
+  const runtime = opts.flags.runtime;
+  if (runtime !== undefined) {
+    const check = validateRuntime(runtime);
+    if (!check.ok) {
+      for (const line of check.messages) {
+        process.stderr.write(`speca run: ${line}\n`);
+      }
+      return 2;
+    }
+  }
+
   // Pre-flight checks. Each detector returns null when clean; a non-null
   // failure short-circuits here with the matching ErrorKind. Callers can
   // disable with `skipPreflight: true` (used by tests that aren't
   // exercising this path).
   if (!opts.skipPreflight) {
-    const expiredAuth = await detectExpiredAuth({ authFile: opts.authFile });
-    if (expiredAuth) {
-      return reportStderrError("auth-expired", expiredAuth);
+    // The expired-auth detector inspects the claude CLI's credential
+    // store — only meaningful when claude is the runtime that will run.
+    if (runtime === undefined || runtime === "claude") {
+      const expiredAuth = await detectExpiredAuth({ authFile: opts.authFile });
+      if (expiredAuth) {
+        return reportStderrError("auth-expired", expiredAuth);
+      }
     }
     if (!opts.flags.force) {
       const stale = await detectStaleResume({
@@ -206,6 +234,7 @@ export async function runRunCommand(opts: RunOptions): Promise<number> {
     outputDir,
     cwd,
     budget: opts.flags.budget,
+    runtime,
   };
 
   const outputMode = getOutputMode({ noTui: opts.flags.noTui, json: opts.flags.json });

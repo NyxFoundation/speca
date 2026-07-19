@@ -126,6 +126,45 @@ process.exit(0);
     expect(code).not.toBe(0);
   });
 
+  it("forwards --runtime <id> to the orchestrator argv (issue #113)", async () => {
+    const body = `
+process.stderr.write(JSON.stringify(process.argv.slice(2)) + "\\n");
+process.exit(0);
+`;
+    const handle = spawnPipeline({
+      phases: ["01a"],
+      runtime: "ollama",
+      command: NODE,
+      baseArgs: fakeScript(body),
+    });
+    const errLines: string[] = [];
+    handle.on("stderr", (l) => errLines.push(l));
+    const code = await handle.done;
+    expect(code).toBe(0);
+    const argv = JSON.parse(errLines[0] ?? "[]") as string[];
+    const i = argv.indexOf("--runtime");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(argv[i + 1]).toBe("ollama");
+  });
+
+  it("omits --runtime when the option is not set (default stays claude-side)", async () => {
+    const body = `
+process.stderr.write(JSON.stringify(process.argv.slice(2)) + "\\n");
+process.exit(0);
+`;
+    const handle = spawnPipeline({
+      phases: ["01a"],
+      command: NODE,
+      baseArgs: fakeScript(body),
+    });
+    const errLines: string[] = [];
+    handle.on("stderr", (l) => errLines.push(l));
+    const code = await handle.done;
+    expect(code).toBe(0);
+    const argv = JSON.parse(errLines[0] ?? "[]") as string[];
+    expect(argv).not.toContain("--runtime");
+  });
+
   it("buffers a chunk that arrives mid-line", async () => {
     // Emit each character with a tiny delay so chunk boundaries land mid-line.
     const event = JSON.stringify({ type: "phase-completed", ts, phase: "01a", duration_s: 1, total_results: 0 });
