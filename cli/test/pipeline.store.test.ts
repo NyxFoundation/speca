@@ -114,13 +114,13 @@ describe("applyLogLine — ring buffer and worker activity", () => {
     };
   }
 
-  it("appends to the log ring buffer and increments batchesObserved", () => {
+  it("appends to the log ring buffer and increments logLinesObserved", () => {
     let s = createInitialSnapshot();
     s = applyLogLine(s, line());
     s = applyLogLine(s, line({ summary: "result: ok cost=$0.01", tool: null, type: "result" }));
     expect(s.logs).toHaveLength(2);
     const phase = s.phases.get("01a");
-    expect(phase?.batchesObserved).toBe(2);
+    expect(phase?.logLinesObserved).toBe(2);
     expect(phase?.workerActivity).toEqual({ W0: "result: ok cost=$0.01" });
     expect(s.workers.get("W0")?.lastSummary).toMatch(/result/);
   });

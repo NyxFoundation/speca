@@ -41,7 +41,12 @@ export function PhaseRow({ phase, selected, name }: PhaseRowProps) {
       if (phase.totalResults == null) return "done";
       return `${phase.totalResults} results`;
     }
-    if (phase.status === "running") return `running (${phase.batchesObserved} events)`;
+    if (phase.status === "running") {
+      // `partialBatches` is only present in attach mode (counted from real
+      // files on disk); the log-event pulse is shown in both modes.
+      const batches = phase.partialBatches != null ? `${phase.partialBatches} partials, ` : "";
+      return `running (${batches}${phase.logLinesObserved} log events)`;
+    }
     if (phase.status === "failed") return `failed: ${phase.failureReason ?? "unknown"}`;
     return "pending";
   })();

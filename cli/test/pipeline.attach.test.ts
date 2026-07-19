@@ -6,11 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ATTACH_ACTIVE_WINDOW_MS,
   buildAttachSnapshot,
+  comparePhaseIds,
+  mergeAttachRescan,
   parsePartialFilename,
   scanAttachState,
   seedPhaseStatus,
   type AttachPhaseSeed,
 } from "../src/lib/pipeline/attach.js";
+import { applyLogLine } from "../src/lib/pipeline/store.js";
 
 let cwd: string;
 beforeEach(() => {
@@ -175,7 +178,11 @@ describe("seedPhaseStatus / buildAttachSnapshot", () => {
     expect(snap.phases.get("01b")?.totalResults).toBe(4);
     expect(snap.phases.get("04")?.status).toBe("running");
     expect(snap.phases.get("04")?.totalResults).toBe(5);
-    expect(snap.phases.get("04")?.batchesObserved).toBe(2);
+    // Separate counters (#118 follow-up): the on-disk batch file count is
+    // `partialBatches`; `logLinesObserved` starts at zero and only the log
+    // tail increments it.
+    expect(snap.phases.get("04")?.partialBatches).toBe(2);
+    expect(snap.phases.get("04")?.logLinesObserved).toBe(0);
     expect(Object.keys(snap.phases.get("04")?.workerActivity ?? {})).toEqual(["W0", "W1"]);
     expect(snap.pipelineStatus).toBe("running");
     expect(snap.startedAt).toBeDefined();
@@ -189,5 +196,106 @@ describe("seedPhaseStatus / buildAttachSnapshot", () => {
     const snap = buildAttachSnapshot(scan, Date.now());
     expect(snap.pipelineStatus).toBe("idle");
     expect(snap.phases.get("04")?.status).toBe("done");
+  });
+});
+
+describe("comparePhaseIds (#118 follow-up: explicit pipeline order)", () => {
+  it("orders the canonical set by pipeline position", () => {
+    const shuffled = ["04", "01e", "03", "01a", "02c", "01b"];
+    expect([...shuffled].sort(comparePhaseIds)).toEqual(["01a", "01b", "01e", "02c", "03", "04"]);
+  });
+
+  it("sorts unknown (fork) phase ids after every known phase", () => {
+    // localeCompare would have put "0a" before "04" is locale-dependent —
+    // the explicit rank must place fork phases last, deterministically.
+    expect(["0a", "04"].sort(comparePhaseIds)).toEqual(["04", "0a"]);
+    expect(["0b", "01a", "0a"].sort(comparePhaseIds)).toEqual(["01a", "0a", "0b"]);
+    expect(comparePhaseIds("0a", "0a")).toBe(0);
+  });
+});
+
+describe("mergeAttachRescan (#118 follow-up: periodic status refresh)", () => {
+  const logLine = (phase: string) => ({
+    phase,
+    worker: "0",
+    batch: "0",
+    ts: "2026-07-19T00:00:00.000Z",
+    type: "assistant",
+    summary: "tool_use: Grep",
+    severity: "info" as const,
+    tool: "Grep",
+    sourcePath: "/x.log.jsonl",
+  });
+
+  it("flips a phase from running to done once its artifacts go quiet", async () => {
+    const outputs = join(cwd, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    writePartial(outputs, "04_PARTIAL_W0B0_1700000000.json", 1);
+    const scan = await scanAttachState({ cwd });
+
+    const now = Date.now();
+    const seeded = buildAttachSnapshot(scan, now);
+    expect(seeded.phases.get("04")?.status).toBe("running");
+
+    // Re-scan "later": same disk state, but now past the active window.
+    const fresh = buildAttachSnapshot(scan, now + ATTACH_ACTIVE_WINDOW_MS + 1_000);
+    const merged = mergeAttachRescan(seeded, fresh);
+    expect(merged.phases.get("04")?.status).toBe("done");
+    expect(merged.pipelineStatus).toBe("idle");
+  });
+
+  it("preserves the log ring, line counters and log-derived worker summaries", async () => {
+    const outputs = join(cwd, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    writePartial(outputs, "04_PARTIAL_W0B0_1700000000.json", 1);
+    const scan = await scanAttachState({ cwd });
+
+    const now = Date.now();
+    let snap = buildAttachSnapshot(scan, now);
+    snap = applyLogLine(snap, logLine("04"));
+    snap = applyLogLine(snap, logLine("04"));
+    expect(snap.phases.get("04")?.logLinesObserved).toBe(2);
+
+    const merged = mergeAttachRescan(snap, buildAttachSnapshot(scan, now));
+    expect(merged.logs).toHaveLength(2);
+    expect(merged.phases.get("04")?.logLinesObserved).toBe(2);
+    // Log-derived summary beats the "(observed on disk)" placeholder.
+    expect(merged.phases.get("04")?.workerActivity["W0"]).toBe("tool_use: Grep");
+    expect(merged.workers.get("W0")?.lastSummary).toBe("tool_use: Grep");
+  });
+
+  it("picks up new batches and new phases from the fresh scan", async () => {
+    const outputs = join(cwd, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    writePartial(outputs, "04_PARTIAL_W0B0_1700000000.json", 1);
+    const scan1 = await scanAttachState({ cwd });
+    const now = Date.now();
+    const seeded = buildAttachSnapshot(scan1, now);
+    expect(seeded.phases.get("04")?.partialBatches).toBe(1);
+
+    // The run keeps going: a second 04 batch and a brand-new phase land.
+    writePartial(outputs, "04_PARTIAL_W1B1_1700000010.json", 2);
+    writePartial(outputs, "03_PARTIAL_W0B0_1700000020.json", 3);
+    const scan2 = await scanAttachState({ cwd });
+    const merged = mergeAttachRescan(seeded, buildAttachSnapshot(scan2, now));
+
+    expect(merged.phaseOrder).toEqual(["03", "04"]);
+    expect(merged.phases.get("04")?.partialBatches).toBe(2);
+    expect(merged.phases.get("04")?.totalResults).toBe(3);
+    expect(merged.phases.get("03")?.partialBatches).toBe(1);
+  });
+
+  it("keeps a previously seen phase whose artifacts vanished from disk", async () => {
+    const outputs = join(cwd, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    writePartial(outputs, "01b_PARTIAL_W0B0_1700000000.json", 1);
+    writePartial(outputs, "04_PARTIAL_W0B0_1700000010.json", 1);
+    const full = buildAttachSnapshot(await scanAttachState({ cwd }), Date.now());
+
+    rmSync(join(outputs, "01b_PARTIAL_W0B0_1700000000.json"));
+    const shrunk = buildAttachSnapshot(await scanAttachState({ cwd }), Date.now());
+    const merged = mergeAttachRescan(full, shrunk);
+    expect(merged.phaseOrder).toEqual(["01b", "04"]);
+    expect(merged.phases.get("01b")).toBeDefined();
   });
 });
