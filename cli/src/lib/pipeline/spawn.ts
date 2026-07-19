@@ -32,6 +32,14 @@ export interface SpawnPipelineOptions {
   maxConcurrent?: number;
   /** Pass `--force` to clear resume state. */
   force?: boolean;
+  /**
+   * Model runtime forwarded as `--runtime <id>` (issue #113). Validated
+   * upstream against the ProviderRegistry (src/lib/providers/registry.ts);
+   * run_phase.py re-validates against its own runtime registry and exports
+   * ORCHESTRATOR_RUNNER for its subprocesses. Undefined = orchestrator
+   * default (claude).
+   */
+  runtime?: string;
   /** Override SPECA_OUTPUT_DIR. */
   outputDir?: string;
   /** Working directory (defaults to process.cwd()). */
@@ -95,6 +103,7 @@ function buildArgs(opts: SpawnPipelineOptions): string[] {
   if (opts.maxConcurrent !== undefined) args.push("--max-concurrent", String(opts.maxConcurrent));
   if (opts.force) args.push("--force");
   if (opts.outputDir) args.push("--output-dir", opts.outputDir);
+  if (opts.runtime) args.push("--runtime", opts.runtime);
   args.push("--json");
   return args;
 }
