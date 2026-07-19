@@ -895,9 +895,11 @@ class ClaudeRunner:
 
         1. ``SPECA_MCP_CONFIG`` env var — an explicit path supplied by the
            user (the supported way to point an npm-installed CLI at a
-           hand-written config). When set but unreadable this raises instead
-           of falling back: a user who names a config wants THAT config, not
-           a silent substitute.
+           hand-written config). When set it is always honored, never fallen
+           back from: a missing file raises ``FileNotFoundError``, and an
+           existing-but-unreadable file or invalid JSON propagates its own
+           error (``PermissionError``, ``json.JSONDecodeError``). A user who
+           names a config wants THAT config, not a silent substitute.
         2. ``./.mcp.json`` — the user's workspace (cwd). Matches the
            historical behavior for checkout users, where
            ``scripts/setup_mcp.sh`` writes it.
@@ -963,35 +965,23 @@ class ClaudeRunner:
 
         Resolves the base config via :meth:`_load_base_mcp_config`, keeps only
         the servers listed in ``self.config.mcp_servers``, and writes the
-        result to a deterministic path so it can be reused across workers of
-        the same phase.
+        result to a deterministic path shared by all workers of the phase.
 
-        Uses atomic write (tempfile + os.replace) to avoid TOCTOU races
-        when multiple workers start concurrently.
+        The file is regenerated on EVERY call — a previously written copy is
+        never reused. ``outputs/`` persists across runs, so reusing a stale
+        per-phase config would silently ignore a ``.mcp.json`` or
+        ``SPECA_MCP_CONFIG`` the user added after the run that wrote it —
+        turning the missing-server warning's own advice into a dead end
+        (PR #117 review). Regeneration is cheap (a small JSON), deterministic
+        for a given base config, and concurrency-safe: workers may race, but
+        each writes identical content via tempfile + os.replace, so readers
+        never observe a partial file.
         """
         config_dir = get_output_root() / ".mcp_configs"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / f"mcp_{self.config.phase_id}.json"
 
         needed = set(self.config.mcp_servers or [])
-
-        # Reuse if already generated (deterministic per phase).
-        # Safe because the file is always written atomically via os.replace().
-        # Still check for missing servers: the cached file may have been
-        # generated from an empty/missing base config, and reuse must not
-        # reintroduce the silent degradation of issue #98.
-        if config_path.exists():
-            try:
-                with open(config_path, encoding="utf-8") as f:
-                    cached = json.load(f)
-                cached_servers = set(cached.get("mcpServers", {}))
-            except (OSError, json.JSONDecodeError):
-                cached_servers = set()
-            self._warn_missing_mcp_servers(
-                needed, cached_servers, source=str(config_path)
-            )
-            return config_path
-
         base_config, source = self._load_base_mcp_config()
 
         filtered = {
