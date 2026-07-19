@@ -158,6 +158,17 @@ export interface LogWatcherOptions {
    * hardest. Defaults to 200ms (CPU-cheap for 1-2 active log files).
    */
   pollIntervalMs?: number;
+  /**
+   * Create `dir` when it does not exist yet (default true — `speca run`
+   * owns its output tree and wants the watch armed before the orchestrator's
+   * first write). `speca attach` passes false: a read-only observer must not
+   * create directories in a run it does not own. NOTE: chokidar (even in
+   * polling mode) never emits events for a watch target that did not exist
+   * when the watch was armed — callers that pass false must only start the
+   * watcher once the directory exists (attach gates on this and retries from
+   * its rescan timer).
+   */
+  mkdirMissing?: boolean;
 }
 
 interface FileCursor {
@@ -177,11 +188,14 @@ export async function startLogWatcher(opts: LogWatcherOptions): Promise<() => Pr
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const cursors = new Map<string, FileCursor>();
   const absDir = resolve(dir);
-  // Ensure dir exists so chokidar's `add` event fires consistently.
-  try {
-    await fs.mkdir(absDir, { recursive: true });
-  } catch {
-    // best-effort
+  // Ensure dir exists so chokidar's `add` event fires consistently —
+  // unless the caller is a read-only observer (see LogWatcherOptions).
+  if (opts.mkdirMissing !== false) {
+    try {
+      await fs.mkdir(absDir, { recursive: true });
+    } catch {
+      // best-effort
+    }
   }
 
   // Chokidar v4+ dropped glob support, so we watch the directory itself

@@ -21,6 +21,7 @@ import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { parseLogFilename } from "./log-watcher.js";
+import { KNOWN_PHASE_IDS } from "./phase-names.js";
 import {
   createInitialSnapshot,
   type PipelineSnapshot,
@@ -163,10 +164,27 @@ export async function scanAttachState(options: ScanOptions = {}): Promise<Attach
       lastActivityMs: acc.lastActivityMs,
       firstActivityMs: Number.isFinite(acc.firstActivityMs) ? acc.firstActivityMs : 0,
     }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => comparePhaseIds(a.id, b.id));
 
   const latestActivityMs = phases.reduce((max, p) => Math.max(max, p.lastActivityMs), 0);
   return { detected: phases.length > 0, phases, latestActivityMs, outputsDir, logsDir };
+}
+
+/**
+ * Order phases by their pipeline position (`KNOWN_PHASE_IDS`), not by
+ * locale-aware string comparison: a fork's phase-0 artifacts ("0a", "0b")
+ * would otherwise sort after "04" or shuffle under exotic collations.
+ * Unknown phase ids sort after every known one, ordered by a plain
+ * code-unit comparison for determinism.
+ */
+export function comparePhaseIds(a: string, b: string): number {
+  const ra = (KNOWN_PHASE_IDS as readonly string[]).indexOf(a);
+  const rb = (KNOWN_PHASE_IDS as readonly string[]).indexOf(b);
+  const ka = ra === -1 ? KNOWN_PHASE_IDS.length : ra;
+  const kb = rb === -1 ? KNOWN_PHASE_IDS.length : rb;
+  if (ka !== kb) return ka - kb;
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
 }
 
 /**
@@ -238,7 +256,11 @@ export function buildAttachSnapshot(
       id: seed.id,
       status,
       workerActivity,
-      batchesObserved: seed.partialBatches,
+      // Log lines replayed by the watcher increment this from zero; the
+      // on-disk batch count lives in `partialBatches` (separate counters,
+      // separate labels — they measure different things).
+      logLinesObserved: 0,
+      partialBatches: seed.partialBatches,
       workers: seed.workers.length > 0 ? seed.workers.length : undefined,
       totalResults: seed.items > 0 ? seed.items : undefined,
       startedAt: seed.firstActivityMs > 0 ? new Date(seed.firstActivityMs).toISOString() : undefined,
@@ -253,4 +275,63 @@ export function buildAttachSnapshot(
   snap.pipelineStatus = anyRunning ? "running" : "idle";
   if (Number.isFinite(earliest)) snap.startedAt = new Date(earliest).toISOString();
   return snap;
+}
+
+/** Default interval for the attach dashboard's periodic disk re-scan. */
+export const ATTACH_RESCAN_INTERVAL_MS = 10_000;
+
+/**
+ * Fold a fresh disk scan into the live attach snapshot.
+ *
+ * The initial seed is computed once, but a long-lived attach must keep
+ * tracking reality: phases finish (running → done), new batches land, new
+ * phases start. This merge takes the *disk-derived* fields (status,
+ * partialBatches, totalResults, timestamps, pipelineStatus) from the fresh
+ * snapshot while preserving everything the log tail has accumulated since
+ * seeding (the log ring buffer, per-phase log-line counters, and the
+ * richer log-derived worker summaries).
+ *
+ * Phases present in `prev` but missing from `fresh` (artifacts deleted
+ * mid-attach) are kept as-is — dropping rows mid-session would be more
+ * confusing than showing the last known state.
+ */
+export function mergeAttachRescan(
+  prev: PipelineSnapshot,
+  fresh: PipelineSnapshot,
+): PipelineSnapshot {
+  const merged = createInitialSnapshot();
+  merged.pipelineStatus = fresh.pipelineStatus;
+  merged.startedAt = fresh.startedAt ?? prev.startedAt;
+  merged.endedAt = prev.endedAt;
+  merged.lastError = prev.lastError;
+  merged.logs = prev.logs;
+  merged.cost = { ...prev.cost };
+
+  for (const id of fresh.phaseOrder) {
+    const freshPhase = fresh.phases.get(id);
+    if (!freshPhase) continue;
+    const prevPhase = prev.phases.get(id);
+    const phase: PhaseState = {
+      ...freshPhase,
+      // Log-derived state survives the rescan (the fresh snapshot only has
+      // placeholder worker summaries and zeroed line counters).
+      logLinesObserved: prevPhase?.logLinesObserved ?? 0,
+      workerActivity: { ...freshPhase.workerActivity, ...(prevPhase?.workerActivity ?? {}) },
+    };
+    merged.phases.set(id, phase);
+    merged.phaseOrder.push(id);
+  }
+  for (const id of prev.phaseOrder) {
+    if (merged.phases.has(id)) continue;
+    const prevPhase = prev.phases.get(id);
+    if (!prevPhase) continue;
+    merged.phases.set(id, { ...prevPhase, workerActivity: { ...prevPhase.workerActivity } });
+    merged.phaseOrder.push(id);
+  }
+  merged.phaseOrder.sort(comparePhaseIds);
+
+  // Workers map: log-derived summaries (prev) win over disk placeholders.
+  for (const [id, w] of fresh.workers) merged.workers.set(id, { ...w });
+  for (const [id, w] of prev.workers) merged.workers.set(id, { ...w });
+  return merged;
 }
