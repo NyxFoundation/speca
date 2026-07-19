@@ -86,6 +86,27 @@ def _fake_plugin_checkout(root: Path) -> Path:
     return plugin_dir
 
 
+def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n"):
+    """Fake subprocess.run: answers the `git tag --points-at HEAD` version
+    probe with *git_tags* and the CLI invocation by writing *emitted* to the
+    --out file."""
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            if captured is not None:
+                captured.setdefault("git_cmds", []).append(cmd)
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout=git_tags, stderr="")
+        if captured is not None:
+            captured["cmd"] = cmd
+            captured["cwd"] = kwargs.get("cwd")
+            captured["env"] = kwargs.get("env")
+        Path(cmd[cmd.index("--out") + 1]).write_text(
+            json.dumps({"phase": "01e", "provider": "lean", "properties": emitted}),
+            encoding="utf-8",
+        )
+        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+    return fake_run
+
+
 def test_lean_provider_invokes_plugin_cli(monkeypatch, tmp_path):
     """generate() must shell out to `speca-lean4 emit-01e` per the CLI
     contract and return the emitted `properties` list."""
@@ -104,19 +125,9 @@ def test_lean_provider_invokes_plugin_cli(monkeypatch, tmp_path):
          "lean_status": "unknown"},
     ]
     captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["cwd"] = kwargs.get("cwd")
-        captured["env"] = kwargs.get("env")
-        out = Path(cmd[cmd.index("--out") + 1])
-        out.write_text(
-            json.dumps({"phase": "01e", "provider": "lean", "properties": emitted}),
-            encoding="utf-8",
-        )
-        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_run(subprocess_mod, emitted, captured)
+    )
 
     subgraphs = [{"source_url": "https://spec.example/x", "subgraphs": []}]
     scope = {"program_name": "Test Bounty"}
@@ -152,15 +163,9 @@ def test_lean_provider_passes_health_json_source(monkeypatch, tmp_path):
     health.write_text("{}", encoding="utf-8")
 
     captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        Path(cmd[cmd.index("--out") + 1]).write_text(
-            json.dumps({"properties": []}), encoding="utf-8"
-        )
-        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_run(subprocess_mod, [], captured)
+    )
 
     LeanPropertyProvider().generate([], {}, source=str(health))
     cmd = captured["cmd"]
@@ -186,6 +191,110 @@ def test_lean_provider_nonzero_exit_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
     with pytest.raises(RuntimeError, match="boom"):
         LeanPropertyProvider().generate([], {})
+
+
+def test_lean_provider_version_mismatch_raises(monkeypatch, tmp_path):
+    """A checkout verifiably at a different tag than plugin_version must be
+    rejected before the CLI is invoked (issue #87: pins are enforced, not
+    just declared)."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [], git_tags="v0.0.9\n"),
+    )
+    with pytest.raises(RuntimeError, match=r"v0\.0\.9.*pins.*v0\.1\.0"):
+        LeanPropertyProvider().generate([], {})
+
+
+def test_lean_provider_version_mismatch_override(monkeypatch, tmp_path, capsys):
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", "1")
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], git_tags="v0.0.9\n"),
+    )
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    assert "SPECA_LEAN4_ALLOW_VERSION_MISMATCH" in capsys.readouterr().err
+
+
+def test_lean_provider_unverifiable_version_warns_not_fails(monkeypatch, tmp_path, capsys):
+    """A checkout with no readable tag (e.g. a plain directory, or a branch
+    clone) proceeds with a warning — unverified, never falsely verified."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], git_tags=""),
+    )
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    assert "cannot verify" in capsys.readouterr().err
+
+
+def test_lean_provider_zero_properties_warns(monkeypatch, tmp_path, capsys):
+    """An empty emission must be loudly flagged at runtime, not only by the
+    CI verify step."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setattr(subprocess_mod, "run", _mk_fake_run(subprocess_mod, []))
+    result = LeanPropertyProvider().generate([], {})
+    assert result == []
+    assert "zero properties" in capsys.readouterr().err
+
+
+def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
+    """A half-populated cache dir (interrupted clone) must be removed and
+    re-cloned, not reused or allowed to break the re-clone."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.delenv("SPECA_LEAN4_PLUGIN_DIR", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_AUTO_CLONE", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
+
+    # Simulate the leftover of an interrupted clone: dir exists, shape check fails.
+    partial = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+    (partial / ".git").mkdir(parents=True)
+    (partial / ".git" / "config").write_text("stub", encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            dest = Path(cmd[-1])
+            assert not dest.exists(), "clone destination should not pre-exist"
+            (dest / "src" / "speca_lean4").mkdir(parents=True)
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git":  # version probe
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
+        Path(cmd[cmd.index("--out") + 1]).write_text(
+            json.dumps({"properties": [{"property_id": "P-1"}]}), encoding="utf-8"
+        )
+        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+    assert (cache / "src" / "speca_lean4").is_dir()  # fresh clone in place
+    assert not (cache / ".git" / "config").exists()  # partial leftover gone
 
 
 def test_kurtosis_backend_raises_not_implemented():
@@ -257,6 +366,51 @@ def test_create_orchestrator_with_provider_override():
 def test_create_orchestrator_default_provider_unchanged():
     orch = create_orchestrator("01e", property_provider="prompt")
     assert orch.config.property_provider == "prompt"
+
+
+def test_prompt_provider_routes_to_base_run(monkeypatch):
+    """#87 residual: the default (prompt) path must be identical to the
+    pre-seam behavior — run() goes straight to the Claude CLI batch loop and
+    never enters the provider branch."""
+    import asyncio
+    from scripts.orchestrator import base as base_mod
+
+    called = {}
+
+    async def _base_run(self):
+        called["base_run"] = True
+
+    monkeypatch.setattr(base_mod.BaseOrchestrator, "run", _base_run)
+
+    def _forbidden(self):
+        raise AssertionError(
+            "provider branch must not run for the default prompt provider"
+        )
+
+    monkeypatch.setattr(
+        base_mod.Phase01Orchestrator, "_run_01e_with_provider", _forbidden
+    )
+
+    orch = create_orchestrator("01e")  # default: prompt
+    asyncio.run(orch.run())
+    assert called.get("base_run")
+
+
+def test_prompt_provider_keeps_output_fields_compaction():
+    """The prompt path's PARTIAL compaction (output_fields) must stay exactly
+    as configured — only the non-prompt provider save path bypasses it."""
+    orch = create_orchestrator("01e")
+    assert orch.config.output_fields == PHASE_CONFIGS["01e"].output_fields
+    assert orch.config.output_fields, "prompt-path compaction must stay active"
+
+
+def test_provider_output_fields_bypass_stays_local():
+    """The lean-provider save path clears output_fields on its own config
+    copy; the global 01e config must never be affected (regression guard for
+    the lean_*-provenance compaction seam)."""
+    orch = create_orchestrator("01e", property_provider="lean")
+    orch.config.output_fields = []  # what _run_01e_with_provider does at save
+    assert PHASE_CONFIGS["01e"].output_fields, "global 01e config was mutated"
 
 
 def test_refinement_disabled_by_default():

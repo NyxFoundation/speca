@@ -120,19 +120,79 @@ class LeanPropertyProvider:
 
     subprocess_timeout_s = 1800
 
+    @staticmethod
+    def _is_plugin_checkout(path: Path) -> bool:
+        return (path / "src" / "speca_lean4").is_dir()
+
+    def _verify_plugin_version(self, plugin_dir: Path) -> None:
+        """Enforce that *plugin_dir* is actually at the pinned version.
+
+        The shape check (src/speca_lean4 exists) says nothing about *which*
+        version the checkout is, so a stale SPECA_LEAN4_PLUGIN_DIR or cache
+        would silently test the wrong code (issue #87: pins must be enforced,
+        not just declared). Policy:
+
+        - a tag at HEAD matching ``plugin_version`` -> verified;
+        - tags at HEAD but none matching -> hard error (set
+          ``SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1`` to downgrade to a warning,
+          e.g. for local plugin development);
+        - no tag readable (not a git checkout, or a branch clone without
+          tags) -> loud warning, not an error — we cannot verify, and honest
+          "unverified" beats a false "verified".
+        """
+        import os
+        import subprocess
+        import sys
+
+        if not self.plugin_version:
+            return
+        proc = subprocess.run(
+            ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
+            capture_output=True, text=True, timeout=60,
+        )
+        tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
+        if proc.returncode != 0 or not tags:
+            print(
+                f"warning: cannot verify {self.plugin_ref} checkout at "
+                f"{plugin_dir} is {self.plugin_version} (no tag readable at "
+                "HEAD); proceeding unverified.",
+                file=sys.stderr,
+            )
+            return
+        if self.plugin_version not in tags:
+            msg = (
+                f"{self.plugin_ref} checkout at {plugin_dir} is at "
+                f"{'/'.join(tags)}, but the provider pins "
+                f"{self.plugin_version}."
+            )
+            if os.environ.get("SPECA_LEAN4_ALLOW_VERSION_MISMATCH") == "1":
+                print(
+                    f"warning: {msg} Proceeding because "
+                    "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1.",
+                    file=sys.stderr,
+                )
+                return
+            raise RuntimeError(
+                f"{msg} Use a {self.plugin_version} checkout, or set "
+                "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1 to override "
+                "(local plugin development only)."
+            )
+
     def _resolve_plugin_dir(self) -> Path:
         """Locate (or clone) the pinned plugin checkout; return its root."""
         import os
+        import shutil
         import subprocess
 
         env_dir = os.environ.get("SPECA_LEAN4_PLUGIN_DIR")
         if env_dir:
             plugin_dir = Path(env_dir)
-            if not (plugin_dir / "src" / "speca_lean4").is_dir():
+            if not self._is_plugin_checkout(plugin_dir):
                 raise FileNotFoundError(
                     f"SPECA_LEAN4_PLUGIN_DIR={env_dir} is not a "
                     f"{self.plugin_ref} checkout (missing src/speca_lean4)."
                 )
+            self._verify_plugin_version(plugin_dir)
             return plugin_dir
 
         from .paths import get_output_root
@@ -141,8 +201,14 @@ class LeanPropertyProvider:
             get_output_root() / ".plugins"
             / f"speca-lean4-plugin-{self.plugin_version or 'main'}"
         )
-        if (cache_dir / "src" / "speca_lean4").is_dir():
+        if self._is_plugin_checkout(cache_dir):
+            self._verify_plugin_version(cache_dir)
             return cache_dir
+        if cache_dir.exists():
+            # Leftover from an interrupted clone: a half-populated dir would
+            # make the re-clone fail with a misleading "destination path
+            # already exists" error. Remove it and clone fresh.
+            shutil.rmtree(cache_dir)
 
         if os.environ.get("SPECA_LEAN4_AUTO_CLONE", "1") == "0":
             raise RuntimeError(
@@ -153,19 +219,30 @@ class LeanPropertyProvider:
 
         cache_dir.parent.mkdir(parents=True, exist_ok=True)
         clone_url = f"https://github.com/{self.plugin_ref}.git"
+        # Clone into a temp sibling, then rename into place, so an
+        # interrupted clone never leaves a half-populated cache_dir behind.
+        tmp_dir = cache_dir.parent / f"{cache_dir.name}.tmp-{os.getpid()}"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
         cmd = ["git", "clone", "--depth", "1"]
         if self.plugin_version:
             cmd += ["--branch", self.plugin_version]
-        cmd += [clone_url, str(cache_dir)]
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=self.subprocess_timeout_s
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"failed to clone {self.plugin_ref}@{self.plugin_version} "
-                f"(rc={proc.returncode}): {proc.stderr.strip()}\n"
-                "Set SPECA_LEAN4_PLUGIN_DIR to an existing checkout instead."
+        cmd += [clone_url, str(tmp_dir)]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.subprocess_timeout_s
             )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"failed to clone {self.plugin_ref}@{self.plugin_version} "
+                    f"(rc={proc.returncode}): {proc.stderr.strip()}\n"
+                    "Set SPECA_LEAN4_PLUGIN_DIR to an existing checkout instead."
+                )
+            tmp_dir.rename(cache_dir)
+        finally:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        self._verify_plugin_version(cache_dir)
         return cache_dir
 
     def generate(
@@ -242,6 +319,14 @@ class LeanPropertyProvider:
             doc = json.loads(out_path.read_text(encoding="utf-8"))
 
         properties = doc.get("properties", [])
+        if not properties:
+            # An empty emission means downstream phases have nothing to audit;
+            # the phase would otherwise still log "completed" and exit 0.
+            print(
+                "warning: lean provider returned zero properties — check the "
+                "theorem map / scope inputs and the plugin output above.",
+                file=sys.stderr,
+            )
         print(
             f"lean provider: {len(properties)} properties from "
             f"{self.plugin_ref}@{self.plugin_version}"
