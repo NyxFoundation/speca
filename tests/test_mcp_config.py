@@ -135,17 +135,37 @@ def test_partial_config_warns_about_missing_servers_only(isolated_env, capsys):
     assert "tree_sitter" in err
 
 
-def test_cached_empty_config_still_warns(isolated_env, capsys):
-    # A previous run cached an empty per-phase config; the reuse path must
-    # not silently reintroduce the issue #98 behavior.
+def test_fixing_config_after_empty_run_clears_warning(isolated_env, capsys):
+    # First run with no config anywhere: empty per-phase file plus warning.
     runner = make_runner(["fetch"])
     first = runner._get_phase_mcp_config()
-    assert first.exists()
-    capsys.readouterr()  # drop the first runner's warning
-    reused_runner = make_runner(["fetch"])
-    reused = reused_runner._get_phase_mcp_config()
-    assert reused == first
+    assert load_servers(first) == {}
     assert "WARNING" in capsys.readouterr().err
+    # The user follows the warning's advice and creates .mcp.json. The next
+    # run must pick it up even though the per-phase file already exists on
+    # disk — a stale generated config must never be a dead end that keeps
+    # the warning (and the empty server list) alive (PR #117 review).
+    workspace, _ = isolated_env
+    write_mcp_json(workspace / ".mcp.json", {"fetch": {"command": "uvx"}})
+    second_runner = make_runner(["fetch"])
+    second = second_runner._get_phase_mcp_config()
+    assert second == first
+    assert set(load_servers(second)) == {"fetch"}
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_env_var_honored_even_when_phase_config_already_written(
+    isolated_env, tmp_path, monkeypatch, capsys
+):
+    # A leftover per-phase file must not short-circuit SPECA_MCP_CONFIG
+    # handling: pointing the env var at a missing file fails loudly even
+    # when a previous run already wrote outputs/.mcp_configs/mcp_<phase>.json.
+    runner = make_runner(["fetch"])
+    assert runner._get_phase_mcp_config().exists()
+    capsys.readouterr()
+    monkeypatch.setenv("SPECA_MCP_CONFIG", str(tmp_path / "missing.json"))
+    with pytest.raises(FileNotFoundError, match="SPECA_MCP_CONFIG"):
+        make_runner(["fetch"])._get_phase_mcp_config()
 
 
 def test_warning_emitted_once_per_runner(isolated_env, capsys):
