@@ -87,6 +87,33 @@ def _which(name: str) -> str | None:
 
 _WIN_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+OLLAMA_DEFAULT_HOST = "https://ollama.com"
+
+
+def is_ollama_cloud_host(host: str) -> bool:
+    """True when ``host`` points at ollama cloud (ollama.com / subdomain).
+
+    A plain substring test misfires on hosts like
+    ``myollama.company.com`` (contains ``ollama.com`` as a substring) or
+    ``https://example.com/?x=ollama.com``, so parse the hostname and
+    compare label-wise. Kept in sync with ``isOllamaCloudHost`` in
+    ``cli/src/lib/providers/registry.ts`` — an unparseable host counts as
+    self-hosted on both sides (the runner will surface the real error).
+    """
+
+    from urllib.parse import urlparse
+
+    raw = host.strip()
+    if not raw:
+        raw = OLLAMA_DEFAULT_HOST
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    try:
+        hostname = (urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname == "ollama.com" or hostname.endswith(".ollama.com")
+
 
 def _run(cmd: list[str], timeout: float = 3.0) -> subprocess.CompletedProcess[str] | None:
     """Run a short probe command with timeout; return None on failure.
@@ -229,8 +256,8 @@ def _probe_ollama() -> RuntimeAvailability:
     (``https://ollama.com``) does.
     """
 
-    host = os.environ.get("OLLAMA_HOST", "https://ollama.com")
-    cloud = "ollama.com" in host
+    host = (os.environ.get("OLLAMA_HOST") or "").strip() or OLLAMA_DEFAULT_HOST
+    cloud = is_ollama_cloud_host(host)
     has_key = bool(os.environ.get("OLLAMA_API_KEY"))
     return RuntimeAvailability(
         runtime_id="ollama",

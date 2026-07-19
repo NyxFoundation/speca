@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  isOllamaCloudHost,
   isProviderId,
   PROVIDER_IDS,
   PROVIDERS,
@@ -11,9 +15,23 @@ import {
  * The id set must mirror scripts/orchestrator/runtime_registry.py.
  */
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/** Ids as declared by the Python registry — parsed from the source of truth,
+ * not hand-copied, so a drift on either side fails this suite. */
+function pythonRuntimeIds(): string[] {
+  const src = readFileSync(
+    join(HERE, "..", "..", "scripts", "orchestrator", "runtime_registry.py"),
+    "utf8",
+  );
+  const literal = src.match(/RuntimeId = Literal\[([^\]]+)\]/);
+  if (!literal?.[1]) throw new Error("RuntimeId Literal not found in runtime_registry.py");
+  return [...literal[1].matchAll(/"([^"]+)"/g)].map((m) => m[1] as string);
+}
+
 describe("provider id set", () => {
-  it("matches the Python runtime registry ids", () => {
-    expect([...PROVIDER_IDS]).toEqual(["claude", "api", "codex", "gemini", "ollama", "copilot"]);
+  it("matches the Python runtime registry ids (parsed from the Python source)", () => {
+    expect([...PROVIDER_IDS]).toEqual(pythonRuntimeIds());
   });
 
   it("every id has a descriptor with a matching id field", () => {
@@ -40,6 +58,27 @@ describe("validateRuntime — unknown ids", () => {
   });
 });
 
+describe("isOllamaCloudHost — hostname parsing (not substring matching)", () => {
+  it.each([
+    ["https://ollama.com", true],
+    ["ollama.com", true],
+    ["https://api.ollama.com", true],
+    ["OLLAMA.COM", true],
+    ["http://localhost:11434", false],
+    ["192.168.1.10:11434", false],
+    // Substring misfires the old `includes("ollama.com")` check got wrong:
+    ["https://myollama.company.com", false],
+    ["myollama.company.com:11434", false],
+    ["https://example.com/?redirect=ollama.com", false],
+    // Suffix-spoof must not count as cloud:
+    ["https://evilollama.com.attacker.net", false],
+    ["", true], // empty falls back to the cloud default host
+    ["not a parseable host", false], // unparseable counts as self-hosted
+  ])("%s -> cloud=%s", (host, expected) => {
+    expect(isOllamaCloudHost(host)).toBe(expected);
+  });
+});
+
 describe("validateRuntime — ollama (cloud vs self-hosted)", () => {
   it("cloud default host requires OLLAMA_API_KEY", () => {
     const r = validateRuntime("ollama", {});
@@ -60,6 +99,16 @@ describe("validateRuntime — ollama (cloud vs self-hosted)", () => {
   it("self-hosted host needs no key", () => {
     const r = validateRuntime("ollama", { OLLAMA_HOST: "http://localhost:11434" });
     expect(r.ok).toBe(true);
+  });
+
+  it("a self-hosted host that merely CONTAINS ollama.com needs no key", () => {
+    const r = validateRuntime("ollama", { OLLAMA_HOST: "https://myollama.company.com" });
+    expect(r.ok).toBe(true);
+  });
+
+  it("an ollama.com subdomain is cloud and requires the key", () => {
+    const r = validateRuntime("ollama", { OLLAMA_HOST: "https://api.ollama.com" });
+    expect(r.ok).toBe(false);
   });
 
   it("empty OLLAMA_HOST falls back to the cloud default", () => {
