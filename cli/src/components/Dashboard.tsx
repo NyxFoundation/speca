@@ -22,9 +22,17 @@ export interface DashboardProps {
   cwd: string;
   /** Resolves the dashboard once the run completes (used by run.tsx). */
   onExit?: () => void;
+  /**
+   * Read-only mode (`speca attach`, issue #27): the stop / force-kill
+   * keybindings are disabled and the status bar hides them. There is no
+   * `handle` in this mode — the dashboard only observes the store.
+   */
+  readOnly?: boolean;
+  /** Header title — defaults to "speca run". */
+  title?: string;
 }
 
-export function Dashboard({ store, handle, cwd, onExit }: DashboardProps) {
+export function Dashboard({ store, handle, cwd, onExit, readOnly = false, title }: DashboardProps) {
   const snapshot = usePipelineStore(store);
   const theme = useTheme();
   const { exit } = useApp();
@@ -60,12 +68,13 @@ export function Dashboard({ store, handle, cwd, onExit }: DashboardProps) {
 
   // Action-based keybinds (M6 wiring). User overrides via ~/.config/speca/config.toml.
   useKeybind("exit", () => {
-    handle?.kill?.();
+    // Read-only attach must never signal the (unowned) orchestrator.
+    if (!readOnly) handle?.kill?.();
     onExit?.();
     exit();
   });
-  useKeybind("stop-graceful", () => handle?.stop?.());
-  useKeybind("stop-force", () => handle?.kill?.());
+  useKeybind("stop-graceful", () => handle?.stop?.(), { isActive: !readOnly });
+  useKeybind("stop-force", () => handle?.kill?.(), { isActive: !readOnly });
   useKeybind("toggle-log", () => setShowLogs((v) => !v));
   useKeybind("up", () => setSelectedIdx((i) => Math.max(0, i - 1)));
   useKeybind("down", () =>
@@ -87,6 +96,7 @@ export function Dashboard({ store, handle, cwd, onExit }: DashboardProps) {
         pipelineStatus={snapshot.pipelineStatus}
         totalUsd={snapshot.cost.total_usd}
         maxBudgetUsd={snapshot.cost.max_budget_usd}
+        title={title}
       />
 
       {snapshot.pipelineStatus === "budget-exceeded" ? (
@@ -133,7 +143,7 @@ export function Dashboard({ store, handle, cwd, onExit }: DashboardProps) {
       {showDetail && selected ? <PhaseDetail snapshot={snapshot} phaseId={selected.id} /> : null}
       {showLogs ? <LogPane logs={snapshot.logs} maxRows={10} /> : null}
 
-      <StatusBar showLogs={showLogs} lastError={snapshot.lastError} />
+      <StatusBar showLogs={showLogs} lastError={snapshot.lastError} readOnly={readOnly} />
     </Box>
   );
 }

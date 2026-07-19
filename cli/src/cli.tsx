@@ -6,6 +6,7 @@ import { render } from "ink";
 import meow from "meow";
 import { createElement } from "react";
 import { printAskHelp, runAskCommand } from "./commands/ask.js";
+import { printAttachHelp, runAttachCommand } from "./commands/attach.js";
 import { LOGIN_HELP, loginCommand, loginFlagsSchema } from "./commands/auth/login.js";
 import { StatusCommand } from "./commands/auth/status.js";
 import { BROWSE_HELP, runBrowseCommand } from "./commands/browse.js";
@@ -47,6 +48,7 @@ const cli = meow(
     auth <subcommand>  Manage Anthropic credentials (login | status)
     init               Create a new audit project (TARGET_INFO + BUG_BOUNTY_SCOPE)
     run                Run pipeline phases with a live dashboard
+    attach             Read-only attach to a running pipeline in cwd
     browse [glob]      Open the finding browser on Phase 03/04 PARTIAL JSON
     ask [finding-id]   Chat with Claude about a finding (claude-code session)
     corpus <sub>       Browse / export run archives (list | show | export | gc)
@@ -260,6 +262,22 @@ async function run(): Promise<number> {
         },
       });
       return code;
+    }
+    case "attach": {
+      const wantsHelp = subcommand === "help" || isHelpFlag();
+      if (wantsHelp) {
+        printAttachHelp();
+        return 0;
+      }
+      return runAttachCommand({
+        flags: {
+          outputDir: cli.flags.outputDir,
+          // Same meow negation dance as `run`: `--no-tui` arrives as
+          // `tui: false`; an explicit `--no-tui` sets `noTui: true`.
+          noTui: cli.flags.noTui === true || cli.flags.tui === false,
+          json: cli.flags.json,
+        },
+      });
     }
     case "ask": {
       const wantsHelp = subcommand === "help" || isHelpFlag();
