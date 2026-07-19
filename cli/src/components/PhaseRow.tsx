@@ -35,8 +35,11 @@ export function PhaseRow({ phase, selected, name }: PhaseRowProps) {
   const workers = Object.keys(phase.workerActivity).sort();
   const progress = (() => {
     if (phase.status === "done") {
-      const total = phase.totalResults ?? 0;
-      return `${total} results`;
+      // `totalResults` is unset when the phase was reconstructed from disk
+      // (speca attach) rather than observed via a phase-completed event —
+      // show a plain "done" instead of a fabricated "0 results".
+      if (phase.totalResults == null) return "done";
+      return `${phase.totalResults} results`;
     }
     if (phase.status === "running") return `running (${phase.batchesObserved} events)`;
     if (phase.status === "failed") return `failed: ${phase.failureReason ?? "unknown"}`;

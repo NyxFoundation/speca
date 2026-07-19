@@ -230,6 +230,17 @@ export class PipelineStore {
     this.notify();
   }
 
+  /**
+   * Replace the snapshot wholesale. Used by `speca attach` to seed the
+   * dashboard from on-disk artifacts before the log tail starts flowing
+   * (see lib/pipeline/attach.ts). Subsequent `applyLog` calls layer onto
+   * the seeded state exactly as they do for a live `speca run`.
+   */
+  seedSnapshot(snap: PipelineSnapshot): void {
+    this.snap = snap;
+    this.notify();
+  }
+
   /** Replace the snapshot (for tests). */
   reset(): void {
     this.snap = createInitialSnapshot();

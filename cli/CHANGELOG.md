@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`speca attach`** ([#27]) — read-only attach to a running pipeline in
+  cwd. Reconstructs the phase rows from `outputs/*_PARTIAL_*.json`
+  (filenames, mtimes, and real `metadata.item_count` sums — no metrics are
+  invented) and tails `outputs/logs/*.log.jsonl` through the existing
+  polling log watcher, so a second terminal sees the same dashboard as
+  `speca run` without spawning a new orchestrator. Read-only: the stop /
+  force keybindings are disabled and detaching (`q`) never signals the
+  run. Exits 0 with a hint when there is nothing to attach to. `--no-tui`
+  prints a scan summary + plain-text log tail; `--json` emits an
+  `attach-summary` NDJSON envelope followed by `log` records.
+- **M4 acceptance at full Sherlock-RQ1 scale** ([#29]) — the complete
+  Phase 04 PARTIAL set of the RQ1 benchmark run (102 files / 550 reviewed
+  items / 72 actionable findings across 10 Ethereum-client repos, plus
+  the nethermind Phase 03 slice) is committed under
+  `test/fixtures/sherlock-rq1/`. New acceptance tests pin the per-repo
+  finding counts, exercise every filter atom (`severity:` / `verdict:` /
+  `prop:` / `repo:` / free text) against real data, and verify windowed
+  rendering + severity ordering on the 148-row prysm table. A
+  non-CI-gating benchmark (`npm run perf:rq1`) reports loader / filter /
+  sort / render timings over the full set.
+
+### Fixed
+
+- Dashboard phase rows no longer claim "0 results" for a completed phase
+  whose result count is unknown (attach mode) — they render "done".
+
+[#27]: https://github.com/NyxFoundation/speca/issues/27
+[#29]: https://github.com/NyxFoundation/speca/issues/29
+
 ## [0.9.2] - 2026-06-16
 
 Patch release on the 0.9.x soak line. Adds the `speca corpus` subcommand
