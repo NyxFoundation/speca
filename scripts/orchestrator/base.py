@@ -207,7 +207,11 @@ class BaseOrchestrator(ABC):
         # function-calling. ``copilot`` spawns the agentic ``@github/copilot``
         # CLI in JSONL mode (CopilotRunner) — it owns its own tool loop via
         # ``--allow-all-tools`` so we just stream events and parse the
-        # final result file.
+        # final result file. ``claude_pty`` drives the interactive claude
+        # REPL through a pseudo-terminal (ClaudePtyRunner) — insurance for
+        # the day ``-p`` print mode gets paywalled (issue #80); never the
+        # default, and concurrency is clamped to 1 because one interactive
+        # REPL cannot serve parallel batches.
         from . import runtime_registry
         from .api_runner import (
             APIRunner,
@@ -245,6 +249,27 @@ class BaseOrchestrator(ABC):
             self.runner = CopilotRunner(**runner_kwargs)
             model_label = self.runner.model or "(CLI default)"
             print(f"  Runner: CopilotRunner (model={model_label})")
+        elif runner_type == "claude_pty":
+            from .claude_pty_runner import ClaudePtyRunner
+
+            if self.max_concurrent > 1:
+                print(
+                    f"  claude_pty: clamping concurrency {self.max_concurrent} -> 1 "
+                    "(one interactive REPL per batch; parallel interactive "
+                    "sessions against one subscription are not supported)"
+                )
+            self.semaphore = asyncio.Semaphore(1)
+            self.runner = ClaudePtyRunner(
+                self.config,
+                self.semaphore,
+                circuit_breaker=self.circuit_breaker,
+                cost_tracker=self.cost_tracker,
+                archiver=self.archiver,
+            )
+            print(
+                "  Runner: ClaudePtyRunner (interactive REPL via pty — "
+                "issue #80 insurance path; no cost telemetry)"
+            )
         else:
             self.runner = ClaudeRunner(
                 self.config,

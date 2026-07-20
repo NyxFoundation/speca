@@ -17,7 +17,15 @@
  * Python side. Nothing else in the CLI needs to change.
  */
 
-export const PROVIDER_IDS = ["claude", "api", "codex", "gemini", "ollama", "copilot"] as const;
+export const PROVIDER_IDS = [
+  "claude",
+  "api",
+  "codex",
+  "gemini",
+  "ollama",
+  "copilot",
+  "claude_pty",
+] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export interface ProviderValidation {
@@ -122,6 +130,16 @@ export const PROVIDERS: Record<ProviderId, ProviderDescriptor> = {
   copilot: {
     id: "copilot",
     summary: "GitHub Copilot agentic CLI. Auth via `copilot` interactive OAuth.",
+    validate: () => ok(),
+  },
+  claude_pty: {
+    id: "claude_pty",
+    summary:
+      "Anthropic claude CLI driven through its interactive REPL under a pty. " +
+      "Insurance path for `-p` print-mode paywalling (issue #80); not the default.",
+    // Same credential story as `claude` — the CLI owns its auth store.
+    // Platform support (POSIX pty / pywinpty on Windows) is probed on the
+    // Python side at runner construction, where the actionable error lives.
     validate: () => ok(),
   },
 };
