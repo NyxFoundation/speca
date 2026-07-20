@@ -12,7 +12,7 @@ from scripts.orchestrator.schemas import Phase01ePartial, VerificationRecord, Pr
 from scripts.orchestrator.config import PhaseConfig, PHASE_CONFIGS
 from scripts.orchestrator.factory import create_orchestrator
 from pathlib import Path
-import hashlib, json, os, tempfile
+import hashlib, json, os, re, tempfile
 
 
 def test_provider_name_enum_values():
@@ -87,19 +87,28 @@ def _fake_plugin_checkout(root: Path) -> Path:
 
 
 def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n",
-                 git_toplevel=None):
+                 git_toplevel=None,
+                 git_head=LeanPropertyProvider.plugin_commit):
     """Fake subprocess.run: answers the `git rev-parse --show-toplevel`
     containment probe (with *git_toplevel*, defaulting to the probed dir
-    itself, i.e. containment OK), the `git tag --points-at HEAD` version
-    probe (with *git_tags*), and the CLI invocation by writing *emitted* to
+    itself, i.e. containment OK), the `git rev-parse HEAD` commit probe
+    (with *git_head*, defaulting to the pinned commit; None = probe fails,
+    e.g. not a git checkout), the `git tag --points-at HEAD` tag probe
+    (with *git_tags*), and the CLI invocation by writing *emitted* to
     the --out file."""
     def fake_run(cmd, **kwargs):
         if cmd[0] == "git":
             if captured is not None:
                 captured.setdefault("git_cmds", []).append(cmd)
-            if "rev-parse" in cmd:
+            if "--show-toplevel" in cmd:
                 top = git_toplevel if git_toplevel is not None else cmd[2]
                 return subprocess_mod.CompletedProcess(cmd, 0, stdout=top + "\n", stderr="")
+            if "rev-parse" in cmd:  # git rev-parse HEAD
+                if git_head is None:
+                    return subprocess_mod.CompletedProcess(
+                        cmd, 128, stdout="", stderr="fatal: ambiguous argument 'HEAD'"
+                    )
+                return subprocess_mod.CompletedProcess(cmd, 0, stdout=git_head + "\n", stderr="")
             return subprocess_mod.CompletedProcess(cmd, 0, stdout=git_tags, stderr="")
         if captured is not None:
             captured["cmd"] = cmd
@@ -203,7 +212,13 @@ def _mk_fake_kurtosis_run(subprocess_mod, captured=None, *, fixture_props,
     the error-path tests."""
     def fake_run(cmd, **kwargs):
         if cmd[0] == "git":
-            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n" if "tag" in cmd else cmd[2] + "\n", stderr="")
+            if "--show-toplevel" in cmd:
+                return subprocess_mod.CompletedProcess(cmd, 0, stdout=cmd[2] + "\n", stderr="")
+            if "rev-parse" in cmd:  # git rev-parse HEAD -> the pinned commit
+                return subprocess_mod.CompletedProcess(
+                    cmd, 0, stdout=LeanPropertyProvider.plugin_commit + "\n", stderr=""
+                )
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
         if captured is not None:
             captured["cmd"] = cmd
         fixtures_dir = Path(cmd[cmd.index("--fixtures-dir") + 1])
@@ -357,9 +372,9 @@ def test_lean_provider_nonzero_exit_raises(monkeypatch, tmp_path):
 
 
 def test_lean_provider_version_mismatch_raises(monkeypatch, tmp_path):
-    """A checkout verifiably at a different tag than plugin_version must be
+    """A checkout verifiably at a different commit than plugin_commit must be
     rejected before the CLI is invoked (issue #87: pins are enforced, not
-    just declared)."""
+    just declared) — even if it carries some other tag."""
     import subprocess as subprocess_mod
 
     plugin_dir = _fake_plugin_checkout(tmp_path)
@@ -367,9 +382,50 @@ def test_lean_provider_version_mismatch_raises(monkeypatch, tmp_path):
     monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
     monkeypatch.setattr(
         subprocess_mod, "run",
-        _mk_fake_run(subprocess_mod, [], git_tags="v0.0.9\n"),
+        _mk_fake_run(subprocess_mod, [], git_head="d" * 40, git_tags="v0.0.9\n"),
     )
-    with pytest.raises(RuntimeError, match=r"v0\.0\.9.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"commit d{40}.*v0\.0\.9.*pins.*v0\.1\.0"):
+        LeanPropertyProvider().generate([], {})
+
+
+def test_lean_provider_moved_tag_is_rejected(monkeypatch, tmp_path):
+    """The operative pin is the COMMIT: a checkout whose HEAD carries the
+    pinned tag name but sits on a different commit (i.e. the tag was moved
+    upstream) must be rejected — this is exactly the attack/mistake a
+    tag-only comparison cannot see."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [], git_head="e" * 40, git_tags="v0.1.0\n"),
+    )
+    with pytest.raises(RuntimeError, match=r"commit e{40}.*pins.*v0\.1\.0"):
+        LeanPropertyProvider().generate([], {})
+
+
+def test_lean_provider_mismatch_survives_tag_probe_failure(monkeypatch, tmp_path):
+    """Once a commit mismatch is established, a failing tag probe (used only
+    for the diagnostic message) must NOT downgrade the hard error to an
+    'unverified' warning."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == "git"
+        if "--show-toplevel" in cmd:
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout=cmd[2] + "\n", stderr="")
+        if "rev-parse" in cmd:
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="c" * 40 + "\n", stderr="")
+        raise subprocess_mod.TimeoutExpired(cmd, 60)  # the tag probe hangs
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    with pytest.raises(RuntimeError, match=r"commit c{40}.*pins.*v0\.1\.0"):
         LeanPropertyProvider().generate([], {})
 
 
@@ -383,16 +439,16 @@ def test_lean_provider_version_mismatch_override(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
     monkeypatch.setattr(
         subprocess_mod, "run",
-        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], git_tags="v0.0.9\n"),
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], git_head="d" * 40),
     )
     result = LeanPropertyProvider().generate([], {})
     assert result == [{"property_id": "P-1"}]
     assert "SPECA_LEAN4_ALLOW_VERSION_MISMATCH" in capsys.readouterr().err
 
 
-def test_lean_provider_unverifiable_version_warns_not_fails(monkeypatch, tmp_path, capsys):
-    """A checkout with no readable tag (e.g. a plain directory, or a branch
-    clone) proceeds with a warning — unverified, never falsely verified."""
+def test_lean_provider_branch_clone_at_pinned_commit_verifies(monkeypatch, tmp_path, capsys):
+    """A checkout at the pinned commit verifies even without any tag ref
+    (e.g. a plain branch/commit clone) — the commit is the evidence."""
     import subprocess as subprocess_mod
 
     plugin_dir = _fake_plugin_checkout(tmp_path)
@@ -405,7 +461,43 @@ def test_lean_provider_unverifiable_version_warns_not_fails(monkeypatch, tmp_pat
     )
     result = LeanPropertyProvider().generate([], {})
     assert result == [{"property_id": "P-1"}]
+    assert "cannot verify" not in capsys.readouterr().err
+
+
+def test_lean_provider_unverifiable_version_warns_not_fails(monkeypatch, tmp_path, capsys):
+    """A checkout with no readable HEAD (e.g. a plain directory that happens
+    to be a git toplevel without commits) proceeds with a warning —
+    unverified, never falsely verified."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], git_head=None),
+    )
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
     assert "cannot verify" in capsys.readouterr().err
+
+
+def test_lean_provider_tag_only_pin_falls_back_to_tag_policy(monkeypatch, tmp_path):
+    """With no commit recorded (plugin_commit=None) the tag policy still
+    enforces: a checkout at a different tag is rejected."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.setattr(LeanPropertyProvider, "plugin_commit", None)
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [], git_tags="v0.0.9\n"),
+    )
+    with pytest.raises(RuntimeError, match=r"v0\.0\.9.*pins.*v0\.1\.0"):
+        LeanPropertyProvider().generate([], {})
 
 
 def test_lean_provider_zero_properties_warns(monkeypatch, tmp_path, capsys):
@@ -514,8 +606,12 @@ def test_lean_provider_concurrent_clone_rename_race(monkeypatch, tmp_path):
                 "winner", encoding="utf-8"
             )
             return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd[0] == "git" and "rev-parse" in cmd:
+        if cmd[0] == "git" and "--show-toplevel" in cmd:
             return subprocess_mod.CompletedProcess(cmd, 0, stdout=cmd[2] + "\n", stderr="")
+        if cmd[0] == "git" and "rev-parse" in cmd:
+            return subprocess_mod.CompletedProcess(
+                cmd, 0, stdout=LeanPropertyProvider.plugin_commit + "\n", stderr=""
+            )
         if cmd[0] == "git":
             return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
         Path(cmd[cmd.index("--out") + 1]).write_text(
@@ -569,11 +665,152 @@ def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
     assert not (cache / ".git" / "config").exists()  # partial leftover gone
 
 
-def test_kurtosis_backend_raises_not_implemented():
+def test_kurtosis_backend_raises_not_implemented(monkeypatch):
+    monkeypatch.delenv("SPECA_KURTOSIS_PLUGIN_DIR", raising=False)
     backend = KurtosisVerificationBackend()
     assert backend.plugin_ref == "NyxFoundation/kurtosis-harness"
     with pytest.raises(NotImplementedError):
         backend.verify([], {})
+
+
+# ---------------------------------------------------------------------------
+# Resolve-time pin enforcement (issue #87 Task 6 — the pin is operative at
+# resolve_provider()/resolve_verification_backend(), not only inside
+# generate()/verify()).
+# ---------------------------------------------------------------------------
+
+def _mk_fake_git_probe(subprocess_mod, head_sha, calls=None):
+    """Fake subprocess.run for pin probes only: containment OK, HEAD =
+    *head_sha*, no tags. Any non-git command is an error (resolution must
+    never invoke a plugin CLI)."""
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == "git", f"resolve must only probe git, ran: {cmd}"
+        if calls is not None:
+            calls.append(cmd)
+        if "--show-toplevel" in cmd:
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout=cmd[2] + "\n", stderr="")
+        if "rev-parse" in cmd:
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout=head_sha + "\n", stderr="")
+        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+    return fake_run
+
+
+def test_resolve_provider_lean_pin_mismatch_fails_at_resolve(monkeypatch, tmp_path):
+    """A stale SPECA_LEAN4_PLUGIN_DIR must fail at resolve_provider() time —
+    before the pipeline loads any inputs — not mid-run inside generate()."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_git_probe(subprocess_mod, "f" * 40)
+    )
+    with pytest.raises(RuntimeError, match=r"commit f{40}.*pins.*v0\.1\.0"):
+        resolve_provider("lean")
+
+
+def test_resolve_provider_lean_pin_match_passes(monkeypatch, tmp_path):
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_git_probe(subprocess_mod, LeanPropertyProvider.plugin_commit),
+    )
+    assert isinstance(resolve_provider("lean"), LeanPropertyProvider)
+
+
+def test_resolve_provider_lean_bad_env_dir_fails_at_resolve(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(tmp_path / "nope"))
+    with pytest.raises(FileNotFoundError, match="SPECA_LEAN4_PLUGIN_DIR"):
+        resolve_provider("lean")
+
+
+def test_resolve_stays_offline_without_configured_checkouts(monkeypatch):
+    """With no plugin dirs configured, resolution must not spawn any
+    subprocess (no git probes, no cloning) — the default flows stay exactly
+    as cheap as before the pin became operative."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.delenv("SPECA_LEAN4_PLUGIN_DIR", raising=False)
+    monkeypatch.delenv("SPECA_KURTOSIS_PLUGIN_DIR", raising=False)
+
+    def forbidden(cmd, **kwargs):
+        raise AssertionError(f"resolve must not spawn subprocesses, ran: {cmd}")
+
+    monkeypatch.setattr(subprocess_mod, "run", forbidden)
+    assert isinstance(resolve_provider("prompt"), PromptPropertyProvider)
+    assert isinstance(resolve_provider("lean"), LeanPropertyProvider)
+    assert isinstance(resolve_verification_backend("none"), NullVerificationBackend)
+    assert isinstance(
+        resolve_verification_backend("kurtosis"), KurtosisVerificationBackend
+    )
+
+
+def test_resolve_kurtosis_pin_mismatch_fails_at_resolve(monkeypatch, tmp_path):
+    """The kurtosis pin is operative even while verify() is a stub: a
+    configured checkout at the wrong commit fails at resolution, with the
+    pin error — not the stub's NotImplementedError."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.setenv("SPECA_KURTOSIS_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.delenv("SPECA_KURTOSIS_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_git_probe(subprocess_mod, "a" * 40)
+    )
+    with pytest.raises(RuntimeError, match=r"kurtosis-harness.*commit a{40}"):
+        resolve_verification_backend("kurtosis")
+
+
+def test_resolve_kurtosis_pin_match_keeps_stub(monkeypatch, tmp_path):
+    """A correctly pinned checkout resolves fine, and verify() still raises
+    the honest NotImplementedError (execution is #92's job)."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.setenv("SPECA_KURTOSIS_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_git_probe(subprocess_mod, KurtosisVerificationBackend.plugin_commit),
+    )
+    backend = resolve_verification_backend("kurtosis")
+    assert isinstance(backend, KurtosisVerificationBackend)
+    with pytest.raises(NotImplementedError, match="kurtosis-harness"):
+        backend.verify([], {})
+
+
+def test_kurtosis_verify_checks_pin_before_stub(monkeypatch, tmp_path):
+    """Direct verify() calls (bypassing resolve) must also hit the pin: a
+    wrong-commit checkout surfaces the pin error, not NotImplementedError."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.setenv("SPECA_KURTOSIS_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.delenv("SPECA_KURTOSIS_ALLOW_VERSION_MISMATCH", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_git_probe(subprocess_mod, "b" * 40)
+    )
+    with pytest.raises(RuntimeError, match=r"commit b{40}"):
+        KurtosisVerificationBackend().verify([], {})
+
+
+def test_resolve_kurtosis_missing_env_dir_fails_at_resolve(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPECA_KURTOSIS_PLUGIN_DIR", str(tmp_path / "gone"))
+    with pytest.raises(FileNotFoundError, match="SPECA_KURTOSIS_PLUGIN_DIR"):
+        resolve_verification_backend("kurtosis")
+
+
+def test_resolve_kurtosis_mismatch_override_env(monkeypatch, tmp_path, capsys):
+    import subprocess as subprocess_mod
+
+    monkeypatch.setenv("SPECA_KURTOSIS_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setenv("SPECA_KURTOSIS_ALLOW_VERSION_MISMATCH", "1")
+    monkeypatch.setattr(
+        subprocess_mod, "run", _mk_fake_git_probe(subprocess_mod, "c" * 40)
+    )
+    backend = resolve_verification_backend("kurtosis")
+    assert isinstance(backend, KurtosisVerificationBackend)
+    assert "SPECA_KURTOSIS_ALLOW_VERSION_MISMATCH" in capsys.readouterr().err
 
 
 def test_null_backend_returns_empty():
@@ -766,6 +1003,51 @@ def test_prompt_path_partial_matches_golden_fixture(monkeypatch, tmp_path):
     assert "internal_note" not in saved_keys
 
 
+def _normalize_path_strings(obj):
+    """Fold Windows path separators so config dumps compare across OSes."""
+    if isinstance(obj, str):
+        return obj.replace("\\", "/")
+    if isinstance(obj, list):
+        return [_normalize_path_strings(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _normalize_path_strings(v) for k, v in obj.items()}
+    return obj
+
+
+def test_default_configs_additive_over_preseam_golden():
+    """#87 Done-when: `01e` (and the post-04 verification seam) run unchanged
+    with `provider` unset.
+
+    The golden is the full PhaseConfig dump of 01e/04 taken at the PRE-SEAM
+    commit (68ead915, the parent of the PR #94 merge) — i.e. the last state
+    before the provider seam existed. Every pre-seam key must still exist
+    with an equal value: the seam (and everything since) may only ADD
+    fields. Together with test_prompt_path_partial_matches_golden_fixture
+    (whose byte-golden was verified byte-identical to the pre-seam
+    collector's output for the same input — see PR), this anchors "no
+    behavior change for the default path" to the actual pre-seam code, not
+    to a self-comparison. If a later PR intentionally changes a 01e/04
+    default, regenerate the golden and say so explicitly in that PR.
+    """
+    golden_path = Path(__file__).parent / "fixtures" / "phase_config_preseam_golden.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
+    for phase, pre in golden.items():
+        cur = _normalize_path_strings(
+            json.loads(json.dumps(PHASE_CONFIGS[phase].model_dump(), default=str))
+        )
+        missing = sorted(set(pre) - set(cur))
+        assert not missing, f"[{phase}] pre-seam config keys removed: {missing}"
+        changed = {k: (pre[k], cur[k]) for k in pre if cur.get(k) != pre[k]}
+        assert not changed, f"[{phase}] pre-seam config values changed: {changed}"
+        # The seam's own additions must default to no-op values.
+        added = sorted(set(cur) - set(pre))
+        assert set(added) >= {"property_provider", "verification_backend",
+                              "refinement_pass_enabled"}, added
+    assert PHASE_CONFIGS["01e"].property_provider == "prompt"
+    assert PHASE_CONFIGS["01e"].refinement_pass_enabled is False
+    assert PHASE_CONFIGS["04"].verification_backend == "none"
+
+
 def test_refinement_disabled_by_default():
     assert PHASE_CONFIGS["01e"].refinement_pass_enabled is False
 
@@ -795,13 +1077,19 @@ def test_create_orchestrator_verification_override_doesnt_mutate_global():
 
 
 def test_external_plugins_are_version_pinned():
-    # issue #87: plugin boundaries must be version-pinned. The pin mechanism
-    # (a plugin_version field at the resolution point) must exist on both
-    # external plugins. Both pins are now concrete: the lean plugin pins the
-    # speca-lean4-plugin release tag (plugin #8 F1), kurtosis-harness pins a
-    # commit SHA until #92 publishes a tag.
+    # issue #87: plugin boundaries must be version-pinned AND enforced. Both
+    # pins are concrete and carry the operative commit: the lean plugin pins
+    # the speca-lean4-plugin release tag (plugin #8 F1) plus the commit that
+    # tag pointed at when pinned; kurtosis-harness pins a commit SHA until
+    # #92 publishes a tag. plugin_commit is what enforcement compares
+    # against (tags can be moved; commits cannot), so it must always be a
+    # full 40-hex SHA — bump it together with plugin_version.
     assert LeanPropertyProvider.plugin_version == "v0.1.0"
+    assert re.fullmatch(r"[0-9a-f]{40}", LeanPropertyProvider.plugin_commit), \
+        "lean plugin_commit must be a full commit SHA"
     assert KurtosisVerificationBackend.plugin_version, "kurtosis pin must be concrete, not None"
+    assert re.fullmatch(r"[0-9a-f]{40}", KurtosisVerificationBackend.plugin_commit), \
+        "kurtosis plugin_commit must be a full commit SHA"
 
 
 def test_phase04_run_dispatches_confirmed_findings_to_backend(monkeypatch, tmp_path):
