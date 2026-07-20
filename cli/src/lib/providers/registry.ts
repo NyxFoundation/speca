@@ -49,7 +49,15 @@ const OLLAMA_DEFAULT_HOST = "https://ollama.com";
 export function isOllamaCloudHost(host: string): boolean {
   let raw = host.trim();
   if (raw === "") raw = OLLAMA_DEFAULT_HOST;
-  if (!raw.includes("://")) raw = `http://${raw}`;
+  if (raw.startsWith("//")) {
+    // Scheme-relative ("//ollama.com"): prefix the scheme only. Prepending
+    // "http://" would produce "http:////..." — WHATWG URL collapses the
+    // extra slashes but Python's urlparse reads an empty netloc, so the
+    // explicit branch keeps both sides classifying identically.
+    raw = `http:${raw}`;
+  } else if (!raw.includes("://")) {
+    raw = `http://${raw}`;
+  }
   let hostname: string;
   try {
     hostname = new URL(raw).hostname.toLowerCase();
