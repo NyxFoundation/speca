@@ -27,6 +27,9 @@ export type CircuitBreakerTrippedEvent = z.infer<typeof CircuitBreakerTrippedEve
 export const PipelineCompletedEventSchema = z.object({ "duration_s": z.number().gte(0), "phases": z.array(z.string()), "results": z.record(z.string(), z.boolean()), "ts": z.string().describe("RFC 3339 UTC timestamp with millisecond precision."), "type": z.literal("pipeline-completed") });
 export type PipelineCompletedEvent = z.infer<typeof PipelineCompletedEventSchema>;
 
+export const WarningEventSchema = z.object({ "message": z.string(), "phase": z.string(), "ts": z.string().describe("RFC 3339 UTC timestamp with millisecond precision."), "type": z.literal("warning") }).describe("Non-fatal degradation the user must see (issue #98).\n\nExample: a phase declares MCP servers that the resolved ``.mcp.json``\ndoes not provide — the pipeline keeps running, but the TUI dashboard\n(whose only inputs are this NDJSON stream and the log tail; orchestrator\nstderr is discarded in TUI mode) must surface the degradation.");
+export type WarningEvent = z.infer<typeof WarningEventSchema>;
+
 export const pipelineEventSchema = z.discriminatedUnion("type", [
   PipelineStartedEventSchema,
   PhaseStartedEventSchema,
@@ -35,5 +38,6 @@ export const pipelineEventSchema = z.discriminatedUnion("type", [
   BudgetExceededEventSchema,
   CircuitBreakerTrippedEventSchema,
   PipelineCompletedEventSchema,
+  WarningEventSchema,
 ] as const);
 export type PipelineEvent = z.infer<typeof pipelineEventSchema>;
