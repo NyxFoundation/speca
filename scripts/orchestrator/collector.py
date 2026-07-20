@@ -24,6 +24,7 @@ from .schemas import (
     Phase02cPartial,
     Phase03Partial,
     Phase04Partial,
+    Phase05Partial,
     PartialMetadata,
 )
 
@@ -39,6 +40,7 @@ _PHASE_OUTPUT_MODELS: dict[str, type] = {
     "02c": Phase02cPartial,
     "03": Phase03Partial,
     "04": Phase04Partial,
+    "05": Phase05Partial,
 }
 
 

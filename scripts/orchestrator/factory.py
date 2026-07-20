@@ -13,6 +13,7 @@ from .base import (
     Phase02cOrchestrator,
     Phase03Orchestrator,
     Phase04Orchestrator,
+    Phase05Orchestrator,
 )
 from .config import get_phase_config
 from .phase0_runner import is_phase0
@@ -31,6 +32,7 @@ def create_orchestrator(
     archiver: "Archiver | None" = None,
     property_provider: str = "prompt",
     verification_backend: str = "none",
+    search_backend: str | None = None,
 ) -> BaseOrchestrator:
     """
     Create an orchestrator for the specified phase.
@@ -78,6 +80,8 @@ def create_orchestrator(
         orch = Phase03Orchestrator(num_workers, max_concurrent, archiver=archiver)
     elif phase_id == "04":
         orch = Phase04Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
+    elif phase_id == "05":
+        orch = Phase05Orchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
     else:
         orch = BaseOrchestrator(phase_id, num_workers, max_concurrent, archiver=archiver)
 
@@ -86,5 +90,20 @@ def create_orchestrator(
         orch.config.property_provider = property_provider
     if phase_id == "04" and verification_backend != "none":
         orch.config.verification_backend = verification_backend
+    if phase_id == "05":
+        # Pluggable external search (issue #53). The backend decides which
+        # search tools the critique worker gets; "none" degrades gracefully
+        # to an internal-evidence-only critique. Applied on the orchestrator's
+        # config copy — the global PHASE_CONFIGS singleton is never touched.
+        from .providers import resolve_search_backend
+
+        effective = search_backend if search_backend is not None else orch.config.search_backend
+        backend = resolve_search_backend(effective)  # raises on unknown name
+        orch.config.search_backend = backend.name
+        base_tools = [
+            t for t in (orch.config.tools_filter or [])
+            if t not in ("WebSearch", "WebFetch")
+        ]
+        orch.config.tools_filter = base_tools + backend.worker_tools()
 
     return orch

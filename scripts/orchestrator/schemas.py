@@ -128,6 +128,29 @@ class ChecklistMindset(str, Enum):
     FORMAL_VERIFICATION_ENGINEER = "Formal Verification Engineer"
 
 
+class CritiqueVerdict(str, Enum):
+    """Second-opinion verdict from Phase 05 (finding critique).
+
+    Three-valued, recall-safe: LIKELY_FP requires concrete refuting
+    evidence (external citation or code re-verification). When in doubt
+    the finding stays CONFIRMED.
+    """
+    CONFIRMED = "CONFIRMED"
+    LIKELY_FP = "LIKELY_FP"
+    INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT"
+
+
+class EvidenceProvenance(str, Enum):
+    """Where the Phase 05 critique evidence came from.
+
+    ``external+internal`` — external search results plus code/spec re-reads.
+    ``internal-only`` — no search backend was available; the critique ran on
+    internal evidence (code re-reads, upstream phase context) only and says so.
+    """
+    EXTERNAL_AND_INTERNAL = "external+internal"
+    INTERNAL_ONLY = "internal-only"
+
+
 from .providers import PropertyProviderName, VerificationBackendName  # noqa: E402
 
 
@@ -525,6 +548,88 @@ class Phase04Partial(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase 05 – Finding Critique (second-opinion audit with external search)
+# ---------------------------------------------------------------------------
+
+class GlossaryEntry(BaseModel):
+    """A term researched during the critique (protocol name, CVE id, ...).
+
+    ``source_url`` is empty when the definition came from internal knowledge
+    (no search backend available) — an empty URL is the honest signal that
+    the entry is NOT backed by an external citation.
+    """
+    term: str
+    definition: str = ""  # 1-3 sentences
+    source_url: str = ""  # "" = internal knowledge, no external citation
+
+
+class SearchTraceStep(BaseModel):
+    """One step of the external-search trace: what was searched, what was
+    found, and how it fed into the reasoning."""
+    step: int = 0
+    query: str = ""
+    urls: list[str] = Field(default_factory=list)  # hit URLs actually fetched/read
+    found: str = ""      # 1-2 sentences: what the search surfaced
+    inference: str = ""  # 1-2 sentences: how it affected the critique
+
+
+class CodeRecheck(BaseModel):
+    """A code location re-read during critique step 4 (code re-verification)."""
+    file: str
+    lines: str = ""        # e.g. "120-160"
+    observation: str = ""  # what the re-read showed about the suspect pattern
+
+
+class CritiquedItem(BaseModel):
+    """A single Phase 05 critique record for one confirmed Phase 04 finding.
+
+    Honesty contract: ``search_backend`` records which backend produced the
+    external evidence ("websearch" or "none"). When it is "none", the item
+    must not carry search-trace URLs — the validator rejects fabricated
+    citations at the schema boundary.
+    """
+    property_id: str = ""
+    prior_verdict: str = ""  # Phase 04 review_verdict this critique re-examines
+    critique_verdict: CritiqueVerdict | str = ""
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    search_trace: list[SearchTraceStep] = Field(default_factory=list)
+    code_rechecks: list[CodeRecheck] = Field(default_factory=list)
+    related_cves: list[str] = Field(default_factory=list)
+    rationale: str = ""  # 1-3 sentences grounding the final verdict
+    evidence_provenance: EvidenceProvenance | str = EvidenceProvenance.INTERNAL_ONLY
+    search_backend: str = "none"  # "websearch" | "none"
+
+    @model_validator(mode="after")
+    def _no_fabricated_citations(self) -> "CritiquedItem":
+        """When no search backend ran, external citations cannot exist."""
+        if self.search_backend == "none":
+            if any(step.urls for step in self.search_trace):
+                raise ValueError(
+                    "search_backend is 'none' but search_trace contains URLs — "
+                    "citations without a search backend are fabricated evidence"
+                )
+            if any(entry.source_url for entry in self.glossary):
+                raise ValueError(
+                    "search_backend is 'none' but glossary entries carry "
+                    "source_url — citations without a search backend are "
+                    "fabricated evidence"
+                )
+            if self.evidence_provenance == EvidenceProvenance.EXTERNAL_AND_INTERNAL:
+                raise ValueError(
+                    "search_backend is 'none' but evidence_provenance claims "
+                    "external evidence"
+                )
+        return self
+
+
+class Phase05Partial(BaseModel):
+    """Output of Phase 05: critiqued findings."""
+    critiqued_items: list[CritiquedItem] = Field(default_factory=list)
+    source_files: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Queue payload (shared across all phases)
 # ---------------------------------------------------------------------------
 
@@ -725,6 +830,27 @@ def validate_reviewed_item(data: dict[str, Any]) -> tuple[ReviewedItem | None, l
             errors.append("property_id is empty")
         if not item.review_verdict:
             errors.append("review_verdict is empty")
+        return item, errors
+    except Exception as exc:
+        return None, [str(exc)]
+
+
+def validate_critiqued_item(data: dict[str, Any]) -> tuple[CritiquedItem | None, list[str]]:
+    """
+    Validate a raw dict as a CritiquedItem.
+
+    Returns:
+        (parsed_item, errors) – parsed_item is None when validation fails.
+    """
+    errors: list[str] = []
+    try:
+        item = CritiquedItem.model_validate(data)
+        if not item.property_id:
+            errors.append("property_id is empty")
+        if not item.critique_verdict:
+            errors.append("critique_verdict is empty")
+        if not item.rationale:
+            errors.append("rationale is empty")
         return item, errors
     except Exception as exc:
         return None, [str(exc)]

@@ -39,7 +39,7 @@ bash scripts/setup_mcp.sh --verify
 The async Python orchestrator manages the full lifecycle of each phase:
 
 1. **config.py** — `PhaseConfig` Pydantic models define each phase (prompt path, queue/output patterns, batch strategy, circuit breaker thresholds, cost limits, MCP servers, tool filters). All phases live in `PHASE_CONFIGS` dict.
-2. **base.py** — `BaseOrchestrator` loads inputs, validates with Pydantic schemas, filters already-processed items (resume), enriches with context, creates batches, executes in parallel via asyncio. Subclasses: `Phase01Orchestrator`, `Phase02cOrchestrator`, `Phase03Orchestrator`, `Phase04Orchestrator`.
+2. **base.py** — `BaseOrchestrator` loads inputs, validates with Pydantic schemas, filters already-processed items (resume), enriches with context, creates batches, executes in parallel via asyncio. Subclasses: `Phase01Orchestrator`, `Phase02cOrchestrator`, `Phase03Orchestrator`, `Phase04Orchestrator`, `Phase05Orchestrator`.
 3. **runner.py** — `ClaudeRunner` invokes `claude` CLI per batch with `--prompt-path`, `--stream-json`. Includes `CircuitBreaker` (consecutive failures, total retries, empty results) and retry with exponential backoff (max 3).
 4. **watchdog.py** — `LogWatcher` tails stream-json logs in real-time via async task; `CostTracker` enforces per-phase budget (hard stop on `BudgetExceeded`).
 5. **resume.py** — `ResumeManager` scans `PARTIAL_*.json` outputs, extracts processed IDs, enables incremental execution.
@@ -57,7 +57,11 @@ Phase IDs: `01a` → `01b` → `01e` → `02c` → `03` → `04`
 - **03** Audit Map: proof-based 3-phase formal audit (Map → Prove → Stress-Test) against target codebase. Tries to prove properties hold; gaps in proof are findings. Reads `outputs/TARGET_INFO.json` to auto-clone same target repository/commit. Inlined prompt (no skill fork). Model: Sonnet. Tools: Read/Write/Grep/Glob only.
 - **04** Review: 3-gate FP filter pipeline with early exit (Dead Code → Trust Boundary → Scope Check), then severity calibration. Only these 3 gates may produce DISPUTED_FP (recall-safe design). Verdicts: CONFIRMED_VULNERABILITY, CONFIRMED_POTENTIAL, DISPUTED_FP, DOWNGRADED, NEEDS_MANUAL_REVIEW, PASS_THROUGH. Model: Sonnet. Tools: Read/Write/Grep/Glob only (no MCP).
 
-Manual (not orchestrated): `05` PoC Generation, `06` Bug-Bounty Report, `06b` Full Audit Report.
+Opt-in (orchestrated, not in the default 01a→04 chain — run via `--phase 05` / `--target 05`):
+
+- **05** Finding Critique (issue #53): second-opinion audit of Phase 04 CONFIRMED_* findings. Encodes the senior-auditor loop: unknown-term extraction → external search (glossary with source URLs) → re-read finding → code re-verification → three-valued verdict (CONFIRMED / LIKELY_FP / INSUFFICIENT_CONTEXT) with structured trace. External search is pluggable (`--search-backend websearch|none`, default websearch = built-in WebSearch/WebFetch tools). With `none` the critique still runs on internal evidence only and records `evidence_provenance: internal-only`; the `CritiquedItem` schema rejects citations that no search backend could have produced. Recall-safe: LIKELY_FP requires concrete refuting evidence. Requires `outputs/TARGET_INFO.json`. Model: Sonnet.
+
+Manual (not orchestrated): `05_poc` PoC Generation (`prompts/05_poc.md`), `06` Bug-Bounty Report, `06b` Full Audit Report.
 
 ### Skills System
 
@@ -96,5 +100,6 @@ Phases 01e, 02c, 03, and 04 use **inlined prompts** (no skill fork) — all anal
 - `CLAUDE_CODE_PERMISSIONS=bypassPermissions` — Used in CI
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS=100000` — Used in CI
 - `GITHUB_PERSONAL_ACCESS_TOKEN` — For GitHub MCP server
+- `SPECA_SEARCH_BACKEND` — Phase 05 external-search backend (`websearch` or `none`). Equivalent to the `--search-backend` CLI flag (the flag wins when both are set).
 - `SPECA_ARCHIVE_ROOT` — Override the per-run archive root (default: `<cwd>/.speca/runs`). Use `--no-archive` to disable archiving entirely.
 - `SPECA_RUN_ID` — Pin a deterministic run-id (skips the timestamp+nonce generation). Useful for CI replay or for stitching together multi-invocation runs.
