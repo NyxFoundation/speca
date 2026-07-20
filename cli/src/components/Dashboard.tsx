@@ -140,6 +140,16 @@ export function Dashboard({ store, handle, cwd, onExit, readOnly = false, title 
         )}
       </Box>
 
+      {snapshot.warnings.length > 0 ? (
+        <Box borderStyle="round" flexDirection="column" paddingX={1} borderColor={theme.colors.warn}>
+          {snapshot.warnings.map((w, i) => (
+            <Text key={i} color={theme.colors.warn}>
+              warning: {w}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+
       {showDetail && selected ? <PhaseDetail snapshot={snapshot} phaseId={selected.id} /> : null}
       {showLogs ? <LogPane logs={snapshot.logs} maxRows={10} /> : null}
 
