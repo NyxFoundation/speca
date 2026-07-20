@@ -66,9 +66,18 @@ export interface PipelineSnapshot {
   endedAt?: string;
   /** Last failure / abort reason, surfaced in the status bar. */
   lastError?: string;
+  /**
+   * Non-fatal degradations from `warning` events (issue #98 — e.g. a phase
+   * running without its declared MCP servers). Rendered as a persistent
+   * dashboard panel: the orchestrator's stderr is discarded in TUI mode, so
+   * this stream is the only channel through which such warnings reach an
+   * interactive user. Capped at WARNING_CAPACITY (oldest dropped).
+   */
+  warnings: string[];
 }
 
 export const LOG_RING_CAPACITY = 500;
+export const WARNING_CAPACITY = 20;
 
 export function createInitialSnapshot(): PipelineSnapshot {
   return {
@@ -78,6 +87,7 @@ export function createInitialSnapshot(): PipelineSnapshot {
     workers: new Map(),
     logs: [],
     cost: { total_usd: 0, max_budget_usd: null },
+    warnings: [],
   };
 }
 
@@ -107,6 +117,7 @@ function cloneSnapshot(snap: PipelineSnapshot): PipelineSnapshot {
     startedAt: snap.startedAt,
     endedAt: snap.endedAt,
     lastError: snap.lastError,
+    warnings: [...snap.warnings],
   };
 }
 
@@ -175,6 +186,15 @@ export function applyPipelineEvent(prev: PipelineSnapshot, event: PipelineEvent)
       // Don't override budget-exceeded / circuit-broken which are more specific.
       if (snap.pipelineStatus === "running") {
         snap.pipelineStatus = allOk ? "completed" : "failed";
+      }
+      return snap;
+    }
+    case "warning": {
+      // Non-fatal: never touches pipeline/phase status. Kept in a capped
+      // list so the dashboard can render them persistently (issue #98).
+      snap.warnings.push(`[${event.phase}] ${event.message}`);
+      if (snap.warnings.length > WARNING_CAPACITY) {
+        snap.warnings = snap.warnings.slice(-WARNING_CAPACITY);
       }
       return snap;
     }
