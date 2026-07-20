@@ -41,6 +41,7 @@ const EVENT_SCHEMA_NAMES = [
   "BudgetExceededEvent.schema.json",
   "CircuitBreakerTrippedEvent.schema.json",
   "PipelineCompletedEvent.schema.json",
+  "WarningEvent.schema.json",
 ];
 
 function fail(message) {
