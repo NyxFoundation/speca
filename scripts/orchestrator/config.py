@@ -157,12 +157,36 @@ class PhaseConfig(BaseModel):
     # Fields to keep in partial output files saved by the collector.
     # None = all fields (no filtering).
     output_fields: list[str] | None = None
+    # Deterministic upstream fields the orchestrator itself carries across
+    # this phase (input item -> result record, keyed by the result ID field).
+    # These are additive provenance fields (e.g. the lean provider's
+    # lean_status / lean_artifact / kurtosis_test, speca#88) that workers
+    # never receive (context_fields strips them) and therefore never echo.
+    # The orchestrator merges them into results after the runner returns,
+    # and the collector exempts them from output_fields compaction. The
+    # deterministic upstream value always overwrites a same-named field in
+    # worker output — a collision can only be fabricated.
+    passthrough_fields: list[str] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def effective_result_id_field(self) -> str:
         """ID field name in result items. Falls back to item_id_field."""
         return self.result_id_field or self.item_id_field
+
+
+# Additive provenance fields attached by the Lean property provider
+# (speca#88, additive-only contract). They are deterministic facts about a
+# property — never LLM output — and must survive every downstream phase so
+# the post-04 Kurtosis verification backend (speca#92) can read
+# ``kurtosis_test`` from the final results. Phases 02c/03/04 carry them via
+# ``passthrough_fields``; Phase 01e's provider path bypasses output
+# compaction entirely (see Phase01Orchestrator._run_01e_with_provider).
+LEAN_PROVENANCE_FIELDS: list[str] = [
+    "lean_status",
+    "lean_artifact",
+    "kurtosis_test",
+]
 
 
 # Phase configurations - ALL use token-based batching
@@ -309,6 +333,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
                          "covers", "reachability", "exploitability", "_id_prefix"],
         output_fields=["property_id", "text", "type", "assertion", "severity",
                         "covers", "reachability", "exploitability", "code_scope", "code_excerpt"],
+        passthrough_fields=list(LEAN_PROVENANCE_FIELDS),
     ),
 
     "03": PhaseConfig(
@@ -341,6 +366,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         context_fields=["property_id", "text", "type", "assertion", "severity",
                          "covers", "reachability", "exploitability",
                          "code_scope", "code_excerpt"],
+        passthrough_fields=list(LEAN_PROVENANCE_FIELDS),
     ),
 
     "04": PhaseConfig(
@@ -362,6 +388,7 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         tools_filter=["Read", "Write", "Grep", "Glob"],
         context_fields=["property_id", "audit_result", "text", "assertion",
                          "covers", "severity", "type"],
+        passthrough_fields=list(LEAN_PROVENANCE_FIELDS),
     ),
 
     # ------------------------------------------------------------------

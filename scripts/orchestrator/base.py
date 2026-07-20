@@ -173,6 +173,11 @@ class BaseOrchestrator(ABC):
         self._batch_counter = 0
         self._circuit_breaker_tripped = False
         self._budget_exceeded = False
+
+        # {item_id -> {field: value}} index of deterministic passthrough
+        # fields (config.passthrough_fields) built from the loaded input
+        # items. See _build_passthrough_lookup / _apply_passthrough.
+        self._passthrough_lookup: dict[str, dict[str, Any]] = {}
     
     def _create_batch_strategy(self) -> BatchStrategy:
         """Create the appropriate batch strategy based on config."""
@@ -290,6 +295,11 @@ class BaseOrchestrator(ABC):
         all_items = self.load_items()
         print(f"Loaded {len(all_items)} items")
 
+        # Index deterministic passthrough fields (e.g. lean provenance,
+        # speca#88) before any filtering so every produced result — batch,
+        # early-exit or disk-recovered — can be re-hydrated by ID.
+        self._build_passthrough_lookup(all_items)
+
         if not all_items:
             print("No items to process. Exiting.")
             return
@@ -311,9 +321,18 @@ class BaseOrchestrator(ABC):
         print(f"Early exit: {len(early_exit_results)} items")
         print(f"To process: {len(items_to_process)} items")
 
-        # Persist early-exit results so resume sees them
+        # Persist early-exit results so resume sees them. Skip/pass-through
+        # records are rebuilt from scratch by the builders, so re-attach the
+        # passthrough provenance fields before saving.
         if early_exit_results:
-            self.collector.save_partial(early_exit_results, 0, 0)
+            self._apply_passthrough(early_exit_results)
+            # Reserve a dedicated batch slot: the first worker batch is also
+            # (worker 0, batch 0), and if it completes within the same
+            # second its PARTIAL filename collides with this one and
+            # silently overwrites the early-exit records.
+            early_exit_batch = self._batch_counter
+            self._batch_counter += 1
+            self.collector.save_partial(early_exit_results, 0, early_exit_batch)
 
         # Step 3: Enrich items (phase-specific)
         enriched_items = self.enrich_items(items_to_process)
@@ -551,6 +570,68 @@ class BaseOrchestrator(ABC):
         """
         return items
 
+    # ------------------------------------------------------------------
+    # Additive passthrough fields (speca#88 / speca#92)
+    # ------------------------------------------------------------------
+
+    def _build_passthrough_lookup(self, items: list[dict[str, Any]]) -> None:
+        """Index deterministic passthrough field values by input item ID.
+
+        ``config.passthrough_fields`` names additive provenance fields
+        (e.g. the lean provider's ``lean_status`` / ``lean_artifact`` /
+        ``kurtosis_test``) that upstream phases attach to items but that
+        workers never receive (``context_fields`` strips them) and
+        therefore cannot echo. The orchestrator itself carries them across
+        the phase: values indexed here are merged back into result records
+        by :meth:`_apply_passthrough` before every save.
+        """
+        if not self.config.passthrough_fields:
+            return
+        id_field = self.config.item_id_field
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = item.get(id_field)
+            if key is None or key == "":
+                continue
+            values = {
+                field: item[field]
+                for field in self.config.passthrough_fields
+                if field in item
+            }
+            if values:
+                self._passthrough_lookup[str(key)] = values
+
+    def _apply_passthrough(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Attach indexed passthrough fields to result records by ID.
+
+        Mutates *results* in place and returns it. Passthrough fields are
+        trusted only when the upstream input item provided them: the
+        deterministic upstream value always overwrites a same-named field
+        in worker output, and a passthrough-named field with **no**
+        upstream source is dropped — workers never receive these fields,
+        so any value they emit under these names is fabricated.
+        """
+        if not self.config.passthrough_fields:
+            return results
+        result_id_field = self.config.effective_result_id_field
+        for record in results:
+            if not isinstance(record, dict):
+                continue
+            key = record.get(result_id_field)
+            values: dict[str, Any] = {}
+            if key is not None and key != "":
+                values = self._passthrough_lookup.get(str(key), {})
+            for field in self.config.passthrough_fields:
+                if field in values:
+                    record[field] = values[field]
+                else:
+                    record.pop(field, None)
+        return results
+
     def _recover_partial_from_disk(
         self,
         worker_id: int,
@@ -615,11 +696,16 @@ class BaseOrchestrator(ABC):
                     if result is None:
                         self.failed_batches.append((worker_id, batch_index))
                     else:
+                        # Re-attach deterministic passthrough fields the
+                        # worker never saw (speca#88 lean provenance).
+                        self._apply_passthrough(result)
                         self.results.extend(result)
                         if result:
                             self.collector.save_partial(result, worker_id, batch_index)
                         else:
-                            recovered = self._recover_partial_from_disk(worker_id, batch_index)
+                            recovered = self._apply_passthrough(
+                                self._recover_partial_from_disk(worker_id, batch_index)
+                            )
                             if recovered:
                                 print(
                                     f"[W{worker_id}] Batch {batch_index}: recovered {len(recovered)} item(s) from disk after empty stdout result",
@@ -1562,11 +1648,19 @@ class Phase04Orchestrator(BaseOrchestrator):
                                 f"    ⚠️  {filepath} item {prop_id}: {err}",
                                 file=sys.stderr,
                             )
-                    items_dict[prop_id] = {
+                    wrapper = {
                         "property_id": prop_id,
                         "audit_result": item,
                         "source_file": filepath,
                     }
+                    # Lift additive passthrough provenance (speca#88) from
+                    # the Phase 03 audit item to the wrapper's top level so
+                    # the generic passthrough lookup (keyed on top-level
+                    # item fields) can carry it into Phase 04 results.
+                    for field in self.config.passthrough_fields:
+                        if field in item:
+                            wrapper[field] = item[field]
+                    items_dict[prop_id] = wrapper
             except Exception as e:
                 print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
 

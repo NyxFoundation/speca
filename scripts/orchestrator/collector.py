@@ -101,10 +101,19 @@ class ResultCollector:
             if isinstance(item, dict) and id_field in item
         ]
 
-        # Apply output field filtering if configured
+        # Apply output field filtering if configured. Passthrough fields
+        # (deterministic provenance the orchestrator carries across the
+        # phase, e.g. lean_status / kurtosis_test — speca#88/#92) are exempt
+        # from compaction: the filter exists to strip stray worker-invented
+        # fields, and passthrough values are merged in by the orchestrator,
+        # not the worker.
         if self.config.output_fields:
+            keep = list(self.config.output_fields)
+            for field in self.config.passthrough_fields:
+                if field not in keep:
+                    keep.append(field)
             results = [
-                {k: item[k] for k in self.config.output_fields if k in item}
+                {k: item[k] for k in keep if k in item}
                 for item in results
                 if isinstance(item, dict)
             ]
