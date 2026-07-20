@@ -1,0 +1,170 @@
+name: "05. Finding Critique"
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: 'Number of parallel workers'
+        required: false
+        type: number
+        default: 4
+      max_concurrent:
+        description: 'Max concurrent Claude calls'
+        required: false
+        type: number
+        default: 64
+      search_backend:
+        description: 'External-search backend (none = internal evidence only)'
+        required: false
+        type: choice
+        options:
+          - websearch
+          - none
+        default: websearch
+
+permissions:
+  contents: write
+
+jobs:
+  finding-critique:
+    if: ${{ github.actor == 'grandchildrice' || github.actor == 'hirorogo' }}
+    runs-on: self-hosted
+
+    env:
+      CLAUDE_CODE_PERMISSIONS: bypassPermissions
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
+
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Update Scripts and Prompts from Remote
+        run: |
+          set -e
+          echo "Syncing scripts and prompts with remote branch..."
+          git fetch --prune origin
+          git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
+
+      - name: Load Target Info
+        id: target_info
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "outputs/TARGET_INFO.json" ]; then
+            echo "ERROR: outputs/TARGET_INFO.json not found!"
+            echo "This branch must be created from Phase 02c workflow."
+            exit 1
+          fi
+
+          TARGET_REPO="$(jq -r '.target_repo' outputs/TARGET_INFO.json)"
+          TARGET_REF_TYPE="$(jq -r '.target_ref_type' outputs/TARGET_INFO.json)"
+          TARGET_REF_LABEL="$(jq -r '.target_ref_label' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT="$(jq -r '.target_commit' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT_SHORT="$(jq -r '.target_commit_short' outputs/TARGET_INFO.json)"
+
+          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_TYPE=${TARGET_REF_TYPE}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_LABEL=${TARGET_REF_LABEL}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=${TARGET_COMMIT}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT_SHORT=${TARGET_COMMIT_SHORT}" >> "$GITHUB_ENV"
+
+          echo "target_repo=${TARGET_REPO}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_type=${TARGET_REF_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "target_ref_label=${TARGET_REF_LABEL}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${TARGET_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${TARGET_COMMIT_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=$(basename "${TARGET_REPO}")" >> "$GITHUB_OUTPUT"
+
+          echo "Loaded target info:"
+          echo "  Repository: ${TARGET_REPO}"
+          echo "  Ref: ${TARGET_REF_LABEL}"
+          echo "  Commit: ${TARGET_COMMIT_SHORT}"
+
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_COMMIT }}
+          fetch-depth: 0
+          path: target_workspace
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            echo "claude already installed; skipping"
+          else
+            npm install -g @anthropic-ai/claude-code
+          fi
+
+      - name: Setup MCP Servers
+        run: FILESYSTEM_DIRS=". target_workspace" bash scripts/setup_mcp.sh
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Git
+        run: |
+          git config --local user.name "Security Agent Bot"
+          git config --local user.email "bot@nyxfoundation.org"
+
+      - name: Ensure default branch merged into branch
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          if git merge-base --is-ancestor "origin/${DEFAULT_BRANCH}" HEAD; then
+            echo "Branch already contains origin/${DEFAULT_BRANCH}"
+          else
+            git merge --no-edit "origin/${DEFAULT_BRANCH}"
+          fi
+
+      - name: "Pre-flight: Schema & Config Tests"
+        run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: Reset Phase 05 outputs
+        run: find outputs -type f -name '05_*' -delete 2>/dev/null || true
+
+      - name: "Step 05: Finding Critique (Parallel)"
+        run: >
+          uv run python3 scripts/run_phase.py --phase 05
+          --workers ${{ inputs.workers }}
+          --max-concurrent ${{ inputs.max_concurrent }}
+          --search-backend ${{ inputs.search_backend }}
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Results
+        if: success() || failure()
+        run: |
+          git add outputs/ ':!outputs/logs/'
+          if ! git diff --staged --quiet; then
+            git add outputs/logs/
+            git commit -m "05: finding critique for ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }}"
+            git push origin "${{ github.ref_name }}" --force-with-lease
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Finding Critique Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Search backend: \`${{ inputs.search_backend }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target repo: \`${{ env.TARGET_REPO }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target ref: \`${{ env.TARGET_REF_LABEL }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit: \`${{ steps.target_info.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Target commit (full): \`${{ steps.target_info.outputs.full_sha }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: finding-critique-logs-${{ github.run_id }}
+          path: outputs/logs/
+          retention-days: 7

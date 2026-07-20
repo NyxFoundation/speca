@@ -142,6 +142,14 @@ class PhaseConfig(BaseModel):
     # "kurtosis" = NyxFoundation/kurtosis-harness (external plugin).
     verification_backend: str = "none"
 
+    # Which external-search backend the Phase 05 critique worker gets.
+    # "none" (default for non-05 phases) = no search tools.
+    # "websearch" = Claude Code built-in WebSearch/WebFetch tools.
+    # When "none" is selected for Phase 05, the critique degrades gracefully:
+    # it runs on internal evidence only and records that in its output
+    # (evidence_provenance = "internal-only"). See providers.SearchBackend.
+    search_backend: str = "none"
+
     # ---- Context / output field filtering ----
     # Fields to include in the context file sent to workers.
     # None = all fields (no filtering).
@@ -354,6 +362,49 @@ PHASE_CONFIGS: dict[str, PhaseConfig] = {
         tools_filter=["Read", "Write", "Grep", "Glob"],
         context_fields=["property_id", "audit_result", "text", "assertion",
                          "covers", "severity", "type"],
+    ),
+
+    # ------------------------------------------------------------------
+    # Phase 05 — Finding Critique (issue #53)
+    #
+    # Second-opinion audit of Phase 04 CONFIRMED_* findings. Encodes the
+    # senior-auditor loop: extract unfamiliar terms -> external search
+    # (glossary with source URLs) -> re-read the finding -> re-verify the
+    # cited code -> three-valued verdict with a structured trace.
+    #
+    # NOT part of the default 01a..04 chain: nothing depends on "05", so
+    # `--target 04` and every existing workflow are unchanged. Run it
+    # explicitly via `--phase 05` or `--target 05`.
+    #
+    # External search is pluggable (see providers.SearchBackend). The
+    # default backend is "websearch" (Claude Code built-in WebSearch /
+    # WebFetch tools). With --search-backend none the phase still runs,
+    # on internal evidence only, and its output says so.
+    # ------------------------------------------------------------------
+    "05": PhaseConfig(
+        phase_id="05",
+        name="Finding Critique",
+        description="Second-opinion critique of confirmed findings with external search",
+        skill_path=Path("prompts/05_critique_worker.md"),  # Unused — inlined
+        prompt_path=Path("prompts/05_critique_worker.md"),
+        queue_pattern="outputs/05_QUEUE_{worker_id}.json",
+        output_pattern="outputs/05_PARTIAL_*.json",
+        depends_on=["04"],
+        input_patterns=["outputs/04_PARTIAL_*.json"],
+        batch_strategy="count",
+        max_batch_size=1,  # One finding per critique session
+        item_id_field="property_id",
+        result_key="critiqued_items",
+        model="sonnet",
+        max_budget_usd=50.0,
+        mcp_servers=[],  # No MCP — built-in tools only
+        # Read/Grep/Glob for code re-verification, Write for the output
+        # file. WebSearch/WebFetch come from the search backend and are
+        # stripped by the factory when --search-backend none.
+        tools_filter=["Read", "Write", "Grep", "Glob", "WebSearch", "WebFetch"],
+        search_backend="websearch",
+        context_fields=["property_id", "review", "audit_result", "text",
+                         "assertion", "covers", "severity", "type"],
     ),
 }
 

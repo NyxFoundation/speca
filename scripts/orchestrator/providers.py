@@ -36,6 +36,12 @@ class VerificationBackendName(str, Enum):
     KURTOSIS = "kurtosis"  # E2E via NyxFoundation/kurtosis-harness (external)
 
 
+class SearchBackendName(str, Enum):
+    """Recognised external-search backend names for Phase 05 (finding critique)."""
+    WEBSEARCH = "websearch"  # default — Claude Code built-in WebSearch/WebFetch tools
+    NONE = "none"            # degraded mode — critique runs on internal evidence only
+
+
 # ---------------------------------------------------------------------------
 # Property provider interface + implementations
 # ---------------------------------------------------------------------------
@@ -474,6 +480,63 @@ class KurtosisVerificationBackend:
 
 
 # ---------------------------------------------------------------------------
+# Search backend interface + implementations (Phase 05 — finding critique)
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class SearchBackend(Protocol):
+    """Supplies external-search capability to the Phase 05 critique worker.
+
+    The critique worker is a Claude CLI session; external search is delivered
+    to it as *tools* (via the phase's ``tools_filter``), not as pre-fetched
+    data. A backend therefore declares:
+
+    - ``worker_tools()`` — the tool names to append to the phase tool filter.
+    - ``provenance()`` — the ``evidence_provenance`` value the worker must
+      record when this backend is active, so the output schema always carries
+      an honest statement of where the evidence came from.
+    """
+
+    name: str
+
+    def worker_tools(self) -> list[str]:
+        ...
+
+    def provenance(self) -> str:
+        ...
+
+
+class WebSearchBackend:
+    """Default backend — Claude Code built-in WebSearch/WebFetch tools."""
+
+    name = SearchBackendName.WEBSEARCH.value
+
+    def worker_tools(self) -> list[str]:
+        return ["WebSearch", "WebFetch"]
+
+    def provenance(self) -> str:
+        return "external+internal"
+
+
+class NullSearchBackend:
+    """Degraded mode — no search backend configured.
+
+    The critique still runs (term extraction, re-read, code re-verification)
+    but on internal evidence only. No search tools are exposed to the worker,
+    and the output must record ``evidence_provenance = internal-only`` with
+    no external citations (enforced by ``schemas.CritiquedItem``).
+    """
+
+    name = SearchBackendName.NONE.value
+
+    def worker_tools(self) -> list[str]:
+        return []
+
+    def provenance(self) -> str:
+        return "internal-only"
+
+
+# ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
 
@@ -512,3 +575,21 @@ def resolve_verification_backend(name: str | VerificationBackendName) -> Verific
             f"Unknown verification backend: {name!r}. Valid backends: {valid}."
         ) from exc
     return _BACKENDS[key]()
+
+
+_SEARCH_BACKENDS = {
+    SearchBackendName.WEBSEARCH: WebSearchBackend,
+    SearchBackendName.NONE: NullSearchBackend,
+}
+
+
+def resolve_search_backend(name: str | SearchBackendName) -> SearchBackend:
+    """Return the SearchBackend instance for *name*."""
+    try:
+        key = SearchBackendName(name)
+    except ValueError as exc:
+        valid = ", ".join(n.value for n in SearchBackendName)
+        raise ValueError(
+            f"Unknown search backend: {name!r}. Valid backends: {valid}."
+        ) from exc
+    return _SEARCH_BACKENDS[key]()

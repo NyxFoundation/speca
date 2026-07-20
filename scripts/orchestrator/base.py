@@ -39,6 +39,7 @@ from .schemas import (
     Phase01ePartial,
     Phase02cPartial,
     Phase03Partial,
+    Phase04Partial,
     AuditMapItem,
     Severity,
     validate_audit_map_item,
@@ -1663,6 +1664,163 @@ class Phase04Orchestrator(BaseOrchestrator):
         MERGE_FIELDS = ["text", "assertion", "covers", "severity", "type"]
         for item in items:
             pid = item.get("property_id", "")
+            upstream = prop_lookup.get(pid, {})
+            for field in MERGE_FIELDS:
+                if field not in item and field in upstream:
+                    item[field] = upstream[field]
+
+        return items
+
+
+class Phase05Orchestrator(BaseOrchestrator):
+    """Orchestrator for Phase 05 (Finding Critique — issue #53).
+
+    Consumes Phase 04 reviewed items. Only findings Phase 04 confirmed
+    (CONFIRMED_VULNERABILITY / CONFIRMED_POTENTIAL) are critiqued by the
+    LLM; everything else early-exits as PASS_THROUGH so a full 05 run
+    still produces one record per reviewed item.
+    """
+
+    # Only confirmed findings receive a second-opinion critique.
+    _NEEDS_CRITIQUE = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL"}
+
+    @property
+    def _required_files(self) -> list[str]:
+        root = get_output_root()
+        return [str(root / "TARGET_INFO.json")]
+
+    def load_items(self) -> list[dict[str, Any]]:
+        """Load reviewed items from 04 partials with Pydantic validation."""
+        import glob
+
+        for path in self._required_files:
+            if not Path(path).exists():
+                raise PhaseAbortError(
+                    f"{path} not found. "
+                    f"Phase 05 requires this file to re-verify cited code "
+                    f"against the same target repository/commit."
+                )
+
+        items_dict: dict[str, dict] = {}  # keyed by property_id for dedup
+        validation_warnings = 0
+        for filepath in sorted(glob.glob(str(get_output_root() / "04_PARTIAL_*.json"))):
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    data = json.load(f)
+
+                try:
+                    Phase04Partial.model_validate(data)
+                except ValidationError as ve:
+                    _log_validation_warning(filepath, ve, prefix="04→05")
+                    validation_warnings += 1
+
+                reviewed_items = data.get("reviewed_items", [])
+                for item in reviewed_items:
+                    if not isinstance(item, dict):
+                        continue
+                    prop_id = item.get("property_id") or item.get("check_id")
+                    if not prop_id:
+                        continue
+                    parsed, errs = validate_reviewed_item(item)
+                    if errs:
+                        for err in errs:
+                            print(
+                                f"    ⚠️  {filepath} item {prop_id}: {err}",
+                                file=sys.stderr,
+                            )
+                    items_dict[prop_id] = {
+                        "property_id": prop_id,
+                        "review": item,
+                        "source_file": filepath,
+                    }
+            except Exception as e:
+                print(f"Warning: Failed to load {filepath}: {e}", file=sys.stderr)
+
+        if validation_warnings:
+            print(
+                f"⚠️  {validation_warnings} file(s) had schema validation warnings (04→05)",
+                file=sys.stderr,
+            )
+
+        return list(items_dict.values())
+
+    def apply_early_exit(
+        self,
+        items: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Only Phase 04 CONFIRMED_* findings go to the LLM critique."""
+        early_exit_results = []
+        items_to_process = []
+
+        for item in items:
+            review = item.get("review", {})
+            verdict = str(review.get("review_verdict", ""))
+
+            if verdict in self._NEEDS_CRITIQUE:
+                items_to_process.append(item)
+            else:
+                early_exit_results.append({
+                    "property_id": item.get("property_id", ""),
+                    "prior_verdict": verdict,
+                    "critique_verdict": "PASS_THROUGH",
+                    "glossary": [],
+                    "search_trace": [],
+                    "code_rechecks": [],
+                    "related_cves": [],
+                    "rationale": (
+                        f"Auto-passed: Phase 04 verdict was "
+                        f"{verdict or '<empty>'} — only confirmed findings "
+                        f"are critiqued."
+                    ),
+                    "evidence_provenance": "internal-only",
+                    "search_backend": "none",
+                })
+
+        return early_exit_results, items_to_process
+
+    def enrich_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attach the Phase 03 audit result and 02c property fields.
+
+        The critique worker needs the original finding (summary, attack
+        scenario, cited code locations) to re-read it, and the property
+        text/assertion for context. Missing upstream files degrade to
+        less context, never to a crash.
+        """
+        import glob as glob_mod
+
+        # Original Phase 03 finding, keyed by property_id
+        audit_lookup: dict[str, dict[str, Any]] = {}
+        for filepath in sorted(glob_mod.glob(str(get_output_root() / "03_PARTIAL_*.json"))):
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    data = json.load(f)
+                for audit_item in data.get("audit_items", []):
+                    if not isinstance(audit_item, dict):
+                        continue
+                    pid = audit_item.get("property_id") or audit_item.get("check_id", "")
+                    if pid:
+                        audit_lookup[pid] = audit_item
+            except Exception:
+                pass
+
+        # Property fields from 02c PARTIALs
+        prop_lookup: dict[str, dict[str, Any]] = {}
+        for filepath in sorted(glob_mod.glob(str(get_output_root() / "02c_PARTIAL_*.json"))):
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    data = json.load(f)
+                for prop in data.get("properties_with_code", []):
+                    pid = prop.get("property_id", "")
+                    if pid:
+                        prop_lookup[pid] = prop
+            except Exception:
+                pass
+
+        MERGE_FIELDS = ["text", "assertion", "covers", "severity", "type"]
+        for item in items:
+            pid = item.get("property_id", "")
+            if "audit_result" not in item and pid in audit_lookup:
+                item["audit_result"] = audit_lookup[pid]
             upstream = prop_lookup.get(pid, {})
             for field in MERGE_FIELDS:
                 if field not in item and field in upstream:

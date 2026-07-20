@@ -148,6 +148,7 @@ def _build_env_snapshot(
     phases: list[str],
     property_provider: str = "prompt",
     verification_backend: str = "none",
+    search_backend: str | None = None,
 ) -> dict:
     """Capture a sanitised snapshot of the runtime environment.
 
@@ -163,6 +164,7 @@ def _build_env_snapshot(
         "ORCHESTRATOR_RUNNER": runtime_registry.resolve_active(),
         "SPECA_PROPERTY_PROVIDER": property_provider,
         "SPECA_VERIFICATION_BACKEND": verification_backend,
+        "SPECA_SEARCH_BACKEND": search_backend or "",
         "phases": phases,
     }
 
@@ -475,6 +477,7 @@ async def run_phase(
     dataset_source: str | None = None,
     enable_refinement: bool = False,
     verification_backend: str = "none",
+    search_backend: str | None = None,
     emitter: JsonEventEmitter | None = None,
     archiver: Archiver | None = None,
 ) -> bool:
@@ -587,6 +590,7 @@ async def run_phase(
             archiver=archiver,
             property_provider=property_provider,
             verification_backend=verification_backend,
+            search_backend=search_backend,
         )
 
         # Apply dataset source / refinement toggle to the config when relevant.
@@ -701,6 +705,7 @@ async def run_pipeline(
     dataset_source: str | None = None,
     enable_refinement: bool = False,
     verification_backend: str = "none",
+    search_backend: str | None = None,
     target_phase: str | None = None,
     emitter: JsonEventEmitter | None = None,
     archiver: Archiver | None = None,
@@ -721,6 +726,7 @@ async def run_pipeline(
             dataset_source=dataset_source,
             enable_refinement=enable_refinement,
             verification_backend=verification_backend,
+            search_backend=search_backend,
             emitter=emitter,
             archiver=archiver,
         )
@@ -844,6 +850,18 @@ def main():
         default="none",
         choices=["none", "kurtosis"],
         help="Post-04 verification/reproduction backend (default: none).",
+    )
+    parser.add_argument(
+        "--search-backend",
+        default=None,
+        choices=["websearch", "none"],
+        help="External-search backend for phase 05 (finding critique). "
+             "'websearch' (phase default) exposes the built-in WebSearch/WebFetch "
+             "tools to the critique worker; 'none' runs the critique on internal "
+             "evidence only and records that in the output "
+             "(evidence_provenance = internal-only). Also settable via "
+             "SPECA_SEARCH_BACKEND env var; the CLI flag takes precedence. "
+             "Ignored for phases other than 05.",
     )
 
     # Phase 01a: discovery seed inputs
@@ -994,6 +1012,10 @@ def main():
         # parameter-less helper called from inside run_phase) can pick it up.
         os.environ["SPECA_01A_SCOPE"] = args.scope_01a
 
+    # Resolve the phase-05 search backend: CLI flag > env var > phase default
+    # (None means "use the PhaseConfig default", i.e. websearch for 05).
+    search_backend = args.search_backend or os.environ.get("SPECA_SEARCH_BACKEND") or None
+
     # Determine execution order
     if args.target:
         phases = get_phase_chain(args.target)
@@ -1022,6 +1044,7 @@ def main():
             phases,
             property_provider=args.property_provider,
             verification_backend=args.verification_backend,
+            search_backend=search_backend,
         ))
         archiver.set_commit(_get_short_sha())
         # Capture spec sources from SPEC_URLS env (CLI --spec-urls promoted
@@ -1081,6 +1104,7 @@ def main():
                 dataset_source=args.dataset_source,
                 enable_refinement=args.enable_refinement,
                 verification_backend=args.verification_backend,
+                search_backend=search_backend,
                 target_phase=args.target if args.target else None,
                 emitter=emitter,
                 archiver=archiver,
