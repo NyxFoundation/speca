@@ -43,6 +43,161 @@ class SearchBackendName(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Plugin pin enforcement (issue #87 Task 6 — operative, not decorative)
+# ---------------------------------------------------------------------------
+
+def _verify_plugin_checkout_pin(
+    *,
+    plugin_ref: str,
+    plugin_dir: Path,
+    pinned_commit: str | None,
+    pinned_version: str | None,
+    override_env: str,
+) -> None:
+    """Enforce that *plugin_dir* is actually at the pinned plugin version.
+
+    Shared by every external-plugin boundary (lean -> speca-lean4-plugin,
+    kurtosis -> kurtosis-harness). A shape check alone says nothing about
+    *which* version a checkout is, so a stale plugin dir or cache would
+    silently run the wrong code (issue #87: pins must be enforced, not just
+    declared). Policy, strongest evidence first:
+
+    - *pinned_commit* set (the normal case): ``git rev-parse HEAD`` must
+      equal it. Commits are immutable; tags can be moved upstream, so the
+      commit is the operative pin and the tag (*pinned_version*) is the
+      human-readable label. Mismatch -> hard error (set *override_env* =1 to
+      downgrade to a warning, e.g. for local plugin development).
+    - *pinned_commit* unset: fall back to tag comparison — a tag at HEAD
+      matching *pinned_version* verifies; tags at HEAD but none matching ->
+      hard error (same override).
+    - No commit/tag readable (not a git checkout, git missing/timing out, or
+      *plugin_dir* is a plain directory nested inside some OTHER repo —
+      ``git -C`` would silently report the outer repo's state, so containment
+      is checked first) -> loud warning, not an error — we cannot verify, and
+      an honest "unverified" beats a false "verified".
+
+    Scope note: verification is commit-level, not content-level — a dirty
+    working tree on the pinned commit still passes. That is the intended
+    threat model: the pin guards against *stale/wrong-version* checkouts
+    (the failure mode a cache or env var actually produces), not against
+    deliberate local modification, which an attacker with filesystem access
+    could defeat anyway.
+    """
+    import os
+    import subprocess
+    import sys
+
+    pin_label = pinned_version or pinned_commit
+
+    def _unverified(reason: str) -> None:
+        print(
+            f"warning: cannot verify {plugin_ref} checkout at "
+            f"{plugin_dir} is {pin_label} ({reason}); "
+            "proceeding unverified.",
+            file=sys.stderr,
+        )
+
+    def _mismatch(actual: str) -> None:
+        expected = pin_label
+        if pinned_commit and pinned_version and pinned_commit != pinned_version:
+            expected = f"{pinned_version} ({pinned_commit})"
+        msg = (
+            f"{plugin_ref} checkout at {plugin_dir} is at "
+            f"{actual}, but the provider pins {expected}."
+        )
+        if os.environ.get(override_env) == "1":
+            print(
+                f"warning: {msg} Proceeding because {override_env}=1.",
+                file=sys.stderr,
+            )
+            return
+        raise RuntimeError(
+            f"{msg} Use a {pin_label} checkout, set {override_env}=1 to "
+            "override (local plugin development only), or — if the pin "
+            "itself is being bumped — update plugin_version AND "
+            "plugin_commit together at the resolution point."
+        )
+
+    if not (pinned_commit or pinned_version):
+        return
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(plugin_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if top.returncode != 0:
+            _unverified("not a git checkout")
+            return
+        toplevel = Path(top.stdout.strip())
+        if toplevel.resolve() != plugin_dir.resolve():
+            # git -C resolved to an enclosing repository, not the plugin
+            # dir itself; its commits/tags would describe the wrong repo.
+            _unverified(
+                f"directory is not a git toplevel; git resolves to {toplevel}"
+            )
+            return
+        if pinned_commit:
+            head = subprocess.run(
+                ["git", "-C", str(plugin_dir), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if head.returncode != 0 or not head.stdout.strip():
+                _unverified("HEAD commit not readable")
+                return
+            head_sha = head.stdout.strip()
+            if head_sha == pinned_commit:
+                return  # verified — the strongest evidence available
+            # Read tags purely for a diagnosable error message. The mismatch
+            # is already established; a failing tag probe must not downgrade
+            # it to an "unverified" warning.
+            actual = f"commit {head_sha}"
+            try:
+                tag_probe = subprocess.run(
+                    ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
+                    capture_output=True, text=True, timeout=60,
+                )
+                tags = [t.strip() for t in tag_probe.stdout.splitlines() if t.strip()]
+                if tags:
+                    actual += f" (tags: {'/'.join(tags)})"
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            _mismatch(actual)
+            return
+        # Tag-only pin (no commit recorded) — weaker, but still enforced.
+        proc = subprocess.run(
+            ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        _unverified(f"git unavailable: {exc}")
+        return
+    tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
+    if proc.returncode != 0 or not tags:
+        _unverified("no tag readable at HEAD")
+        return
+    if pinned_version not in tags:
+        _mismatch("/".join(tags))
+
+
+def _enforce_plugin_pin(plugin):
+    """Resolve-time pin hook: verify any locally-resolvable plugin checkout.
+
+    Called by :func:`resolve_provider` / :func:`resolve_verification_backend`
+    so the pin is operative at the resolution seam itself (issue #87 Task 6),
+    not only deep inside ``generate()``. Plugins expose an optional
+    ``verify_plugin_pin()``; resolution stays cheap and offline — the hook
+    only inspects checkouts that are already configured locally (env var),
+    never clones. The auto-clone path re-verifies at its own resolution
+    point inside ``generate()``, so every path to a plugin checkout is
+    covered.
+    """
+    verify = getattr(plugin, "verify_plugin_pin", None)
+    if verify is not None:
+        verify()
+    return plugin
+
+
+# ---------------------------------------------------------------------------
 # Property provider interface + implementations
 # ---------------------------------------------------------------------------
 
@@ -140,9 +295,16 @@ class LeanPropertyProvider:
 
     plugin_ref = "NyxFoundation/speca-lean4-plugin"
     # Version pin for the external plugin boundary (issue #87 requires plugin
-    # boundaries to be version-pinned). Pinned to the plugin's F1 release
-    # (speca-lean4-plugin#8).
+    # boundaries to be version-pinned AND enforced). Pinned to the plugin's
+    # F1 release (speca-lean4-plugin#8). plugin_version is the human-readable
+    # tag (CI clones `--branch <plugin_version>`; the workflow reads it as the
+    # single source of truth); plugin_commit is the commit that tag pointed at
+    # when the pin was taken and is what enforcement compares against — tags
+    # can be moved upstream, commits cannot. Bump BOTH together; a tag moved
+    # away from plugin_commit fails resolution loudly (that is the pin
+    # working, not a bug).
     plugin_version: str | None = "v0.1.0"
+    plugin_commit: str | None = "aa123f340bb960ca2d3e7ee0bfb4b119aa495182"
 
     subprocess_timeout_s = 1800
 
@@ -151,90 +313,40 @@ class LeanPropertyProvider:
         return (path / "src" / "speca_lean4").is_dir()
 
     def _verify_plugin_version(self, plugin_dir: Path) -> None:
-        """Enforce that *plugin_dir* is actually at the pinned version.
+        """Enforce that *plugin_dir* is at the pinned commit (see
+        :func:`_verify_plugin_checkout_pin` for the full policy)."""
+        _verify_plugin_checkout_pin(
+            plugin_ref=self.plugin_ref,
+            plugin_dir=plugin_dir,
+            pinned_commit=self.plugin_commit,
+            pinned_version=self.plugin_version,
+            override_env="SPECA_LEAN4_ALLOW_VERSION_MISMATCH",
+        )
 
-        The shape check (src/speca_lean4 exists) says nothing about *which*
-        version the checkout is, so a stale SPECA_LEAN4_PLUGIN_DIR or cache
-        would silently test the wrong code (issue #87: pins must be enforced,
-        not just declared). Policy:
+    def verify_plugin_pin(self) -> Path | None:
+        """Resolve-time pin enforcement (issue #87 Task 6).
 
-        - a tag at HEAD matching ``plugin_version`` -> verified;
-        - tags at HEAD but none matching -> hard error (set
-          ``SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1`` to downgrade to a warning,
-          e.g. for local plugin development);
-        - no tag readable (not a git checkout, a branch clone without tags,
-          git missing/timing out, or *plugin_dir* is a plain directory nested
-          inside some OTHER repo — ``git -C`` would silently report the outer
-          repo's tags, so containment is checked first) -> loud warning, not
-          an error — we cannot verify, and honest "unverified" beats a false
-          "verified".
-
-        Scope note: verification is commit-level (which commit the tag points
-        at), not content-level — a dirty working tree on the pinned tag still
-        passes. That is the intended threat model: the pin guards against
-        *stale/wrong-version* checkouts (the failure mode a cache or env var
-        actually produces), not against deliberate local modification, which
-        an attacker with filesystem access could defeat anyway.
+        If ``SPECA_LEAN4_PLUGIN_DIR`` names a checkout, verify its shape and
+        pinned commit *now* — a stale local checkout should fail at
+        :func:`resolve_provider` time, before the pipeline loads inputs, not
+        mid-run inside ``generate()``. Returns the verified checkout, or
+        ``None`` when nothing is locally resolvable (resolution must stay
+        offline and side-effect free, so the auto-clone/cache path is instead
+        verified at its own resolution point in ``_resolve_plugin_dir``).
         """
         import os
-        import subprocess
-        import sys
 
-        def _unverified(reason: str) -> None:
-            print(
-                f"warning: cannot verify {self.plugin_ref} checkout at "
-                f"{plugin_dir} is {self.plugin_version} ({reason}); "
-                "proceeding unverified.",
-                file=sys.stderr,
+        env_dir = os.environ.get("SPECA_LEAN4_PLUGIN_DIR")
+        if not env_dir:
+            return None
+        plugin_dir = Path(env_dir)
+        if not self._is_plugin_checkout(plugin_dir):
+            raise FileNotFoundError(
+                f"SPECA_LEAN4_PLUGIN_DIR={env_dir} is not a "
+                f"{self.plugin_ref} checkout (missing src/speca_lean4)."
             )
-
-        if not self.plugin_version:
-            return
-        try:
-            top = subprocess.run(
-                ["git", "-C", str(plugin_dir), "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=60,
-            )
-            if top.returncode != 0:
-                _unverified("not a git checkout")
-                return
-            toplevel = Path(top.stdout.strip())
-            if toplevel.resolve() != plugin_dir.resolve():
-                # git -C resolved to an enclosing repository, not the plugin
-                # dir itself; its tags would describe the wrong repo.
-                _unverified(
-                    f"directory is not a git toplevel; git resolves to {toplevel}"
-                )
-                return
-            proc = subprocess.run(
-                ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
-                capture_output=True, text=True, timeout=60,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            _unverified(f"git unavailable: {exc}")
-            return
-        tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
-        if proc.returncode != 0 or not tags:
-            _unverified("no tag readable at HEAD")
-            return
-        if self.plugin_version not in tags:
-            msg = (
-                f"{self.plugin_ref} checkout at {plugin_dir} is at "
-                f"{'/'.join(tags)}, but the provider pins "
-                f"{self.plugin_version}."
-            )
-            if os.environ.get("SPECA_LEAN4_ALLOW_VERSION_MISMATCH") == "1":
-                print(
-                    f"warning: {msg} Proceeding because "
-                    "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1.",
-                    file=sys.stderr,
-                )
-                return
-            raise RuntimeError(
-                f"{msg} Use a {self.plugin_version} checkout, or set "
-                "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1 to override "
-                "(local plugin development only)."
-            )
+        self._verify_plugin_version(plugin_dir)
+        return plugin_dir
 
     def _resolve_plugin_dir(self) -> Path:
         """Locate (or clone) the pinned plugin checkout; return its root."""
@@ -242,16 +354,9 @@ class LeanPropertyProvider:
         import shutil
         import subprocess
 
-        env_dir = os.environ.get("SPECA_LEAN4_PLUGIN_DIR")
-        if env_dir:
-            plugin_dir = Path(env_dir)
-            if not self._is_plugin_checkout(plugin_dir):
-                raise FileNotFoundError(
-                    f"SPECA_LEAN4_PLUGIN_DIR={env_dir} is not a "
-                    f"{self.plugin_ref} checkout (missing src/speca_lean4)."
-                )
-            self._verify_plugin_version(plugin_dir)
-            return plugin_dir
+        env_checkout = self.verify_plugin_pin()
+        if env_checkout is not None:
+            return env_checkout
 
         from .paths import get_output_root
 
@@ -558,19 +663,60 @@ class NullVerificationBackend:
 
 
 class KurtosisVerificationBackend:
-    """E2E reproduction backend via the Kurtosis harness (external plugin)."""
+    """E2E reproduction backend via the Kurtosis harness (external plugin).
+
+    Execution is still a stub (filled by speca#92), but the plugin boundary
+    is already operative: a checkout configured via
+    ``SPECA_KURTOSIS_PLUGIN_DIR`` is pin-verified at resolution time, so #92
+    inherits enforcement instead of retrofitting it.
+    """
 
     plugin_ref = "NyxFoundation/kurtosis-harness"
     # Version pin for the external plugin boundary (issue #87 requires plugin
-    # boundaries to be version-pinned). No tagged release exists yet, so this
-    # pins the current default-branch HEAD; #92 bumps it to a tag when published.
+    # boundaries to be version-pinned AND enforced). No tagged release exists
+    # yet, so the version and the enforced commit coincide; #92 bumps
+    # plugin_version to a tag when published — keep plugin_commit as the
+    # commit that tag points at (bump both together).
     plugin_version: str | None = "f92be45cfecb35700ab8e67800151260ac3c5f07"
+    plugin_commit: str | None = "f92be45cfecb35700ab8e67800151260ac3c5f07"
+
+    def verify_plugin_pin(self) -> Path | None:
+        """Resolve-time pin enforcement (issue #87 Task 6).
+
+        If ``SPECA_KURTOSIS_PLUGIN_DIR`` names an existing checkout, verify
+        it is at the pinned commit now; a wrong-version harness must fail at
+        :func:`resolve_verification_backend` time, not after a full 04 run.
+        Returns the checkout path, or ``None`` when none is configured (the
+        stub then raises NotImplementedError at verify() time as before).
+        """
+        import os
+
+        env_dir = os.environ.get("SPECA_KURTOSIS_PLUGIN_DIR")
+        if not env_dir:
+            return None
+        plugin_dir = Path(env_dir)
+        if not plugin_dir.is_dir():
+            raise FileNotFoundError(
+                f"SPECA_KURTOSIS_PLUGIN_DIR={env_dir} does not exist or is "
+                f"not a directory (expected a {self.plugin_ref} checkout)."
+            )
+        _verify_plugin_checkout_pin(
+            plugin_ref=self.plugin_ref,
+            plugin_dir=plugin_dir,
+            pinned_commit=self.plugin_commit,
+            pinned_version=self.plugin_version,
+            override_env="SPECA_KURTOSIS_ALLOW_VERSION_MISMATCH",
+        )
+        return plugin_dir
 
     def verify(
         self,
         confirmed_findings: list[dict],
         target_info: dict,
     ) -> list[dict]:
+        # Pin errors must surface as pin errors, not be masked by the stub's
+        # NotImplementedError.
+        self.verify_plugin_pin()
         pin = f"@{self.plugin_version}" if self.plugin_version else ""
         raise NotImplementedError(
             f"kurtosis backend requires {self.plugin_ref}{pin}; "
@@ -653,7 +799,11 @@ _BACKENDS = {
 
 
 def resolve_provider(name: str | PropertyProviderName) -> PropertyProvider:
-    """Return the PropertyProvider instance for *name*."""
+    """Return the PropertyProvider instance for *name*.
+
+    Resolution enforces the plugin version pin for any locally-configured
+    plugin checkout (issue #87 Task 6) — see :func:`_enforce_plugin_pin`.
+    """
     try:
         key = PropertyProviderName(name)
     except ValueError as exc:
@@ -661,11 +811,15 @@ def resolve_provider(name: str | PropertyProviderName) -> PropertyProvider:
         raise ValueError(
             f"Unknown property provider: {name!r}. Valid providers: {valid}."
         ) from exc
-    return _PROVIDERS[key]()
+    return _enforce_plugin_pin(_PROVIDERS[key]())
 
 
 def resolve_verification_backend(name: str | VerificationBackendName) -> VerificationBackend:
-    """Return the VerificationBackend instance for *name*."""
+    """Return the VerificationBackend instance for *name*.
+
+    Resolution enforces the plugin version pin for any locally-configured
+    plugin checkout (issue #87 Task 6) — see :func:`_enforce_plugin_pin`.
+    """
     try:
         key = VerificationBackendName(name)
     except ValueError as exc:
@@ -673,7 +827,7 @@ def resolve_verification_backend(name: str | VerificationBackendName) -> Verific
         raise ValueError(
             f"Unknown verification backend: {name!r}. Valid backends: {valid}."
         ) from exc
-    return _BACKENDS[key]()
+    return _enforce_plugin_pin(_BACKENDS[key]())
 
 
 _SEARCH_BACKENDS = {
