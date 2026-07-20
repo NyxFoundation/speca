@@ -55,6 +55,7 @@ const ALL_EVENT_TYPES: PipelineEventType[] = [
   "budget-exceeded",
   "circuit-breaker-tripped",
   "pipeline-completed",
+  "warning",
 ];
 
 describe.skipIf(!UV_OK)("Python ↔ TS event contract", () => {
@@ -74,6 +75,7 @@ e.emit("phase-failed", phase="01b", reason="dependency check failed", duration_s
 e.emit("budget-exceeded", phase="03", cost_usd=9.9, max_budget_usd=10.0, duration_s=600.0)
 e.emit("circuit-breaker-tripped", phase="03", reason="too many failures", stats={"consecutive_failures": 5}, duration_s=30.0)
 e.emit("pipeline-completed", phases=["01a"], results={"01a": True}, duration_s=2.0)
+e.emit("warning", phase="02c", message="MCP servers not configured: tree_sitter")
 `;
     const stdout = runViaUv(harness);
 
