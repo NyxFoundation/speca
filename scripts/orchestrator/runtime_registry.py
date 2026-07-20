@@ -19,6 +19,10 @@ snapshot already know about them, which lets a downstream PR drop in a
 * ``gemini``  — Google gemini CLI (``gemini -p --output-format stream-json``).
 * ``ollama``  — Ollama HTTP (``/api/chat``, cloud or self-hosted).
 * ``copilot`` — GitHub Copilot agentic CLI (``copilot`` from ``@github/copilot``).
+* ``claude_pty`` — the same Anthropic claude CLI, but driven through its
+  *interactive* REPL under a pseudo-terminal instead of ``-p`` print mode
+  (ClaudePtyRunner). Insurance against ``-p`` being paywalled out of
+  subscription tiers (issue #80); never selected by default.
 
 The Web side (``web/server/services/chat_runtime_*``) already has
 streaming implementations for all four; the orchestrator side is more
@@ -36,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 
-RuntimeId = Literal["claude", "api", "codex", "gemini", "ollama", "copilot"]
+RuntimeId = Literal["claude", "api", "codex", "gemini", "ollama", "copilot", "claude_pty"]
 
 
 @dataclass(frozen=True)
@@ -317,6 +321,46 @@ def _probe_copilot() -> RuntimeAvailability:
     )
 
 
+def _probe_claude_pty() -> RuntimeAvailability:
+    """Probe the interactive-REPL-under-pty transport (issue #80).
+
+    Availability = the claude CLI is on PATH AND the platform can provide
+    a real pty (POSIX stdlib; Windows only with the optional pywinpty
+    package — we never fake a pty with pipes).
+    """
+
+    from .claude_pty_runner import pty_supported
+
+    base_notes = (
+        "Insurance transport: drives the interactive claude REPL through a "
+        "pty instead of `-p` print mode (issue #80).",
+        "OFF by default — select with ORCHESTRATOR_RUNNER=claude_pty or "
+        "--runtime claude_pty. Concurrency is clamped to 1 (one REPL, one "
+        "batch at a time).",
+        "No token-usage/cost telemetry in interactive mode; budget guard "
+        "cannot fire from this runner.",
+    )
+    claude = _which("claude")
+    if claude is None:
+        return RuntimeAvailability(
+            runtime_id="claude_pty",
+            available=False,
+            implemented=True,
+            notes=base_notes
+            + (
+                "claude CLI not found on PATH.",
+                "Install via `npm install -g @anthropic-ai/claude-code`.",
+            ),
+        )
+    supported, reason = pty_supported()
+    return RuntimeAvailability(
+        runtime_id="claude_pty",
+        available=supported,
+        implemented=True,
+        notes=base_notes + (reason,),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -357,6 +401,12 @@ REGISTRY: dict[str, RuntimeDescriptor] = {
         runtime_id="copilot",
         summary="GitHub Copilot agentic CLI (`copilot -p --output-format json --allow-all-tools`). Tool-calling owned by the CLI.",
         probe=_probe_copilot,
+        implemented=True,
+    ),
+    "claude_pty": RuntimeDescriptor(
+        runtime_id="claude_pty",
+        summary="Anthropic claude CLI, interactive REPL under a pty. Insurance path for `-p` paywall (issue #80); OFF by default.",
+        probe=_probe_claude_pty,
         implemented=True,
     ),
 }

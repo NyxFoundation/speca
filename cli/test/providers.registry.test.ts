@@ -144,7 +144,10 @@ describe("validateRuntime — API-key providers", () => {
 });
 
 describe("validateRuntime — CLI-managed providers", () => {
-  it.each([["claude"], ["copilot"]] as const)("%s needs no env credentials", (id) => {
-    expect(validateRuntime(id, {}).ok).toBe(true);
-  });
+  it.each([["claude"], ["copilot"], ["claude_pty"]] as const)(
+    "%s needs no env credentials",
+    (id) => {
+      expect(validateRuntime(id, {}).ok).toBe(true);
+    },
+  );
 });
