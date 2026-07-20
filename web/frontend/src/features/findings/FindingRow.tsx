@@ -47,7 +47,11 @@ export function FindingRow({ finding, runId, repoRoot }: Props) {
       <Link
         to={`/runs/${encodeURIComponent(runId)}/findings/${encodeURIComponent(
           finding.property_id,
-        )}`}
+        )}${
+          // Property ids repeat across clients (spec-derived), so the
+          // detail link must carry the row's client to stay unambiguous.
+          finding.target ? `?target=${encodeURIComponent(finding.target)}` : ""
+        }`}
         className={styles.rowLink}
       >
         <div className={styles.severityCell}>

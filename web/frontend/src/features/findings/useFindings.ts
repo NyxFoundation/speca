@@ -47,13 +47,19 @@ export function useFindings(
 export function useFinding(
   runId: string | undefined,
   propertyId: string | undefined,
+  // Client/target to disambiguate — property ids are spec-derived and
+  // repeat across clients in a multi-client audit, so the detail fetch
+  // must pin the client the user clicked.
+  target?: string,
 ): UseQueryResult<Finding, Error> {
   return useQuery<Finding, Error>({
     enabled: Boolean(runId && propertyId),
-    queryKey: ["finding", runId, propertyId],
+    queryKey: ["finding", runId, propertyId, target ?? null],
     queryFn: () =>
       apiFetch<Finding>(
-        `runs/${encodeURIComponent(runId ?? "")}/findings/${encodeURIComponent(propertyId ?? "")}`,
+        `runs/${encodeURIComponent(runId ?? "")}/findings/${encodeURIComponent(propertyId ?? "")}${
+          target ? `?target=${encodeURIComponent(target)}` : ""
+        }`,
       ),
   });
 }

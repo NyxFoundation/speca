@@ -73,15 +73,25 @@ def list_findings(
 
 
 @router.get("/runs/{run_id}/findings/{property_id}", response_model=Finding)
-def get_finding(run_id: str, property_id: str) -> Finding:
+def get_finding(
+    run_id: str,
+    property_id: str,
+    target: str | None = Query(default=None),
+) -> Finding:
     """Return one finding or raise 404.
+
+    Property ids are spec-derived and repeat across clients in a
+    multi-client audit, so the detail lookup accepts ``?target=<client>``
+    to pin the exact record. The SPA's list rows link here with the row's
+    own target. Without ``target`` the first match in the loader's stable
+    order is returned (fine for single-target runs).
 
     Slice G will hit this endpoint when the SPA's detail page mounts;
     by returning the same normalized shape as the list endpoint the
     ``data-testid="finding-code-path"`` row stays stable.
     """
 
-    finding = find_finding(run_id, property_id)
+    finding = find_finding(run_id, property_id, target=target)
     if finding is None:
         raise HTTPException(status_code=404, detail=f"Finding {property_id} not found in run {run_id}")
     return finding

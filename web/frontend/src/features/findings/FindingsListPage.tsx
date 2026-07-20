@@ -78,6 +78,12 @@ function compare(a: Finding, b: Finding, key: SortKey, dir: SortDir): number {
   if (cmp === 0 && key !== "property_id") {
     cmp = a.property_id.localeCompare(b.property_id);
   }
+  // Final tie-break by target — property ids repeat across clients in a
+  // multi-client audit, so without this the relative order of the same
+  // property's per-client rows would be unstable.
+  if (cmp === 0) {
+    cmp = (a.target ?? "").localeCompare(b.target ?? "");
+  }
   return dir === "asc" ? cmp : -cmp;
 }
 
@@ -259,7 +265,9 @@ export function FindingsListPage() {
           <div className={styles.tbody}>
             {visibleFindings.map((f) => (
               <FindingRow
-                key={f.property_id}
+                // Property ids repeat across clients in a multi-client
+                // audit, so the key must include the target.
+                key={`${f.target ?? ""}::${f.property_id}`}
                 finding={f}
                 runId={runId ?? ""}
                 repoRoot={paths?.repo_root ?? null}
