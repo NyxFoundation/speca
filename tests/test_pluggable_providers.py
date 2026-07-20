@@ -86,7 +86,7 @@ def _fake_plugin_checkout(root: Path) -> Path:
     return plugin_dir
 
 
-def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n",
+def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.1\n",
                  git_toplevel=None,
                  git_head=LeanPropertyProvider.plugin_commit):
     """Fake subprocess.run: answers the `git rev-parse --show-toplevel`
@@ -218,7 +218,7 @@ def _mk_fake_kurtosis_run(subprocess_mod, captured=None, *, fixture_props,
                 return subprocess_mod.CompletedProcess(
                     cmd, 0, stdout=LeanPropertyProvider.plugin_commit + "\n", stderr=""
                 )
-            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.1\n", stderr="")
         if captured is not None:
             captured["cmd"] = cmd
         fixtures_dir = Path(cmd[cmd.index("--fixtures-dir") + 1])
@@ -384,7 +384,7 @@ def test_lean_provider_version_mismatch_raises(monkeypatch, tmp_path):
         subprocess_mod, "run",
         _mk_fake_run(subprocess_mod, [], git_head="d" * 40, git_tags="v0.0.9\n"),
     )
-    with pytest.raises(RuntimeError, match=r"commit d{40}.*v0\.0\.9.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"commit d{40}.*v0\.0\.9.*pins.*v0\.1\.1"):
         LeanPropertyProvider().generate([], {})
 
 
@@ -400,9 +400,9 @@ def test_lean_provider_moved_tag_is_rejected(monkeypatch, tmp_path):
     monkeypatch.delenv("SPECA_LEAN4_ALLOW_VERSION_MISMATCH", raising=False)
     monkeypatch.setattr(
         subprocess_mod, "run",
-        _mk_fake_run(subprocess_mod, [], git_head="e" * 40, git_tags="v0.1.0\n"),
+        _mk_fake_run(subprocess_mod, [], git_head="e" * 40, git_tags="v0.1.1\n"),
     )
-    with pytest.raises(RuntimeError, match=r"commit e{40}.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"commit e{40}.*pins.*v0\.1\.1"):
         LeanPropertyProvider().generate([], {})
 
 
@@ -425,7 +425,7 @@ def test_lean_provider_mismatch_survives_tag_probe_failure(monkeypatch, tmp_path
         raise subprocess_mod.TimeoutExpired(cmd, 60)  # the tag probe hangs
 
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
-    with pytest.raises(RuntimeError, match=r"commit c{40}.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"commit c{40}.*pins.*v0\.1\.1"):
         LeanPropertyProvider().generate([], {})
 
 
@@ -496,7 +496,7 @@ def test_lean_provider_tag_only_pin_falls_back_to_tag_policy(monkeypatch, tmp_pa
         subprocess_mod, "run",
         _mk_fake_run(subprocess_mod, [], git_tags="v0.0.9\n"),
     )
-    with pytest.raises(RuntimeError, match=r"v0\.0\.9.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"v0\.0\.9.*pins.*v0\.1\.1"):
         LeanPropertyProvider().generate([], {})
 
 
@@ -594,7 +594,7 @@ def test_lean_provider_concurrent_clone_rename_race(monkeypatch, tmp_path):
     monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
     monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
 
-    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.1"
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["git", "clone"]:
@@ -613,7 +613,7 @@ def test_lean_provider_concurrent_clone_rename_race(monkeypatch, tmp_path):
                 cmd, 0, stdout=LeanPropertyProvider.plugin_commit + "\n", stderr=""
             )
         if cmd[0] == "git":
-            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.1\n", stderr="")
         Path(cmd[cmd.index("--out") + 1]).write_text(
             json.dumps({"properties": [{"property_id": "P-1"}]}), encoding="utf-8"
         )
@@ -640,7 +640,7 @@ def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
 
     # Simulate the leftover of an interrupted clone: dir exists, shape check fails.
-    partial = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+    partial = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.1"
     (partial / ".git").mkdir(parents=True)
     (partial / ".git" / "config").write_text("stub", encoding="utf-8")
 
@@ -651,7 +651,7 @@ def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
             (dest / "src" / "speca_lean4").mkdir(parents=True)
             return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
         if cmd[0] == "git":  # version probe
-            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.1\n", stderr="")
         Path(cmd[cmd.index("--out") + 1]).write_text(
             json.dumps({"properties": [{"property_id": "P-1"}]}), encoding="utf-8"
         )
@@ -660,7 +660,7 @@ def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess_mod, "run", fake_run)
     result = LeanPropertyProvider().generate([], {})
     assert result == [{"property_id": "P-1"}]
-    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.1"
     assert (cache / "src" / "speca_lean4").is_dir()  # fresh clone in place
     assert not (cache / ".git" / "config").exists()  # partial leftover gone
 
@@ -706,7 +706,7 @@ def test_resolve_provider_lean_pin_mismatch_fails_at_resolve(monkeypatch, tmp_pa
     monkeypatch.setattr(
         subprocess_mod, "run", _mk_fake_git_probe(subprocess_mod, "f" * 40)
     )
-    with pytest.raises(RuntimeError, match=r"commit f{40}.*pins.*v0\.1\.0"):
+    with pytest.raises(RuntimeError, match=r"commit f{40}.*pins.*v0\.1\.1"):
         resolve_provider("lean")
 
 
@@ -1084,7 +1084,7 @@ def test_external_plugins_are_version_pinned():
     # #92 publishes a tag. plugin_commit is what enforcement compares
     # against (tags can be moved; commits cannot), so it must always be a
     # full 40-hex SHA — bump it together with plugin_version.
-    assert LeanPropertyProvider.plugin_version == "v0.1.0"
+    assert LeanPropertyProvider.plugin_version == "v0.1.1"
     assert re.fullmatch(r"[0-9a-f]{40}", LeanPropertyProvider.plugin_commit), \
         "lean plugin_commit must be a full commit SHA"
     assert KurtosisVerificationBackend.plugin_version, "kurtosis pin must be concrete, not None"

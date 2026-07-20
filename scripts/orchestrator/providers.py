@@ -303,8 +303,8 @@ class LeanPropertyProvider:
     # can be moved upstream, commits cannot. Bump BOTH together; a tag moved
     # away from plugin_commit fails resolution loudly (that is the pin
     # working, not a bug).
-    plugin_version: str | None = "v0.1.0"
-    plugin_commit: str | None = "aa123f340bb960ca2d3e7ee0bfb4b119aa495182"
+    plugin_version: str | None = "v0.1.1"
+    plugin_commit: str | None = "b8621d5184a311b9f0762d6d5967aae9b93d7402"
 
     subprocess_timeout_s = 1800
 
