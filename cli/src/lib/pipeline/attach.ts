@@ -171,10 +171,12 @@ export async function scanAttachState(options: ScanOptions = {}): Promise<Attach
 }
 
 /**
- * Order phases by their pipeline position (`KNOWN_PHASE_IDS`), not by
- * locale-aware string comparison: a fork's phase-0 artifacts ("0a", "0b")
- * would otherwise sort after "04" or shuffle under exotic collations.
- * Unknown phase ids sort after every known one, ordered by a plain
+ * Order phases by their pipeline position (`KNOWN_PHASE_IDS`, which now
+ * includes the phase-0 setup steps 0a/0b/0c ahead of 01a — mirroring
+ * `scripts/orchestrator/config.py::PHASE_CONFIGS`), not by locale-aware
+ * string comparison: "0a" must precede "01a" yet localeCompare would also
+ * happily put it after "04" or shuffle under exotic collations. Unknown
+ * (fork) phase ids sort after every known one, ordered by a plain
  * code-unit comparison for determinism.
  */
 export function comparePhaseIds(a: string, b: string): number {

@@ -10,7 +10,12 @@
  * (`phaseName`) we still accept arbitrary strings and fall back to the id
  * itself so a fork that adds new phases renders cleanly.
  */
-export const KNOWN_PHASE_IDS = ["01a", "01b", "01e", "02c", "03", "04"] as const;
+// Pipeline order per `PHASE_CONFIGS` / `get_phase_chain`: the phase-0 setup
+// steps (0a -> 0b -> 0c, Slice H3 — routed to phase0_runner, not the batch
+// orchestrator) run BEFORE 01a. Keep this array in that execution order —
+// `comparePhaseIds` (lib/pipeline/attach.ts) derives the dashboard row
+// order from the positions here.
+export const KNOWN_PHASE_IDS = ["0a", "0b", "0c", "01a", "01b", "01e", "02c", "03", "04"] as const;
 export type KnownPhaseId = (typeof KNOWN_PHASE_IDS)[number];
 
 export function isKnownPhaseId(value: string): value is KnownPhaseId {
@@ -18,6 +23,9 @@ export function isKnownPhaseId(value: string): value is KnownPhaseId {
 }
 
 export const PHASE_NAMES: Record<KnownPhaseId, string> = {
+  "0a": "Bug Bounty Scope Extraction",
+  "0b": "Target Workspace Verification",
+  "0c": "TARGET_INFO Generation",
   "01a": "Spec Discovery",
   "01b": "Subgraph Extraction",
   "01e": "Property Generation",

@@ -199,18 +199,26 @@ describe("seedPhaseStatus / buildAttachSnapshot", () => {
   });
 });
 
-describe("comparePhaseIds (#118 follow-up: explicit pipeline order)", () => {
-  it("orders the canonical set by pipeline position", () => {
-    const shuffled = ["04", "01e", "03", "01a", "02c", "01b"];
-    expect([...shuffled].sort(comparePhaseIds)).toEqual(["01a", "01b", "01e", "02c", "03", "04"]);
+describe("comparePhaseIds (#118/#121 follow-up: explicit pipeline order)", () => {
+  it("orders the canonical set by pipeline position, phase-0 setup first", () => {
+    const shuffled = ["04", "0c", "01e", "03", "0a", "01a", "02c", "0b", "01b"];
+    expect([...shuffled].sort(comparePhaseIds)).toEqual([
+      "0a", "0b", "0c", "01a", "01b", "01e", "02c", "03", "04",
+    ]);
+  });
+
+  it("places the phase-0 setup steps BEFORE 01a, per config.py::PHASE_CONFIGS", () => {
+    // #121 review: 0a/0b/0c are core setup phases (Slice H3) that run
+    // before the batch pipeline — they are known ids, not fork ids, and
+    // must sort ahead of everything else.
+    expect(["0a", "04"].sort(comparePhaseIds)).toEqual(["0a", "04"]);
+    expect(["01a", "0c"].sort(comparePhaseIds)).toEqual(["0c", "01a"]);
+    expect(comparePhaseIds("0a", "0a")).toBe(0);
   });
 
   it("sorts unknown (fork) phase ids after every known phase", () => {
-    // localeCompare would have put "0a" before "04" is locale-dependent —
-    // the explicit rank must place fork phases last, deterministically.
-    expect(["0a", "04"].sort(comparePhaseIds)).toEqual(["04", "0a"]);
-    expect(["0b", "01a", "0a"].sort(comparePhaseIds)).toEqual(["01a", "0a", "0b"]);
-    expect(comparePhaseIds("0a", "0a")).toBe(0);
+    expect(["0z", "04"].sort(comparePhaseIds)).toEqual(["04", "0z"]);
+    expect(["zz", "01a", "0z"].sort(comparePhaseIds)).toEqual(["01a", "0z", "zz"]);
   });
 });
 

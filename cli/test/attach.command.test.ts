@@ -194,6 +194,50 @@ describe("runAttachCommand (#27)", () => {
     expect(out).toContain("[04/W0/B0] system: init");
   });
 
+  it("disposes a watcher whose start was still in flight at detach (#121 follow-up)", async () => {
+    // Race: the rescan timer kicks off a (slow) watcher start; detach fires
+    // while the start is mid-await. The late-arriving watcher must dispose
+    // itself via WatcherState.stopped instead of leaking past teardown.
+    const outputs = join(cwd, "outputs");
+    mkdirSync(outputs, { recursive: true });
+    writeFileSync(
+      join(outputs, "04_PARTIAL_W0B0_1700000000.json"),
+      JSON.stringify({ reviewed_items: [{ property_id: "PROP-race" }], metadata: { item_count: 1 } }),
+    );
+    // No logs dir yet — the initial start attempt is skipped, so the only
+    // start comes from the rescan timer (where the race lives).
+
+    let started = false;
+    let stopCalled = false;
+    const slowStart: typeof startLogWatcher = async () => {
+      started = true;
+      await new Promise((r) => setTimeout(r, 300));
+      return async () => {
+        stopCalled = true;
+      };
+    };
+
+    const controller = new AbortController();
+    setTimeout(() => mkdirSync(join(outputs, "logs"), { recursive: true }), 10);
+    // Abort while the timer-driven start is mid-await (starts ~50ms,
+    // resolves ~350ms).
+    setTimeout(() => controller.abort(), 150);
+
+    const code = await runAttachCommand({
+      flags: { noTui: true },
+      cwd,
+      signal: controller.signal,
+      rescanIntervalMs: 50,
+      startLogs: slowStart,
+    });
+    expect(code).toBe(0);
+    expect(started).toBe(true);
+    // The command returned before the slow start resolved — the detached
+    // continuation must still dispose the watcher.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(stopCalled).toBe(true);
+  });
+
   it("SIGTERM detaches cleanly with exit 0 (#118 follow-up)", async () => {
     // No AbortSignal seam here on purpose: this exercises the real
     // process-signal path. `process.emit` invokes the listener directly,
