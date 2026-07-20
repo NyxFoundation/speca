@@ -8,7 +8,7 @@
 //   3. Sections: evidence_snippet, proof_trace, gates_passed (Phase 04),
 //      reviewer_notes. Each section is hidden if its source field is empty.
 
-import { useParams, Link } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 
 import CodeBlock from "@/components/CodeBlock/CodeBlock";
 import { OpenInVSCode } from "@/components/OpenInVSCode";
@@ -45,6 +45,9 @@ function buildFindingContextBlock(finding: Finding): string {
     `- Phase: ${finding.phase}`,
     `- Run ID: ${finding.run_id}`,
   ];
+  if (finding.target) {
+    lines.push(`- Client/target: ${finding.target}`);
+  }
   if (finding.file) {
     lines.push(
       `- File: ${finding.file}${finding.line_range ? `::${finding.line_range}` : ""}`,
@@ -71,7 +74,11 @@ export function FindingDetailPage() {
     runId: string;
     propertyId: string;
   }>();
-  const { data, error, isLoading } = useFinding(runId, propertyId);
+  // `?target=<client>` disambiguates spec-derived property ids that repeat
+  // across clients; list rows always link here with their own target.
+  const [searchParams] = useSearchParams();
+  const target = searchParams.get("target") ?? undefined;
+  const { data, error, isLoading } = useFinding(runId, propertyId, target);
   // Slice G — repo root is required to build the absolute path for the
   // "open in VSCode" icon next to the code location row.
   const { data: paths } = useIntegrationsPaths();

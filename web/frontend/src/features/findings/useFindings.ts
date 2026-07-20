@@ -25,6 +25,7 @@ function buildQuery(query: FindingQuery): string {
   if (query.phase) params.set("phase", query.phase);
   if (query.severity) params.set("severity", query.severity);
   if (query.verdict) params.set("verdict", query.verdict);
+  if (query.target) params.set("target", query.target);
   const qs = params.toString();
   return qs ? `?${qs}` : "";
 }
@@ -46,13 +47,19 @@ export function useFindings(
 export function useFinding(
   runId: string | undefined,
   propertyId: string | undefined,
+  // Client/target to disambiguate — property ids are spec-derived and
+  // repeat across clients in a multi-client audit, so the detail fetch
+  // must pin the client the user clicked.
+  target?: string,
 ): UseQueryResult<Finding, Error> {
   return useQuery<Finding, Error>({
     enabled: Boolean(runId && propertyId),
-    queryKey: ["finding", runId, propertyId],
+    queryKey: ["finding", runId, propertyId, target ?? null],
     queryFn: () =>
       apiFetch<Finding>(
-        `runs/${encodeURIComponent(runId ?? "")}/findings/${encodeURIComponent(propertyId ?? "")}`,
+        `runs/${encodeURIComponent(runId ?? "")}/findings/${encodeURIComponent(propertyId ?? "")}${
+          target ? `?target=${encodeURIComponent(target)}` : ""
+        }`,
       ),
   });
 }
