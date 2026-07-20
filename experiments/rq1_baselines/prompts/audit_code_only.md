@@ -31,8 +31,8 @@ Language: English only.
     look for security-relevant defects directly in the code. With no property to
     check, hunt the standard vulnerability classes. For each candidate: read the
     full enforcing code and the data flow into it; establish an attacker-reachable
-    path (entry point -> sink); if no plausible attacker path exists, classify it
-    `potential-vulnerability`. Consider at least: missing/incorrect input
+    path (entry point -> sink); an attacker-reachable defect is `vulnerability`;
+    if no plausible attacker path exists, classify it `potential-vulnerability`. Consider at least: missing/incorrect input
     validation; integer/bounds errors; unchecked array or map access;
     concurrency/TOCTOU and cache-key/dedup-key defects; incorrect error handling;
     deserialization of untrusted data; state corruption across boundaries.
@@ -54,11 +54,15 @@ Language: English only.
       (NO severity, confidence, code_scope, or attack_path):
         1) "property_id"      -> surrogate id "armA-<NNN>" (per-finding counter;
                                  arm A has no property, so this is a stable synthetic id)
-        2) "classification"   -> one of: vulnerable | potential-vulnerability |
-                                 not-a-vulnerability | out-of-scope | informational
+        2) "classification"   -> one of: vulnerability | potential-vulnerability |
+                                 not-a-vulnerability | informational | out-of-scope
+                                 (EXACTLY these strings — the Phase 04 orchestrator
+                                 routes only "vulnerability"/"potential-vulnerability"
+                                 to review; any other spelling, e.g. "vulnerable",
+                                 is silently passed through without FP filtering)
         3) "code_path"        -> "path/to/file.go::Symbol::Lstart-end" (primary location)
         4) "proof_trace"      -> 1-3 sentence rationale / root cause
-        5) "attack_scenario"  -> only for vulnerable/potential-vulnerability, else ""
+        5) "attack_scenario"  -> only for vulnerability/potential-vulnerability, else ""
         6) "checklist_id"     -> set equal to property_id (downstream compatibility)
 
     Write the file even if there are no findings (empty "audit_items"). Severity is

@@ -31,8 +31,8 @@ Language: English only.
     excerpt list the concrete obligations the code must satisfy (informally - do
     NOT emit a typed property object); locate the enforcing code (full functions,
     callers/callees) via Grep/Read; for each obligation check whether the code
-    satisfies it. An attacker-reachable gap is `vulnerable`; an uncertain-path gap
-    is `potential-vulnerability`.
+    satisfies it. An attacker-reachable gap is `vulnerability`; an uncertain-path
+    gap is `potential-vulnerability`.
   </method>
 
   <fairness_constraints>
@@ -51,15 +51,19 @@ Language: English only.
     - "audit_items": array. Each row MUST contain ONLY these 6 keys, nothing else
       (NO severity, confidence, code_scope, or attack_path):
         1) "property_id"      -> surrogate id "armB-<NNN>" (per-finding counter)
-        2) "classification"   -> vulnerable | potential-vulnerability |
-                                 not-a-vulnerability | out-of-scope | informational
+        2) "classification"   -> vulnerability | potential-vulnerability |
+                                 not-a-vulnerability | informational | out-of-scope
+                                 (EXACTLY these strings — the Phase 04 orchestrator
+                                 routes only "vulnerability"/"potential-vulnerability"
+                                 to review; any other spelling, e.g. "vulnerable",
+                                 is silently passed through without FP filtering)
         3) "code_path"        -> "path/to/file.go::Symbol::Lstart-end"
         4) "proof_trace"      -> MUST begin with "[obligation: <the informal spec
                                  obligation that surfaced this>] " then 1-3 sentence
                                  rationale. The bracketed prefix is arm B's
                                  provenance so #103 can distinguish it from arm C's
                                  typed properties.
-        5) "attack_scenario"  -> only for vulnerable/potential-vulnerability, else ""
+        5) "attack_scenario"  -> only for vulnerability/potential-vulnerability, else ""
         6) "checklist_id"     -> set equal to property_id
 
     Write the file even when there are no findings. Severity is recovered
