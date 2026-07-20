@@ -1,0 +1,173 @@
+name: "Kurtosis pin verify (real checkout)"
+
+# issue #87 Task 6 follow-through. PR #137 made the kurtosis-harness version
+# pin operative, and the mismatch/moved-tag/unverified paths are covered by
+# unit tests against synthetic git repos — but the MATCH path had only ever
+# been exercised against a fake repo carrying the pinned sha, never against
+# an actual NyxFoundation/kurtosis-harness clone (no local checkout was
+# possible in the authoring environment). This job closes that gap with the
+# real repository:
+#
+#   1. clone kurtosis-harness, check out the exact pinned commit, and prove
+#      resolve_verification_backend("kurtosis") accepts it via the real git
+#      verification path (the "proceeding unverified" fallback is asserted
+#      ABSENT — acceptance must come from a positive commit match, not from
+#      the warn-and-continue branch);
+#   2. prove the stub still raises NotImplementedError AFTER the pin check
+#      passes (pin errors and stub errors stay distinguishable);
+#   3. check out the pinned commit's parent and prove resolution REJECTS it
+#      with the pin error. This negative leg doubles as the job's built-in
+#      red-check: if pin enforcement ever regresses to a no-op, this job
+#      fails — it cannot silently stay green.
+#
+# Hosted runner: git + Python only, no Claude CLI, no self-hosted resources.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/kurtosis-pin-verify.yml'
+      - 'scripts/orchestrator/providers.py'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kurtosis-pin-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pin-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+
+      - name: Install Python 3.11 via uv
+        run: uv python install 3.11
+
+      - name: Sync Python deps
+        run: uv sync
+
+      - name: Read the code pin
+        # Single source of truth: KurtosisVerificationBackend.plugin_commit.
+        # No sha literals in this file — bumping the pin in providers.py
+        # moves this workflow automatically.
+        run: |
+          set -e
+          PIN_COMMIT=$(uv run --quiet python3 -c "import sys; sys.path.insert(0, 'scripts'); from orchestrator.providers import KurtosisVerificationBackend as K; print(K.plugin_commit)")
+          PLUGIN_REF=$(uv run --quiet python3 -c "import sys; sys.path.insert(0, 'scripts'); from orchestrator.providers import KurtosisVerificationBackend as K; print(K.plugin_ref)")
+          test -n "$PIN_COMMIT"
+          test -n "$PLUGIN_REF"
+          echo "PIN_COMMIT=$PIN_COMMIT" >> "$GITHUB_ENV"
+          echo "PLUGIN_REF=$PLUGIN_REF" >> "$GITHUB_ENV"
+          echo "pin: $PLUGIN_REF @ $PIN_COMMIT"
+
+      - name: Clone the real harness at the pinned commit
+        run: |
+          set -e
+          HARNESS_DIR="$RUNNER_TEMP/kurtosis-harness"
+          git clone "https://github.com/$PLUGIN_REF.git" "$HARNESS_DIR"
+          git -C "$HARNESS_DIR" checkout --detach "$PIN_COMMIT"
+          echo "HARNESS_DIR=$HARNESS_DIR" >> "$GITHUB_ENV"
+          echo "checked out $(git -C "$HARNESS_DIR" rev-parse HEAD)"
+
+      - name: "Positive: pinned checkout must verify (and not via the unverified fallback)"
+        env:
+          # Resolution reads this env var (issue #87 resolution seam).
+          SPECA_KURTOSIS_PLUGIN_DIR: ${{ runner.temp }}/kurtosis-harness
+        run: |
+          uv run python3 - <<'EOF'
+          import contextlib, io, sys
+          sys.path.insert(0, "scripts")
+          from orchestrator.providers import (
+              KurtosisVerificationBackend,
+              resolve_verification_backend,
+          )
+
+          stderr = io.StringIO()
+          with contextlib.redirect_stderr(stderr):
+              backend = resolve_verification_backend("kurtosis")  # must not raise
+              path = backend.verify_plugin_pin()
+          captured = stderr.getvalue()
+          sys.stderr.write(captured)
+
+          assert isinstance(backend, KurtosisVerificationBackend)
+          assert path is not None, (
+              "verify_plugin_pin() returned None — the env-configured "
+              "checkout was not inspected at all (false green)"
+          )
+          # The acceptance must come from the git commit match, not from the
+          # cannot-verify warning branch.
+          assert "proceeding unverified" not in captured, (
+              "checkout was accepted via the unverified-warning fallback, "
+              f"not a real commit match:\n{captured}"
+          )
+          assert "warning:" not in captured, (
+              f"unexpected warning during a clean pin match:\n{captured}"
+          )
+          print(f"OK: real {backend.plugin_ref} checkout at "
+                f"{backend.plugin_commit} verified via git commit match")
+
+          # Stub ordering: with the pin satisfied, verify() must fail as the
+          # honest #92 stub, not as a pin error.
+          try:
+              backend.verify([], {})
+          except NotImplementedError as exc:
+              assert backend.plugin_ref in str(exc)
+              print(f"OK: stub still raises NotImplementedError after a pin pass: {exc}")
+          else:
+              raise AssertionError(
+                  "verify() returned instead of raising the #92 stub error"
+              )
+          EOF
+
+      - name: "Negative (built-in red-check): wrong commit must be rejected"
+        env:
+          SPECA_KURTOSIS_PLUGIN_DIR: ${{ runner.temp }}/kurtosis-harness
+        run: |
+          set -e
+          WRONG_SHA=$(git -C "$SPECA_KURTOSIS_PLUGIN_DIR" rev-parse "$PIN_COMMIT^")
+          git -C "$SPECA_KURTOSIS_PLUGIN_DIR" checkout --detach "$WRONG_SHA"
+          echo "moved harness checkout to $WRONG_SHA (pin is $PIN_COMMIT)"
+          WRONG_SHA="$WRONG_SHA" uv run python3 - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from orchestrator.providers import resolve_verification_backend
+
+          try:
+              resolve_verification_backend("kurtosis")
+          except RuntimeError as exc:
+              msg = str(exc)
+              assert os.environ["PIN_COMMIT"] in msg, msg
+              assert os.environ["WRONG_SHA"] in msg, msg
+              print(f"OK: wrong-commit checkout rejected at resolve time:\n  {msg}")
+          else:
+              print(
+                  "PIN ENFORCEMENT REGRESSION: a checkout at the wrong commit "
+                  "resolved without error",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          EOF
+
+      - name: Restore pinned checkout (leave artifacts honest)
+        if: always()
+        run: git -C "$RUNNER_TEMP/kurtosis-harness" checkout --detach "$PIN_COMMIT" || true
+
+      - name: Summary
+        run: |
+          {
+            echo "## kurtosis-harness pin verification (issue #87 Task 6)"
+            echo "- pin (from code): \`$PLUGIN_REF\` @ \`$PIN_COMMIT\`"
+            echo "- positive: real clone at the pin resolves cleanly via git commit match (no unverified fallback)"
+            echo "- stub ordering: NotImplementedError (#92 stub) still raised after the pin passes"
+            echo "- negative/red-check: parent commit rejected with the pin error at resolve time"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,191 @@
+name: "01e. Lean determinism (run-level)"
+
+# issue #88 Done-when: "Re-running is deterministic (same inputs -> same
+# properties and paths)". The pytest pilot test (test_lean_pilot_determinism,
+# run by 01e-properties-lean.yml) proves determinism at the provider
+# `generate()` level; this workflow proves it at the level the Done-when
+# actually names — a full `run_phase.py --phase 01e --property-provider lean`
+# invocation — by executing the phase twice from byte-identical inputs into
+# fresh output directories and comparing:
+#
+#   - the emitted 01e_PARTIAL file set (keyed by W/B slot; the trailing
+#     filename timestamp is wall-clock by design and is the only normalized
+#     path component),
+#   - the full partial JSON content (properties, lean_* provenance,
+#     kurtosis_test path strings, processed_ids) minus metadata.timestamp,
+#   - the complete outputs/kurtosis fixture tree, byte-for-byte.
+#
+# The comparator (scripts/ci/compare_01e_runs.py) exits 4 on any difference,
+# and the final self-test step plants three deliberate differences and
+# asserts exit 4 for each — a comparator that stops detecting differences
+# turns this job red, so the check cannot silently degrade into a
+# rubber stamp.
+#
+# Hosted runner on purpose: no Claude CLI, no LLM, no self-hosted resources.
+# Proof health comes from the plugin's committed sample fixture (certifies
+# nothing about the real theorems; this is a determinism check, not a proof
+# run).
+
+on:
+  # workflow_dispatch is only triggerable once this file is on the default
+  # branch; the path-filtered PR trigger lets the check run (and be reviewed)
+  # on the PR that introduces or modifies the surface.
+  pull_request:
+    paths:
+      - '.github/workflows/01e-lean-determinism.yml'
+      - 'scripts/ci/compare_01e_runs.py'
+      - 'scripts/orchestrator/providers.py'
+      - 'scripts/orchestrator/collector.py'
+      - 'scripts/orchestrator/base.py'
+      - 'scripts/orchestrator/paths.py'
+      - 'scripts/run_phase.py'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: 01e-lean-determinism-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  determinism:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+
+      - name: Install Python 3.11 via uv
+        run: uv python install 3.11
+
+      - name: Sync Python deps
+        run: uv sync
+
+      - name: Resolve plugin version pin
+        # Same single source of truth as 01e-properties-lean.yml: the code
+        # pin (LeanPropertyProvider.plugin_version). No version literals here.
+        run: |
+          set -e
+          PIN=$(uv run --quiet python3 -c "import sys; sys.path.insert(0, 'scripts'); from orchestrator.providers import LeanPropertyProvider; print(LeanPropertyProvider.plugin_version)")
+          echo "Using the code pin (LeanPropertyProvider.plugin_version): $PIN"
+          echo "PLUGIN_VERSION=$PIN" >> "$GITHUB_ENV"
+
+      - name: Resolve pinned plugin
+        run: |
+          set -e
+          PLUGIN_DIR="$RUNNER_TEMP/speca-lean4-plugin"
+          git clone --depth 1 --branch "$PLUGIN_VERSION" \
+            https://github.com/NyxFoundation/speca-lean4-plugin.git "$PLUGIN_DIR"
+          echo "SPECA_LEAN4_PLUGIN_DIR=$PLUGIN_DIR" >> "$GITHUB_ENV"
+          HEALTH="$PLUGIN_DIR/tests/fixtures/theorem_health.sample.json"
+          test -f "$HEALTH"
+          echo "SPECA_LEAN4_HEALTH_JSON=$HEALTH" >> "$GITHUB_ENV"
+          echo "Resolved speca-lean4-plugin@$PLUGIN_VERSION ($(git -C "$PLUGIN_DIR" rev-parse HEAD))"
+          echo "NOTE: proof health = the plugin's committed sample fixture (plumbing/determinism run, certifies nothing)"
+
+      - name: "Run 01e twice from byte-identical inputs"
+        run: |
+          set -euo pipefail
+          prepare_inputs() {
+            rm -rf outputs
+            mkdir -p outputs
+            cp "$SPECA_LEAN4_PLUGIN_DIR/tests/fixtures/bug_bounty_scope.sample.json" \
+               outputs/BUG_BOUNTY_SCOPE.json
+            printf '{"specs": [], "metadata": {"note": "determinism CI fixture"}}\n' \
+              > outputs/01b_PARTIAL_ci_smoke.json
+          }
+
+          prepare_inputs
+          sha256sum outputs/BUG_BOUNTY_SCOPE.json outputs/01b_PARTIAL_ci_smoke.json | tee "$RUNNER_TEMP/inputs-run1.sha"
+          uv run python3 scripts/run_phase.py --phase 01e --property-provider lean --no-archive
+          mv outputs "$RUNNER_TEMP/run1"
+
+          prepare_inputs
+          sha256sum outputs/BUG_BOUNTY_SCOPE.json outputs/01b_PARTIAL_ci_smoke.json | tee "$RUNNER_TEMP/inputs-run2.sha"
+          # The inputs themselves must be identical or the whole comparison
+          # is meaningless — guard it instead of assuming it.
+          diff <(cut -d' ' -f1 "$RUNNER_TEMP/inputs-run1.sha") \
+               <(cut -d' ' -f1 "$RUNNER_TEMP/inputs-run2.sha")
+          uv run python3 scripts/run_phase.py --phase 01e --property-provider lean --no-archive
+          mv outputs "$RUNNER_TEMP/run2"
+
+      - name: "Compare: properties, paths, fixture bytes"
+        run: |
+          set -euo pipefail
+          uv run python3 scripts/ci/compare_01e_runs.py "$RUNNER_TEMP/run1" "$RUNNER_TEMP/run2"
+
+      - name: "Comparator self-test: planted differences must be detected"
+        # A comparator that always says "identical" is worse than no
+        # comparator. Plant three independent differences (fixture content,
+        # property content, fixture path) and require exit code 4 — exactly
+        # the "difference detected" code, so a comparator crash (1) or a
+        # structural error (2) also fails this step.
+        run: |
+          set -euo pipefail
+
+          expect_diff() {
+            local label="$1"
+            set +e
+            uv run python3 scripts/ci/compare_01e_runs.py "$RUNNER_TEMP/run1" "$RUNNER_TEMP/mutant"
+            local rc=$?
+            set -e
+            if [ "$rc" -ne 4 ]; then
+              echo "SELF-TEST FAILED [$label]: comparator exit=$rc (expected 4 = difference detected)"
+              exit 1
+            fi
+            echo "self-test OK [$label]: planted difference detected (exit 4)"
+          }
+
+          # 1. Mutate one fixture file's bytes.
+          rm -rf "$RUNNER_TEMP/mutant"; cp -r "$RUNNER_TEMP/run2" "$RUNNER_TEMP/mutant"
+          FIRST_FIXTURE=$(find "$RUNNER_TEMP/mutant/kurtosis" -name 'assertion.scaffold.json' | sort | head -1)
+          test -n "$FIRST_FIXTURE"
+          printf '\n' >> "$FIRST_FIXTURE"
+          expect_diff "fixture content mutated"
+
+          # 2. Mutate one property field inside a partial (timestamp left
+          #    untouched, so only the planted change can trip the comparator).
+          rm -rf "$RUNNER_TEMP/mutant"; cp -r "$RUNNER_TEMP/run2" "$RUNNER_TEMP/mutant"
+          MUTANT_DIR="$RUNNER_TEMP/mutant" uv run python3 - <<'EOF'
+          import glob, json, os
+          fp = sorted(glob.glob(os.path.join(os.environ["MUTANT_DIR"], "01e_PARTIAL_*.json")))[0]
+          doc = json.load(open(fp, encoding="utf-8"))
+          doc["properties"][0]["property_id"] += "-tampered"
+          json.dump(doc, open(fp, "w", encoding="utf-8"), indent=2)
+          EOF
+          expect_diff "property field mutated"
+
+          # 3. Move one fixture directory (path change, contents unchanged).
+          rm -rf "$RUNNER_TEMP/mutant"; cp -r "$RUNNER_TEMP/run2" "$RUNNER_TEMP/mutant"
+          FIRST_DIR=$(find "$RUNNER_TEMP/mutant/kurtosis" -mindepth 2 -maxdepth 2 -type d | sort | head -1)
+          test -n "$FIRST_DIR"
+          mv "$FIRST_DIR" "${FIRST_DIR}-moved"
+          expect_diff "fixture path moved"
+
+      - name: Summary
+        run: |
+          {
+            echo "## 01e lean run-level determinism (issue #88 Done-when)"
+            echo "- two full \`run_phase.py --phase 01e --property-provider lean\` runs from byte-identical inputs"
+            echo "- plugin: NyxFoundation/speca-lean4-plugin@$PLUGIN_VERSION (sample health fixture; certifies nothing)"
+            echo "- identical: partial W/B slots, partial JSON content, lean_*/kurtosis_test values, fixture tree bytes"
+            echo "- normalized (wall-clock by design): partial filename timestamp token, metadata.timestamp"
+            echo "- comparator self-test: 3 planted differences each detected (exit 4)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload both runs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 01e-determinism-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/run1
+            ${{ runner.temp }}/run2
+          retention-days: 7
