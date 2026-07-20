@@ -73,8 +73,10 @@ Flags
 Exit codes
   0   Detached normally (q / Ctrl-C / SIGTERM), or no pipeline artifacts
       were found (a hint is printed)
-  1   The log watcher could not be started in headless mode (TUI mode
-      degrades to phase rows only and still exits 0)
+  1   Initial log-watcher start failed in headless mode. Only the startup
+      attempt exits 1 — later retry failures (e.g. logs dir appearing
+      mid-session) warn on stderr and keep tailing. TUI mode degrades to
+      phase rows only and still exits 0.
 
 Examples
   $ speca attach
@@ -137,6 +139,13 @@ interface WatcherState {
   stop: (() => Promise<void>) | null;
   /** Set when a start attempt threw — we warn once and stop retrying. */
   failed: boolean;
+  /**
+   * Set on teardown (#121 follow-up). A rescan-timer start attempt can be
+   * mid-`await` when detach fires; without this flag its late-arriving
+   * watcher would be assigned after teardown already ran and leak. Any
+   * start that completes after `stopped` disposes itself immediately.
+   */
+  stopped: boolean;
 }
 
 async function tryStartWatcher(
@@ -145,19 +154,34 @@ async function tryStartWatcher(
   startLogs: typeof startLogWatcher,
   onLine: (line: LogLine) => void,
 ): Promise<void> {
-  if (state.stop || state.failed) return;
+  if (state.stop || state.failed || state.stopped) return;
   if (!(await dirExists(logsDir))) return;
+  if (state.stopped) return;
   try {
-    state.stop = await startLogs({
+    const stop = await startLogs({
       dir: logsDir,
       mkdirMissing: false,
       onLine,
       onWarn: (msg) => process.stderr.write(`[speca attach] log-watcher: ${msg}\n`),
     });
+    if (state.stopped) {
+      // Detached while the start was in flight — dispose, don't leak.
+      await stop();
+      return;
+    }
+    state.stop = stop;
   } catch (err) {
     state.failed = true;
     process.stderr.write(`[speca attach] log-watcher unavailable: ${(err as Error).message}\n`);
   }
+}
+
+/** Single teardown path for both modes: flag first, then dispose. */
+async function stopWatcher(state: WatcherState): Promise<void> {
+  state.stopped = true;
+  const stop = state.stop;
+  state.stop = null;
+  await stop?.();
 }
 
 /** Resolve on detach: AbortSignal (tests) or SIGINT / SIGTERM. */
@@ -206,7 +230,7 @@ async function runHeadless(
   }
 
   const startLogs = opts.startLogs ?? startLogWatcher;
-  const watcher: WatcherState = { stop: null, failed: false };
+  const watcher: WatcherState = { stop: null, failed: false, stopped: false };
   const onLine = (line: LogLine): void => {
     if (mode === "json") {
       // `LogLine.type` is the Claude stream-json type — keep it under
@@ -233,7 +257,7 @@ async function runHeadless(
 
   await waitForDetach(opts.signal);
   clearInterval(timer);
-  await watcher.stop?.();
+  await stopWatcher(watcher);
   return 0;
 }
 
@@ -258,7 +282,7 @@ export async function runAttachCommand(opts: AttachOptions): Promise<number> {
   store.seedSnapshot(buildAttachSnapshot(scan, nowMs));
 
   const startLogs = opts.startLogs ?? startLogWatcher;
-  const watcher: WatcherState = { stop: null, failed: false };
+  const watcher: WatcherState = { stop: null, failed: false, stopped: false };
   await tryStartWatcher(watcher, scan.logsDir, startLogs, (line) => store.applyLog(line));
 
   // Periodic re-scan (#118 follow-up): keep phase statuses / batch counts
@@ -304,7 +328,7 @@ export async function runAttachCommand(opts: AttachOptions): Promise<number> {
   } finally {
     process.removeListener("SIGTERM", onSigterm);
     clearInterval(timer);
-    await watcher.stop?.();
+    await stopWatcher(watcher);
   }
   return 0;
 }

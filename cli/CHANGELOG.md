@@ -57,10 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - SIGTERM now detaches through the same cleanup path as `q` / Ctrl-C
     (watcher and rescan timer torn down), and `speca attach --help`
     documents the exit codes, including the headless exit-1 path.
+- `speca attach` corrections from the [#121] review:
+  - `KNOWN_PHASE_IDS` now includes the phase-0 setup steps (`0a` Bug
+    Bounty Scope Extraction, `0b` Target Workspace Verification, `0c`
+    TARGET_INFO Generation) ahead of `01a`, mirroring
+    `scripts/orchestrator/config.py::PHASE_CONFIGS` — `comparePhaseIds`
+    previously mis-sorted them after `04` as fork phases.
+  - The watcher start/teardown race is closed with a single
+    `WatcherState.stopped` flag: a start still in flight at detach now
+    disposes itself instead of leaking, and the help clarifies that the
+    headless exit-1 path applies only to the initial watcher start.
 
 [#27]: https://github.com/NyxFoundation/speca/issues/27
 [#29]: https://github.com/NyxFoundation/speca/issues/29
 [#118]: https://github.com/NyxFoundation/speca/pull/118
+[#121]: https://github.com/NyxFoundation/speca/pull/121
 
 ## [0.9.2] - 2026-06-16
 
