@@ -265,3 +265,96 @@ describe("runRunCommand — pre-flight checks (#28 ErrorKind wiring)", () => {
     expect(stderr).not.toContain("kind=stale-resume");
   });
 });
+
+describe("runRunCommand — --runtime selection (#113)", () => {
+  let stderrCapture: { chunks: string[]; restore(): void };
+
+  beforeEach(() => {
+    const chunks: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string | Uint8Array): boolean => {
+      chunks.push(typeof c === "string" ? c : Buffer.from(c).toString("utf8"));
+      return true;
+    }) as typeof process.stderr.write;
+    stderrCapture = {
+      chunks,
+      restore() {
+        process.stderr.write = orig;
+      },
+    };
+  });
+  afterEach(() => {
+    stderrCapture.restore();
+    delete process.env["OLLAMA_API_KEY"];
+    delete process.env["OLLAMA_HOST"];
+  });
+
+  it("rejects an unknown runtime before spawning", async () => {
+    let spawned = false;
+    const code = await runRunCommand({
+      flags: { phase: ["01a"], noTui: true, runtime: "gpt5" },
+      cwd,
+      spawn: ((opts) => {
+        spawned = true;
+        return fakeSpawnDependencyFailure()(opts);
+      }) as typeof spawnPipeline,
+      startLogs: async () => async () => {},
+      skipPreflight: true,
+    });
+    expect(code).toBe(2);
+    expect(spawned).toBe(false);
+    const stderr = stderrCapture.chunks.join("");
+    expect(stderr).toContain("unknown runtime 'gpt5'");
+  });
+
+  it("rejects ollama cloud without OLLAMA_API_KEY, naming the fix", async () => {
+    delete process.env["OLLAMA_API_KEY"];
+    delete process.env["OLLAMA_HOST"];
+    let spawned = false;
+    const code = await runRunCommand({
+      flags: { phase: ["01a"], noTui: true, runtime: "ollama" },
+      cwd,
+      spawn: ((opts) => {
+        spawned = true;
+        return fakeSpawnDependencyFailure()(opts);
+      }) as typeof spawnPipeline,
+      startLogs: async () => async () => {},
+      skipPreflight: true,
+    });
+    expect(code).toBe(2);
+    expect(spawned).toBe(false);
+    expect(stderrCapture.chunks.join("")).toContain("OLLAMA_API_KEY");
+  });
+
+  it("forwards a credentialed ollama runtime into the spawn options", async () => {
+    process.env["OLLAMA_API_KEY"] = "sk-test";
+    let seenRuntime: string | undefined;
+    const code = await runRunCommand({
+      flags: { phase: ["01a"], noTui: true, runtime: "ollama" },
+      cwd,
+      spawn: ((opts) => {
+        seenRuntime = opts.runtime;
+        return fakeSpawnDependencyFailure()(opts);
+      }) as typeof spawnPipeline,
+      startLogs: async () => async () => {},
+      skipPreflight: true,
+    });
+    expect(code).toBe(1); // fake pipeline's dependency-failure exit
+    expect(seenRuntime).toBe("ollama");
+  });
+
+  it("leaves runtime undefined when the flag is absent (default unchanged)", async () => {
+    let seenRuntime: string | undefined = "sentinel";
+    await runRunCommand({
+      flags: { phase: ["01a"], noTui: true },
+      cwd,
+      spawn: ((opts) => {
+        seenRuntime = opts.runtime;
+        return fakeSpawnDependencyFailure()(opts);
+      }) as typeof spawnPipeline,
+      startLogs: async () => async () => {},
+      skipPreflight: true,
+    });
+    expect(seenRuntime).toBeUndefined();
+  });
+});

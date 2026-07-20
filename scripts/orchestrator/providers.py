@@ -75,13 +75,175 @@ class PromptPropertyProvider:
 
 
 class LeanPropertyProvider:
-    """Lean 4 formal-verification provider (external plugin)."""
+    """Lean 4 formal-verification provider (external plugin).
+
+    ``generate()`` subprocess-invokes the plugin's CLI contract
+    (speca-lean4-plugin README, "CLI contract"):
+
+        speca-lean4 emit-01e --scope BUG_BOUNTY_SCOPE.json
+                             [--subgraphs 01b_subgraphs.json]
+                             (--health-json health.json | --run-lean)
+                             --out 01e_PARTIAL_lean.json
+
+    and returns the emitted ``properties`` list (01e schema; Lean provenance
+    fields like ``lean_status`` are additive extras, per speca#88's contract).
+
+    Plugin resolution (version-pinned per issue #87):
+
+    1. ``SPECA_LEAN4_PLUGIN_DIR`` — path to an existing plugin checkout.
+    2. Otherwise the pinned tag is auto-cloned into
+       ``<output_root>/.plugins/speca-lean4-plugin-<version>`` (requires git
+       and network; set ``SPECA_LEAN4_AUTO_CLONE=0`` to forbid).
+
+    The CLI is invoked as ``python -m speca_lean4.cli`` from the checkout
+    (with ``<checkout>/src`` on PYTHONPATH) rather than via a pip console
+    script: the plugin resolves its repo-root data files (theorem_map.json,
+    data/*.json) relative to its source tree, which a wheel install would not
+    carry.
+
+    Proof-health source (Stage B of the plugin pipeline), in priority order:
+
+    - ``source`` argument (wired from ``--dataset-source``) or the
+      ``SPECA_LEAN4_HEALTH_JSON`` env var — path to a precomputed
+      ``lake exe speca-export`` proof-health JSON (the plugin's CI artifact).
+    - ``SPECA_LEAN4_RUN_LEAN=1`` — run the Lean exporter now (requires the
+      Lean toolchain; heavy — gated off by default).
+    - Neither — the plugin emits every property ``lean_status=unknown`` with
+      a warning (honest dry-mapping mode; nothing is claimed proved).
+    """
 
     plugin_ref = "NyxFoundation/speca-lean4-plugin"
     # Version pin for the external plugin boundary (issue #87 requires plugin
-    # boundaries to be version-pinned). The plugin repo has no commits/tags yet,
-    # so the pin is deferred to #88 when it publishes a taggable release.
-    plugin_version: str | None = None
+    # boundaries to be version-pinned). Pinned to the plugin's F1 release
+    # (speca-lean4-plugin#8).
+    plugin_version: str | None = "v0.1.0"
+
+    subprocess_timeout_s = 1800
+
+    @staticmethod
+    def _is_plugin_checkout(path: Path) -> bool:
+        return (path / "src" / "speca_lean4").is_dir()
+
+    def _verify_plugin_version(self, plugin_dir: Path) -> None:
+        """Enforce that *plugin_dir* is actually at the pinned version.
+
+        The shape check (src/speca_lean4 exists) says nothing about *which*
+        version the checkout is, so a stale SPECA_LEAN4_PLUGIN_DIR or cache
+        would silently test the wrong code (issue #87: pins must be enforced,
+        not just declared). Policy:
+
+        - a tag at HEAD matching ``plugin_version`` -> verified;
+        - tags at HEAD but none matching -> hard error (set
+          ``SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1`` to downgrade to a warning,
+          e.g. for local plugin development);
+        - no tag readable (not a git checkout, or a branch clone without
+          tags) -> loud warning, not an error — we cannot verify, and honest
+          "unverified" beats a false "verified".
+        """
+        import os
+        import subprocess
+        import sys
+
+        if not self.plugin_version:
+            return
+        proc = subprocess.run(
+            ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
+            capture_output=True, text=True, timeout=60,
+        )
+        tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
+        if proc.returncode != 0 or not tags:
+            print(
+                f"warning: cannot verify {self.plugin_ref} checkout at "
+                f"{plugin_dir} is {self.plugin_version} (no tag readable at "
+                "HEAD); proceeding unverified.",
+                file=sys.stderr,
+            )
+            return
+        if self.plugin_version not in tags:
+            msg = (
+                f"{self.plugin_ref} checkout at {plugin_dir} is at "
+                f"{'/'.join(tags)}, but the provider pins "
+                f"{self.plugin_version}."
+            )
+            if os.environ.get("SPECA_LEAN4_ALLOW_VERSION_MISMATCH") == "1":
+                print(
+                    f"warning: {msg} Proceeding because "
+                    "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1.",
+                    file=sys.stderr,
+                )
+                return
+            raise RuntimeError(
+                f"{msg} Use a {self.plugin_version} checkout, or set "
+                "SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1 to override "
+                "(local plugin development only)."
+            )
+
+    def _resolve_plugin_dir(self) -> Path:
+        """Locate (or clone) the pinned plugin checkout; return its root."""
+        import os
+        import shutil
+        import subprocess
+
+        env_dir = os.environ.get("SPECA_LEAN4_PLUGIN_DIR")
+        if env_dir:
+            plugin_dir = Path(env_dir)
+            if not self._is_plugin_checkout(plugin_dir):
+                raise FileNotFoundError(
+                    f"SPECA_LEAN4_PLUGIN_DIR={env_dir} is not a "
+                    f"{self.plugin_ref} checkout (missing src/speca_lean4)."
+                )
+            self._verify_plugin_version(plugin_dir)
+            return plugin_dir
+
+        from .paths import get_output_root
+
+        cache_dir = (
+            get_output_root() / ".plugins"
+            / f"speca-lean4-plugin-{self.plugin_version or 'main'}"
+        )
+        if self._is_plugin_checkout(cache_dir):
+            self._verify_plugin_version(cache_dir)
+            return cache_dir
+        if cache_dir.exists():
+            # Leftover from an interrupted clone: a half-populated dir would
+            # make the re-clone fail with a misleading "destination path
+            # already exists" error. Remove it and clone fresh.
+            shutil.rmtree(cache_dir)
+
+        if os.environ.get("SPECA_LEAN4_AUTO_CLONE", "1") == "0":
+            raise RuntimeError(
+                f"lean provider requires {self.plugin_ref}@{self.plugin_version} "
+                "and SPECA_LEAN4_AUTO_CLONE=0 forbids cloning it. Set "
+                "SPECA_LEAN4_PLUGIN_DIR to an existing checkout."
+            )
+
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        clone_url = f"https://github.com/{self.plugin_ref}.git"
+        # Clone into a temp sibling, then rename into place, so an
+        # interrupted clone never leaves a half-populated cache_dir behind.
+        tmp_dir = cache_dir.parent / f"{cache_dir.name}.tmp-{os.getpid()}"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        cmd = ["git", "clone", "--depth", "1"]
+        if self.plugin_version:
+            cmd += ["--branch", self.plugin_version]
+        cmd += [clone_url, str(tmp_dir)]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.subprocess_timeout_s
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"failed to clone {self.plugin_ref}@{self.plugin_version} "
+                    f"(rc={proc.returncode}): {proc.stderr.strip()}\n"
+                    "Set SPECA_LEAN4_PLUGIN_DIR to an existing checkout instead."
+                )
+            tmp_dir.rename(cache_dir)
+        finally:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        self._verify_plugin_version(cache_dir)
+        return cache_dir
 
     def generate(
         self,
@@ -89,11 +251,87 @@ class LeanPropertyProvider:
         bug_bounty_scope: dict,
         source: str | None = None,
     ) -> list[dict]:
-        pin = f"@{self.plugin_version}" if self.plugin_version else " (version pin TBD by #88)"
-        raise NotImplementedError(
-            f"lean provider requires {self.plugin_ref}{pin}; "
-            "install and configure it first."
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        plugin_dir = self._resolve_plugin_dir()
+
+        with tempfile.TemporaryDirectory(prefix="speca-lean4-") as td:
+            tmp = Path(td)
+            scope_path = tmp / "BUG_BOUNTY_SCOPE.json"
+            scope_path.write_text(
+                json.dumps(bug_bounty_scope, ensure_ascii=False), encoding="utf-8"
+            )
+            out_path = tmp / "01e_PARTIAL_lean.json"
+
+            cmd = [
+                sys.executable, "-m", "speca_lean4.cli", "emit-01e",
+                "--scope", str(scope_path),
+                "--out", str(out_path),
+            ]
+
+            if subgraphs:
+                # The CLI globs 01b files; a JSON *list* file is consumed as a
+                # list of subgraph dicts (covers resolution input).
+                subgraphs_path = tmp / "01b_subgraphs.json"
+                subgraphs_path.write_text(
+                    json.dumps(subgraphs, ensure_ascii=False), encoding="utf-8"
+                )
+                cmd += ["--subgraphs", str(subgraphs_path)]
+
+            health_json = source or os.environ.get("SPECA_LEAN4_HEALTH_JSON")
+            if health_json:
+                health_path = Path(health_json)
+                if not health_path.exists():
+                    raise FileNotFoundError(
+                        f"lean provider proof-health JSON not found: {health_json}"
+                    )
+                cmd += ["--health-json", str(health_path)]
+            elif os.environ.get("SPECA_LEAN4_RUN_LEAN") == "1":
+                cmd += ["--run-lean"]
+
+            env = dict(os.environ)
+            src_dir = str(plugin_dir / "src")
+            existing = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = (
+                src_dir + os.pathsep + existing if existing else src_dir
+            )
+
+            proc = subprocess.run(
+                cmd,
+                cwd=str(plugin_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=self.subprocess_timeout_s,
+            )
+            # Surface the plugin's warnings (unknown lean_status, B5
+            # type-consistency flags) instead of swallowing them.
+            if proc.stderr:
+                print(proc.stderr, file=sys.stderr, end="")
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"speca-lean4 emit-01e failed (rc={proc.returncode}): "
+                    f"{proc.stderr.strip() or proc.stdout.strip()}"
+                )
+            doc = json.loads(out_path.read_text(encoding="utf-8"))
+
+        properties = doc.get("properties", [])
+        if not properties:
+            # An empty emission means downstream phases have nothing to audit;
+            # the phase would otherwise still log "completed" and exit 0.
+            print(
+                "warning: lean provider returned zero properties — check the "
+                "theorem map / scope inputs and the plugin output above.",
+                file=sys.stderr,
+            )
+        print(
+            f"lean provider: {len(properties)} properties from "
+            f"{self.plugin_ref}@{self.plugin_version}"
         )
+        return properties
 
 
 class DatasetPropertyProvider:

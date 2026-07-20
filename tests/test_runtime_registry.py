@@ -227,3 +227,49 @@ def test_ollama_runner_explicit_kwarg_overrides_env(
     )
     assert r.base_url == "https://kwarg-wins.example/v1"
     assert r.model == "custom-model"
+
+
+# ---------------------------------------------------------------------------
+# Ollama cloud host detection (issue #113 follow-up: hostname parse, not
+# substring match)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("https://ollama.com", True),
+        ("ollama.com", True),
+        ("https://api.ollama.com", True),
+        ("OLLAMA.COM", True),
+        ("http://localhost:11434", False),
+        ("192.168.1.10:11434", False),
+        # Substring misfires the old `"ollama.com" in host` check got wrong:
+        ("https://myollama.company.com", False),
+        ("myollama.company.com:11434", False),
+        ("https://example.com/?redirect=ollama.com", False),
+        # Suffix-spoof must not count as cloud:
+        ("https://evilollama.com.attacker.net", False),
+        ("", True),  # empty falls back to the cloud default host
+    ],
+)
+def test_is_ollama_cloud_host(host: str, expected: bool) -> None:
+    assert rr.is_ollama_cloud_host(host) is expected
+
+
+def test_probe_ollama_self_hosted_lookalike_needs_no_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host that merely CONTAINS ollama.com is self-hosted: no key needed."""
+
+    monkeypatch.setenv("OLLAMA_HOST", "https://myollama.company.com")
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    assert rr.probe("ollama").available is True
+
+
+def test_probe_ollama_cloud_subdomain_requires_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OLLAMA_HOST", "https://api.ollama.com")
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    assert rr.probe("ollama").available is False

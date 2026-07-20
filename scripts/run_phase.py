@@ -827,8 +827,11 @@ def main():
         "--dataset-source",
         default=None,
         metavar="URL_OR_PATH",
-        help="HuggingFace URL, GitHub release URL, or local path for "
-             "--property-provider=dataset or --property-provider=existing.",
+        help="Provider input source. dataset: HuggingFace or GitHub release "
+             "URL. existing: path to a previously-generated "
+             "01e_PARTIAL_*.json. lean: path to a precomputed "
+             "`lake exe speca-export` proof-health JSON (equivalent to "
+             "SPECA_LEAN4_HEALTH_JSON; omit for dry-mapping mode).",
     )
     parser.add_argument(
         "--enable-refinement",

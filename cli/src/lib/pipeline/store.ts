@@ -27,8 +27,18 @@ export interface PhaseState {
   model?: string | null;
   // Worker activity (worker id → most recent log line summary).
   workerActivity: Record<string, string>;
-  // Counters for progress display.
-  batchesObserved: number;
+  /**
+   * Number of log lines observed for this phase via the file-tail watcher
+   * (a live progress pulse for the dashboard). NOT the batch count — see
+   * `partialBatches` for that.
+   */
+  logLinesObserved: number;
+  /**
+   * Number of `{phase}_PARTIAL_W*B*_*.json` batch files on disk. Only set
+   * by `speca attach` (lib/pipeline/attach.ts), which counts real files;
+   * `speca run` has no reliable batch signal and leaves it undefined.
+   */
+  partialBatches?: number;
 }
 
 export interface CostState {
@@ -78,7 +88,7 @@ function ensurePhase(snap: PipelineSnapshot, id: string): PhaseState {
       id,
       status: "pending",
       workerActivity: {},
-      batchesObserved: 0,
+      logLinesObserved: 0,
     };
     snap.phases.set(id, phase);
     if (!snap.phaseOrder.includes(id)) snap.phaseOrder.push(id);
@@ -190,7 +200,7 @@ export function applyLogLine(prev: PipelineSnapshot, line: LogLine): PipelineSna
     if (line.worker !== "") {
       phase.workerActivity[`W${line.worker}`] = line.summary;
     }
-    phase.batchesObserved += 1;
+    phase.logLinesObserved += 1;
     // Workers collection (across all phases).
     if (line.worker !== "") {
       const wid = `W${line.worker}`;
@@ -227,6 +237,17 @@ export class PipelineStore {
 
   setBudget(maxUsd: number): void {
     this.snap = { ...this.snap, cost: { ...this.snap.cost, max_budget_usd: maxUsd } };
+    this.notify();
+  }
+
+  /**
+   * Replace the snapshot wholesale. Used by `speca attach` to seed the
+   * dashboard from on-disk artifacts before the log tail starts flowing
+   * (see lib/pipeline/attach.ts). Subsequent `applyLog` calls layer onto
+   * the seeded state exactly as they do for a live `speca run`.
+   */
+  seedSnapshot(snap: PipelineSnapshot): void {
+    this.snap = snap;
     this.notify();
   }
 

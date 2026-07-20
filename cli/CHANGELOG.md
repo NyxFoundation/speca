@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`speca attach`** ([#27]) — read-only attach to a running pipeline in
+  cwd. Reconstructs the phase rows from `outputs/*_PARTIAL_*.json`
+  (filenames, mtimes, and real `metadata.item_count` sums — no metrics are
+  invented) and tails `outputs/logs/*.log.jsonl` through the existing
+  polling log watcher, so a second terminal sees the same dashboard as
+  `speca run` without spawning a new orchestrator. Read-only: the stop /
+  force keybindings are disabled and detaching (`q`) never signals the
+  run. Exits 0 with a hint when there is nothing to attach to. `--no-tui`
+  prints a scan summary + plain-text log tail; `--json` emits an
+  `attach-summary` NDJSON envelope followed by `log` records.
+- **M4 acceptance at full Sherlock-RQ1 scale** ([#29]) — the complete
+  Phase 04 PARTIAL set of the RQ1 benchmark run (102 files / 550 reviewed
+  items / 72 actionable findings across 10 Ethereum-client repos, plus
+  the nethermind Phase 03 slice) is committed under
+  `test/fixtures/sherlock-rq1/`. New acceptance tests pin the per-repo
+  finding counts, exercise every filter atom (`severity:` / `verdict:` /
+  `prop:` / `repo:` / free text) against real data, and verify windowed
+  rendering + severity ordering on the 148-row prysm table. A
+  non-CI-gating benchmark (`npm run perf:rq1`) reports loader / filter /
+  sort / render timings over the full set.
+
+### Fixed
+
+- Dashboard phase rows no longer claim "0 results" for a completed phase
+  whose result count is unknown (attach mode) — they render "done".
+- `speca attach` follow-ups from the [#118] review:
+  - Attach is now truly write-free: the log watcher no longer mkdirs
+    `outputs/logs/` on behalf of a read-only observer
+    (`mkdirMissing: false`), and the watcher only starts once the
+    directory exists — retried from the rescan timer, since chokidar
+    never delivers events for a watch target created after the watch was
+    armed. The mutation-free test no longer pre-creates `logs/`.
+  - Phase statuses refresh over a long-lived attach: a periodic disk
+    re-scan (10 s) folds fresh status / batch / item counts into the live
+    snapshot while preserving the log ring and log-derived worker
+    summaries, so a finished phase flips running → done instead of
+    staying "running" forever.
+  - The dashboard's per-phase counters are separated: `partialBatches`
+    (real `*_PARTIAL_*.json` files on disk, attach only) vs
+    `logLinesObserved` (log-tail pulse; previously misnamed
+    `batchesObserved`), and the phase row labels both explicitly.
+  - Phase rows sort by explicit pipeline position (`KNOWN_PHASE_IDS`)
+    with fork phases after, instead of `localeCompare` — a fork's
+    phase-0 artifacts ("0a") no longer sort ahead of "04" or shuffle
+    under exotic collations.
+  - SIGTERM now detaches through the same cleanup path as `q` / Ctrl-C
+    (watcher and rescan timer torn down), and `speca attach --help`
+    documents the exit codes, including the headless exit-1 path.
+
+[#27]: https://github.com/NyxFoundation/speca/issues/27
+[#29]: https://github.com/NyxFoundation/speca/issues/29
+[#118]: https://github.com/NyxFoundation/speca/pull/118
+
 ## [0.9.2] - 2026-06-16
 
 Patch release on the 0.9.x soak line. Adds the `speca corpus` subcommand

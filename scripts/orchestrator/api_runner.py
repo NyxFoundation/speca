@@ -10,6 +10,13 @@ Environment variables:
   - API_RUNNER_BASE_URL:  API base URL (default: https://openrouter.ai/api/v1)
   - API_RUNNER_API_KEY:   API key for authentication
   - API_RUNNER_MODEL:     Model ID override (default: deepseek/deepseek-r1)
+  - SPECA_PROMPT_CACHE:   Prompt-caching override ("1"/"on" force-enable,
+                          "0"/"off" disable, unset/"auto" = per-runtime
+                          default). Enabling REQUESTS caching; whether it
+                          takes effect depends on the provider and on the
+                          prefix reaching the model's minimum cacheable
+                          length — check the prompt_cache_usage fields in
+                          the api_response log entries. See issue #79.
 """
 
 from __future__ import annotations
@@ -301,6 +308,39 @@ class APIRunner:
     MODEL_ENV: str = "API_RUNNER_MODEL"
     RUNTIME_LABEL: str = "api"
 
+    # ---- Prompt caching (issue #79) ----
+    # When True, the first user message is sent as two content blocks:
+    # the large, phase-stable prompt template carrying an Anthropic
+    # ``cache_control: {"type": "ephemeral"}`` breakpoint, followed by an
+    # uncached block with the per-batch dynamic arguments (QUEUE_FILE=...).
+    # Anthropic renders tools -> system -> messages, and both the tool
+    # definitions and the template are byte-stable across batches, so a
+    # single breakpoint on the template block caches the whole stable
+    # prefix. A second, *moving* breakpoint is re-placed on the newest
+    # message every turn of the tool loop so the growing conversation
+    # history (including large tool results) is served from cache instead
+    # of being re-billed at full price each turn (Anthropic's multi-turn
+    # pattern). Total: 2 of the 4 allowed breakpoints. Cache reads bill at
+    # ~0.1x of normal input.
+    #
+    # Honesty note: enabling this REQUESTS caching, it does not guarantee
+    # it. Prefixes below the model's minimum cacheable length (1024-4096
+    # tokens depending on the model) silently no-op — no error, just no
+    # cache activity. The only ground truth is the provider's usage
+    # counters (cache_read_input_tokens / cache_creation_input_tokens,
+    # or OpenAI-style prompt_tokens_details.cached_tokens), which the
+    # per-turn ``api_response`` log entries surface as
+    # ``prompt_cache_usage`` when present.
+    #
+    # The base runner targets OpenRouter, which passes ``cache_control``
+    # through to Anthropic models and drops it for others — safe default
+    # on. Subclasses that talk to providers with strict request validation
+    # (OpenAI, Gemini's compat shim) or no cache billing at all (Ollama)
+    # set this to False; those providers either auto-cache by prefix or
+    # have nothing to cache, and an unknown key could be rejected.
+    SUPPORTS_PROMPT_CACHE: bool = True
+    PROMPT_CACHE_ENV: str = "SPECA_PROMPT_CACHE"
+
     def __init__(
         self,
         config: PhaseConfig,
@@ -335,6 +375,9 @@ class APIRunner:
             if model is not None
             else os.environ.get(self.MODEL_ENV, self.DEFAULT_MODEL)
         )
+
+        # Prompt caching: explicit env override wins, else per-runtime default.
+        self.prompt_cache_enabled = self._resolve_prompt_cache()
 
         # Directories
         self.output_dir = get_output_root()
@@ -432,8 +475,9 @@ class APIRunner:
         self._save_json(queue_path, queue_payload)
         self._save_json(context_path, context_payload)
 
-        # Build prompt from template
-        prompt_content = self._build_prompt(
+        # Build prompt from template. With prompt caching on, this is a
+        # [cached template block, uncached args block] pair (issue #79).
+        prompt_content = self._build_user_content(
             worker_id=worker_id,
             queue_file=str(queue_path),
             context_file=str(context_path),
@@ -464,6 +508,11 @@ class APIRunner:
             for turn in range(self.max_turns):
                 num_turns += 1
 
+                # Multi-turn caching: move the conversation breakpoint to
+                # the newest message before every request (no-op when
+                # caching is off).
+                self._update_conversation_breakpoint(messages)
+
                 request_body: dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
@@ -477,6 +526,11 @@ class APIRunner:
                     "timestamp": time.time(),
                     "model": self.model,
                     "message_count": len(messages),
+                    # "requested", not "effective": below the model's
+                    # minimum cacheable prefix (1024-4096 tokens) the
+                    # marker silently no-ops. Check prompt_cache_usage on
+                    # the matching api_response entry for the real hit.
+                    "prompt_cache_requested": self.prompt_cache_enabled,
                 })
 
                 try:
@@ -511,12 +565,30 @@ class APIRunner:
                 total_input_tokens += usage.get("prompt_tokens", 0)
                 total_output_tokens += usage.get("completion_tokens", 0)
 
-                log_entries.append({
+                response_entry: dict[str, Any] = {
                     "type": "api_response",
                     "turn": turn,
                     "usage": usage,
                     "finish_reason": data.get("choices", [{}])[0].get("finish_reason"),
-                })
+                }
+                # Ground truth for cache effectiveness: the provider's own
+                # counters. Anthropic/OpenRouter report cache_read_ /
+                # cache_creation_input_tokens; OpenAI reports
+                # prompt_tokens_details.cached_tokens. Absent fields mean
+                # the provider reported nothing — NOT a confirmed miss.
+                cache_usage = {
+                    k: usage[k]
+                    for k in ("cache_read_input_tokens", "cache_creation_input_tokens")
+                    if isinstance(usage.get(k), int)
+                }
+                details = usage.get("prompt_tokens_details")
+                if isinstance(details, dict) and isinstance(
+                    details.get("cached_tokens"), int
+                ):
+                    cache_usage["cached_tokens"] = details["cached_tokens"]
+                if cache_usage:
+                    response_entry["prompt_cache_usage"] = cache_usage
+                log_entries.append(response_entry)
 
                 choice = data.get("choices", [{}])[0]
                 message = choice.get("message", {})
@@ -628,10 +700,39 @@ class APIRunner:
 
         return results
 
-    def _build_prompt(self, **kwargs: Any) -> str:
-        """Build the prompt content with template substitution."""
-        with open(resolve_core_asset(self.config.prompt_path)) as f:
-            prompt_content = f.read()
+    def _resolve_prompt_cache(self) -> bool:
+        """Resolve whether prompt caching is active for this runner.
+
+        Resolution order: ``SPECA_PROMPT_CACHE`` env override ("1"/"on"/
+        "true" force-enable, "0"/"off"/"false" disable) > the runtime's
+        ``SUPPORTS_PROMPT_CACHE`` class default.
+        """
+        raw = os.environ.get(self.PROMPT_CACHE_ENV, "auto").strip().lower()
+        if raw in ("1", "on", "true", "yes"):
+            if not self.SUPPORTS_PROMPT_CACHE:
+                print(
+                    f"[{self.RUNTIME_LABEL}] WARNING: {self.PROMPT_CACHE_ENV}={raw} "
+                    "force-enables cache_control on a runtime that does not "
+                    "support it; strict providers (e.g. OpenAI) reject the "
+                    "field and every request will fail.",
+                    file=sys.stderr,
+                )
+            return True
+        if raw in ("0", "off", "false", "no"):
+            return False
+        return self.SUPPORTS_PROMPT_CACHE
+
+    def _build_prompt_blocks(self, **kwargs: Any) -> tuple[str, str]:
+        """Split the prompt into (stable template, volatile args block).
+
+        The template body is identical for every batch of a phase — it is
+        the cacheable prefix. The args block carries the per-batch values
+        (QUEUE_FILE, CONTEXT_FILE, worker/batch ids, timestamp) and must
+        stay OUT of the cached span, otherwise every batch would write a
+        distinct cache entry that is never read.
+        """
+        with open(resolve_core_asset(self.config.prompt_path), encoding="utf-8") as f:
+            template_body = f.read()
 
         def _quote(v: Any) -> str:
             s = str(v)
@@ -639,8 +740,88 @@ class APIRunner:
                 return f'"{s}"'
             return s
 
-        args = " ".join(f"{k.upper()}={_quote(v)}" for k, v in kwargs.items())
-        return f"{prompt_content}\n\n{args}"
+        args_block = " ".join(f"{k.upper()}={_quote(v)}" for k, v in kwargs.items())
+        return template_body, args_block
+
+    def _build_prompt(self, **kwargs: Any) -> str:
+        """Build the prompt content with template substitution."""
+        template_body, args_block = self._build_prompt_blocks(**kwargs)
+        return f"{template_body}\n\n{args_block}"
+
+    def _build_user_content(self, **kwargs: Any) -> str | list[dict[str, Any]]:
+        """Build the first user message's ``content`` value.
+
+        With prompt caching enabled the content is a two-block list with an
+        Anthropic ``cache_control`` breakpoint on the stable template block
+        (see the ``SUPPORTS_PROMPT_CACHE`` class comment). Otherwise it is
+        the legacy single string — byte-identical to pre-#79 behaviour.
+        """
+        if not self.prompt_cache_enabled:
+            return self._build_prompt(**kwargs)
+
+        template_body, args_block = self._build_prompt_blocks(**kwargs)
+        return [
+            {
+                "type": "text",
+                "text": template_body,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": args_block},
+        ]
+
+    def _update_conversation_breakpoint(
+        self, messages: list[dict[str, Any]]
+    ) -> None:
+        """Re-place the moving multi-turn cache breakpoint (issue #79 f/u).
+
+        Anthropic's multi-turn pattern: keep one static breakpoint on the
+        stable prefix (the template block of the first message) and one
+        MOVING breakpoint on the newest message. Each turn the previous
+        moving marker is removed and re-placed on the last user/tool
+        message, so the whole conversation up to that point — including
+        the large tool results of earlier turns — becomes a cache read
+        on the next request instead of full-price input.
+
+        Budget: static template marker + one moving marker = 2 of the 4
+        breakpoints Anthropic allows. Assistant messages come back from
+        the provider verbatim and are never annotated. No-op when prompt
+        caching is off (message shapes stay byte-identical to pre-#79).
+        """
+        if not self.prompt_cache_enabled:
+            return
+
+        # Strip the previous moving marker. The static marker lives on
+        # block 0 of message 0 and is left untouched.
+        for i, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            start = 1 if i == 0 else 0
+            for block in content[start:]:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+        # Mark the newest cacheable message. We only annotate messages we
+        # authored (role user/tool); the loop appends tool results after
+        # every assistant turn, so this is always the true tail of the
+        # conversation at request time.
+        for msg in reversed(messages):
+            if msg.get("role") not in ("user", "tool"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            elif isinstance(content, list) and content:
+                last = content[-1]
+                if isinstance(last, dict):
+                    last["cache_control"] = {"type": "ephemeral"}
+            return
 
     def _parse_results(self, result_path: Path) -> list[dict[str, Any]] | None:
         """Parse results from the output JSON file."""
@@ -762,6 +943,11 @@ class CodexAPIRunner(APIRunner):
     API_KEY_ENV = "OPENAI_API_KEY"
     MODEL_ENV = "OPENAI_MODEL"
     RUNTIME_LABEL = "codex"
+    # OpenAI validates request fields strictly (an unknown ``cache_control``
+    # key inside a content part is rejected) and already auto-caches
+    # >=1024-token prefixes at 50% off. The template/args split alone keeps
+    # the prefix byte-stable, which is all OpenAI's implicit caching needs.
+    SUPPORTS_PROMPT_CACHE = False
 
 
 class GeminiAPIRunner(APIRunner):
@@ -778,6 +964,10 @@ class GeminiAPIRunner(APIRunner):
     API_KEY_ENV = "GEMINI_API_KEY"
     MODEL_ENV = "GEMINI_MODEL"
     RUNTIME_LABEL = "gemini"
+    # Gemini's OpenAI compat shim has no ``cache_control`` concept; recent
+    # Gemini API versions apply implicit input caching on their own. Don't
+    # risk the shim rejecting an unknown content-part key.
+    SUPPORTS_PROMPT_CACHE = False
 
 
 class OllamaAPIRunner(APIRunner):
@@ -795,6 +985,10 @@ class OllamaAPIRunner(APIRunner):
     API_KEY_ENV = "OLLAMA_API_KEY"
     MODEL_ENV = "OLLAMA_MODEL"
     RUNTIME_LABEL = "ollama"
+    # Ollama has no cache billing (local inference / flat cloud pricing)
+    # and no ``cache_control`` semantics — nothing to gain, keep the
+    # legacy single-string prompt.
+    SUPPORTS_PROMPT_CACHE = False
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

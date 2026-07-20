@@ -1,0 +1,193 @@
+name: "01e. Properties (lean provider)"
+
+# provider:lean CI smoke (speca-lean4-plugin#8, F4) — mirrors the shape of
+# 01e-properties.yml but exercises the pluggable `lean` property provider
+# instead of the Claude CLI prompt path: `run_phase.py --phase 01e
+# --property-provider lean` subprocess-invokes the version-pinned external
+# plugin's CLI (`speca-lean4 emit-01e`, see LeanPropertyProvider) and writes
+# regular 01e_PARTIAL_*.json output.
+#
+# Python-only by default (green without any Lean toolchain): proof health
+# comes from the plugin's committed sample fixture, which certifies nothing —
+# it is clearly fixture data and this job is a plumbing smoke, not a proof
+# run. The real `lake exe speca-export` path (elan + Lean toolchain +
+# gasper-lean4 build) is heavy and is gated behind the run_lean input,
+# off by default. No Claude CLI, no API key, no self-hosted runner needed.
+
+on:
+  # Path-filtered PR smoke: workflow_dispatch alone is not triggerable until
+  # the file reaches the default branch, and the provider seam should not
+  # regress silently anyway. Runs only when the lean-provider surface changes.
+  pull_request:
+    paths:
+      - '.github/workflows/01e-properties-lean.yml'
+      - 'scripts/orchestrator/providers.py'
+      - 'scripts/orchestrator/base.py'
+      - 'scripts/orchestrator/collector.py'
+      - 'scripts/orchestrator/factory.py'
+      - 'scripts/orchestrator/config.py'
+      - 'tests/test_pluggable_providers.py'
+  workflow_dispatch:
+    inputs:
+      plugin_version:
+        description: 'speca-lean4-plugin git tag/ref to resolve. Empty = the code pin (LeanPropertyProvider.plugin_version).'
+        required: false
+        type: string
+        default: ''
+      run_lean:
+        description: 'Run the real Lean exporter (heavy: installs elan and builds lean/; off = plugin sample health fixture)'
+        required: false
+        type: boolean
+        default: false
+      bug_bounty_scope:
+        description: 'Bug Bounty Scope Definition (JSON). Empty = plugin sample scope fixture.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  properties-lean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+
+      - name: Install Python 3.11 via uv
+        run: uv python install 3.11
+
+      - name: Sync Python deps
+        run: uv sync
+
+      - name: Install ripgrep
+        # tests/test_api_runner.py's Grep-tool tests need `rg` (the plain-grep
+        # fallback ignores glob filters); the self-hosted runners have it,
+        # hosted ubuntu-latest does not.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - name: "Pre-flight: Schema & Config Tests"
+        run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: Resolve plugin version pin
+        # Single source of truth: the code pin (LeanPropertyProvider.
+        # plugin_version). A dispatch input can override it for ad-hoc
+        # testing; bumping the pin in providers.py moves this workflow
+        # automatically — no version literals in this file.
+        env:
+          INPUT_PLUGIN_VERSION: ${{ inputs.plugin_version }}
+        run: |
+          set -e
+          if [ -n "$INPUT_PLUGIN_VERSION" ]; then
+            PIN="$INPUT_PLUGIN_VERSION"
+            echo "Using dispatch-input plugin version override: $PIN"
+          else
+            PIN=$(uv run python3 -c "import sys; sys.path.insert(0, 'scripts'); from orchestrator.providers import LeanPropertyProvider; print(LeanPropertyProvider.plugin_version)")
+            echo "Using the code pin (LeanPropertyProvider.plugin_version): $PIN"
+          fi
+          echo "PLUGIN_VERSION=$PIN" >> "$GITHUB_ENV"
+
+      - name: Resolve pinned plugin
+        run: |
+          set -e
+          PLUGIN_DIR="$RUNNER_TEMP/speca-lean4-plugin"
+          git clone --depth 1 --branch "$PLUGIN_VERSION" \
+            https://github.com/NyxFoundation/speca-lean4-plugin.git "$PLUGIN_DIR"
+          echo "SPECA_LEAN4_PLUGIN_DIR=$PLUGIN_DIR" >> "$GITHUB_ENV"
+          echo "Resolved speca-lean4-plugin@$PLUGIN_VERSION ($(git -C "$PLUGIN_DIR" rev-parse HEAD))"
+
+      - name: Select proof-health source (fixture)
+        if: ${{ !inputs.run_lean }}
+        run: |
+          HEALTH="$SPECA_LEAN4_PLUGIN_DIR/tests/fixtures/theorem_health.sample.json"
+          test -f "$HEALTH"
+          echo "SPECA_LEAN4_HEALTH_JSON=$HEALTH" >> "$GITHUB_ENV"
+          echo "NOTE: using the plugin's committed sample health fixture." \
+               "lean_status values in this run certify nothing (plumbing smoke)."
+
+      - name: Select proof-health source (run Lean exporter)
+        if: ${{ inputs.run_lean }}
+        run: |
+          set -e
+          curl -fsSL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          echo "SPECA_LEAN4_RUN_LEAN=1" >> "$GITHUB_ENV"
+
+      - name: Write Bug Bounty Scope
+        # The input reaches the shell via env, never by expanding ${{ }}
+        # inside the script body (GitHub's documented injection anti-pattern;
+        # also breaks on quotes in the JSON).
+        env:
+          BUG_BOUNTY_SCOPE: ${{ inputs.bug_bounty_scope }}
+        run: |
+          mkdir -p outputs
+          if [ -n "$BUG_BOUNTY_SCOPE" ]; then
+            printf '%s\n' "$BUG_BOUNTY_SCOPE" > outputs/BUG_BOUNTY_SCOPE.json
+            echo "Wrote BUG_BOUNTY_SCOPE.json from workflow input"
+          else
+            cp "$SPECA_LEAN4_PLUGIN_DIR/tests/fixtures/bug_bounty_scope.sample.json" outputs/BUG_BOUNTY_SCOPE.json
+            echo "Wrote BUG_BOUNTY_SCOPE.json from the plugin's sample fixture"
+          fi
+
+      - name: Write minimal 01b input
+        # Phase 01e depends on 01b partials. This smoke runs standalone, so
+        # satisfy the dependency with an empty (schema-valid) 01b partial —
+        # the lean provider only uses 01b subgraphs for `covers` resolution
+        # and falls back to its label-derived covers without them.
+        run: |
+          printf '{"specs": [], "metadata": {"note": "provider:lean CI smoke fixture"}}\n' \
+            > outputs/01b_PARTIAL_ci_smoke.json
+
+      - name: "Step 01e: Properties (lean provider)"
+        run: uv run python3 scripts/run_phase.py --phase 01e --property-provider lean --no-archive
+
+      - name: Verify emitted 01e
+        run: |
+          uv run python3 - <<'EOF'
+          import glob, json, sys
+          sys.path.insert(0, "scripts")
+          from orchestrator.schemas import Phase01ePartial
+
+          files = sorted(glob.glob("outputs/01e_PARTIAL_*.json"))
+          assert files, "no 01e_PARTIAL_*.json emitted"
+          props = []
+          for fp in files:
+              doc = json.load(open(fp, encoding="utf-8"))
+              Phase01ePartial.model_validate(doc)  # core 01e schema
+              props.extend(doc["properties"])
+          assert props, "01e partial contains no properties"
+
+          status = {}
+          for p in props:
+              status[p.get("lean_status", "<absent>")] = status.get(p.get("lean_status", "<absent>"), 0) + 1
+          missing = [p["property_id"] for p in props if "lean_status" not in p]
+          assert not missing, f"properties missing lean provenance: {missing[:5]}"
+
+          print(f"OK: {len(props)} schema-valid properties across {len(files)} file(s)")
+          print(f"lean_status distribution: {status}")
+          EOF
+
+      - name: Summary
+        run: |
+          {
+            echo "## provider:lean smoke"
+            echo "- plugin: NyxFoundation/speca-lean4-plugin@$PLUGIN_VERSION"
+            echo "- proof health: ${{ inputs.run_lean && 'real lake exe speca-export run' || 'plugin sample fixture (certifies nothing; plumbing smoke)' }}"
+            echo "- output: outputs/01e_PARTIAL_*.json (uploaded as artifact)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload 01e output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 01e-lean-${{ github.run_id }}
+          path: outputs/01e_PARTIAL_*.json
+          retention-days: 14
