@@ -106,7 +106,13 @@ def is_ollama_cloud_host(host: str) -> bool:
     raw = host.strip()
     if not raw:
         raw = OLLAMA_DEFAULT_HOST
-    if "://" not in raw:
+    if raw.startswith("//"):
+        # Scheme-relative ("//ollama.com"): prefix the scheme only.
+        # Blindly prepending "http://" would yield "http:////..." which
+        # urlparse reads as an empty netloc (while WHATWG URL collapses
+        # the slashes) — the exact Node/Python divergence this guards.
+        raw = f"http:{raw}"
+    elif "://" not in raw:
         raw = f"http://{raw}"
     try:
         hostname = (urlparse(raw).hostname or "").lower()

@@ -74,6 +74,11 @@ describe("isOllamaCloudHost — hostname parsing (not substring matching)", () =
     ["https://evilollama.com.attacker.net", false],
     ["", true], // empty falls back to the cloud default host
     ["not a parseable host", false], // unparseable counts as self-hosted
+    // Scheme-relative hosts must classify the same as the Python side:
+    ["//ollama.com", true],
+    ["//api.ollama.com", true],
+    ["//myollama.company.com", false],
+    ["//localhost:11434", false],
   ])("%s -> cloud=%s", (host, expected) => {
     expect(isOllamaCloudHost(host)).toBe(expected);
   });

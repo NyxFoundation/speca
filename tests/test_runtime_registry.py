@@ -251,6 +251,12 @@ def test_ollama_runner_explicit_kwarg_overrides_env(
         # Suffix-spoof must not count as cloud:
         ("https://evilollama.com.attacker.net", False),
         ("", True),  # empty falls back to the cloud default host
+        ("not a parseable host", False),  # unparseable counts as self-hosted
+        # Scheme-relative hosts must classify the same as the TS side:
+        ("//ollama.com", True),
+        ("//api.ollama.com", True),
+        ("//myollama.company.com", False),
+        ("//localhost:11434", False),
     ],
 )
 def test_is_ollama_cloud_host(host: str, expected: bool) -> None:
