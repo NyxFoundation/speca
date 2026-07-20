@@ -4,8 +4,10 @@ name: "01e. Properties (lean provider)"
 # 01e-properties.yml but exercises the pluggable `lean` property provider
 # instead of the Claude CLI prompt path: `run_phase.py --phase 01e
 # --property-provider lean` subprocess-invokes the version-pinned external
-# plugin's CLI (`speca-lean4 emit-01e`, see LeanPropertyProvider) and writes
-# regular 01e_PARTIAL_*.json output.
+# plugin's CLI (`speca-lean4 emit-kurtosis`, see LeanPropertyProvider) and
+# writes regular 01e_PARTIAL_*.json output plus one Kurtosis fixture
+# scaffold per checker-linked property under outputs/kurtosis/ (issue #88
+# Task 5; fixtures are scaffolds — devnet execution is speca#92).
 #
 # Python-only by default (green without any Lean toolchain): proof health
 # comes from the plugin's committed sample fixture, which certifies nothing —
@@ -122,6 +124,25 @@ jobs:
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
           echo "SPECA_LEAN4_RUN_LEAN=1" >> "$GITHUB_ENV"
 
+      - name: "Pilot tests: proved property + fixture + determinism (issue #88 Task 8)"
+        # These pytest cases skip during the pre-flight run (no plugin
+        # resolved yet) and activate here, against the real pinned checkout:
+        # at least one lean_status=proved property carries an on-disk
+        # kurtosis fixture scaffold, the emission validates as 01e, and a
+        # re-run is byte-identical (properties, paths, fixture contents).
+        # Proof health for these tests is the plugin's sample fixture —
+        # plumbing verification, not theorem certification. A skip here would
+        # be a false green (the tests self-skip without a resolved plugin),
+        # so skips are promoted to failure.
+        run: |
+          set -euo pipefail
+          test -d "$SPECA_LEAN4_PLUGIN_DIR/src/speca_lean4"
+          uv run python3 -m pytest tests/test_pluggable_providers.py -v --tb=short -ra -k "lean_pilot" | tee pilot-tests.log
+          if grep -qE "SKIPPED|no tests ran" pilot-tests.log; then
+            echo "pilot tests were skipped or not collected — failing (they must run against the resolved plugin)"
+            exit 1
+          fi
+
       - name: Write Bug Bounty Scope
         # The input reaches the shell via env, never by expanding ${{ }}
         # inside the script body (GitHub's documented injection anti-pattern;
@@ -172,8 +193,30 @@ jobs:
           missing = [p["property_id"] for p in props if "lean_status" not in p]
           assert not missing, f"properties missing lean provenance: {missing[:5]}"
 
+          # issue #88 Task 5/8: kurtosis fixture verification. Every non-null
+          # kurtosis_test must point at a real on-disk scaffold that honestly
+          # claims no verdict; checkerless properties keep it null/absent.
+          import os
+          n_fx = 0
+          for p in props:
+              kt = p.get("kurtosis_test")
+              if not kt:
+                  continue
+              assert os.path.isfile(kt), f"kurtosis_test missing on disk: {kt}"
+              fx = json.load(open(kt, encoding="utf-8"))
+              assert fx.get("scaffold") is True, f"fixture not marked scaffold: {kt}"
+              assert fx.get("handoff", {}).get("verdict") is None, \
+                  f"fixture claims a verdict but nothing ran: {kt}"
+              n_fx += 1
+          assert n_fx, "no kurtosis_test fixture was emitted (Task 5 regression)"
+          assert any(
+              p.get("lean_status") == "proved" and p.get("kurtosis_test")
+              for p in props
+          ), "no proved property with a kurtosis fixture (Task 8 pilot contract)"
+
           print(f"OK: {len(props)} schema-valid properties across {len(files)} file(s)")
           print(f"lean_status distribution: {status}")
+          print(f"kurtosis fixtures verified on disk: {n_fx}")
           EOF
 
       - name: Summary
@@ -183,6 +226,7 @@ jobs:
             echo "- plugin: NyxFoundation/speca-lean4-plugin@$PLUGIN_VERSION"
             echo "- proof health: ${{ inputs.run_lean && 'real lake exe speca-export run' || 'plugin sample fixture (certifies nothing; plumbing smoke)' }}"
             echo "- output: outputs/01e_PARTIAL_*.json (uploaded as artifact)"
+            echo "- kurtosis fixtures: outputs/kurtosis/<label>/<property_id>/ (scaffolds — devnet execution is speca#92)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload 01e output
@@ -190,5 +234,7 @@ jobs:
         if: always()
         with:
           name: 01e-lean-${{ github.run_id }}
-          path: outputs/01e_PARTIAL_*.json
+          path: |
+            outputs/01e_PARTIAL_*.json
+            outputs/kurtosis/
           retention-days: 14
