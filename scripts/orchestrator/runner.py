@@ -34,6 +34,7 @@ _CLAUDE_BIN = (
 ) or shutil.which("claude") or "claude"
 
 from .config import PhaseConfig
+from .json_events import get_active_emitter
 from .paths import get_core_root, get_output_root, resolve_core_asset
 from .watchdog import (
     LogWatcher,
@@ -936,11 +937,29 @@ class ClaudeRunner:
         servers were absent (issue #98): Claude starts with
         ``--strict-mcp-config`` and an empty server list, so e.g. phase 02c
         simply loses Tree-sitter with no visible failure. Never silent.
+
+        Two channels, because no single one reaches every mode:
+
+        - stderr ``print`` — visible in ``--no-tui`` / piped runs, where the
+          CLI forwards orchestrator stderr verbatim;
+        - a ``warning`` NDJSON event — the default interactive dashboard's
+          only inputs are the event stream and the log tail (it DISCARDS
+          subprocess stderr, see cli/src/commands/run.tsx), so without this
+          event TUI users would never see the degradation.
         """
         missing = sorted(needed - available)
         if not missing or self._mcp_warning_emitted:
             return
         self._mcp_warning_emitted = True
+        get_active_emitter().emit(
+            "warning",
+            phase=self.config.phase_id,
+            message=(
+                f"MCP servers not configured: {', '.join(missing)} — the "
+                "phase runs without them and may degrade. Create .mcp.json "
+                "in your workspace or set SPECA_MCP_CONFIG."
+            ),
+        )
         if source is not None:
             where = f"MCP config loaded from: {source}"
         else:
