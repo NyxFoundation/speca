@@ -3,12 +3,13 @@
 Covers:
   - resolution order: $SPECA_MCP_CONFIG > ./.mcp.json > <core root>/.mcp.json
   - hard failure when SPECA_MCP_CONFIG points at a missing file
-  - the loud stderr warning when a phase declares servers that are absent
-    (including the cached-config reuse path)
+  - the loud stderr warning and the `warning` NDJSON event when a phase
+    declares servers that are absent
   - per-phase filtering keeps only the declared servers
 """
 
 import asyncio
+import io
 import json
 from pathlib import Path
 
@@ -173,6 +174,32 @@ def test_warning_emitted_once_per_runner(isolated_env, capsys):
     runner._get_phase_mcp_config()
     runner._get_phase_mcp_config()
     assert capsys.readouterr().err.count("WARNING") == 1
+
+
+def test_missing_servers_emit_warning_event(isolated_env, capsys):
+    """The warning must also reach the NDJSON stream (PR #117 review, Major 1).
+
+    The default interactive dashboard discards orchestrator stderr, so the
+    `warning` event is the only channel that reaches TUI users.
+    """
+    from scripts.orchestrator import json_events
+
+    stream = io.StringIO()
+    json_events.set_active_emitter(json_events.JsonEventEmitter(enabled=True, stream=stream))
+    try:
+        runner = make_runner(["fetch"])
+        runner._get_phase_mcp_config()
+    finally:
+        # Never leak the enabled emitter into other tests.
+        json_events.set_active_emitter(json_events.JsonEventEmitter(enabled=False))
+    lines = [line for line in stream.getvalue().splitlines() if line.strip()]
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["type"] == "warning"
+    assert event["phase"] == "testphase"
+    assert "fetch" in event["message"]
+    # The stderr print still happens for --no-tui / piped runs.
+    assert "WARNING" in capsys.readouterr().err
 
 
 def test_no_warning_when_phase_declares_no_servers(isolated_env, capsys):
