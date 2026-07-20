@@ -5,6 +5,7 @@ import {
   createInitialSnapshot,
   PipelineStore,
   LOG_RING_CAPACITY,
+  WARNING_CAPACITY,
 } from "../src/lib/pipeline/store.js";
 import type { LogLine } from "../src/lib/pipeline/log-watcher.js";
 import type { PipelineEvent } from "../src/lib/pipeline/events.js";
@@ -95,6 +96,33 @@ describe("applyPipelineEvent — error / budget paths", () => {
     s = applyPipelineEvent(s, ev.budgetExceeded("03"));
     s = applyPipelineEvent(s, ev.pipelineCompleted(["03"], { "03": false }));
     expect(s.pipelineStatus).toBe("budget-exceeded");
+  });
+});
+
+describe("applyPipelineEvent — warning events (issue #98)", () => {
+  function warning(phase: string, message: string): PipelineEvent {
+    return { type: "warning", ts, phase, message };
+  }
+
+  it("accumulates warnings without touching pipeline or phase status", () => {
+    let s = createInitialSnapshot();
+    s = applyPipelineEvent(s, ev.pipelineStarted(["02c"]));
+    s = applyPipelineEvent(s, ev.phaseStarted("02c"));
+    s = applyPipelineEvent(s, warning("02c", "MCP servers not configured: tree_sitter"));
+    expect(s.warnings).toEqual(["[02c] MCP servers not configured: tree_sitter"]);
+    expect(s.pipelineStatus).toBe("running");
+    expect(s.phases.get("02c")?.status).toBe("running");
+    expect(s.lastError).toBeUndefined();
+  });
+
+  it("caps the warning list at WARNING_CAPACITY, dropping the oldest", () => {
+    let s = createInitialSnapshot();
+    for (let i = 0; i < WARNING_CAPACITY + 5; i++) {
+      s = applyPipelineEvent(s, warning("01a", `w${i}`));
+    }
+    expect(s.warnings).toHaveLength(WARNING_CAPACITY);
+    expect(s.warnings[0]).toBe("[01a] w5");
+    expect(s.warnings.at(-1)).toBe(`[01a] w${WARNING_CAPACITY + 4}`);
   });
 });
 
