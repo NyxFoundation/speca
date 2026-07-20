@@ -1,0 +1,326 @@
+name: "03/04. Lean pilot audit (issue #88 TODO 4)"
+
+# issue #88 方針TODO 4: run the real 03 (audit map) and 04 (review) phases,
+# with the real Claude CLI, on properties that came from the LEAN provider
+# (gasper-lean4 Core theorems -> 01e -> 02c). Locally the pipeline was only
+# proven through 02c with real data; 03/04 had fake-runner integration
+# coverage only. This workflow runs them for real on the self-hosted runners
+# (Claude CLI is authenticated there), against a small committed subset so
+# LLM cost stays bounded.
+#
+# Dispatch this on a data branch that carries the pilot inputs in outputs/:
+#   - TARGET_INFO.json          (owner/repo + pinned commit of the target)
+#   - 02c_PARTIAL_*.json        (lean-derived, code-resolved property subset)
+#   - BUG_BOUNTY_SCOPE.json     (required by Phase 04)
+#   - 01b_SUBGRAPH_INDEX.json   (required by Phase 04)
+# e.g. branch ci/issue-88-lean-pilot-0304 (created from main + the pilot
+# subset produced locally on 2026-07-20; 9 properties).
+#
+# The run also answers a portability question: on local Windows runs, phase
+# 03/04 workers using the default model (sonnet) were refused by a cyber
+# safeguard when cwd was the speca repo, while haiku/opus ran fine. If this
+# job's sonnet workers produce audit items here, that refusal was
+# environment-specific; if they refuse here too, the `model` input allows an
+# immediate haiku/opus comparison run. Either result is signal — the
+# verification step fails the job when a phase emits fewer items than
+# `min_items`, so mass refusal cannot end green.
+#
+# No pull_request trigger on purpose: this occupies a shared self-hosted
+# runner and spends LLM budget, so it is dispatch-only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: 'Number of parallel workers'
+        required: false
+        type: number
+        default: 2
+      max_concurrent:
+        description: 'Max concurrent Claude calls'
+        required: false
+        type: number
+        default: 4
+      run_04:
+        description: 'Also run Phase 04 (review) after Phase 03'
+        required: false
+        type: boolean
+        default: true
+      model:
+        description: 'Model override for run_phase.py --model (empty = phase config default, sonnet). Use e.g. haiku/opus to compare refusal behavior.'
+        required: false
+        type: string
+        default: ''
+      min_items:
+        description: 'Fail if a phase emits fewer result items than this (guards against silent mass refusal). Default = the committed 9-property subset.'
+        required: false
+        type: number
+        default: 9
+
+permissions:
+  contents: write
+
+jobs:
+  lean-pilot-audit:
+    if: ${{ github.actor == 'grandchildrice' || github.actor == 'hirorogo' || github.actor == 'sururu-k' }}
+    runs-on: self-hosted
+    timeout-minutes: 180
+
+    env:
+      CLAUDE_CODE_PERMISSIONS: bypassPermissions
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: 100000
+      MODEL_INPUT: ${{ inputs.model }}
+      WORKERS_INPUT: ${{ inputs.workers }}
+      MAX_CONCURRENT_INPUT: ${{ inputs.max_concurrent }}
+      MIN_ITEMS: ${{ inputs.min_items }}
+
+    steps:
+      - name: Checkout Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Update Scripts and Prompts from Remote
+        run: |
+          set -e
+          echo "Syncing scripts and prompts with remote branch..."
+          git fetch --prune origin
+          git checkout origin/${{ github.ref_name }} -- scripts/ prompts/ .github/workflows/ .claude/
+
+      - name: Verify pilot inputs on this branch
+        run: |
+          set -euo pipefail
+          for f in outputs/TARGET_INFO.json outputs/BUG_BOUNTY_SCOPE.json outputs/01b_SUBGRAPH_INDEX.json; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: $f not found — dispatch this workflow on the lean-pilot data branch."
+              exit 1
+            fi
+          done
+          if ! ls outputs/02c_PARTIAL_*.json 1>/dev/null 2>&1; then
+            echo "ERROR: no outputs/02c_PARTIAL_*.json on this branch — Phase 03 has no input."
+            exit 1
+          fi
+          echo "Pilot inputs present:"
+          ls -lh outputs/TARGET_INFO.json outputs/02c_PARTIAL_*.json
+
+      - name: Load Target Info
+        id: target_info
+        run: |
+          set -euo pipefail
+
+          TARGET_REPO="$(jq -r '.target_repo' outputs/TARGET_INFO.json)"
+          TARGET_REF_LABEL="$(jq -r '.target_ref_label' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT="$(jq -r '.target_commit' outputs/TARGET_INFO.json)"
+          TARGET_COMMIT_SHORT="$(jq -r '.target_commit_short' outputs/TARGET_INFO.json)"
+
+          echo "TARGET_REPO=${TARGET_REPO}" >> "$GITHUB_ENV"
+          echo "TARGET_REF_LABEL=${TARGET_REF_LABEL}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT=${TARGET_COMMIT}" >> "$GITHUB_ENV"
+          echo "TARGET_COMMIT_SHORT=${TARGET_COMMIT_SHORT}" >> "$GITHUB_ENV"
+
+          echo "short_sha=${TARGET_COMMIT_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=${TARGET_COMMIT}" >> "$GITHUB_OUTPUT"
+
+          echo "Loaded target info:"
+          echo "  Repository: ${TARGET_REPO}"
+          echo "  Ref: ${TARGET_REF_LABEL}"
+          echo "  Commit: ${TARGET_COMMIT_SHORT}"
+
+      - name: Checkout Target Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_COMMIT }}
+          fetch-depth: 0
+          path: target_workspace
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: |
+          if command -v claude >/dev/null 2>&1; then
+            echo "claude already installed; skipping"
+          else
+            npm install -g @anthropic-ai/claude-code
+          fi
+
+      - name: Setup MCP Servers
+        run: FILESYSTEM_DIRS=". target_workspace" bash scripts/setup_mcp.sh
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Claude Version
+        id: claude_version
+        run: |
+          set -euo pipefail
+          if command -v claude >/dev/null 2>&1; then
+            echo "version=$(claude --version)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=claude-not-found" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare Git
+        run: |
+          git config --local user.name "Security Agent Bot"
+          git config --local user.email "bot@nyxfoundation.org"
+
+      - name: Ensure default branch merged into branch
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          git fetch origin "${DEFAULT_BRANCH}"
+          if git merge-base --is-ancestor "origin/${DEFAULT_BRANCH}" HEAD; then
+            echo "Branch already contains origin/${DEFAULT_BRANCH}"
+          else
+            git merge --no-edit "origin/${DEFAULT_BRANCH}"
+          fi
+
+      - name: "Pre-flight: Schema & Config Tests"
+        run: uv run python3 -m pytest tests/ -v --tb=short
+
+      - name: Reset Phase 03/04 outputs
+        run: |
+          find outputs -type f -name '03_*' -delete 2>/dev/null || true
+          find outputs -type f -name '04_*' -delete 2>/dev/null || true
+
+      - name: "Step 03: Audit Map (real LLM, lean-derived properties)"
+        run: |
+          set -euo pipefail
+          MODEL_ARGS=()
+          if [ -n "$MODEL_INPUT" ]; then
+            MODEL_ARGS=(--model "$MODEL_INPUT")
+            echo "Model override: $MODEL_INPUT"
+          else
+            echo "Model: phase config default (sonnet)"
+          fi
+          uv run python3 scripts/run_phase.py --phase 03 \
+            --workers "$WORKERS_INPUT" --max-concurrent "$MAX_CONCURRENT_INPUT" \
+            "${MODEL_ARGS[@]}"
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify Phase 03 output
+        run: |
+          uv run python3 - <<'EOF'
+          import glob, json, os, sys
+          from collections import Counter
+
+          min_items = int(os.environ["MIN_ITEMS"])
+
+          inputs = set()
+          for fp in sorted(glob.glob("outputs/02c_PARTIAL_*.json")):
+              doc = json.load(open(fp, encoding="utf-8"))
+              inputs |= {p["property_id"] for p in doc.get("properties_with_code", [])}
+
+          items = []
+          for fp in sorted(glob.glob("outputs/03_PARTIAL_*.json")):
+              doc = json.load(open(fp, encoding="utf-8"))
+              items.extend(doc.get("audit_items", []))
+
+          ids = {i.get("property_id") for i in items}
+          stray = ids - inputs
+          assert not stray, f"03 emitted items for unknown property_ids: {sorted(stray)[:5]}"
+
+          print(f"03 coverage: {len(ids)}/{len(inputs)} properties -> {len(items)} audit item(s)")
+          print("classification:", dict(Counter(i.get("classification") for i in items)))
+          lean_carried = sum(1 for i in items if "lean_status" in i)
+          print(f"items carrying the lean_status passthrough key: {lean_carried}/{len(items)}")
+
+          if len(items) < min_items:
+              print(
+                  f"FAIL: phase 03 emitted {len(items)} item(s) < min_items={min_items} "
+                  "(possible mass refusal or systemic failure — see logs artifact)",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          EOF
+
+      - name: "Step 04: Audit Review (real LLM)"
+        if: ${{ inputs.run_04 }}
+        run: |
+          set -euo pipefail
+          MODEL_ARGS=()
+          if [ -n "$MODEL_INPUT" ]; then
+            MODEL_ARGS=(--model "$MODEL_INPUT")
+          fi
+          uv run python3 scripts/run_phase.py --phase 04 \
+            --workers "$WORKERS_INPUT" --max-concurrent "$MAX_CONCURRENT_INPUT" \
+            "${MODEL_ARGS[@]}"
+        env:
+          GITHUB_PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify Phase 04 output
+        if: ${{ inputs.run_04 }}
+        run: |
+          uv run python3 - <<'EOF'
+          import glob, json, os, sys
+          from collections import Counter
+
+          min_items = int(os.environ["MIN_ITEMS"])
+
+          n_in = 0
+          for fp in sorted(glob.glob("outputs/03_PARTIAL_*.json")):
+              doc = json.load(open(fp, encoding="utf-8"))
+              n_in += len(doc.get("audit_items", []))
+
+          items = []
+          for fp in sorted(glob.glob("outputs/04_PARTIAL_*.json")):
+              doc = json.load(open(fp, encoding="utf-8"))
+              items.extend(doc.get("reviewed_items", []))
+
+          print(f"04: {len(items)} reviewed item(s) from {n_in} audit item(s)")
+          print("verdicts:", dict(Counter(i.get("review_verdict") for i in items)))
+
+          required = min(min_items, n_in)
+          if len(items) < required:
+              print(
+                  f"FAIL: phase 04 emitted {len(items)} item(s) < {required} "
+                  "(possible mass refusal or systemic failure — see logs artifact)",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          EOF
+
+      - name: Refusal diagnostics (informational)
+        if: always()
+        run: |
+          set +e
+          echo "Scanning phase logs for refusal-shaped assistant output (informational only):"
+          grep -rilE "I (cannot|can't|won'?t) (help|assist|continue)|unable to (help|assist)|malicious|safeguard" \
+            outputs/logs/ 2>/dev/null | head -20 || echo "  no refusal-shaped strings found in outputs/logs/"
+          exit 0
+
+      - name: Push Results
+        if: success() || failure()
+        run: |
+          git add outputs/ ':!outputs/logs/'
+          if ! git diff --staged --quiet; then
+            git add outputs/logs/
+            git commit -m "03/04 lean pilot: ${{ env.TARGET_REPO }}@${{ steps.target_info.outputs.short_sha }} (issue #88 TODO 4)"
+            git push origin "${{ github.ref_name }}" --force-with-lease
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Lean pilot 03/04 (issue #88 TODO 4)"
+            echo "Branch: \`${{ github.ref_name }}\`"
+            echo "Target: \`${{ env.TARGET_REPO }}\` @ \`${{ steps.target_info.outputs.short_sha }}\`"
+            echo "Model: \`${MODEL_INPUT:-sonnet (phase config default)}\`"
+            echo "Claude: \`${{ steps.claude_version.outputs.version }}\`"
+            echo "min_items gate: \`$MIN_ITEMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-pilot-0304-logs-${{ github.run_id }}
+          path: outputs/logs/
+          retention-days: 14
