@@ -84,15 +84,35 @@ class LeanPropertyProvider:
     """Lean 4 formal-verification provider (external plugin).
 
     ``generate()`` subprocess-invokes the plugin's CLI contract
-    (speca-lean4-plugin README, "CLI contract"):
+    (speca-lean4-plugin README, "CLI contract"). By default it calls the
+    ``emit-kurtosis`` subcommand (speca#88 Task 5), which runs the same
+    property pipeline as ``emit-01e`` and additionally writes one Kurtosis
+    fixture scaffold per checker-linked property:
 
-        speca-lean4 emit-01e --scope BUG_BOUNTY_SCOPE.json
-                             [--subgraphs 01b_subgraphs.json]
-                             (--health-json health.json | --run-lean)
-                             --out 01e_PARTIAL_lean.json
+        speca-lean4 emit-kurtosis --scope BUG_BOUNTY_SCOPE.json
+                                  [--subgraphs 01b_subgraphs.json]
+                                  (--health-json health.json | --run-lean)
+                                  --fixtures-dir <output_root>/kurtosis
+                                  --out 01e_PARTIAL_lean.json
 
-    and returns the emitted ``properties`` list (01e schema; Lean provenance
-    fields like ``lean_status`` are additive extras, per speca#88's contract).
+    Fixtures land under ``<output_root>/kurtosis/<label>/<property_id>/`` and
+    each linked property's ``kurtosis_test`` field is rebased to that path
+    (POSIX form, relative to the speca working directory when the output root
+    is relative — e.g. ``outputs/kurtosis/.../assertion.scaffold.json``).
+    Honesty contract: properties whose theorem has no Executable checker keep
+    ``kurtosis_test`` null/absent — the provider never fabricates fixture
+    references, and it verifies every referenced fixture actually exists on
+    disk before returning. Set ``SPECA_LEAN4_KURTOSIS_FIXTURES=0`` to skip
+    fixture emission and fall back to the plain ``emit-01e`` call.
+
+    Note: fixture files are overwritten in place on re-runs, but directories
+    for properties that no longer exist are not garbage-collected (the
+    provider never deletes under the output root); current ``kurtosis_test``
+    references always point at freshly written files.
+
+    The provider returns the emitted ``properties`` list (01e schema; Lean /
+    Kurtosis provenance fields like ``lean_status`` and ``kurtosis_test`` are
+    additive extras, per speca#88's contract — core 01e fields are unchanged).
 
     Plugin resolution (version-pinned per issue #87):
 
@@ -303,6 +323,21 @@ class LeanPropertyProvider:
 
         plugin_dir = self._resolve_plugin_dir()
 
+        # speca#88 Task 5: emit Kurtosis fixture scaffolds alongside the 01e
+        # properties by default. SPECA_LEAN4_KURTOSIS_FIXTURES=0 opts out and
+        # restores the plain emit-01e call (no fixtures, no kurtosis_test).
+        emit_fixtures = os.environ.get("SPECA_LEAN4_KURTOSIS_FIXTURES", "1") != "0"
+        fixtures_root: Path | None = None
+        fixtures_dir: Path | None = None
+        if emit_fixtures:
+            from .paths import get_output_root
+
+            # As-configured root (e.g. "outputs/kurtosis") is what gets
+            # recorded in kurtosis_test; the resolved absolute path is what
+            # the plugin subprocess (cwd = plugin checkout) writes into.
+            fixtures_root = get_output_root() / "kurtosis"
+            fixtures_dir = fixtures_root.resolve()
+
         with tempfile.TemporaryDirectory(prefix="speca-lean4-") as td:
             tmp = Path(td)
             scope_path = tmp / "BUG_BOUNTY_SCOPE.json"
@@ -311,11 +346,14 @@ class LeanPropertyProvider:
             )
             out_path = tmp / "01e_PARTIAL_lean.json"
 
+            subcommand = "emit-kurtosis" if emit_fixtures else "emit-01e"
             cmd = [
-                sys.executable, "-m", "speca_lean4.cli", "emit-01e",
+                sys.executable, "-m", "speca_lean4.cli", subcommand,
                 "--scope", str(scope_path),
                 "--out", str(out_path),
             ]
+            if emit_fixtures:
+                cmd += ["--fixtures-dir", str(fixtures_dir)]
 
             if subgraphs:
                 # The CLI globs 01b files; a JSON *list* file is consumed as a
@@ -358,12 +396,22 @@ class LeanPropertyProvider:
                 print(proc.stderr, file=sys.stderr, end="")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"speca-lean4 emit-01e failed (rc={proc.returncode}): "
+                    f"speca-lean4 {subcommand} failed (rc={proc.returncode}): "
                     f"{proc.stderr.strip() or proc.stdout.strip()}"
                 )
             doc = json.loads(out_path.read_text(encoding="utf-8"))
 
         properties = doc.get("properties", [])
+        if emit_fixtures:
+            n_fixtures = self._rebase_kurtosis_paths(
+                properties, plugin_dir, fixtures_dir, fixtures_root
+            )
+            print(
+                f"lean provider: {n_fixtures} Kurtosis fixture scaffold(s) "
+                f"under {fixtures_root.as_posix()}/ "
+                f"({len(properties) - n_fixtures} properties without an "
+                "Executable checker keep kurtosis_test null)"
+            )
         if not properties:
             # An empty emission means downstream phases have nothing to audit;
             # the phase would otherwise still log "completed" and exit 0.
@@ -377,6 +425,57 @@ class LeanPropertyProvider:
             f"{self.plugin_ref}@{self.plugin_version}"
         )
         return properties
+
+    @staticmethod
+    def _rebase_kurtosis_paths(
+        properties: list[dict],
+        plugin_dir: Path,
+        fixtures_dir: Path,
+        fixtures_root: Path,
+    ) -> int:
+        """Rewrite each non-null ``kurtosis_test`` to the speca-side path.
+
+        The plugin records fixture paths relative to its own cwd when
+        possible, absolute otherwise. speca passes an absolute
+        ``--fixtures-dir`` (*fixtures_dir*), so recorded paths are normally
+        absolute; they are rebased onto *fixtures_root* (the output root as
+        configured, e.g. ``outputs/kurtosis``) so downstream phases resolve
+        them from the speca working directory.
+
+        Honesty checks (fail loud, never fabricate):
+        - a recorded path outside the requested fixtures dir is an error;
+        - a recorded path whose fixture file does not exist on disk is an
+          error;
+        - properties with null/absent ``kurtosis_test`` are left untouched.
+
+        Returns the number of properties with a verified fixture path.
+        """
+        n_fixtures = 0
+        for prop in properties:
+            recorded = prop.get("kurtosis_test")
+            if not recorded:
+                continue  # no Executable checker — honestly stays null
+            raw = Path(recorded)
+            if not raw.is_absolute():
+                # Plugin-cwd-relative form (fixtures dir nested inside the
+                # plugin checkout — not the normal speca layout, but legal).
+                raw = plugin_dir / raw
+            try:
+                rel = raw.resolve().relative_to(fixtures_dir)
+            except ValueError:
+                raise RuntimeError(
+                    f"plugin recorded kurtosis_test outside the requested "
+                    f"fixtures dir ({fixtures_dir}): {recorded!r} "
+                    f"(property {prop.get('property_id')!r})"
+                )
+            if not (fixtures_dir / rel).is_file():
+                raise RuntimeError(
+                    f"kurtosis_test fixture missing on disk: "
+                    f"{fixtures_dir / rel} (property {prop.get('property_id')!r})"
+                )
+            prop["kurtosis_test"] = (fixtures_root / rel).as_posix()
+            n_fixtures += 1
+        return n_fixtures
 
 
 class DatasetPropertyProvider:

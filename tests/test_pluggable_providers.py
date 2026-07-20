@@ -8,11 +8,11 @@ from scripts.orchestrator.providers import (
     resolve_provider, resolve_verification_backend,
     run_refinement_pass,
 )
-from scripts.orchestrator.schemas import VerificationRecord, PropertyProviderName as SchemasProviderName  # same object — tested below
+from scripts.orchestrator.schemas import Phase01ePartial, VerificationRecord, PropertyProviderName as SchemasProviderName  # same object — tested below
 from scripts.orchestrator.config import PhaseConfig, PHASE_CONFIGS
 from scripts.orchestrator.factory import create_orchestrator
 from pathlib import Path
-import json, tempfile
+import hashlib, json, os, tempfile
 
 
 def test_provider_name_enum_values():
@@ -114,15 +114,18 @@ def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n",
 
 
 def test_lean_provider_invokes_plugin_cli(monkeypatch, tmp_path):
-    """generate() must shell out to `speca-lean4 emit-01e` per the CLI
-    contract and return the emitted `properties` list."""
+    """generate() must shell out to `speca-lean4 emit-kurtosis` (the default
+    since speca#88 Task 5 — same 01e pipeline plus fixture scaffolds) per the
+    CLI contract and return the emitted `properties` list."""
     import subprocess as subprocess_mod
     import sys as sys_mod
 
     plugin_dir = _fake_plugin_checkout(tmp_path)
     monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path / "outputs"))
     monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
     monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_KURTOSIS_FIXTURES", raising=False)
 
     emitted = [
         {"property_id": "PROP-lean-001", "text": "t", "severity": "HIGH",
@@ -142,8 +145,13 @@ def test_lean_provider_invokes_plugin_cli(monkeypatch, tmp_path):
     assert result == emitted
     cmd = captured["cmd"]
     assert cmd[0] == sys_mod.executable
-    assert cmd[1:4] == ["-m", "speca_lean4.cli", "emit-01e"]
+    assert cmd[1:4] == ["-m", "speca_lean4.cli", "emit-kurtosis"]
     assert "--scope" in cmd and "--out" in cmd
+    # fixtures go under the speca output root, passed as an absolute path
+    # (the plugin subprocess runs with cwd = the plugin checkout)
+    fixtures_dir = Path(cmd[cmd.index("--fixtures-dir") + 1])
+    assert fixtures_dir.is_absolute()
+    assert fixtures_dir == (tmp_path / "outputs" / "kurtosis").resolve()
     # subgraphs were materialized to a temp file and passed through
     assert "--subgraphs" in cmd
     # no health source configured -> honest dry-mapping mode (no --health-json,
@@ -157,6 +165,155 @@ def test_lean_provider_invokes_plugin_cli(monkeypatch, tmp_path):
     scope_file = Path(cmd[cmd.index("--scope") + 1])
     # (the tempdir is gone after generate() returns; path shape is enough)
     assert scope_file.name == "BUG_BOUNTY_SCOPE.json"
+
+
+def test_lean_provider_fixture_optout_falls_back_to_emit_01e(monkeypatch, tmp_path):
+    """SPECA_LEAN4_KURTOSIS_FIXTURES=0 must restore the plain emit-01e call:
+    no --fixtures-dir, no kurtosis_test rewriting, nothing written."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv("SPECA_LEAN4_KURTOSIS_FIXTURES", "0")
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+
+    captured = {}
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}], captured),
+    )
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    cmd = captured["cmd"]
+    assert cmd[1:4] == ["-m", "speca_lean4.cli", "emit-01e"]
+    assert "--fixtures-dir" not in cmd
+    assert not (tmp_path / "outputs" / "kurtosis").exists()
+
+
+def _mk_fake_kurtosis_run(subprocess_mod, captured=None, *, fixture_props,
+                          write_fixture_files=True, record_path=None):
+    """Fake subprocess.run emulating `emit-kurtosis`: for each entry in
+    *fixture_props* (property dict, linked flag) it writes the fixture
+    scaffold under the --fixtures-dir the provider passed (unless
+    *write_fixture_files* is False) and records the kurtosis_test path in the
+    --out JSON, exactly like the plugin's `_record_path` (absolute POSIX when
+    outside the plugin cwd). *record_path* overrides the recorded path for
+    the error-path tests."""
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n" if "tag" in cmd else cmd[2] + "\n", stderr="")
+        if captured is not None:
+            captured["cmd"] = cmd
+        fixtures_dir = Path(cmd[cmd.index("--fixtures-dir") + 1])
+        emitted = []
+        for prop, linked in fixture_props:
+            prop = dict(prop)
+            if linked:
+                fdir = fixtures_dir / (prop.get("label") or "unlabeled").replace(":", "--") / prop["property_id"]
+                fp = fdir / "assertion.scaffold.json"
+                if write_fixture_files:
+                    fdir.mkdir(parents=True, exist_ok=True)
+                    (fdir / "devnet.scaffold.json").write_text(
+                        json.dumps({"scaffold": True}), encoding="utf-8"
+                    )
+                    fp.write_text(
+                        json.dumps({"scaffold": True, "handoff": {"verdict": None}}),
+                        encoding="utf-8",
+                    )
+                prop["kurtosis_test"] = (
+                    record_path if record_path is not None else fp.resolve().as_posix()
+                )
+            emitted.append(prop)
+        Path(cmd[cmd.index("--out") + 1]).write_text(
+            json.dumps({"phase": "01e", "provider": "lean", "properties": emitted}),
+            encoding="utf-8",
+        )
+        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+    return fake_run
+
+
+def test_lean_provider_rebases_kurtosis_paths(monkeypatch, tmp_path):
+    """Task 5 contract: kurtosis_test is rebased onto the configured output
+    root (POSIX form), the fixture file really exists there, and properties
+    without a checker keep kurtosis_test null/absent — never fabricated."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    out_root = tmp_path / "outputs"
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(out_root))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_KURTOSIS_FIXTURES", raising=False)
+
+    fixture_props = [
+        ({"property_id": "PROP-l-001", "label": "beacon-chain:slashing",
+          "lean_status": "proved"}, True),
+        ({"property_id": "PROP-l-002", "label": "beacon-chain:slashing",
+          "lean_status": "proved"}, False),  # no Executable checker
+    ]
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_kurtosis_run(subprocess_mod, fixture_props=fixture_props),
+    )
+    result = LeanPropertyProvider().generate([], {})
+
+    linked = result[0]
+    expected = (
+        out_root / "kurtosis" / "beacon-chain--slashing" / "PROP-l-001"
+        / "assertion.scaffold.json"
+    )
+    assert linked["kurtosis_test"] == expected.as_posix()
+    assert "\\" not in linked["kurtosis_test"]  # POSIX form on every platform
+    assert expected.is_file()
+    # honesty: the checkerless property was not given a fixture reference
+    assert result[1].get("kurtosis_test") is None
+
+
+def test_lean_provider_missing_fixture_file_raises(monkeypatch, tmp_path):
+    """A kurtosis_test path whose fixture was never written must fail loud —
+    the provider refuses to emit references to fixtures that don't exist."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.delenv("SPECA_LEAN4_KURTOSIS_FIXTURES", raising=False)
+
+    fixture_props = [({"property_id": "PROP-l-001", "label": "x"}, True)]
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_kurtosis_run(
+            subprocess_mod, fixture_props=fixture_props, write_fixture_files=False
+        ),
+    )
+    with pytest.raises(RuntimeError, match="missing on disk"):
+        LeanPropertyProvider().generate([], {})
+
+
+def test_lean_provider_fixture_path_outside_dir_raises(monkeypatch, tmp_path):
+    """A recorded kurtosis_test outside the requested fixtures dir must be
+    rejected, not silently rebased or passed through."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.delenv("SPECA_LEAN4_KURTOSIS_FIXTURES", raising=False)
+
+    rogue = (tmp_path / "elsewhere" / "assertion.scaffold.json").resolve()
+    fixture_props = [({"property_id": "PROP-l-001", "label": "x"}, True)]
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_kurtosis_run(
+            subprocess_mod, fixture_props=fixture_props,
+            record_path=rogue.as_posix(),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="outside the requested"):
+        LeanPropertyProvider().generate([], {})
 
 
 def test_lean_provider_passes_health_json_source(monkeypatch, tmp_path):
@@ -706,3 +863,117 @@ def test_phase04_run_dispatches_confirmed_findings_to_backend(monkeypatch, tmp_p
     assert ver_path.exists(), "04_VERIFICATION.json was not written"
     records = json.loads(ver_path.read_text(encoding="utf-8"))["verification_records"]
     assert {r["property_id"] for r in records} == {"P-1", "P-2"}
+
+
+# ---------------------------------------------------------------------------
+# speca#88 Task 8 — pilot tests against the REAL plugin checkout.
+#
+# These run only when SPECA_LEAN4_PLUGIN_DIR points at an actual
+# speca-lean4-plugin checkout (the `properties-lean` CI job resolves the
+# pinned version and exports it; `tests-on-push` skips them). Proof health
+# comes from the plugin's committed sample fixture — it certifies NOTHING
+# about the real theorems; these tests validate the plumbing contract
+# (proved-status property with an on-disk fixture scaffold, 01e schema
+# validity, determinism), not mathematical truth.
+# ---------------------------------------------------------------------------
+
+_REAL_PLUGIN_DIR = os.environ.get("SPECA_LEAN4_PLUGIN_DIR", "")
+
+
+def _real_plugin_ready() -> bool:
+    if not _REAL_PLUGIN_DIR:
+        return False
+    root = Path(_REAL_PLUGIN_DIR)
+    return (
+        (root / "src" / "speca_lean4").is_dir()
+        and (root / "tests" / "fixtures" / "theorem_health.sample.json").is_file()
+        and (root / "tests" / "fixtures" / "bug_bounty_scope.sample.json").is_file()
+    )
+
+
+requires_real_plugin = pytest.mark.skipif(
+    not _real_plugin_ready(),
+    reason="pilot tests need SPECA_LEAN4_PLUGIN_DIR pointing at a real "
+           "speca-lean4-plugin checkout (with its sample fixtures)",
+)
+
+
+def _pilot_generate(monkeypatch, out_root: Path) -> list[dict]:
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(out_root))
+    monkeypatch.delenv("SPECA_LEAN4_KURTOSIS_FIXTURES", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    root = Path(_REAL_PLUGIN_DIR)
+    scope = json.loads(
+        (root / "tests" / "fixtures" / "bug_bounty_scope.sample.json")
+        .read_text(encoding="utf-8")
+    )
+    health = root / "tests" / "fixtures" / "theorem_health.sample.json"
+    return LeanPropertyProvider().generate([], scope, source=str(health))
+
+
+@requires_real_plugin
+def test_lean_pilot_proved_property_with_fixture(monkeypatch, tmp_path):
+    """Task 8 pilot: at least one lean_status=proved property carries a
+    kurtosis_test whose fixture scaffold exists on disk, and the whole
+    emission validates against the core 01e schema (additive fields only)."""
+    props = _pilot_generate(monkeypatch, tmp_path)
+    assert props, "pilot emitted no properties"
+
+    # Core 01e schema validity (extras like lean_* / kurtosis_test are
+    # additive and must not break validation).
+    Phase01ePartial.model_validate({"properties": props})
+
+    proved_with_fixture = [
+        p for p in props
+        if p.get("lean_status") == "proved" and p.get("kurtosis_test")
+    ]
+    assert proved_with_fixture, (
+        "no proved property with a kurtosis_test fixture — the pilot "
+        "contract (issue #88 Task 8) is not met"
+    )
+
+    fixtures_root = tmp_path / "kurtosis"
+    for p in props:
+        kt = p.get("kurtosis_test")
+        if not kt:
+            continue  # honest null for checkerless properties
+        fp = Path(kt)
+        assert fp.is_file(), f"kurtosis_test does not exist on disk: {kt}"
+        assert fp.name == "assertion.scaffold.json"
+        assert fixtures_root.resolve() in fp.resolve().parents, (
+            f"fixture escaped the output root: {kt}"
+        )
+        # devnet config sits next to the assertion stub
+        assert (fp.parent / "devnet.scaffold.json").is_file()
+        doc = json.loads(fp.read_text(encoding="utf-8"))
+        # Honesty invariants: these are scaffolds — nothing has run, no
+        # verdict may be claimed, and the checker names a real Executable
+        # function.
+        assert doc["scaffold"] is True
+        assert doc["handoff"]["verdict"] is None
+        assert doc["checker"]["primary"]
+        assert doc["property_id"] == p["property_id"]
+
+
+def _snapshot_tree(root: Path) -> dict[str, str]:
+    """{relative POSIX path: sha256} for every file under *root*."""
+    return {
+        fp.relative_to(root).as_posix():
+            hashlib.sha256(fp.read_bytes()).hexdigest()
+        for fp in sorted(root.rglob("*")) if fp.is_file()
+    }
+
+
+@requires_real_plugin
+def test_lean_pilot_determinism(monkeypatch, tmp_path):
+    """Task 8 determinism: the same inputs must produce byte-identical
+    properties, kurtosis_test paths, and fixture contents on a re-run."""
+    props1 = _pilot_generate(monkeypatch, tmp_path)
+    snap1 = _snapshot_tree(tmp_path / "kurtosis")
+    assert snap1, "first run wrote no fixtures"
+
+    props2 = _pilot_generate(monkeypatch, tmp_path)
+    snap2 = _snapshot_tree(tmp_path / "kurtosis")
+
+    assert props1 == props2, "properties differ between identical runs"
+    assert snap1 == snap2, "fixture tree differs between identical runs"
