@@ -136,28 +136,60 @@ class LeanPropertyProvider:
         - tags at HEAD but none matching -> hard error (set
           ``SPECA_LEAN4_ALLOW_VERSION_MISMATCH=1`` to downgrade to a warning,
           e.g. for local plugin development);
-        - no tag readable (not a git checkout, or a branch clone without
-          tags) -> loud warning, not an error — we cannot verify, and honest
-          "unverified" beats a false "verified".
+        - no tag readable (not a git checkout, a branch clone without tags,
+          git missing/timing out, or *plugin_dir* is a plain directory nested
+          inside some OTHER repo — ``git -C`` would silently report the outer
+          repo's tags, so containment is checked first) -> loud warning, not
+          an error — we cannot verify, and honest "unverified" beats a false
+          "verified".
+
+        Scope note: verification is commit-level (which commit the tag points
+        at), not content-level — a dirty working tree on the pinned tag still
+        passes. That is the intended threat model: the pin guards against
+        *stale/wrong-version* checkouts (the failure mode a cache or env var
+        actually produces), not against deliberate local modification, which
+        an attacker with filesystem access could defeat anyway.
         """
         import os
         import subprocess
         import sys
 
-        if not self.plugin_version:
-            return
-        proc = subprocess.run(
-            ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
-            capture_output=True, text=True, timeout=60,
-        )
-        tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
-        if proc.returncode != 0 or not tags:
+        def _unverified(reason: str) -> None:
             print(
                 f"warning: cannot verify {self.plugin_ref} checkout at "
-                f"{plugin_dir} is {self.plugin_version} (no tag readable at "
-                "HEAD); proceeding unverified.",
+                f"{plugin_dir} is {self.plugin_version} ({reason}); "
+                "proceeding unverified.",
                 file=sys.stderr,
             )
+
+        if not self.plugin_version:
+            return
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(plugin_dir), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if top.returncode != 0:
+                _unverified("not a git checkout")
+                return
+            toplevel = Path(top.stdout.strip())
+            if toplevel.resolve() != plugin_dir.resolve():
+                # git -C resolved to an enclosing repository, not the plugin
+                # dir itself; its tags would describe the wrong repo.
+                _unverified(
+                    f"directory is not a git toplevel; git resolves to {toplevel}"
+                )
+                return
+            proc = subprocess.run(
+                ["git", "-C", str(plugin_dir), "tag", "--points-at", "HEAD"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            _unverified(f"git unavailable: {exc}")
+            return
+        tags = [t.strip() for t in proc.stdout.splitlines() if t.strip()]
+        if proc.returncode != 0 or not tags:
+            _unverified("no tag readable at HEAD")
             return
         if self.plugin_version not in tags:
             msg = (
@@ -238,7 +270,14 @@ class LeanPropertyProvider:
                     f"(rc={proc.returncode}): {proc.stderr.strip()}\n"
                     "Set SPECA_LEAN4_PLUGIN_DIR to an existing checkout instead."
                 )
-            tmp_dir.rename(cache_dir)
+            try:
+                tmp_dir.rename(cache_dir)
+            except OSError:
+                # A concurrent resolver may have renamed its own clone into
+                # place first ("Directory not empty" / "file exists"). If the
+                # winner left a valid checkout, use it; otherwise re-raise.
+                if not self._is_plugin_checkout(cache_dir):
+                    raise
         finally:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)

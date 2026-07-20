@@ -86,14 +86,20 @@ def _fake_plugin_checkout(root: Path) -> Path:
     return plugin_dir
 
 
-def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n"):
-    """Fake subprocess.run: answers the `git tag --points-at HEAD` version
-    probe with *git_tags* and the CLI invocation by writing *emitted* to the
-    --out file."""
+def _mk_fake_run(subprocess_mod, emitted, captured=None, git_tags="v0.1.0\n",
+                 git_toplevel=None):
+    """Fake subprocess.run: answers the `git rev-parse --show-toplevel`
+    containment probe (with *git_toplevel*, defaulting to the probed dir
+    itself, i.e. containment OK), the `git tag --points-at HEAD` version
+    probe (with *git_tags*), and the CLI invocation by writing *emitted* to
+    the --out file."""
     def fake_run(cmd, **kwargs):
         if cmd[0] == "git":
             if captured is not None:
                 captured.setdefault("git_cmds", []).append(cmd)
+            if "rev-parse" in cmd:
+                top = git_toplevel if git_toplevel is not None else cmd[2]
+                return subprocess_mod.CompletedProcess(cmd, 0, stdout=top + "\n", stderr="")
             return subprocess_mod.CompletedProcess(cmd, 0, stdout=git_tags, stderr="")
         if captured is not None:
             captured["cmd"] = cmd
@@ -260,6 +266,115 @@ def test_lean_provider_zero_properties_warns(monkeypatch, tmp_path, capsys):
     assert "zero properties" in capsys.readouterr().err
 
 
+def test_lean_provider_nested_plain_dir_is_unverified(monkeypatch, tmp_path, capsys):
+    """A plain (non-git) plugin dir nested inside another repository must NOT
+    inherit the outer repo's tags: `git -C` resolves to the enclosing
+    toplevel, so the probe is only trusted when the toplevel IS the plugin
+    dir. Here the outer repo even carries a wrong tag — without the
+    containment check this would hard-fail (or worse, falsely verify)."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setattr(
+        subprocess_mod, "run",
+        _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}],
+                     git_tags="v0.0.9\n", git_toplevel=str(tmp_path)),
+    )
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    err = capsys.readouterr().err
+    assert "cannot verify" in err and "not a git toplevel" in err
+
+
+def test_lean_provider_git_unavailable_warns_not_fails(monkeypatch, tmp_path, capsys):
+    """git missing from PATH (or hanging) must take the warn-unverified
+    branch, not crash the provider."""
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+
+    inner = _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}])
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            raise FileNotFoundError("No such file or directory: 'git'")
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    assert "git unavailable" in capsys.readouterr().err
+
+
+def test_lean_provider_probe_timeout_warns_not_fails(monkeypatch, tmp_path, capsys):
+    import subprocess as subprocess_mod
+
+    plugin_dir = _fake_plugin_checkout(tmp_path)
+    monkeypatch.setenv("SPECA_LEAN4_PLUGIN_DIR", str(plugin_dir))
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+
+    inner = _mk_fake_run(subprocess_mod, [{"property_id": "P-1"}])
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "git":
+            raise subprocess_mod.TimeoutExpired(cmd, 60)
+        return inner(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    assert "git unavailable" in capsys.readouterr().err
+
+
+def test_lean_provider_concurrent_clone_rename_race(monkeypatch, tmp_path):
+    """If a concurrent resolver renames its clone into place first, the
+    loser's rename raises OSError; the winner's valid checkout must be used
+    instead of crashing."""
+    import subprocess as subprocess_mod
+
+    monkeypatch.delenv("SPECA_LEAN4_PLUGIN_DIR", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_AUTO_CLONE", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_HEALTH_JSON", raising=False)
+    monkeypatch.delenv("SPECA_LEAN4_RUN_LEAN", raising=False)
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
+
+    cache = tmp_path / ".plugins" / "speca-lean4-plugin-v0.1.0"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            dest = Path(cmd[-1])
+            (dest / "src" / "speca_lean4").mkdir(parents=True)
+            # Concurrent winner appears between clone and rename.
+            (cache / "src" / "speca_lean4").mkdir(parents=True)
+            (cache / "src" / "speca_lean4" / "marker.txt").write_text(
+                "winner", encoding="utf-8"
+            )
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if cmd[0] == "git" and "rev-parse" in cmd:
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout=cmd[2] + "\n", stderr="")
+        if cmd[0] == "git":
+            return subprocess_mod.CompletedProcess(cmd, 0, stdout="v0.1.0\n", stderr="")
+        Path(cmd[cmd.index("--out") + 1]).write_text(
+            json.dumps({"properties": [{"property_id": "P-1"}]}), encoding="utf-8"
+        )
+        return subprocess_mod.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess_mod, "run", fake_run)
+    result = LeanPropertyProvider().generate([], {})
+    assert result == [{"property_id": "P-1"}]
+    # The winner's checkout survived; no tmp leftovers.
+    assert (cache / "src" / "speca_lean4" / "marker.txt").exists()
+    leftovers = [p for p in cache.parent.iterdir() if ".tmp-" in p.name]
+    assert leftovers == []
+
+
 def test_lean_provider_cleans_partial_clone_cache(monkeypatch, tmp_path):
     """A half-populated cache dir (interrupted clone) must be removed and
     re-cloned, not reused or allowed to break the re-clone."""
@@ -411,6 +526,87 @@ def test_provider_output_fields_bypass_stays_local():
     orch = create_orchestrator("01e", property_provider="lean")
     orch.config.output_fields = []  # what _run_01e_with_provider does at save
     assert PHASE_CONFIGS["01e"].output_fields, "global 01e config was mutated"
+
+
+# Fixed input for the #87(b) golden test: full Property field set plus extra
+# provenance keys that the default prompt path must strip via output_fields.
+_GOLDEN_INPUT_PROPERTIES = [
+    {
+        "property_id": "PROP-golden-001",
+        "text": "Quorum intersection weight is bounded",
+        "type": "safety",
+        "assertion": "forall q1 q2: quorum_2 q1 -> quorum_2 q2 -> overlap(q1, q2) >= threshold",
+        "severity": "CRITICAL",
+        "covers": "FN-001",
+        "reachability": {
+            "classification": "external",
+            "entry_points": ["P2P"],
+            "attacker_controlled": True,
+            "bug_bounty_scope": "in_scope",
+        },
+        "exploitability": "high",
+        "bug_bounty_eligible": True,
+        "lean_status": "proved",
+        "lean_proof_source": "theorem quorum_intersection ... := by omega",
+        "internal_note": "must never appear in the prompt-path PARTIAL",
+    },
+    {
+        "property_id": "PROP-golden-002",
+        "text": "No two justified blocks at one height",
+        "type": "safety",
+        "assertion": "justified b1 h -> justified b2 h -> b1 = b2",
+        "severity": "HIGH",
+        "covers": "FN-002",
+        "reachability": {
+            "classification": "internal",
+            "entry_points": [],
+            "attacker_controlled": False,
+            "bug_bounty_scope": "conditional",
+        },
+        "exploitability": "medium",
+        "bug_bounty_eligible": False,
+        "kurtosis_test": {"scaffold": True},
+    },
+]
+
+
+def test_prompt_path_partial_matches_golden_fixture(monkeypatch, tmp_path):
+    """#87(b): true fixture-identity guard for the DEFAULT provider path.
+
+    The prompt path's 01e PARTIAL for a fixed input must stay identical to
+    the committed golden file — same output_fields compaction (extra keys
+    stripped), same key order, same envelope, same serialization. Any change
+    to the collector/config seam that alters the default path's bytes fails
+    here, not in production diffs. Newlines are normalized because the
+    collector writes platform-native line endings; content is what the #87
+    contract freezes.
+    """
+    from scripts.orchestrator.collector import ResultCollector
+    from scripts.orchestrator.config import get_phase_config
+
+    monkeypatch.setenv("SPECA_OUTPUT_DIR", str(tmp_path))
+    collector = ResultCollector(get_phase_config("01e").model_copy(deep=True))
+    out_path = collector.save_partial(
+        [json.loads(json.dumps(p)) for p in _GOLDEN_INPUT_PROPERTIES],
+        worker_id=0,
+        batch_index=0,
+        timestamp=1700000000,
+    )
+    assert out_path.name == "01e_PARTIAL_W0B0_1700000000.json"
+
+    golden = Path(__file__).parent / "fixtures" / "01e_prompt_partial_golden.json"
+    produced = out_path.read_bytes().replace(b"\r\n", b"\n")
+    expected = golden.read_bytes().replace(b"\r\n", b"\n")
+    assert produced == expected, (
+        "default prompt-path 01e PARTIAL differs from the golden fixture "
+        f"({golden}); if the change is intentional, regenerate the golden "
+        "and say so explicitly in the PR."
+    )
+    # Belt and braces: the stripped extras must really be gone.
+    doc = json.loads(produced.decode("utf-8"))
+    saved_keys = set().union(*(p.keys() for p in doc["properties"]))
+    assert "lean_status" not in saved_keys
+    assert "internal_note" not in saved_keys
 
 
 def test_refinement_disabled_by_default():
