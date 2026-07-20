@@ -113,8 +113,6 @@ def snapshot_tree(root: Path) -> dict[str, str]:
 
 
 def main() -> None:
-    print("SABOTAGE: comparator neutered, always OK")
-    sys.exit(0)
     if len(sys.argv) != 3:
         fail(EXIT_STRUCTURAL, "usage: compare_01e_runs.py <run1_dir> <run2_dir>")
     run1, run2 = Path(sys.argv[1]), Path(sys.argv[2])
