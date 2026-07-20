@@ -55,6 +55,11 @@ export function FindingRow({ finding, runId, repoRoot }: Props) {
         </div>
         <div className={styles.idCell} title={finding.property_id}>
           {finding.property_id}
+          {finding.target && (
+            <span className={styles.target} title={finding.target}>
+              {finding.target}
+            </span>
+          )}
         </div>
         <div className={styles.verdictCell}>
           <VerdictChip verdict={finding.verdict} />

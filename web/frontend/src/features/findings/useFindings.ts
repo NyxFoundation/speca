@@ -25,6 +25,7 @@ function buildQuery(query: FindingQuery): string {
   if (query.phase) params.set("phase", query.phase);
   if (query.severity) params.set("severity", query.severity);
   if (query.verdict) params.set("verdict", query.verdict);
+  if (query.target) params.set("target", query.target);
   const qs = params.toString();
   return qs ? `?${qs}` : "";
 }

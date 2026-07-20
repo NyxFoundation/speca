@@ -69,6 +69,10 @@ class _PartialFinding:
     # Captured separately so a Phase 04 winner can still surface the
     # Phase 03 code_path / proof_trace.
     audit_raw: dict[str, Any] | None = None
+    # Target/client the finding belongs to, derived from the PARTIAL file's
+    # parent directory (``outputs/<target>/03_PARTIAL_*.json``). ``None`` for
+    # top-level ``outputs/03_PARTIAL_*.json`` (single-target layout).
+    target: str | None = None
 
     def to_finding(self) -> Finding:
         """Translate the accumulator into the wire ``Finding`` model.
@@ -118,6 +122,7 @@ class _PartialFinding:
             run_id=self.run_id,
             phase=self.phase,
             property_id=self.property_id,
+            target=self.target,
             severity=severity,
             verdict=verdict,
             file=file_,
@@ -174,6 +179,31 @@ def _iter_partial_files(outputs_dir: Path) -> Iterable[Path]:
         yield from outputs_dir.glob(f"*/{phase}_PARTIAL_*.json")
 
 
+def _extract_target(path: Path, outputs_dir: Path) -> str | None:
+    """Derive the target/client name from a PARTIAL file's parent directory.
+
+    Multi-target audits lay outputs out as
+    ``outputs/<target>/03_PARTIAL_*.json`` — e.g. the Ethereum multi-client
+    audit uses ``outputs/lighthouse_fusaka/...``, ``outputs/reth_fusaka/...``.
+    The parent directory name is the client/target the finding belongs to.
+
+    Top-level ``outputs/03_PARTIAL_*.json`` files (the single-target "current
+    run" layout) have no enclosing target directory, so we return ``None`` and
+    the frontend treats the finding as belonging to the run as a whole.
+    """
+
+    try:
+        parent = path.parent
+        if parent.resolve() == outputs_dir.resolve():
+            return None
+    except OSError:
+        # A resolve() that touches a vanished/permission-denied path should
+        # not abort the whole listing — degrade to "no target".
+        return None
+    name = parent.name.strip()
+    return name or None
+
+
 def _load_partial(path: Path) -> dict[str, Any] | None:
     """Read + JSON-parse one PARTIAL file. Returns ``None`` on any error.
 
@@ -203,6 +233,7 @@ def _ingest(
     path: Path,
     run_id: str,
     accumulator: dict[str, _PartialFinding],
+    target: str | None = None,
 ) -> None:
     """Merge one PARTIAL's items into the dedup accumulator.
 
@@ -241,6 +272,7 @@ def _ingest(
                 source_file=path,
                 raw=item,
                 audit_raw=item if phase == "03" else None,
+                target=target,
             )
 
             existing = accumulator.get(property_id)
@@ -258,10 +290,17 @@ def _ingest(
                     candidate.audit_raw = existing.audit_raw
                 elif candidate.audit_raw is None and existing.phase == "03":
                     candidate.audit_raw = existing.raw
+                # The Phase 04 record and its Phase 03 origin share a target
+                # dir in practice, but backfill defensively so a target from
+                # the loser survives when the winner's own dir was top-level.
+                if candidate.target is None and existing.target is not None:
+                    candidate.target = existing.target
                 accumulator[property_id] = candidate
             elif candidate_rank == existing_rank and candidate.timestamp > existing.timestamp:
                 if candidate.audit_raw is None and existing.audit_raw is not None:
                     candidate.audit_raw = existing.audit_raw
+                if candidate.target is None and existing.target is not None:
+                    candidate.target = existing.target
                 accumulator[property_id] = candidate
             elif candidate_rank < existing_rank:
                 # The newcomer is lower-priority but might be the Phase 03
@@ -269,6 +308,8 @@ def _ingest(
                 # from. Backfill audit_raw without changing the winner.
                 if existing.audit_raw is None and candidate.phase == "03":
                     existing.audit_raw = candidate.raw
+                if existing.target is None and candidate.target is not None:
+                    existing.target = candidate.target
 
 
 def load_findings(run_id: str, outputs_dir: Path | None = None) -> list[Finding]:
@@ -284,7 +325,8 @@ def load_findings(run_id: str, outputs_dir: Path | None = None) -> list[Finding]
         partial = _load_partial(path)
         if partial is None:
             continue
-        _ingest(partial, path, run_id, accumulator)
+        target = _extract_target(path, base)
+        _ingest(partial, path, run_id, accumulator, target=target)
 
     # Severity-sorted default. The frontend re-sorts but keeping a stable
     # server-side order makes the API easier to eyeball with curl.
@@ -312,6 +354,7 @@ def filter_findings(
     phase: str | None = None,
     severity: str | None = None,
     verdict: str | None = None,
+    target: str | None = None,
 ) -> list[Finding]:
     """In-memory filter to back ``GET /api/runs/<id>/findings?...``.
 
@@ -326,9 +369,23 @@ def filter_findings(
             return False
         if verdict and (f.verdict or "") != verdict:
             return False
+        if target and (f.target or "") != target:
+            return False
         return True
 
     return [f for f in findings if keep(f)]
+
+
+def available_targets(findings: list[Finding]) -> list[str]:
+    """Distinct, sorted list of targets/clients present in ``findings``.
+
+    Backs the ``meta.targets`` field the client dropdown reads. Findings
+    with no target (top-level ``outputs/`` single-target layout) contribute
+    nothing, so a single-target run reports ``[]`` and the frontend simply
+    hides the client filter.
+    """
+
+    return sorted({f.target for f in findings if f.target})
 
 
 def find_finding(run_id: str, property_id: str, outputs_dir: Path | None = None) -> Finding | None:

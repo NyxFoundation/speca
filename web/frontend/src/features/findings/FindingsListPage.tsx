@@ -91,10 +91,12 @@ export function FindingsListPage() {
     const sev = searchParams.get("severity");
     const verd = searchParams.get("verdict");
     const ph = searchParams.get("phase");
+    const tgt = searchParams.get("target");
     return {
       severity: (sev ?? undefined) as Severity | undefined,
       verdict: verd ?? undefined,
       phase: (ph ?? undefined) as Phase | undefined,
+      target: tgt ?? undefined,
     };
   }, [searchParams]);
 
@@ -200,7 +202,7 @@ export function FindingsListPage() {
       )}
 
       <FilterInput parsed={parsedDsl} />
-      <FilterBar />
+      <FilterBar targets={data?.meta.targets ?? []} />
 
       {isLoading && (
         <div className={styles.state}>{t("findings.list.loading")}</div>

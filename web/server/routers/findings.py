@@ -24,6 +24,7 @@ from web.server.schemas.findings import (
     Finding,
 )
 from web.server.services.finding_loader import (
+    available_targets,
     filter_findings,
     find_finding,
     load_findings,
@@ -38,25 +39,36 @@ def list_findings(
     phase: Literal["03", "04"] | None = Query(default=None),
     severity: Literal["Critical", "High", "Medium", "Low", "Informational"] | None = Query(default=None),
     verdict: str | None = Query(default=None),
+    target: str | None = Query(default=None),
 ) -> FindingsResponse:
     """Return the filtered finding list for one run.
 
-    All three query params are optional. ``severity`` is validated against
-    the closed enum (FastAPI returns 422 on a typo). ``verdict`` is free
-    text because forks may introduce new verdicts — the loader matches
-    exactly against the raw upstream string.
+    Query params are optional. ``severity`` is validated against the closed
+    enum (FastAPI returns 422 on a typo). ``verdict`` / ``target`` are free
+    text because forks may introduce new verdicts and target/client names
+    are arbitrary directory names — the loader matches exactly against the
+    raw upstream string.
+
+    ``meta.targets`` always reflects the *unfiltered* client set so the
+    dropdown keeps every client selectable even after one is chosen.
     """
 
     findings: list[Finding] = load_findings(run_id)
+    targets = available_targets(findings)
     filtered = filter_findings(
         findings,
         phase=phase,
         severity=severity,
         verdict=verdict,
+        target=target,
     )
     return FindingsResponse(
         data=filtered,
-        meta=FindingsMeta(data_source="current_outputs", count=len(filtered)),
+        meta=FindingsMeta(
+            data_source="current_outputs",
+            count=len(filtered),
+            targets=targets,
+        ),
     )
 
 

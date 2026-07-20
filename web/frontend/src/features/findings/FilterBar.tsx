@@ -19,12 +19,19 @@ import {
   type Severity,
 } from "./types";
 
-export function FilterBar() {
+interface FilterBarProps {
+  /** Distinct client/target names from `meta.targets`. When empty (a
+   * single-target run) the client filter is hidden entirely. */
+  targets?: string[];
+}
+
+export function FilterBar({ targets = [] }: FilterBarProps) {
   const t = useT();
   const [searchParams, setSearchParams] = useSearchParams();
   const currentSeverity = searchParams.get("severity") as Severity | null;
   const currentVerdict = searchParams.get("verdict");
   const currentPhase = searchParams.get("phase") as Phase | null;
+  const currentTarget = searchParams.get("target");
 
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(searchParams);
@@ -38,6 +45,27 @@ export function FilterBar() {
 
   return (
     <section className={styles.bar} aria-label={t("findings.filter.bar_aria")}>
+      {targets.length > 0 && (
+        <div className={styles.group}>
+          <span className={styles.groupLabel}>
+            {t("findings.filter.client_label")}
+          </span>
+          <select
+            className={styles.select}
+            aria-label={t("findings.filter.client_label")}
+            value={currentTarget ?? ""}
+            onChange={(e) => setParam("target", e.target.value || null)}
+          >
+            <option value="">{t("findings.filter.all_clients")}</option>
+            {targets.map((tgt) => (
+              <option key={tgt} value={tgt}>
+                {tgt}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       <div className={styles.group}>
         <span className={styles.groupLabel}>
           {t("findings.filter.severity_label")}

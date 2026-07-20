@@ -43,6 +43,10 @@ class Finding(BaseModel):
     run_id: str
     phase: Phase
     property_id: str
+    # Target/client the finding belongs to (derived from the
+    # ``outputs/<target>/`` subdirectory). ``None`` for the single-target
+    # top-level ``outputs/`` layout. Backs the client filter added for #54.
+    target: str | None = None
     severity: Severity
     # Phase 04 verdict (raw upstream string). Frontend decides display.
     verdict: str | None = None
@@ -69,6 +73,9 @@ class FindingsMeta(BaseModel):
 
     data_source: Literal["current_outputs", "run_scoped"] = "current_outputs"
     count: int = 0
+    # Distinct client/target names across the *unfiltered* finding set, so the
+    # frontend can populate the client dropdown without a second request.
+    targets: list[str] = Field(default_factory=list)
 
 
 class FindingsResponse(BaseModel):
@@ -92,3 +99,4 @@ class FindingQuery(BaseModel):
     phase: Literal["03", "04"] | None = None
     severity: Severity | None = None
     verdict: str | None = None
+    target: str | None = None

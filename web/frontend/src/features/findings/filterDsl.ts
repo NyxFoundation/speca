@@ -15,10 +15,10 @@
 //   severity:high|critical        → OR-list (pipe-separated)
 //   verdict:CONFIRMED_VULNERABILITY
 //   prop:PROP-6a4*                → glob (`*` and `?`) on property_id
-//   repo:lighthouse_fusaka        → exact match on run_id (the closest
-//                                   thing the v0 wire model has to a
-//                                   "repo" key — CLI multi-target is
-//                                   v1 territory)
+//   repo:lighthouse_fusaka        → glob match on the finding's `target`
+//                                   (the client/target directory), falling
+//                                   back to `run_id` when a finding carries
+//                                   no target (single-target layout)
 //   path:contracts/**/*.sol       → glob on the finding's `file` field.
 //                                   `**` matches any number of path
 //                                   segments. Mirrors CLI spec §3.5
@@ -43,7 +43,8 @@ export interface ParsedFilter {
   verdict: string[];
   /** `prop:` globs. Each entry is a regex pre-compiled from the glob. */
   propPatterns: RegExp[];
-  /** `repo:` globs (matched against run_id). */
+  /** `repo:` globs (matched against the finding's `target`, or `run_id`
+   * when the finding has no target). */
   repoPatterns: RegExp[];
   /** `path:` globs (matched against the finding's `file` field). */
   pathPatterns: RegExp[];
@@ -199,7 +200,10 @@ export function matchFilter(f: Finding, parsed: ParsedFilter): boolean {
     }
   }
   if (parsed.repoPatterns.length > 0) {
-    if (!parsed.repoPatterns.some((re) => re.test(f.run_id))) {
+    // Prefer the real client/target; fall back to run_id for single-target
+    // findings that carry no target.
+    const repoHaystack = f.target ?? f.run_id;
+    if (!parsed.repoPatterns.some((re) => re.test(repoHaystack))) {
       return false;
     }
   }
