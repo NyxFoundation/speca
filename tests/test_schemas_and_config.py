@@ -375,8 +375,12 @@ class TestEnums:
         assert AuditClassification.INFORMATIONAL == "informational"
 
     def test_review_verdict_values(self):
-        assert ReviewVerdict.CONFIRMED == "Confirmed"
-        assert ReviewVerdict.DISPUTED == "Disputed"
+        assert ReviewVerdict.CONFIRMED_VULNERABILITY == "CONFIRMED_VULNERABILITY"
+        assert ReviewVerdict.CONFIRMED_POTENTIAL == "CONFIRMED_POTENTIAL"
+        assert ReviewVerdict.DISPUTED_FP == "DISPUTED_FP"
+        assert ReviewVerdict.DOWNGRADED == "DOWNGRADED"
+        assert ReviewVerdict.NEEDS_MANUAL_REVIEW == "NEEDS_MANUAL_REVIEW"
+        assert ReviewVerdict.PASS_THROUGH == "PASS_THROUGH"
 
     def test_reachability_classification_values(self):
         assert ReachabilityClassification.EXTERNAL_REACHABLE == "external-reachable"

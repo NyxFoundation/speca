@@ -12,6 +12,9 @@ Grounded in scripts/orchestrator/schemas.py:
   - AuditMapItem.property_id, AuditMapItem.classification
   - ReviewedItem.property_id, ReviewedItem.review_verdict
 AuditClassification positive set = {vulnerable, vulnerability, potential-vulnerability}.
+Phase 04 verdict vocabulary (prompts/04_review_worker.md):
+  confirmed = CONFIRMED_VULNERABILITY | CONFIRMED_POTENTIAL (+ legacy "Confirmed")
+  disputed  = DISPUTED_FP (+ legacy "Disputed")
 
 Run on real data:
   python build_population_table.py --p03 outputs/03_PARTIAL_*.json \
@@ -48,6 +51,8 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
             elif cls in EXCLUDED:
                 excluded += 1
 
+    _CONFIRMED = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "Confirmed"}
+    _DISPUTED = {"DISPUTED_FP", "Disputed"}
     confirmed_ids: list[str] = []
     disputed = 0
     adjudicated = 0
@@ -56,9 +61,9 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
             adjudicated += 1
             verdict = str(item.get("review_verdict", "")).strip()
             pid = item.get("property_id") or item.get("check_id") or ""
-            if verdict == "Confirmed":
+            if verdict in _CONFIRMED:
                 confirmed_ids.append(pid)
-            elif verdict == "Disputed":
+            elif verdict in _DISPUTED:
                 disputed += 1
 
     table = {
@@ -105,8 +110,8 @@ def _selftest() -> int:
         {"property_id": "P4", "classification": "out-of-scope"},
     ]}]
     p04 = [{"reviewed_items": [
-        {"property_id": "P1", "review_verdict": "Confirmed"},
-        {"property_id": "P2", "review_verdict": "Disputed"},
+        {"property_id": "P1", "review_verdict": "CONFIRMED_VULNERABILITY"},
+        {"property_id": "P2", "review_verdict": "DISPUTED_FP"},
     ]}]
     clusters = {"P1": "C1"}
     gt = {"P1": "GT-7"}
