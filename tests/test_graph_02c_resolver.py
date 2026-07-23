@@ -133,12 +133,13 @@ def test_run_02c_driver_gate_and_report(tmp_path):
          "text": "abstract prose no idents"},                        # low -> fallback
     ]
     items, rep = run_02c(tmp_path, props)
-    assert rep.n == 3 and rep.resolved == 2 and rep.fallback == 1
-    assert rep.by_confidence["high"] == 1 and rep.by_confidence["low"] == 1
-    assert rep.fallback_rate == round(1 / 3, 4)
+    # high-only accepted by default: P1(high) resolved; P2(medium) + P3(low) fall back
+    assert rep.n == 3 and rep.resolved == 1 and rep.fallback == 2
+    assert rep.by_confidence["high"] == 1 and rep.by_confidence["medium"] == 1
     byid = {i["property_id"]: i for i in items}
     assert byid["P1"]["x_02c_confidence"] == "high"
     assert byid["P1"]["code_scope"]["resolution_status"] == "resolved"
+    assert byid["P2"]["code_scope"]["resolution_status"] == "needs_llm_fallback"
     assert byid["P3"]["code_scope"]["resolution_status"] == "needs_llm_fallback"
     # nothing dropped
     assert len(items) == len(props)

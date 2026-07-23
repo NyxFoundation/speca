@@ -12,9 +12,13 @@ without the Claude/MCP dependency.
    convention-insensitively (`norm()` collapses pyspec `process_attestation`
    onto client `ProcessAttestation` / `processAttestation`). Emits a
    **confidence** (high / medium / low).
-3. **Confidence gate** (`run.py`) — high/medium accepted directly; **low →
-   `needs_llm_fallback`** (never dropped). So the LLM runs on only the tail, and
-   system recall ≥ the pure-LLM baseline *by construction*.
+3. **Confidence gate** (`run.py`) — **high accepted directly** (exact strong-seed
+   hit — precise); **medium + low → `needs_llm_fallback`** (never dropped). So the
+   LLM runs on only the tail, and system recall ≥ the pure-LLM baseline *by
+   construction*. High-only is the default because medium (mined-token) matches
+   validated imprecise on real clients whose function structure differs from
+   pyspec — e.g. prysm's Go `on_block` mis-matching `Fork`. Set
+   `SPECA_02C_ACCEPT=high,medium` to also accept medium (cheaper, less precise).
 
 ## Accuracy is measured, not assumed
 - `benchmark.py` mines ground truth from Phase 03 findings' `code_path`.
@@ -23,6 +27,11 @@ without the Claude/MCP dependency.
   below `--recall-min` / above `--fallback-max`; wired into CI
   (`.github/workflows/graph-02c-eval.yml`). Validated on real nethermind C#
   (recall 1.0 with the exact seed).
+- **Real-client validation** (gasper 01e, 20 properties): lighthouse (Rust, 895
+  files) → 16 high / 4 medium, 20/20 located, ~3.1s, 0 LLM; prysm (Go camelCase,
+  3586 files) → 10 high / 10 medium. Under the high-only default the imprecise
+  medium tail (e.g. `on_block`→`Fork`) drops to the LLM, keeping the
+  deterministic tier precise.
 
 ## Run
 ```bash

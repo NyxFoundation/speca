@@ -18,18 +18,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import os
+
 from .resolver import resolve
 from .symbols import SymbolIndex, build_index
 
-# confidence -> whether the deterministic result is accepted (else LLM fallback)
-_ACCEPT = {"high", "medium"}
+
+def _accepted_confidences() -> set[str]:
+    """Which confidences are accepted deterministically (rest -> LLM fallback).
+
+    Default is HIGH only: a high match is an exact strong-seed (covers /
+    spec_symbol) hit and is precise. MEDIUM is a mined-token match — validated
+    imprecise on real clients whose function structure differs from pyspec
+    (e.g. prysm ``on_block`` mis-matching ``Fork``), so it falls back to the
+    LLM by default to keep the deterministic tier PRECISE. Set
+    ``SPECA_02C_ACCEPT=high,medium`` to also accept medium (cheaper, less
+    precise).
+    """
+    raw = os.environ.get("SPECA_02C_ACCEPT", "high").strip().lower()
+    return {c.strip() for c in raw.split(",") if c.strip()} or {"high"}
 
 
 @dataclass
 class RunReport:
     n: int
-    resolved: int                 # deterministically accepted (high+medium)
-    fallback: int                 # low -> needs the LLM
+    resolved: int                 # deterministically accepted (per SPECA_02C_ACCEPT gate)
+    fallback: int                 # not accepted -> needs the LLM tail
     by_confidence: dict[str, int] = field(default_factory=dict)
     skipped_langs: list[str] = field(default_factory=list)
 
@@ -54,28 +68,32 @@ def run_02c(
     the caller can run the LLM 02c on just those.
     """
     index = index or build_index(repo_path)
+    accept = _accepted_confidences()
     items: list[dict[str, Any]] = []
     by_conf: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+    resolved = 0
+    fallback = 0
 
     for prop in properties:
         r = resolve(prop, index)
         by_conf[r.confidence] = by_conf.get(r.confidence, 0) + 1
         code_scope = dict(r.code_scope)
-        if r.confidence not in _ACCEPT:
+        if r.confidence in accept:
+            resolved += 1
+        else:
             # never drop it — hand this one to the LLM tail
             code_scope["resolution_status"] = "needs_llm_fallback"
+            fallback += 1
         item = dict(prop)
         item["code_scope"] = code_scope
         item["x_02c_confidence"] = r.confidence
         item["x_02c_matched_seeds"] = r.matched_seeds
         items.append(item)
 
-    n = len(properties)
-    resolved = by_conf["high"] + by_conf["medium"]
     report = RunReport(
-        n=n,
+        n=len(properties),
         resolved=resolved,
-        fallback=by_conf["low"],
+        fallback=fallback,
         by_confidence=by_conf,
         skipped_langs=sorted(index.skipped_langs),
     )
