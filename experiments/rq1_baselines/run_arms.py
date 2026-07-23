@@ -49,24 +49,38 @@ ARMS = json.loads((HERE / "arms.json").read_text(encoding="utf-8"))
 _AUDIT_VARIANT = {"03_codeonly": "A", "03_spec_only": "B"}
 
 
-def _build_arm_queue(arm_letter: str, out_root: Path, target_workspace: str) -> int:
-    """Build the arm A/B audit queue into <out_root>/outputs/03_QUEUE_W0B0.json,
-    covering the same in-scope population arm C sees. Returns unit count."""
+def _build_arm_queue(arm_letter: str, out_root: Path, target_workspace: str,
+                     shared_scope: str | None = None) -> int:
+    """Build the arm A/B audit queue covering the same in-scope population arm C
+    sees. Writes into <out_root> directly — `get_output_root()` (paths.py) returns
+    SPECA_OUTPUT_DIR itself with NO `outputs/` subdir, and phases write
+    BUG_BOUNTY_SCOPE.json / 01b_PARTIAL_*.json there. Raises on an empty queue: a
+    silent 0-unit queue would make arm-A recall a spurious 0 — the exact causal
+    misread this experiment must avoid (#102 review)."""
     from queue_builder import build_arm_a_units, build_arm_b_units, write_queue
 
-    out_dir = out_root / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
     ws = Path(target_workspace)
     if arm_letter == "A":
-        scope = _first_json([out_dir / "BUG_BOUNTY_SCOPE.json", ws / "outputs" / "BUG_BOUNTY_SCOPE.json", ws / "BUG_BOUNTY_SCOPE.json"])
-        ti = _first_json([out_dir / "TARGET_INFO.json", ws / "outputs" / "TARGET_INFO.json"])
+        # Arm A runs no scope-extraction phase (0a); the shared scope must be
+        # passed in (--bug-bounty-scope) so every arm audits the SAME scope.
+        scope = None
+        if shared_scope:
+            scope = _first_json([Path(shared_scope)])
+        scope = scope or _first_json([out_root / "BUG_BOUNTY_SCOPE.json", ws / "BUG_BOUNTY_SCOPE.json"])
+        ti = _first_json([out_root / "TARGET_INFO.json", ws / "TARGET_INFO.json"])
         units = build_arm_a_units(scope or {}, ti)
         arm_id = "A_code_only"
-    else:  # B
-        parts = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_dir.glob("01b_PARTIAL_*.json"))]
+    else:  # B — 01b partials produced by the arm's own 01b phase (runs first)
+        parts = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_root.glob("01b_PARTIAL_*.json"))]
         units = build_arm_b_units(parts)
         arm_id = "B_spec_only"
-    write_queue(units, out_dir / "03_QUEUE_W0B0.json", arm_id)
+    if not units:
+        raise SystemExit(
+            f"[{arm_id}] built 0 audit units — refusing to run a fair-queue arm on "
+            f"an empty queue. For arm A pass --bug-bounty-scope <shared BUG_BOUNTY_SCOPE.json>; "
+            f"for arm B confirm 01b produced 01b_PARTIAL_*.json in {out_root}."
+        )
+    write_queue(units, out_root / "03_ASYNC_QUEUE_W0B0.json", arm_id)
     return len(units)
 
 
@@ -87,7 +101,8 @@ def arm_by_id(arm_id: str) -> dict:
     raise SystemExit(f"unknown arm: {arm_id}")
 
 
-def run_arm(arm: dict, run_idx: int, target_workspace: str, model: str, dry_run: bool) -> bool:
+def run_arm(arm: dict, run_idx: int, target_workspace: str, model: str, dry_run: bool,
+            shared_scope: str | None = None) -> bool:
     """Run one arm as one independent run. Each (arm, run) writes to a disjoint
     output root so arms never thrash the same venv/outputs, and pins SPECA_RUN_ID
     (see CLAUDE.md) for determinism. Returns True on success, False if any phase
@@ -106,7 +121,7 @@ def run_arm(arm: dict, run_idx: int, target_workspace: str, model: str, dry_run:
         # Arms A/B skip 02c, so build their audit queue right before the audit
         # phase (arm B needs 01b to have run first — the phase list orders it so).
         if phase in _AUDIT_VARIANT and not dry_run:
-            n = _build_arm_queue(_AUDIT_VARIANT[phase], out_root, target_workspace)
+            n = _build_arm_queue(_AUDIT_VARIANT[phase], out_root, target_workspace, shared_scope)
             print(f"[{arm['id']} run{run_idx}] built {phase} queue: {n} units")
         # model is a run_phase.py FLAG (--model), not an env var.
         cmd = [
@@ -215,6 +230,10 @@ def main() -> int:
                     help="target repo workspace path (SPECA_TARGET_WORKSPACE). "
                          "Named to avoid clashing with run_phase.py's --target (=phase).")
     ap.add_argument("--model", default=ARMS["defaults"]["model"])
+    ap.add_argument("--bug-bounty-scope", dest="bug_bounty_scope",
+                    help="shared BUG_BOUNTY_SCOPE.json for arm A (arm A runs no scope-"
+                         "extraction phase; all arms must audit the SAME scope — "
+                         "hold_constant: bug_bounty_scope).")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     ap.add_argument("--score", action="store_true", help="score existing runs and exit")
     ap.add_argument("--gt-map", dest="gt_map",
@@ -232,7 +251,8 @@ def main() -> int:
     for arm_id in args.arms.split(","):
         arm = arm_by_id(arm_id)
         for run_idx in range(args.runs):
-            if not run_arm(arm, run_idx, args.sherlock_target, args.model, args.dry_run):
+            if not run_arm(arm, run_idx, args.sherlock_target, args.model, args.dry_run,
+                           args.bug_bounty_scope):
                 ok = False
     print("done (dry-run)" if args.dry_run else ("done" if ok else "done WITH ABORTED runs"))
     return 0 if ok or args.dry_run else 1

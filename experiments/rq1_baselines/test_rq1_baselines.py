@@ -21,28 +21,56 @@ from queue_builder import build_arm_a_units, build_arm_b_units  # noqa: E402
 import run_arms  # noqa: E402
 
 
-def test_arm_a_units_cover_scope_no_property_signal():
-    scope = {"in_scope": {"components": [
-        {"name": "verify_batch", "path": "kzg/verify.go", "language": "Go"},
-        {"name": "compute_challenge", "path": "kzg/challenge.go"},
-    ]}}
+def test_arm_a_units_from_real_scope_schema():
+    # REAL BUG_BOUNTY_SCOPE.json shape (phase0_runner.py): top-level
+    # in_scope_assets = flat list[str], plus in_scope_contracts = list[dict].
+    scope = {
+        "in_scope_assets": ["kzg/verify.go::VerifyBatch", "kzg/challenge.go"],
+        "in_scope_contracts": [{"name": "Deposit", "address": "0xabc"}],
+    }
     units = build_arm_a_units(scope)
-    assert [u["check_id"] for u in units] == ["armA-001", "armA-002"], units
-    # fairness: one unit per in-scope component, same population, no property fields
-    assert len(units) == 2
+    assert [u["check_id"] for u in units] == ["armA-001", "armA-002", "armA-003"], units
     for u in units:
         assert u["arm"] == "A_code_only"
-        assert u["property_id"] == u["check_id"]      # surrogate id
-        assert u["code_path"]                          # locates code
-        assert "assertion" not in u and "type" not in u  # no typed-property signal
-    print("ok: arm A units")
+        assert u["property_id"] == u["check_id"]          # surrogate id
+        assert u["code_path"]                              # locates the asset
+        assert "assertion" not in u and "type" not in u    # no typed-property signal
+    assert units[2]["asset"] == "Deposit"                  # contract enumerated too
+    print("ok: arm A units from real in_scope_assets schema")
 
 
-def test_arm_a_dedups_and_handles_list_and_empty():
-    scope = {"in_scope": [{"path": "a.go"}, {"path": "a.go"}, {"path": "b.go"}]}
-    assert len(build_arm_a_units(scope)) == 2          # dedup by path
-    assert build_arm_a_units({}) == []                 # empty scope -> empty (caller warns)
-    print("ok: arm A dedup/empty")
+def test_arm_a_dedups_and_empty_and_legacy_fallback():
+    scope = {"in_scope_assets": ["a.go", "a.go", "b.go"]}
+    assert len(build_arm_a_units(scope)) == 2              # dedup by asset
+    assert build_arm_a_units({}) == []                     # empty -> empty (caller raises)
+    # legacy fallback (older scope files) still yields units, not silent zero
+    assert len(build_arm_a_units({"in_scope_components": ["x.go", "y.go"]})) == 2
+    print("ok: arm A dedup/empty/legacy-fallback")
+
+
+def test_build_arm_queue_reads_real_layout_and_refuses_empty():
+    # Integration test of _build_arm_queue itself (the bug locus in the #156
+    # review): scope file lives at <out_root>/BUG_BOUNTY_SCOPE.json (get_output_root
+    # adds no `outputs/` subdir), and an empty queue must RAISE, not run silently.
+    with tempfile.TemporaryDirectory() as td:
+        out_root = Path(td) / "runs" / "A_code_only" / "run0"
+        out_root.mkdir(parents=True)
+        (out_root / "BUG_BOUNTY_SCOPE.json").write_text(
+            json.dumps({"in_scope_assets": ["kzg/verify.go", "das/sampling.go"]}), encoding="utf-8")
+        n = run_arms._build_arm_queue("A", out_root, td)
+        assert n == 2, n
+        q = json.loads((out_root / "03_ASYNC_QUEUE_W0B0.json").read_text())
+        assert q["metadata"]["arm"] == "A_code_only" and len(q["items"]) == 2
+        # empty scope must refuse, not build a 0-unit queue (spurious 0 recall)
+        empty = Path(td) / "empty" / "run0"
+        empty.mkdir(parents=True)
+        (empty / "BUG_BOUNTY_SCOPE.json").write_text("{}", encoding="utf-8")
+        try:
+            run_arms._build_arm_queue("A", empty, td)
+            assert False, "expected SystemExit on empty queue"
+        except SystemExit:
+            pass
+    print("ok: _build_arm_queue real layout + refuses empty")
 
 
 def test_arm_b_units_carry_spec_provenance_not_properties():

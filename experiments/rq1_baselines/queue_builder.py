@@ -17,8 +17,14 @@ muddied.
 Everything is parameterized (scope path, 01b glob, target-info, output path, arm)
 so the harness does not block on the pending #122 seed-count / #107 denominator
 decisions. Output is the queue the Phase 03 orchestrator loads
-(`queue_pattern = outputs/03_QUEUE_*.json`); each unit's id field is `check_id`
-(the Phase 03 `item_id_field`), a surrogate `armA-<NNN>` / `armB-<NNN>`.
+(`queue_pattern = outputs/03_ASYNC_QUEUE_*.json`). Each unit carries the Phase 03
+id field `property_id` (the real `item_id_field`) AND `check_id`, both set to a
+surrogate `armA-<NNN>` / `armB-<NNN>`, so it is consumed like an arm-C item.
+
+Scope schema (verified vs phase0_runner.py / real BUG_BOUNTY_SCOPE.json):
+`in_scope_assets` is a flat list[str] of repos/paths/addresses (NOT a nested
+`in_scope.components` dict); `in_scope_contracts` is a list of dicts. Both are
+enumerated (older shapes tolerated as a fallback).
 """
 from __future__ import annotations
 
@@ -35,45 +41,63 @@ def _sid(arm_letter: str, n: int) -> str:
     return f"arm{arm_letter}-{n:03d}"
 
 
-def _scope_components(scope: dict[str, Any]) -> list[dict[str, Any]]:
-    """In-scope components from a BUG_BOUNTY_SCOPE.json, tolerant of shape drift.
+def _in_scope_units(scope: dict[str, Any]) -> list[tuple[str, str]]:
+    """(label, code_path) per in-scope asset from a real BUG_BOUNTY_SCOPE.json.
 
-    Accepts `in_scope` as a list of component dicts, or `in_scope.components`, or
-    a top-level `components` list. A component is any dict; we keep the fields that
-    locate code (name/path/file/symbol/region) and ignore the rest.
+    The file that phase0_runner.py generates (and 01e consumes) has a top-level
+    `in_scope_assets: list[str]` (repos / file paths / addresses) plus
+    `in_scope_contracts: list[dict]`. We enumerate those; a plain legacy shape
+    (`in_scope_components` / `components` as str or dict) is tolerated as a
+    fallback so an older scope file still yields units instead of silently zero.
     """
-    in_scope = scope.get("in_scope", scope.get("scope", {}))
-    if isinstance(in_scope, dict):
-        comps = in_scope.get("components") or in_scope.get("targets") or []
-    elif isinstance(in_scope, list):
-        comps = in_scope
-    else:
-        comps = []
-    if not comps:
-        comps = scope.get("components", [])
-    return [c for c in comps if isinstance(c, dict)]
+    out: list[tuple[str, str]] = []
+    assets = scope.get("in_scope_assets")
+    if isinstance(assets, list):
+        for a in assets:
+            if isinstance(a, str) and a.strip():
+                out.append((a.strip(), a.strip()))
+            elif isinstance(a, dict):
+                p = a.get("path") or a.get("name") or a.get("asset")
+                if p:
+                    out.append((str(p), str(p)))
+    for c in scope.get("in_scope_contracts") or []:
+        if isinstance(c, dict):
+            label = c.get("name") or c.get("address")
+            if label:
+                out.append((str(label), str(c.get("address") or label)))
+    if not out:  # legacy / fallback shapes
+        legacy = scope.get("in_scope_components") or scope.get("components") or []
+        if isinstance(legacy, dict):
+            legacy = legacy.get("components") or legacy.get("targets") or []
+        for c in legacy:
+            if isinstance(c, str) and c.strip():
+                out.append((c.strip(), c.strip()))
+            elif isinstance(c, dict):
+                p = c.get("path") or c.get("file") or c.get("name") or c.get("symbol")
+                if p:
+                    out.append((str(p), str(p)))
+    return out
 
 
 def build_arm_a_units(scope: dict[str, Any], target_info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Arm A units: one per in-scope code component, no spec/property signal."""
-    comps = _scope_components(scope)
-    # TARGET_INFO may enumerate additional in-scope components; union by (path/name).
+    """Arm A units: one per in-scope asset (no spec/property signal). Covers the
+    same in-scope population arm C sees (from BUG_BOUNTY_SCOPE / TARGET_INFO)."""
+    pairs = _in_scope_units(scope)
     if target_info:
-        comps = comps + [c for c in _scope_components(target_info) if isinstance(c, dict)]
+        pairs = pairs + _in_scope_units(target_info)
     seen: set[str] = set()
     units: list[dict[str, Any]] = []
-    for c in comps:
-        key = str(c.get("path") or c.get("file") or c.get("name") or c.get("symbol") or json.dumps(c, sort_keys=True))
-        if key in seen:
+    for label, code_path in pairs:
+        if label in seen:
             continue
-        seen.add(key)
+        seen.add(label)
         cid = _sid("A", len(units) + 1)
         units.append({
             "check_id": cid,
             "property_id": cid,           # surrogate (README): arms A/B have no property
             "arm": "A_code_only",
-            "code_path": c.get("path") or c.get("file") or c.get("symbol") or c.get("name", ""),
-            "component": {k: c.get(k) for k in ("name", "path", "file", "symbol", "region", "language") if c.get(k) is not None},
+            "code_path": code_path,
+            "asset": label,
         })
     return units
 
