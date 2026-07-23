@@ -2,10 +2,10 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from experiments.graph_02c.benchmark import GroundTruth, load_ground_truth, parse_code_path  # noqa: E402
-from experiments.graph_02c.metric import evaluate, score_one  # noqa: E402
+from orchestrator.graph_02c.benchmark import GroundTruth, load_ground_truth, parse_code_path  # noqa: E402
+from orchestrator.graph_02c.metric import evaluate, score_one  # noqa: E402
 
 
 def _cs(*locs):

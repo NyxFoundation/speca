@@ -10,7 +10,7 @@ runtime fallback (low-confidence -> LLM), a passing gate means the deterministic
 tier resolves >= RECALL_MIN of properties itself, and the rest fall back (never
 dropped), so system recall >= the LLM baseline at a bounded LLM cost.
 
-    python -m experiments.graph_02c.eval_cli \
+    python -m orchestrator.graph_02c.eval_cli \
         [--repo <dir>] [--bench <bench.json>] \
         [--recall-min 0.9] [--fallback-max 0.34]
 """

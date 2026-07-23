@@ -27,8 +27,8 @@ without the Claude/MCP dependency.
 ## Run
 ```bash
 uv run --with tree-sitter --with tree-sitter-language-pack --with tree-sitter-c-sharp \
-  python3 -m experiments.graph_02c.eval_cli          # accuracy gate
-python -m experiments.graph_02c.run --repo <client> --01e <01e_PARTIAL.json>  # produce 02c
+  PYTHONPATH=scripts python3 -m orchestrator.graph_02c.eval_cli          # accuracy gate
+PYTHONPATH=scripts python -m orchestrator.graph_02c.run --repo <client> --01e <01e_PARTIAL.json>  # produce 02c
 ```
 
 ## Status

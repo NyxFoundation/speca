@@ -1329,7 +1329,7 @@ class Phase02cOrchestrator(BaseOrchestrator):
             return
 
         # lazy import: tree-sitter deps are only needed for graph mode
-        from experiments.graph_02c.run import run_02c  # type: ignore
+        from .graph_02c.run import run_02c  # type: ignore
 
         properties = self.load_items()
         print(f"  02c(graph): resolving {len(properties)} properties over {workspace}")

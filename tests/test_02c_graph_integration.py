@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "scripts"))
 sys.path.insert(0, str(_ROOT))
 
-_BENCH_REPO = _ROOT / "experiments/graph_02c/fixtures/bench_repo"
+_BENCH_REPO = _ROOT / "scripts/orchestrator/graph_02c/fixtures/bench_repo"
 
 
 def _prop(pid: str, covers: str) -> dict:

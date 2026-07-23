@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_FIXTURES = Path(__file__).resolve().parents[2] / "cli/test/fixtures/sherlock-rq1"
+_FIXTURES = Path(__file__).resolve().parents[3] / "cli/test/fixtures/sherlock-rq1"
 
 # file::Symbol.path::Lstart-end   (Lstart-end optional; symbol optional)
 _CODE_PATH = re.compile(

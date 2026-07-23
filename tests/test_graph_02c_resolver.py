@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 pytest.importorskip("tree_sitter")
 try:
@@ -18,10 +18,10 @@ try:
 except Exception:
     pytest.skip("tree-sitter grammars unavailable", allow_module_level=True)
 
-from experiments.graph_02c.symbols import build_index  # noqa: E402
-from experiments.graph_02c.resolver import resolve  # noqa: E402
-from experiments.graph_02c.benchmark import GroundTruth  # noqa: E402
-from experiments.graph_02c.metric import score_one, evaluate  # noqa: E402
+from orchestrator.graph_02c.symbols import build_index  # noqa: E402
+from orchestrator.graph_02c.resolver import resolve  # noqa: E402
+from orchestrator.graph_02c.benchmark import GroundTruth  # noqa: E402
+from orchestrator.graph_02c.metric import score_one, evaluate  # noqa: E402
 
 _CS = """namespace Nethermind.Merge.Plugin.Data {
   public class ExecutionPayloadParams {
@@ -122,7 +122,7 @@ def test_name_extraction_return_type_vs_name(tmp_path):
 def test_run_02c_driver_gate_and_report(tmp_path):
     """Driver: high/medium accepted, low -> needs_llm_fallback (never dropped),
     report gives the fallback rate the CI accuracy gate asserts (#157 Step 3)."""
-    from experiments.graph_02c.run import run_02c
+    from orchestrator.graph_02c.run import run_02c
     (tmp_path / "c").mkdir()
     (tmp_path / "c/attestation.go").write_text(
         "package p\nfunc ProcessAttestation(a int) int { return a }\n")
@@ -161,7 +161,7 @@ def test_cross_convention_seed_matching(tmp_path):
 def test_accuracy_gate_passes_on_bench_fixture():
     """Step 4: the CI accuracy gate runs on the vendored bench repo and passes
     strict thresholds (cross-convention pyspec->client resolution, #157)."""
-    from experiments.graph_02c.eval_cli import run, _DEFAULT_REPO, _DEFAULT_BENCH
+    from orchestrator.graph_02c.eval_cli import run, _DEFAULT_REPO, _DEFAULT_BENCH
     res = run(_DEFAULT_REPO, _DEFAULT_BENCH)
     assert res["recall"] == 1.0
     assert res["fallback_rate"] == 0.0
