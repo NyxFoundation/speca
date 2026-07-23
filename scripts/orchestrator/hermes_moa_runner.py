@@ -2,19 +2,20 @@
 
 Runs one phase batch through THREE independent models and fuses their results
 with the recall-first union+cross-verify aggregation in :mod:`orchestrator.moa`
-(method b). The models are reached through the Hermes agent's OpenAI-compatible
-proxy (``hermes proxy``), which routes to ollama-cloud, so no provider API key
-lives in speca's environment.
+(method b). The 3 models are ollama-cloud models reached over the OpenAI-
+compatible ``ollama.com/v1`` endpoint using the ``OLLAMA_API_KEY`` credential
+(the same key the Hermes agent manages for its ollama-cloud provider — export
+it into the env before running; no key is committed).
 
-Each sub-model is a plain :class:`APIRunner` (its own agentic tool loop over the
-target codebase); this runner just fans a batch out to the three and fuses.
+Each sub-model is a plain :class:`OllamaAPIRunner` (its own agentic tool loop
+over the target codebase — tool-calling verified on all 3 models); this runner
+just fans a batch out to the three and fuses.
 
 Config (env):
-- ``SPECA_HERMES_PROXY_URL``  OpenAI-compatible base url of ``hermes proxy``
-                              (default ``http://127.0.0.1:11435/v1``).
+- ``OLLAMA_API_KEY``          ollama-cloud bearer (required).
+- ``OLLAMA_BASE_URL``         endpoint (default ``https://ollama.com/v1``).
 - ``SPECA_HERMES_MOA_MODELS`` comma-separated model list
                               (default ``deepseek-v4-pro,qwen3.5:397b,kimi-k2.7-code``).
-- ``SPECA_HERMES_PROXY_KEY``  optional bearer the proxy expects (default none).
 """
 from __future__ import annotations
 
@@ -23,13 +24,13 @@ import os
 import sys
 from typing import Any
 
-from .api_runner import APIRunner
+from .api_runner import OllamaAPIRunner
 from .config import PhaseConfig
 from .moa import aggregate
 from .runner import CircuitBreaker, CircuitBreakerTripped, BudgetExceeded
 from .watchdog import CostTracker
 
-DEFAULT_PROXY_URL = "http://127.0.0.1:11435/v1"
+DEFAULT_PROXY_URL = "https://ollama.com/v1"
 DEFAULT_MODELS = ("deepseek-v4-pro", "qwen3.5:397b", "kimi-k2.7-code")
 
 
@@ -38,16 +39,6 @@ def resolve_models() -> list[str]:
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return list(DEFAULT_MODELS)
-
-
-class _HermesModel(APIRunner):
-    """One MoA member: an APIRunner pointed at the Hermes proxy for one model."""
-
-    DEFAULT_BASE_URL = DEFAULT_PROXY_URL
-    DEFAULT_MODEL = DEFAULT_MODELS[0]
-    BASE_URL_ENV = "SPECA_HERMES_PROXY_URL"
-    API_KEY_ENV = "SPECA_HERMES_PROXY_KEY"
-    MODEL_ENV = "SPECA_HERMES_MODEL_UNUSED"  # model is passed explicitly per member
 
 
 class HermesMoARunner:
@@ -66,17 +57,19 @@ class HermesMoARunner:
         self.circuit_breaker = circuit_breaker or CircuitBreaker(config)
         self.cost_tracker = cost_tracker
         self.models = resolve_models()
-        base_url = os.environ.get("SPECA_HERMES_PROXY_URL", DEFAULT_PROXY_URL)
+        base_url = os.environ.get("OLLAMA_BASE_URL", DEFAULT_PROXY_URL)
+        api_key = os.environ.get("OLLAMA_API_KEY", "")
         # Each member shares the circuit breaker / cost tracker so systemic
-        # issues (proxy down, budget) trip once for the whole MoA.
-        self.members: dict[str, APIRunner] = {
-            model: _HermesModel(
+        # issues (endpoint down, budget) trip once for the whole MoA.
+        self.members: dict[str, OllamaAPIRunner] = {
+            model: OllamaAPIRunner(
                 config,
                 semaphore,
                 max_retries=max_retries,
                 circuit_breaker=self.circuit_breaker,
                 cost_tracker=cost_tracker,
                 base_url=base_url,
+                api_key=api_key,
                 model=model,
             )
             for model in self.models
@@ -93,7 +86,7 @@ class HermesMoARunner:
         recall-first aggregation still yields results. Budget/circuit-breaker
         exceptions propagate (they are systemic, not per-member).
         """
-        async def _one(model: str, runner: APIRunner):
+        async def _one(model: str, runner: OllamaAPIRunner):
             try:
                 return model, await runner.run_batch(batch, worker_id, batch_index)
             except (CircuitBreakerTripped, BudgetExceeded):
