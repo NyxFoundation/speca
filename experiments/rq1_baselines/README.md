@@ -5,12 +5,18 @@ baseline) and **#1756B(5)** (framework vs. base-model). Its result gates the
 paper's framing decisions in #106 (generality) and #111 (deployment reframe),
 so it runs **first**.
 
-> Status: **design + scaffold**. Prompts and protocol are ready. The runner
-> (`run_arms.py`) is a skeleton documenting the exact wiring; it needs the two
-> variant audit phases registered in `scripts/orchestrator/config.py`, the arm
-> A/B **queue builder** (below), and **one smoke-test run** before its numbers
-> can be trusted. Nothing here has been executed (no compute budget / findings
-> data in this environment).
+> Status: **harness implemented, compute-gated.** The arm A/B **queue builder**
+> (`queue_builder.py`, aligned to the real `BUG_BOUNTY_SCOPE.json`
+> `in_scope_assets` schema) and **scoring** (`run_arms.py score()`) are
+> implemented and unit-tested (`test_rq1_baselines.py`, incl. an integration test
+> of `_build_arm_queue` that refuses an empty queue). Arm A takes the shared
+> scope via `--bug-bounty-scope <BUG_BOUNTY_SCOPE.json>` (it runs no scope phase;
+> all arms must audit the SAME scope). **Remaining and compute-gated** (do NOT
+> trust numbers until done): registering the two variant phases in
+> `scripts/orchestrator/config.py` and **one smoke-test run per arm** — see the
+> `run_arms.py` module docstring STATUS for the exact remaining wiring (the real
+> `03_ASYNC_QUEUE` / `input_patterns` load path). Nothing here has been executed
+> on real targets (no compute / findings data in this environment).
 >
 > Revised per @grandchildrice's PR #125 review: output schema now matches the
 > real Phase 03 contract; env wiring and the run terminology are corrected;
@@ -60,8 +66,9 @@ and the A(1) causal claim is muddied. Rule:
 - **Arm B queue**: the Phase 01b subgraph regions mapped to code (spec-driven
   units), again with no typed-property filtering.
 
-This queue builder is part of the wiring (step 2 in `run_arms.py`); it is not yet
-implemented.
+This queue builder is implemented in `queue_builder.py` (arm A from
+`in_scope_assets`, arm B from 01b subgraphs) and wired into `run_arms.py`
+`run_arm()`; arm A takes the shared scope via `--bug-bounty-scope`.
 
 ## Runs, not seeds (#102 directive 1, and per review point 5)
 
@@ -102,10 +109,12 @@ arm A recall LOW and a nameable "property-only-recoverable" set exists
 
 ## How to run (once wired)
 
-1. Register `03_codeonly` / `03_spec_only` in `config.py` (stubs in `run_arms.py`
-   header) and implement the arm A/B queue builder (above).
+1. Register `03_codeonly` / `03_spec_only` in `config.py` (remaining wiring in the
+   `run_arms.py` header STATUS). The arm A/B queue builder (`queue_builder.py`) is
+   implemented; arm A needs the shared scope via `--bug-bounty-scope`.
 2. `python experiments/rq1_baselines/run_arms.py --arms A,B,C --runs 3 \
-     --sherlock-target <path-to-target-workspace> --model sonnet`
+     --sherlock-target <path-to-target-workspace> --model sonnet \
+     --bug-bounty-scope <shared BUG_BOUNTY_SCOPE.json>`
    (model is a `run_phase.py` `--model` flag; the target is passed via
    `SPECA_TARGET_WORKSPACE`; each (arm, run) writes a disjoint output root and
    aborts on a non-zero phase exit.)
@@ -116,4 +125,8 @@ arm A recall LOW and a nameable "property-only-recoverable" set exists
 - `arms.json` — arm definitions + the output-contract note.
 - `prompts/audit_code_only.md` — arm A auditor (no spec/properties).
 - `prompts/audit_spec_only.md` — arm B auditor (spec/subgraph, no typed properties).
-- `run_arms.py` — orchestration skeleton (wiring + queue builder documented in header).
+- `run_arms.py` — orchestration + scoring. Builds the arm A/B queue (via
+  `queue_builder.py`), runs each arm's phases, and `score()`s per-arm recall
+  against `--gt-map`. Remaining config.py wiring is in the module-header STATUS.
+- `queue_builder.py` — arm A/B audit-queue builder (real `in_scope_assets` schema).
+- `test_rq1_baselines.py` — unit + integration tests (queue builder, `_build_arm_queue`, scoring).
