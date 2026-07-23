@@ -385,7 +385,13 @@ class APIRunner:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Max turns for tool loop
-        self.max_turns = config.max_turns_per_batch or 50
+        import os as _os
+        _mt = _os.environ.get("SPECA_API_MAX_TURNS", "").strip()
+        self.max_turns = (int(_mt) if _mt.isdigit() and int(_mt) > 0
+                          else (config.max_turns_per_batch or 50))
+        _tok = _os.environ.get("SPECA_API_MAX_TOKENS", "").strip()
+        self.max_tokens = int(_tok) if _tok.isdigit() and int(_tok) > 0 else 16384
+        self.reasoning_effort = _os.environ.get("SPECA_API_REASONING_EFFORT", "").strip().lower() or None
 
     async def run_batch(
         self,
@@ -517,8 +523,10 @@ class APIRunner:
                     "model": self.model,
                     "messages": messages,
                     "tools": TOOL_DEFINITIONS,
-                    "max_tokens": 16384,
+                    "max_tokens": self.max_tokens,
                 }
+                if self.reasoning_effort:
+                    request_body["reasoning_effort"] = self.reasoning_effort
 
                 log_entries.append({
                     "type": "api_request",
