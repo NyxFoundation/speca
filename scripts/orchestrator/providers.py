@@ -304,7 +304,7 @@ class LeanPropertyProvider:
     # away from plugin_commit fails resolution loudly (that is the pin
     # working, not a bug).
     plugin_version: str | None = "v0.1.1"
-    plugin_commit: str | None = "b8621d5184a311b9f0762d6d5967aae9b93d7402"
+    plugin_commit: str | None = "53e175eaf15bdf8d12b029ff7c7b49eb877b6ede"
 
     subprocess_timeout_s = 1800
 
