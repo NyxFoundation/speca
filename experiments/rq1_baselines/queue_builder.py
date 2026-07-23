@@ -146,7 +146,7 @@ def main() -> int:
     ap.add_argument("--scope", help="BUG_BOUNTY_SCOPE.json (arm A)")
     ap.add_argument("--target-info", help="TARGET_INFO.json (arm A, optional)")
     ap.add_argument("--b01-glob", help="glob for 01b partials (arm B), e.g. outputs/01b_PARTIAL_*.json")
-    ap.add_argument("--out", required=True, help="output queue path, e.g. outputs/03_QUEUE_W0B0.json")
+    ap.add_argument("--out", required=True, help="output queue path, e.g. <out_root>/03_ASYNC_QUEUE_W0B0.json")
     args = ap.parse_args()
 
     if args.arm == "A":

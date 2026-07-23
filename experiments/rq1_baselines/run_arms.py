@@ -121,7 +121,15 @@ def run_arm(arm: dict, run_idx: int, target_workspace: str, model: str, dry_run:
         # Arms A/B skip 02c, so build their audit queue right before the audit
         # phase (arm B needs 01b to have run first — the phase list orders it so).
         if phase in _AUDIT_VARIANT and not dry_run:
-            n = _build_arm_queue(_AUDIT_VARIANT[phase], out_root, target_workspace, shared_scope)
+            # An empty/misbuilt queue aborts THIS (arm, run) only — same
+            # ABORTED.txt-and-continue contract as a failed phase below, not a
+            # process-wide SystemExit that would take down other arms/runs (#156).
+            try:
+                n = _build_arm_queue(_AUDIT_VARIANT[phase], out_root, target_workspace, shared_scope)
+            except SystemExit as exc:
+                (out_root / "ABORTED.txt").write_text(f"queue build for {phase}: {exc}\n", encoding="utf-8")
+                print(f"[{arm['id']} run{run_idx}] ABORT: queue build for {phase}: {exc}")
+                return False
             print(f"[{arm['id']} run{run_idx}] built {phase} queue: {n} units")
         # model is a run_phase.py FLAG (--model), not an env var.
         cmd = [
@@ -152,7 +160,10 @@ _CONFIRMED_VERDICTS = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "Confir
 def _confirmed_finding_ids(run_root: Path) -> set[str]:
     """Finding ids (property_id / check_id) confirmed by Phase 04 in one run."""
     ids: set[str] = set()
-    for fp in sorted((run_root / "outputs").glob("04_PARTIAL_*.json")) if (run_root / "outputs").is_dir() else []:
+    # Phase 04 writes 04_PARTIAL_*.json into run_root itself — get_output_root()
+    # (paths.py) returns SPECA_OUTPUT_DIR with NO `outputs/` subdir. Same fix as
+    # _build_arm_queue; verified against the real layout in the test below (#156).
+    for fp in sorted(run_root.glob("04_PARTIAL_*.json")):
         try:
             data = json.loads(fp.read_text(encoding="utf-8"))
         except Exception:

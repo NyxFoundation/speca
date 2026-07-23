@@ -66,8 +66,9 @@ and the A(1) causal claim is muddied. Rule:
 - **Arm B queue**: the Phase 01b subgraph regions mapped to code (spec-driven
   units), again with no typed-property filtering.
 
-This queue builder is part of the wiring (step 2 in `run_arms.py`); it is not yet
-implemented.
+This queue builder is implemented in `queue_builder.py` (arm A from
+`in_scope_assets`, arm B from 01b subgraphs) and wired into `run_arms.py`
+`run_arm()`; arm A takes the shared scope via `--bug-bounty-scope`.
 
 ## Runs, not seeds (#102 directive 1, and per review point 5)
 
@@ -124,4 +125,8 @@ arm A recall LOW and a nameable "property-only-recoverable" set exists
 - `arms.json` — arm definitions + the output-contract note.
 - `prompts/audit_code_only.md` — arm A auditor (no spec/properties).
 - `prompts/audit_spec_only.md` — arm B auditor (spec/subgraph, no typed properties).
-- `run_arms.py` — orchestration skeleton (wiring + queue builder documented in header).
+- `run_arms.py` — orchestration + scoring. Builds the arm A/B queue (via
+  `queue_builder.py`), runs each arm's phases, and `score()`s per-arm recall
+  against `--gt-map`. Remaining config.py wiring is in the module-header STATUS.
+- `queue_builder.py` — arm A/B audit-queue builder (real `in_scope_assets` schema).
+- `test_rq1_baselines.py` — unit + integration tests (queue builder, `_build_arm_queue`, scoring).

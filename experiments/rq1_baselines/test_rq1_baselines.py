@@ -92,9 +92,10 @@ def test_arm_b_units_carry_spec_provenance_not_properties():
 
 def test_confirmed_finding_ids_reads_phase04():
     with tempfile.TemporaryDirectory() as td:
+        # Real layout: Phase 04 outputs live directly under run_root (= SPECA_OUTPUT_DIR),
+        # NOT under run_root/outputs — the #156 re-review bug this test now guards.
         run_root = Path(td)
-        (run_root / "outputs").mkdir()
-        (run_root / "outputs" / "04_PARTIAL_x.json").write_text(json.dumps({"reviewed_items": [
+        (run_root / "04_PARTIAL_x.json").write_text(json.dumps({"reviewed_items": [
             {"property_id": "armA-001", "review_verdict": "CONFIRMED_VULNERABILITY"},
             {"property_id": "armA-002", "review_verdict": "DISPUTED_FP"},
             {"property_id": "armA-003", "review_verdict": "CONFIRMED_POTENTIAL"},
