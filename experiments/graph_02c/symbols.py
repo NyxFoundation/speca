@@ -78,16 +78,34 @@ def _get_parser(lang: str):
 
 
 def _name_of(node) -> str | None:
-    """The identifier child that names a definition node (language-agnostic-ish)."""
+    """The name of a definition node.
+
+    Tree-sitter grammars expose a ``name`` field (``type`` for some Rust items);
+    use it — the first bare ``identifier`` child is often the RETURN TYPE, not
+    the name (e.g. C# ``public AcceptTxResult Accept(...)``), which would index
+    the wrong symbol.
+    """
+    def _from(n):
+        # a qualified / explicit-interface name: take the trailing identifier
+        ident = None
+        for c in [n, *n.children]:
+            if c.type in ("identifier", "type_identifier", "field_identifier"):
+                ident = c
+        return (ident or n).text.decode("utf-8", "replace")
+
+    for field in ("name", "type"):
+        n = node.child_by_field_name(field)
+        if n is not None:
+            return _from(n)
+    # wrapper nodes carry the name on a nested spec (e.g. Go type_declaration ->
+    # type_spec.name); look one level down for a name field.
     for c in node.children:
-        if c.type in ("identifier", "type_identifier", "name", "field_identifier"):
-            return c.text.decode("utf-8", "replace")
-    # rust impl blocks etc.: dig one level for a type identifier
-    for c in node.children:
-        for gc in c.children:
-            if gc.type in ("identifier", "type_identifier"):
-                return gc.text.decode("utf-8", "replace")
-    return None
+        n = c.child_by_field_name("name")
+        if n is not None:
+            return _from(n)
+    # last-resort heuristic: the trailing identifier child
+    idents = [c for c in node.children if c.type in ("identifier", "type_identifier")]
+    return idents[-1].text.decode("utf-8", "replace") if idents else None
 
 
 def _extract_file(path: Path, rel: str, lang: str, defn_types: set[str],

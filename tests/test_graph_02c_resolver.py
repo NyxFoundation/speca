@@ -99,3 +99,21 @@ def test_end_to_end_recall_on_synthetic_bench(tmp_path):
     ]
     rep = evaluate([(gt, resolve(prop, idx).code_scope) for gt, prop in bench])
     assert rep.recall == 1.0
+
+
+def test_name_extraction_return_type_vs_name(tmp_path):
+    """Regression (#157): the method NAME, not the return type, is indexed —
+    real nethermind pattern `public AcceptTxResult Accept(...)` + explicit
+    interface impl `AcceptTxResult ITxFilter.Accept(...)` + Go `type X struct`."""
+    idx = _tree(tmp_path, {
+        "Filters/GasLimitTxFilter.cs":
+            "namespace N { class GasLimitTxFilter {"
+            " public AcceptTxResult Accept(Transaction tx) { return default; }"
+            " AcceptTxResult ITxFilter.AcceptExplicit(Transaction tx) { return default; } } }",
+        "consensus/state.go": "package p\ntype BeaconState struct { epoch int }\n",
+    })
+    names = {s.name for s in idx.symbols}
+    assert "Accept" in names, "method name (not return type AcceptTxResult) must be indexed"
+    assert "AcceptExplicit" in names, "explicit-interface method name must be indexed"
+    assert "AcceptTxResult" not in names, "return type must NOT be indexed as a symbol"
+    assert "BeaconState" in names, "Go type_declaration name (nested type_spec) must be indexed"
