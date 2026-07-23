@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 
-RuntimeId = Literal["claude", "api", "codex", "gemini", "ollama", "copilot", "claude_pty"]
+RuntimeId = Literal["claude", "api", "codex", "gemini", "ollama", "copilot", "claude_pty", "hermes_moa"]
 
 
 @dataclass(frozen=True)
@@ -361,6 +361,30 @@ def _probe_claude_pty() -> RuntimeAvailability:
     )
 
 
+
+def _probe_hermes_moa() -> RuntimeAvailability:
+    """Mixture-of-Agents over the Hermes agent's OpenAI-compatible proxy.
+
+    Available when the ``hermes`` CLI is on PATH (it owns the provider
+    credential pool + proxy). The 3 ollama-cloud members are reached via the
+    proxy url; auth lives in Hermes, not speca.
+    """
+    import os as _os
+    hermes = _which("hermes")
+    from .hermes_moa_runner import resolve_models, DEFAULT_PROXY_URL
+    return RuntimeAvailability(
+        runtime_id="hermes_moa",
+        available=bool(hermes),
+        implemented=True,
+        notes=(
+            "MoA (union+cross-verify) over 3 models via `hermes proxy` -> ollama-cloud.",
+            f"models: {', '.join(resolve_models())}",
+            f"proxy: {_os.environ.get('SPECA_HERMES_PROXY_URL', DEFAULT_PROXY_URL)}",
+            ("hermes CLI found." if hermes else "hermes CLI not on PATH — run `hermes proxy` first."),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -401,6 +425,12 @@ REGISTRY: dict[str, RuntimeDescriptor] = {
         runtime_id="copilot",
         summary="GitHub Copilot agentic CLI (`copilot -p --output-format json --allow-all-tools`). Tool-calling owned by the CLI.",
         probe=_probe_copilot,
+        implemented=True,
+    ),
+    "hermes_moa": RuntimeDescriptor(
+        runtime_id="hermes_moa",
+        summary="Mixture-of-Agents: 3 ollama-cloud models via Hermes proxy, recall-first union+cross-verify (speca#88 a/b/c-3).",
+        probe=_probe_hermes_moa,
         implemented=True,
     ),
     "claude_pty": RuntimeDescriptor(

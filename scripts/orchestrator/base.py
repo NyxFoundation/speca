@@ -255,6 +255,14 @@ class BaseOrchestrator(ABC):
             self.runner = CopilotRunner(**runner_kwargs)
             model_label = self.runner.model or "(CLI default)"
             print(f"  Runner: CopilotRunner (model={model_label})")
+        elif runner_type == "hermes_moa":
+            from .hermes_moa_runner import HermesMoARunner
+
+            self.runner = HermesMoARunner(**runner_kwargs)
+            print(
+                f"  Runner: HermesMoARunner (MoA, models={self.runner.model}, "
+                "recall-first union+cross-verify)"
+            )
         elif runner_type == "claude_pty":
             from .claude_pty_runner import ClaudePtyRunner
 
