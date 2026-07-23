@@ -199,6 +199,13 @@ def _recovered_gt(finding_ids: set[str], finding_to_gt: dict[str, str]) -> set[s
     return {finding_to_gt[f] for f in finding_ids if f in finding_to_gt}
 
 
+def _scorable_run(run_root: Path) -> bool:
+    """True only if this (arm, run) actually produced Phase-04 output. A run that
+    aborted or never ran has no 04_PARTIAL and must be skipped, not scored as
+    recall 0 (which would spuriously understate the arm's recall)."""
+    return any(run_root.glob("04_PARTIAL_*.json"))
+
+
 def score(arms: list[str], runs: int, gt_map_path: str | None) -> int:
     """Per-arm recall on the 15 H/M/L, using an EXTERNAL match map.
 
@@ -228,8 +235,16 @@ def score(arms: list[str], runs: int, gt_map_path: str | None) -> int:
         arm = arm_by_id(arm_id)
         per_run_recall: list[float] = []
         union: set[str] = set()
+        skipped = 0
         for run_idx in range(runs):
             run_root = HERE / "runs" / arm["id"] / f"run{run_idx}"
+            # Only score a run that actually produced Phase-04 output. A run that
+            # aborted (ABORTED.txt / no 04 output) or never ran must NOT be counted
+            # as recall 0 — that is a spurious 0 that understates recall exactly like
+            # the earlier path/schema bugs. "Ran 04 but recovered nothing" IS a real 0.
+            if not _scorable_run(run_root):
+                skipped += 1
+                continue
             rec = _recovered_gt(_confirmed_finding_ids(run_root), f2g)
             union |= rec
             per_run_recall.append(round(len(rec) / denom, 4))
@@ -237,7 +252,8 @@ def score(arms: list[str], runs: int, gt_map_path: str | None) -> int:
         by_sev = {s: sum(1 for g in union if sev.get(g) == s) for s in ("High", "Medium", "Low")}
         mean = round(sum(per_run_recall) / len(per_run_recall), 4) if per_run_recall else None
         rng = (min(per_run_recall), max(per_run_recall)) if per_run_recall else None
-        print(f"[{arm['id']}] recall mean={mean} min-max={rng} over {runs} run(s) | "
+        note = f" ({skipped} aborted/absent run(s) skipped)" if skipped else ""
+        print(f"[{arm['id']}] recall mean={mean} min-max={rng} over {len(per_run_recall)} scored run(s){note} | "
               f"union recovered {len(union)}/{denom} (H/M/L={by_sev['High']}/{by_sev['Medium']}/{by_sev['Low']})")
 
     # property-only-recoverable = (B|C) MINUS A, listed by gt id (the decisive set)

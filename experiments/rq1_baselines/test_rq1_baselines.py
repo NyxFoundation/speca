@@ -108,6 +108,21 @@ def test_confirmed_finding_ids_reads_phase04():
     print("ok: confirmed finding ids from Phase 04")
 
 
+def test_scorable_run_skips_aborted_or_absent():
+    # A run with no Phase-04 output (aborted / never ran) must NOT be scored as
+    # recall 0 — score() skips it. Only a run that produced 04 output is scorable
+    # (a real "ran 04, recovered nothing" is a genuine 0, and DOES have 04 output).
+    with tempfile.TemporaryDirectory() as td:
+        ran = Path(td) / "ran"; ran.mkdir()
+        (ran / "04_PARTIAL_x.json").write_text("{}", encoding="utf-8")
+        assert run_arms._scorable_run(ran) is True
+        aborted = Path(td) / "aborted"; aborted.mkdir()
+        (aborted / "ABORTED.txt").write_text("phase 03 exited 1", encoding="utf-8")
+        assert run_arms._scorable_run(aborted) is False
+        assert run_arms._scorable_run(Path(td) / "never_ran") is False
+    print("ok: _scorable_run skips aborted/absent")
+
+
 def test_recovered_gt_and_property_only_set():
     f2g = {"armA-001": "H1", "armC-005": "H2", "armB-007": "M1"}
     assert run_arms._recovered_gt({"armA-001", "armX-999"}, f2g) == {"H1"}
