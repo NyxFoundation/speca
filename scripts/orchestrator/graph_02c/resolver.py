@@ -83,23 +83,29 @@ def _lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
 # a strong seed's normalized form must be at least this long before we allow a
 # prefix match — shorter seeds prefix-match too many unrelated symbols.
 _MIN_PREFIX_LEN = 12
+# a spec function may have a small number of client-side variants (fork phases,
+# plural naming); audit them all. Above this, the prefix is too ambiguous.
+_SIBLING_CAP = 4
 
 
 def _prefix_lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
-    """Unique long-prefix match for a strong seed.
+    """Long-prefix match for a strong seed (client renamed the spec function).
 
-    A client frequently names a spec function with an extra suffix — prysm's Go
-    ``ProcessJustificationAndFinalizationPreCompute`` implements pyspec
-    ``process_justification_and_finalization``. Accept such a match when either:
+    Ordered by decreasing precision:
 
-    * the normalized seed is a prefix of exactly ONE distinct normalized symbol
-      name, or
-    * several candidates exist but the shortest is itself a prefix of all the
-      others — i.e. they are the same canonical symbol plus further suffixes
-      (prysm's ``…PreCompute`` vs an auto-generated ``…PreComputeWrapper``); the
-      shortest is the canonical implementation.
+    * the normalized seed is a prefix of exactly ONE symbol name -> that symbol
+      (prysm ``ProcessJustificationAndFinalizationPreCompute`` for pyspec
+      ``process_justification_and_finalization``);
+    * several candidates but the shortest is a prefix of all the others -> the
+      shortest is the canonical impl (``…PreCompute`` vs an auto-generated
+      ``…PreComputeWrapper``);
+    * up to ``_SIBLING_CAP`` sibling variants that all extend the seed -> ALL of
+      them, because they are the spec function's client-side variants and an
+      audit wants every one (lodestar ``processAttestations`` /
+      ``processAttestationPhase0`` / ``processAttestationsAltair`` for pyspec
+      ``process_attestation``).
 
-    Otherwise (short seed, or genuinely divergent candidates) return [] so the
+    Otherwise (short seed, or too many divergent candidates) return [] so the
     property falls back to the LLM tail — keeping the deterministic tier precise.
     """
     n = _norm(seed)
@@ -114,6 +120,8 @@ def _prefix_lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
     shortest = min(matches, key=len)
     if all(k.startswith(shortest) for k in matches):
         return matches[shortest]
+    if len(matches) <= _SIBLING_CAP:
+        return [s for syms in matches.values() for s in syms]
     return []
 
 

@@ -190,23 +190,37 @@ def test_unique_prefix_match_on_strong_seed(tmp_path):
     assert any(l["symbol"] == "ProcessJustificationAndFinalizationPreCompute"
                for l in r.code_scope["locations"])
 
-    # ambiguous: two divergent suffixes, neither a prefix of the other -> fallback
-    idx2 = _tree(tmp_path, {
-        "prysm/a.go": "package p\nfunc ProcessJustificationAndFinalizationPreCompute() {}\n",
-        "prysm/b.go": "package p\nfunc ProcessJustificationAndFinalizationForkchoice() {}\n",
-    })
-    r2 = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx2)
-    assert r2.confidence in ("medium", "low")
-
-    # canonical + auto-generated wrapper (shortest is a prefix of the rest) -> high
+    # canonical + auto-generated wrapper (shortest is a prefix of the rest) -> the
+    # canonical only (high)
     idx3 = _tree(tmp_path, {
         "prysm/a.go": "package p\nfunc ProcessJustificationAndFinalizationPreCompute() {}\n",
         "prysm/b.go": "package p\nfunc ProcessJustificationAndFinalizationPreComputeWrapper() {}\n",
     })
     r3 = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx3)
     assert r3.confidence == "high"
-    assert any(l["symbol"] == "ProcessJustificationAndFinalizationPreCompute"
-               for l in r3.code_scope["locations"])
+    got3 = {l["symbol"] for l in r3.code_scope["locations"]}
+    assert got3 == {"ProcessJustificationAndFinalizationPreCompute"}
+
+
+def test_prefix_sibling_variants_resolve_to_all(tmp_path):
+    """A spec function with several client variants (lodestar plural + fork-phase
+    naming) resolves to ALL of them so the audit covers each (#157)."""
+    idx = _tree(tmp_path, {
+        "st/a.ts": "export function processAttestations(x: number): void {}\n",
+        "st/b.ts": "export function processAttestationPhase0(x: number): void {}\n",
+        "st/c.ts": "export function processAttestationsAltair(x: number): void {}\n",
+    })
+    r = resolve({"property_id": "P", "covers": "process_attestation"}, idx)
+    assert r.confidence == "high"
+    got = {l["symbol"] for l in r.code_scope["locations"]}
+    assert {"processAttestations", "processAttestationPhase0", "processAttestationsAltair"} <= got
+
+    # too many divergent variants (> cap) -> ambiguous -> fallback to the LLM
+    idx_many = _tree(tmp_path, {f"st/{i}.ts":
+        f"export function processAttestationVariant{i}(x: number): void {{}}\n"
+        for i in range(6)})
+    r2 = resolve({"property_id": "P", "covers": "process_attestation"}, idx_many)
+    assert r2.confidence in ("medium", "low")
 
 
 def test_accuracy_gate_passes_on_bench_fixture():
