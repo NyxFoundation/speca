@@ -392,6 +392,8 @@ class APIRunner:
         _tok = _os.environ.get("SPECA_API_MAX_TOKENS", "").strip()
         self.max_tokens = int(_tok) if _tok.isdigit() and int(_tok) > 0 else 16384
         self.reasoning_effort = _os.environ.get("SPECA_API_REASONING_EFFORT", "").strip().lower() or None
+        _tt = _os.environ.get("SPECA_API_TURN_TIMEOUT", "").strip()
+        self.turn_timeout = float(_tt) if _tt.replace(".", "", 1).isdigit() and float(_tt) > 0 else 150.0
 
     async def run_batch(
         self,
@@ -542,11 +544,18 @@ class APIRunner:
                 })
 
                 try:
-                    response = await client.post(
-                        "/chat/completions",
-                        json=request_body,
+                    response = await asyncio.wait_for(
+                        client.post("/chat/completions", json=request_body),
+                        timeout=self.turn_timeout,
                     )
                     response.raise_for_status()
+                except (asyncio.TimeoutError, httpx.TimeoutException) as e:
+                    log_entries.append({
+                        "type": "api_error", "turn": turn, "status": 0,
+                        "error": f"turn timeout after {self.turn_timeout}s (anti-wedge)",
+                    })
+                    await asyncio.sleep(2)
+                    continue
                 except httpx.HTTPStatusError as e:
                     error_text = e.response.text[:500] if e.response else str(e)
                     log_entries.append({
