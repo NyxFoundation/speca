@@ -19,6 +19,7 @@ import {
   BudgetExceededEventSchema as budgetExceededSchema,
   CircuitBreakerTrippedEventSchema as circuitBreakerTrippedSchema,
   PipelineCompletedEventSchema as pipelineCompletedSchema,
+  WarningEventSchema as warningSchema,
   type PipelineEvent,
   type PipelineStartedEvent,
   type PhaseStartedEvent,
@@ -27,6 +28,7 @@ import {
   type BudgetExceededEvent,
   type CircuitBreakerTrippedEvent,
   type PipelineCompletedEvent,
+  type WarningEvent,
 } from "../schemas/generated/events/schemas.js";
 
 export {
@@ -38,6 +40,7 @@ export {
   budgetExceededSchema,
   circuitBreakerTrippedSchema,
   pipelineCompletedSchema,
+  warningSchema,
 };
 export type {
   PipelineEvent,
@@ -48,6 +51,7 @@ export type {
   BudgetExceededEvent,
   CircuitBreakerTrippedEvent,
   PipelineCompletedEvent,
+  WarningEvent,
 };
 
 export type PipelineEventType = PipelineEvent["type"];

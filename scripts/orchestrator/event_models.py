@@ -81,6 +81,20 @@ class PipelineCompletedEvent(_EventBase):
     duration_s: float = Field(ge=0)
 
 
+class WarningEvent(_EventBase):
+    """Non-fatal degradation the user must see (issue #98).
+
+    Example: a phase declares MCP servers that the resolved ``.mcp.json``
+    does not provide — the pipeline keeps running, but the TUI dashboard
+    (whose only inputs are this NDJSON stream and the log tail; orchestrator
+    stderr is discarded in TUI mode) must surface the degradation.
+    """
+
+    type: Literal["warning"] = "warning"
+    phase: str
+    message: str
+
+
 # Public union, helpful for ``isinstance`` checks and exhaustive matching on
 # the Python side. The CLI does not import this; it uses the JSON Schemas.
 PipelineEvent = (
@@ -91,6 +105,7 @@ PipelineEvent = (
     | BudgetExceededEvent
     | CircuitBreakerTrippedEvent
     | PipelineCompletedEvent
+    | WarningEvent
 )
 
 
@@ -103,4 +118,5 @@ __all__ = [
     "PipelineCompletedEvent",
     "PipelineEvent",
     "PipelineStartedEvent",
+    "WarningEvent",
 ]

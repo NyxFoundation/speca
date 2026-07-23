@@ -27,6 +27,7 @@ from .event_models import (
     PhaseStartedEvent,
     PipelineCompletedEvent,
     PipelineStartedEvent,
+    WarningEvent,
 )
 
 
@@ -42,6 +43,7 @@ _TYPE_TO_MODEL: dict[str, Any] = {
     "budget-exceeded": BudgetExceededEvent,
     "circuit-breaker-tripped": CircuitBreakerTrippedEvent,
     "pipeline-completed": PipelineCompletedEvent,
+    "warning": WarningEvent,
 }
 
 
@@ -95,3 +97,32 @@ class JsonEventEmitter:
             # Consumer hung up or stream closed; let the orchestrator
             # finish and surface its own errors instead of crashing here.
             self.enabled = False
+
+
+# ---------------------------------------------------------------------------
+# Process-wide emitter registry.
+#
+# ``run_phase.py`` owns the JsonEventEmitter and threads it through the
+# top-level pipeline functions, but deeply nested components (e.g.
+# ``ClaudeRunner`` warning about missing MCP servers, issue #98) have no
+# constructor path to it. They call ``get_active_emitter()`` instead:
+# a disabled no-op instance is returned until ``run_phase.py`` registers the
+# real one, so callers never need a None check and non-JSON runs stay silent
+# on stdout. Single-process orchestration (workers are asyncio tasks), so a
+# module-level slot is safe.
+# ---------------------------------------------------------------------------
+
+_active_emitter: JsonEventEmitter | None = None
+
+
+def set_active_emitter(emitter: JsonEventEmitter) -> None:
+    """Register the process-wide emitter (called once by ``run_phase.py``)."""
+    global _active_emitter
+    _active_emitter = emitter
+
+
+def get_active_emitter() -> JsonEventEmitter:
+    """Return the process-wide emitter, or a disabled no-op instance."""
+    if _active_emitter is None:
+        return JsonEventEmitter(enabled=False)
+    return _active_emitter

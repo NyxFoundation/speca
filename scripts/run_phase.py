@@ -38,7 +38,7 @@ from orchestrator import create_orchestrator
 from orchestrator.archiver import Archiver
 from orchestrator.base import PhaseAbortError
 from orchestrator.config import get_phase_config, get_phase_chain, PHASE_CONFIGS, resolve_pattern
-from orchestrator.json_events import JsonEventEmitter
+from orchestrator.json_events import JsonEventEmitter, set_active_emitter
 from orchestrator.paths import get_output_root, resolve_core_asset
 from orchestrator.phase0_runner import get_phase0_runner, is_phase0
 from orchestrator.resume import ResumeManager
@@ -995,6 +995,10 @@ def main():
         sys.stdout = sys.stderr
 
     emitter = JsonEventEmitter(enabled=args.json)
+    # Register process-wide so nested components without a constructor
+    # path to the emitter (e.g. ClaudeRunner's missing-MCP-server
+    # warning, issue #98) can emit through get_active_emitter().
+    set_active_emitter(emitter)
 
     # Set output directory early, before any orchestrator import evaluates paths
     if args.output_dir:

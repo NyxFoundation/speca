@@ -25,6 +25,23 @@ Quick links:
 - [Audit walkthrough](https://speca.pages.dev/docs/tutorial/audit-walkthrough)
 - [Pipeline overview](https://speca.pages.dev/docs/pipeline/overview)
 
+## MCP server configuration
+
+Pipeline phases that use MCP servers (spec fetch, subgraph extraction,
+code-scope resolution) read a `.mcp.json`, resolved in this order:
+
+1. `SPECA_MCP_CONFIG` — environment variable pointing at an explicit config
+   file. When set it is always used: a missing, unreadable, or invalid file
+   fails the run instead of falling back to the entries below.
+2. `.mcp.json` in the directory you run `speca` from (your workspace).
+3. The default bundled with the npm package
+   (`vendor/speca-core/.mcp.json`), which provides the `fetch`,
+   `filesystem`, and `tree_sitter` servers used by the pipeline.
+
+When a phase declares MCP servers that none of these provide, `speca run`
+prints a `[MCP] WARNING` on stderr instead of silently continuing without
+them.
+
 ## Internal references
 
 - Implementation spec: [`docs/SPECA_CLI_SPEC.md`](../docs/SPECA_CLI_SPEC.md)

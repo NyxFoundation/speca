@@ -166,6 +166,8 @@ export function formatEventSummary(event: PipelineEvent): string {
       return `[${event.phase}] BUDGET EXCEEDED: $${event.cost_usd ?? 0} / $${event.max_budget_usd ?? 0}`;
     case "circuit-breaker-tripped":
       return `[${event.phase}] CIRCUIT BREAKER TRIPPED: ${event.reason}`;
+    case "warning":
+      return `[${event.phase}] WARNING: ${event.message}`;
     default:
       return assertNever(event, "formatEventSummary");
   }

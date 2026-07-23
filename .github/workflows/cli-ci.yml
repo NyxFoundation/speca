@@ -168,13 +168,18 @@ jobs:
   # `uv run --project <checkout>` directly and bypasses the CLI entirely, so
   # it stays green even when spawn.ts / resolveCoreRoot are broken.
   #
-  # Runs on ubuntu AND macos: #95 was reported on macOS, and the fix carries
-  # platform-specific code (spawn.ts picks `python`, not `python3`, and
-  # defaultVenvDir deliberately uses ~/.cache on every platform rather than
-  # ~/Library/Caches). Windows is NOT covered here — its uv venv puts the
-  # interpreter at Scripts\python.exe, so the venv assert below would need a
-  # separate shell; the build matrix only smoke-tests `doctor` from inside the
-  # checkout there, so the foreign-cwd guarantee stays unverified on Windows.
+  # Runs on ubuntu, macos AND windows: #95 was reported on macOS, and the fix
+  # carries platform-specific code (spawn.ts picks `python`, not `python3` —
+  # a Windows-only distinction — and defaultVenvDir deliberately uses
+  # ~/.cache on every platform rather than ~/Library/Caches). The
+  # windows-2022 leg (issue #99) exists precisely because those Windows-only
+  # branches used to be exercised nowhere: the build matrix only smoke-tests
+  # `doctor` from inside the checkout. All steps use `shell: bash` (Git Bash
+  # on Windows); the two OS-dependent bits are the venv interpreter layout
+  # (bin/python vs Scripts/python.exe) and path separators — the latter is
+  # neutralized by computing the expected core root and venv hash key through
+  # resolveCoreRoot() itself (see the "resolve core root" step) instead of
+  # re-deriving them with shell string concatenation.
   e2e-foreign-cwd:
     # Quoted: in an unquoted YAML scalar a " #" starts a comment, which would
     # silently truncate this name to "e2e — issue" and drop the matrix suffix,
@@ -185,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14]
+        os: [ubuntu-22.04, macos-14, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -205,7 +210,33 @@ jobs:
         # `npm run build` runs vendor-core.mjs first; with uv on PATH it also
         # generates vendor/speca-core/uv.lock — the exact payload npm users get.
         run: npm run build
+      - name: resolve core root exactly as the CLI does
+        id: core
+        working-directory: cli
+        shell: bash
+        # Ask resolveCoreRoot() itself for the core root and hash ITS return
+        # value, instead of re-deriving the path with shell string
+        # concatenation. On Windows resolveCoreRoot() returns a
+        # backslash-separated path (path.join), while "${GITHUB_WORKSPACE}/cli/..."
+        # would mix separators — the sha256 venv key and the doctor-output
+        # grep below must match the CLI's own byte-for-byte string, so any
+        # re-derivation is structurally fragile (issue #99).
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { pathToFileURL } from "node:url";
+            import { resolve } from "node:path";
+            const mod = await import(pathToFileURL(resolve("dist/lib/core-root.js")).href);
+            const root = mod.resolveCoreRoot();
+            const key = createHash("sha256").update(root).digest("hex").slice(0, 16);
+            console.log(`root=${root}`);
+            console.log(`venv-key=${key}`);
+          ' | tee -a "${GITHUB_OUTPUT}"
       - name: speca doctor from a foreign cwd — core resolves to the vendored copy
+        shell: bash
+        env:
+          EXPECTED_CORE_ROOT: ${{ steps.core.outputs.root }}
         run: |
           set -euo pipefail
           # RUNNER_TEMP, not a hardcoded /tmp: it is the documented per-job
@@ -213,13 +244,18 @@ jobs:
           # which is the whole point — no speca repo anywhere above the cwd.
           mkdir -p "${RUNNER_TEMP}/speca-issue95"
           cd "${RUNNER_TEMP}/speca-issue95"
+          # The vendored copy must be what resolution produced — otherwise
+          # this job would silently test the wrong core.
+          case "${EXPECTED_CORE_ROOT}" in
+            *vendor*speca-core) ;;
+            *) echo "resolveCoreRoot() did not pick the vendored core: ${EXPECTED_CORE_ROOT}"; exit 1 ;;
+          esac
           # FORCE_COLOR=0: chalk turns ANSI on under GitHub Actions even
           # without a TTY, and escape codes between "[OK]" and the check name
           # would break the greps below.
           FORCE_COLOR=0 node "${GITHUB_WORKSPACE}/cli/dist/cli.js" doctor | tee doctor.txt
           # resolveCoreRoot() is vendor-first in the dist layout; the `core`
-          # check must report the VENDORED copy, not the checkout root —
-          # otherwise this job would silently test the wrong core.
+          # check must report the VENDORED copy, not the checkout root.
           grep -E "\[OK\] +core" doctor.txt
           # Ink soft-wraps long lines at 80 columns under a pipe, which can
           # split the reported path across lines — strip ALL whitespace before
@@ -227,9 +263,11 @@ jobs:
           # specifically: newline is in [:space:], so this also RE-JOINS a
           # wrapped path into one line, which a per-line `sed s///g` would not
           # do. [:class:] in -d mode is POSIX and works on both GNU and BSD tr.
-          tr -d "[:space:]" < doctor.txt \
-            | grep -F "${GITHUB_WORKSPACE}/cli/vendor/speca-core"
+          # grep -F: EXPECTED_CORE_ROOT contains backslashes on Windows and
+          # must be matched literally, never as a regex.
+          tr -d "[:space:]" < doctor.txt | grep -F "${EXPECTED_CORE_ROOT}"
       - name: speca run from a foreign cwd — full lifecycle via the bundled core
+        shell: bash
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/speca-issue95"
@@ -252,14 +290,25 @@ jobs:
           done
           echo "OK — orchestrator lifecycle observed from a foreign cwd"
       - name: venv keyed to the VENDORED core root (proof the bundled copy ran)
+        shell: bash
+        env:
+          VENV_KEY: ${{ steps.core.outputs.venv-key }}
         run: |
           set -euo pipefail
           # spawn.ts sets UV_PROJECT_ENVIRONMENT to
           # <cache>/speca/venvs/<sha256(coreRoot)[:16]> (see defaultVenvDir),
-          # so the venv path encodes WHICH core root the run resolved. Had it
-          # resolved the checkout root instead of the vendored copy, this
-          # directory would not exist.
-          key="$(node -e 'const{createHash}=require("node:crypto");process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex").slice(0,16))' "${GITHUB_WORKSPACE}/cli/vendor/speca-core")"
-          venv="${XDG_CACHE_HOME:-$HOME/.cache}/speca/venvs/${key}"
+          # so the venv path encodes WHICH core root the run resolved. The key
+          # comes from the "resolve core root" step, which hashed the exact
+          # string defaultVenvDir hashes at runtime. Had the run resolved the
+          # checkout root instead of the vendored copy, this directory would
+          # not exist.
+          venv="${XDG_CACHE_HOME:-$HOME/.cache}/speca/venvs/${VENV_KEY}"
           echo "expecting venv at: ${venv}"
-          test -x "${venv}/bin/python"
+          # uv venv layout is OS-specific: bin/python on POSIX,
+          # Scripts/python.exe on Windows (there is no python3 shim there —
+          # the very branch spawn.ts carries and the reason this leg exists).
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            test -x "${venv}/Scripts/python.exe"
+          else
+            test -x "${venv}/bin/python"
+          fi
