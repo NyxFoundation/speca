@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .symbols import Symbol, SymbolIndex, norm as _norm
@@ -125,28 +126,91 @@ def _prefix_lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
     return []
 
 
-def _loc(s: Symbol) -> dict[str, Any]:
+def _loc(s: Symbol, role: str = "primary") -> dict[str, Any]:
     # schema.CodeLocation shape: file / symbol / line_range{start,end} / role / note
+    note = f"graph-resolved ({s.kind})" if role == "primary" else f"callee of primary ({s.kind})"
     return {
         "file": s.file,
         "symbol": s.name,
         "line_range": {"start": s.line_start, "end": s.line_end},
-        "role": "primary",
-        "note": f"graph-resolved ({s.kind})",
+        "role": role,
+        "note": note,
     }
 
 
-def resolve(prop: dict[str, Any], index: SymbolIndex, max_locations: int = 8) -> Resolution:
+# definition kinds that are *functions/methods* (callees worth auditing) — types,
+# classes, enums, config getters etc. are excluded from call-graph expansion.
+_FUNC_KINDS = {
+    "function_declaration", "method_declaration", "function_item",
+    "method_definition", "function_definition", "constructor_declaration",
+    "routine", "method", "func",
+}
+_CALL = re.compile(r"([A-Za-z_]\w{2,})\s*\(")
+_CALLEE_CAP = 6
+# generic constructors / stdlib-ish methods that carry no audit signal as callees
+# (matched on the normalized name — lowercased, separators dropped)
+_CALLEE_STOP = {
+    "new", "default", "from", "into", "clone", "unwrap", "expect", "tostring",
+    "asref", "asmut", "len", "isempty", "get", "set", "push", "insert", "iter",
+    "collect", "tovec", "format", "print", "println", "panic", "some", "none",
+    "ok", "err", "min", "max", "append", "make", "string", "contains",
+}
+
+
+def _expand_callees(primaries: list[Symbol], index: SymbolIndex,
+                    cap: int = _CALLEE_CAP) -> list[Symbol]:
+    """1-hop call graph: the in-repo functions a primary calls in its body.
+
+    A property's audit surface rarely ends at one function — lodestar's
+    ``processJustificationAndFinalization`` delegates the core logic to
+    ``weighJustificationAndFinalization``; prysm's ``ProcessSlashings`` calls
+    ``ProportionalSlashingMultiplier`` / ``TotalActiveBalance``. We read each
+    primary's body, extract call targets (``name(``), and add those that resolve
+    to a *function/method* defined in this client. Same-file callees rank first
+    (split-out helpers), then same top-level dir. Bounded by ``cap`` so the map
+    stays focused; types/getters are excluded via ``_FUNC_KINDS``.
+    """
+    root = Path(index.root)
+    prim_norm = {_norm(p.name) for p in primaries}
+    prim_files = {p.file for p in primaries}
+    prim_dirs = {p.file.split("/")[0] for p in primaries}
+    scored: dict[tuple, tuple[int, Symbol]] = {}
+    for p in primaries:
+        try:
+            lines = (root / p.file).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        body = "\n".join(lines[p.line_start - 1:p.line_end])
+        for target in dict.fromkeys(_CALL.findall(body)):  # unique, order-preserving
+            tn = _norm(target)
+            if tn in prim_norm or tn in _CALLEE_STOP:
+                continue
+            for s in index.lookup(target):
+                if s.kind not in _FUNC_KINDS:
+                    continue
+                rank = 0 if s.file in prim_files else 1 if s.file.split("/")[0] in prim_dirs else 2
+                key = (s.file, s.line_start, s.name)
+                if key not in scored or rank < scored[key][0]:
+                    scored[key] = (rank, s)
+    ranked = sorted(scored.values(), key=lambda rs: (rs[0], rs[1].file, rs[1].line_start))
+    return [s for _, s in ranked[:cap]]
+
+
+def resolve(prop: dict[str, Any], index: SymbolIndex, max_locations: int = 8,
+            expand_callees: bool = True) -> Resolution:
     strong, weak = _seeds(prop)
     matched: list[str] = []
     locs: list[dict[str, Any]] = []
     seen: set[tuple] = set()
+    primaries: list[Symbol] = []
 
-    def add(sym: Symbol):
+    def add(sym: Symbol, role: str = "primary"):
         key = (sym.file, sym.line_start, sym.name)
         if key not in seen:
             seen.add(key)
-            locs.append(_loc(sym))
+            locs.append(_loc(sym, role))
+            if role == "primary":
+                primaries.append(sym)
 
     for seed in strong:
         hit = _lookup(seed, index) or _prefix_lookup(seed, index)
@@ -166,8 +230,15 @@ def resolve(prop: dict[str, Any], index: SymbolIndex, max_locations: int = 8) ->
                     add(s)
         confidence = "medium" if matched else "low"
 
+    locs = locs[:max_locations]
+    # call-graph 1-hop: add the functions the (strong-matched) primaries call, so
+    # the code map spans the audit surface, not just the entry function.
+    if expand_callees and confidence == "high" and primaries:
+        for callee in _expand_callees(primaries, index):
+            add(callee, role="callee")
+
     code_scope = {
-        "locations": locs[:max_locations],
+        "locations": locs,
         "resolution_status": "resolved" if locs else "not_found",
         "resolution_error": "",
     }

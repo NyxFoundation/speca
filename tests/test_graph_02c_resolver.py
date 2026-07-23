@@ -223,6 +223,37 @@ def test_prefix_sibling_variants_resolve_to_all(tmp_path):
     assert r2.confidence in ("medium", "low")
 
 
+def test_callee_expansion_spans_call_graph(tmp_path):
+    """The code map includes the in-repo functions the primary calls (1-hop),
+    so a property's audit surface spans multiple functions/files (#157)."""
+    idx = _tree(tmp_path, {
+        "epoch/process.go": (
+            "package p\n"
+            "func ProcessSlashings(s int) int { return weigh(s) + total(s) }\n"
+            "func weigh(s int) int { return s }\n"
+            "func total(s int) int { return s }\n"
+        ),
+        "util/types.go": "package p\ntype BeaconConfig struct { x int }\n",
+    })
+    r = resolve({"property_id": "P", "covers": "process_slashings"}, idx)
+    by_role = {}
+    for l in r.code_scope["locations"]:
+        by_role.setdefault(l["role"], set()).add(l["symbol"])
+    assert by_role.get("primary") == {"ProcessSlashings"}
+    # callees weigh + total are included; the type BeaconConfig is NOT a callee
+    assert {"weigh", "total"} <= by_role.get("callee", set())
+    assert "BeaconConfig" not in by_role.get("callee", set())
+
+
+def test_callee_expansion_can_be_disabled(tmp_path):
+    idx = _tree(tmp_path, {
+        "e.go": "package p\nfunc ProcessSlashings() int { return helper() }\nfunc helper() int { return 1 }\n",
+    })
+    r = resolve({"property_id": "P", "covers": "process_slashings"}, idx, expand_callees=False)
+    roles = {l["role"] for l in r.code_scope["locations"]}
+    assert roles == {"primary"}
+
+
 def test_accuracy_gate_passes_on_bench_fixture():
     """Step 4: the CI accuracy gate runs on the vendored bench repo and passes
     strict thresholds (cross-convention pyspec->client resolution, #157)."""
