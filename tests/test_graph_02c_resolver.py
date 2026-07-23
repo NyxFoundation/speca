@@ -142,3 +142,17 @@ def test_run_02c_driver_gate_and_report(tmp_path):
     assert byid["P3"]["code_scope"]["resolution_status"] == "needs_llm_fallback"
     # nothing dropped
     assert len(items) == len(props)
+
+
+def test_cross_convention_seed_matching(tmp_path):
+    """A pyspec snake_case `covers` matches client symbols regardless of the
+    client's naming convention — Go camelCase and Rust snake_case (#157)."""
+    idx = _tree(tmp_path, {
+        "prysm/att.go": "package p\nfunc ProcessAttestation(a int) int { return a }\n",
+        "lighthouse/att.rs": "fn process_attestation(a: i32) -> i32 { a }\n",
+        "lodestar/att.ts": "function processAttestation(a: number): number { return a; }\n",
+    })
+    r = resolve({"property_id": "P", "covers": "process_attestation"}, idx)
+    got = {l["symbol"] for l in r.code_scope["locations"]}
+    assert r.confidence == "high"
+    assert {"ProcessAttestation", "process_attestation", "processAttestation"} <= got

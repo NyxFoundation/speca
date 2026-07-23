@@ -37,6 +37,16 @@ _SKIP_DIRS = {".git", "node_modules", "target", "bin", "obj", "vendor", "testdat
               "test", "tests", "dist", "build", ".venv", "__pycache__"}
 
 
+def norm(name: str) -> str:
+    """Convention-insensitive key: last dotted component, lowercased, with
+    separators dropped. Collapses pyspec snake_case (``process_attestation``,
+    the property `covers`) onto client camelCase (Go ``ProcessAttestation``, TS
+    ``processAttestation``) so a seed matches regardless of the client's style.
+    """
+    tail = name.strip().replace(" ", "").split(".")[-1]
+    return tail.replace("_", "").replace("-", "").lower()
+
+
 @dataclass(frozen=True)
 class Symbol:
     name: str
@@ -55,10 +65,10 @@ class SymbolIndex:
 
     def add(self, s: Symbol) -> None:
         self.symbols.append(s)
-        self.by_name.setdefault(s.name.lower(), []).append(s)
+        self.by_name.setdefault(norm(s.name), []).append(s)
 
     def lookup(self, name: str) -> list[Symbol]:
-        return self.by_name.get(name.lower(), [])
+        return self.by_name.get(norm(name), [])
 
 
 def _get_parser(lang: str):

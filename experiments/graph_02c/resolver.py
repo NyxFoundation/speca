@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .symbols import Symbol, SymbolIndex
+from .symbols import Symbol, SymbolIndex, norm as _norm
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # generic words that are not useful symbol seeds
@@ -66,9 +66,6 @@ def _seeds(prop: dict[str, Any]) -> tuple[list[str], list[str]]:
     return strong2, weak
 
 
-def _norm(name: str) -> str:
-    # last dotted/spaced component, e.g. "Class.Method" -> "method"
-    return name.replace(" ", "").split(".")[-1].lower()
 
 
 def _lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
