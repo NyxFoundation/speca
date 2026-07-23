@@ -156,3 +156,14 @@ def test_cross_convention_seed_matching(tmp_path):
     got = {l["symbol"] for l in r.code_scope["locations"]}
     assert r.confidence == "high"
     assert {"ProcessAttestation", "process_attestation", "processAttestation"} <= got
+
+
+def test_accuracy_gate_passes_on_bench_fixture():
+    """Step 4: the CI accuracy gate runs on the vendored bench repo and passes
+    strict thresholds (cross-convention pyspec->client resolution, #157)."""
+    from experiments.graph_02c.eval_cli import run, _DEFAULT_REPO, _DEFAULT_BENCH
+    res = run(_DEFAULT_REPO, _DEFAULT_BENCH)
+    assert res["recall"] == 1.0
+    assert res["fallback_rate"] == 0.0
+    assert res["skipped_langs"] == []
+    assert res["misses"] == []
