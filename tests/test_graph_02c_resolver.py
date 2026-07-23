@@ -117,3 +117,28 @@ def test_name_extraction_return_type_vs_name(tmp_path):
     assert "AcceptExplicit" in names, "explicit-interface method name must be indexed"
     assert "AcceptTxResult" not in names, "return type must NOT be indexed as a symbol"
     assert "BeaconState" in names, "Go type_declaration name (nested type_spec) must be indexed"
+
+
+def test_run_02c_driver_gate_and_report(tmp_path):
+    """Driver: high/medium accepted, low -> needs_llm_fallback (never dropped),
+    report gives the fallback rate the CI accuracy gate asserts (#157 Step 3)."""
+    from experiments.graph_02c.run import run_02c
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c/attestation.go").write_text(
+        "package p\nfunc ProcessAttestation(a int) int { return a }\n")
+    props = [
+        {"property_id": "P1", "covers": "ProcessAttestation"},      # high
+        {"property_id": "P2", "text": "the ProcessAttestation call"},  # medium (mined)
+        {"property_id": "P3", "covers": "NonExistentFunc",
+         "text": "abstract prose no idents"},                        # low -> fallback
+    ]
+    items, rep = run_02c(tmp_path, props)
+    assert rep.n == 3 and rep.resolved == 2 and rep.fallback == 1
+    assert rep.by_confidence["high"] == 1 and rep.by_confidence["low"] == 1
+    assert rep.fallback_rate == round(1 / 3, 4)
+    byid = {i["property_id"]: i for i in items}
+    assert byid["P1"]["x_02c_confidence"] == "high"
+    assert byid["P1"]["code_scope"]["resolution_status"] == "resolved"
+    assert byid["P3"]["code_scope"]["resolution_status"] == "needs_llm_fallback"
+    # nothing dropped
+    assert len(items) == len(props)
