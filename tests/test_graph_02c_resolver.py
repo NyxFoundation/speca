@@ -1,0 +1,101 @@
+"""Step 2 tests: Tree-sitter symbol index + deterministic resolver (speca#157).
+
+Runs against a tiny synthetic tree (no client clone). Requires the tree-sitter
+grammars — run via `uv run --with tree-sitter --with tree-sitter-language-pack
+--with tree-sitter-c-sharp -m pytest tests/test_graph_02c_resolver.py`.
+"""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+pytest.importorskip("tree_sitter")
+try:
+    import tree_sitter_c_sharp  # noqa: F401
+    import tree_sitter_language_pack  # noqa: F401
+except Exception:
+    pytest.skip("tree-sitter grammars unavailable", allow_module_level=True)
+
+from experiments.graph_02c.symbols import build_index  # noqa: E402
+from experiments.graph_02c.resolver import resolve  # noqa: E402
+from experiments.graph_02c.benchmark import GroundTruth  # noqa: E402
+from experiments.graph_02c.metric import score_one, evaluate  # noqa: E402
+
+_CS = """namespace Nethermind.Merge.Plugin.Data {
+  public class ExecutionPayloadParams {
+    public void ValidateParams(int count) {
+      if (count < 0) { throw new System.Exception("bad"); }
+      return;
+    }
+  }
+}
+"""
+
+_GO = """package p
+func ProcessAttestation(a int) int { return a + 1 }
+type State struct { epoch int }
+"""
+
+
+def _tree(tmp_path, files):
+    for rel, content in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return build_index(tmp_path)
+
+
+def test_index_extracts_symbols_polyglot(tmp_path):
+    idx = _tree(tmp_path, {
+        "Data/IExecutionPayloadParams.cs": _CS,
+        "consensus/attestation.go": _GO,
+    })
+    names = {s.name for s in idx.symbols}
+    assert "ValidateParams" in names and "ExecutionPayloadParams" in names
+    assert "ProcessAttestation" in names and "State" in names
+
+
+def test_resolver_high_confidence_on_spec_symbol(tmp_path):
+    idx = _tree(tmp_path, {"Data/IExecutionPayloadParams.cs": _CS})
+    prop = {"property_id": "P1", "spec_symbol": "ValidateParams",
+            "text": "params must be validated", "assertion": "valid(params)"}
+    r = resolve(prop, idx)
+    assert r.confidence == "high"
+    assert any(l["symbol"] == "ValidateParams" for l in r.code_scope["locations"])
+    # and it matches the nethermind-style ground truth
+    gt = GroundTruth("nethermind", "P1", "Data/IExecutionPayloadParams.cs",
+                     "ExecutionPayloadParams.ValidateParams", 3, 6, "raw")
+    assert score_one(gt, r.code_scope).hit is True
+
+
+def test_resolver_low_confidence_triggers_fallback(tmp_path):
+    idx = _tree(tmp_path, {"Data/IExecutionPayloadParams.cs": _CS})
+    prop = {"property_id": "P2", "spec_symbol": "NonexistentThing",
+            "text": "some abstract prose with no code identifiers here"}
+    r = resolve(prop, idx)
+    assert r.confidence == "low"          # -> the 02c phase falls back to the LLM
+    assert r.code_scope["resolution_status"] == "not_found"
+
+
+def test_resolver_medium_on_mined_token(tmp_path):
+    idx = _tree(tmp_path, {"consensus/attestation.go": _GO})
+    prop = {"property_id": "P3",
+            "text": "the ProcessAttestation path must bound its work"}
+    r = resolve(prop, idx)
+    assert r.confidence == "medium"
+    assert any(l["symbol"] == "ProcessAttestation" for l in r.code_scope["locations"])
+
+
+def test_end_to_end_recall_on_synthetic_bench(tmp_path):
+    idx = _tree(tmp_path, {"Data/IExecutionPayloadParams.cs": _CS,
+                           "consensus/attestation.go": _GO})
+    bench = [
+        (GroundTruth("c", "P1", "Data/IExecutionPayloadParams.cs", "ValidateParams", 3, 6, "r"),
+         {"property_id": "P1", "spec_symbol": "ValidateParams"}),
+        (GroundTruth("c", "P3", "consensus/attestation.go", "ProcessAttestation", 2, 2, "r"),
+         {"property_id": "P3", "spec_symbol": "ProcessAttestation"}),
+    ]
+    rep = evaluate([(gt, resolve(prop, idx).code_scope) for gt, prop in bench])
+    assert rep.recall == 1.0
