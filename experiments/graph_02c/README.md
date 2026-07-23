@@ -31,7 +31,10 @@ uv run --with tree-sitter --with tree-sitter-language-pack --with tree-sitter-c-
 python -m experiments.graph_02c.run --repo <client> --01e <01e_PARTIAL.json>  # produce 02c
 ```
 
-## Status / next
-resolver + driver + gate done. **Not yet wired into the 02c phase orchestrator**
-— that integration lands as a reviewed PR (a deterministic 02c path + LLM tail),
-not autonomous commits.
+## Status
+resolver + driver + accuracy gate + **02c phase integration** all done and in
+CI. Enable with `run_phase.py --code-resolution graph` (or
+`SPECA_02C_RESOLUTION=graph`): Phase02cOrchestrator resolves deterministically
+over `SPECA_TARGET_WORKSPACE` and runs the LLM only on the low-confidence tail.
+Verified end-to-end (schema-valid 02c_PARTIAL, 0 LLM calls when all resolve).
+Install the grammars with the `graph-02c` extra (`pip install -e .[graph-02c]`).
