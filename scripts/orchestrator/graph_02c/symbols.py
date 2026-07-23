@@ -29,7 +29,9 @@ _LANG = {
     ".ts": ("typescript", {"function_declaration", "method_definition", "class_declaration",
                            "interface_declaration"}),
     ".js": ("javascript", {"function_declaration", "method_definition", "class_declaration"}),
-    ".nim": ("nim", {"proc_declaration", "func_declaration", "method_declaration", "type_declaration"}),
+    # tree-sitter-nim models every proc/func/method/template/iterator/converter
+    # as a single `routine` node (name in a `symbol` child); types are `typeDef`.
+    ".nim": ("nim", {"routine", "typeDef"}),
     ".py": ("python", {"function_definition", "class_definition"}),
 }
 
@@ -99,7 +101,7 @@ def _name_of(node) -> str | None:
         # a qualified / explicit-interface name: take the trailing identifier
         ident = None
         for c in [n, *n.children]:
-            if c.type in ("identifier", "type_identifier", "field_identifier"):
+            if c.type in ("identifier", "type_identifier", "field_identifier", "ident"):
                 ident = c
         return (ident or n).text.decode("utf-8", "replace")
 
@@ -113,8 +115,16 @@ def _name_of(node) -> str | None:
         n = c.child_by_field_name("name")
         if n is not None:
             return _from(n)
+    # Nim: `routine`/`typeDef` name lives in a `symbol` child wrapping an `ident`
+    # (the grammar exposes no `name` field). Take the first such symbol's ident.
+    for c in node.children:
+        if c.type == "symbol":
+            for gc in [c, *c.children]:
+                if gc.type == "ident":
+                    return gc.text.decode("utf-8", "replace")
     # last-resort heuristic: the trailing identifier child
-    idents = [c for c in node.children if c.type in ("identifier", "type_identifier")]
+    idents = [c for c in node.children
+              if c.type in ("identifier", "type_identifier", "ident")]
     return idents[-1].text.decode("utf-8", "replace") if idents else None
 
 

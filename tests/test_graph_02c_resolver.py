@@ -159,6 +159,56 @@ def test_cross_convention_seed_matching(tmp_path):
     assert {"ProcessAttestation", "process_attestation", "processAttestation"} <= got
 
 
+def test_nim_routine_symbol_extraction(tmp_path):
+    """tree-sitter-nim models proc/func/method as a single `routine` node with
+    the name in a `symbol` child — the index must extract it (#157 nimbus 0->OK)."""
+    idx = _tree(tmp_path, {
+        "beacon/epoch.nim":
+            "proc process_justification_and_finalization*(state: var T) =\n"
+            "  discard\n"
+            "func getCurrentEpoch(state: T): Epoch =\n"
+            "  discard\n",
+    })
+    names = {s.name for s in idx.symbols}
+    assert "process_justification_and_finalization" in names
+    assert "getCurrentEpoch" in names
+    r = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx)
+    assert r.confidence == "high"
+
+
+def test_unique_prefix_match_on_strong_seed(tmp_path):
+    """A client that adds a suffix (prysm ProcessJustificationAndFinalization
+    PreCompute) resolves high via unique long-prefix match; ambiguous/short
+    prefixes do NOT (#157 precision)."""
+    idx = _tree(tmp_path, {
+        "prysm/epoch.go":
+            "package p\n"
+            "func ProcessJustificationAndFinalizationPreCompute(a int) int { return a }\n",
+    })
+    r = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx)
+    assert r.confidence == "high"
+    assert any(l["symbol"] == "ProcessJustificationAndFinalizationPreCompute"
+               for l in r.code_scope["locations"])
+
+    # ambiguous: two divergent suffixes, neither a prefix of the other -> fallback
+    idx2 = _tree(tmp_path, {
+        "prysm/a.go": "package p\nfunc ProcessJustificationAndFinalizationPreCompute() {}\n",
+        "prysm/b.go": "package p\nfunc ProcessJustificationAndFinalizationForkchoice() {}\n",
+    })
+    r2 = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx2)
+    assert r2.confidence in ("medium", "low")
+
+    # canonical + auto-generated wrapper (shortest is a prefix of the rest) -> high
+    idx3 = _tree(tmp_path, {
+        "prysm/a.go": "package p\nfunc ProcessJustificationAndFinalizationPreCompute() {}\n",
+        "prysm/b.go": "package p\nfunc ProcessJustificationAndFinalizationPreComputeWrapper() {}\n",
+    })
+    r3 = resolve({"property_id": "P", "covers": "process_justification_and_finalization"}, idx3)
+    assert r3.confidence == "high"
+    assert any(l["symbol"] == "ProcessJustificationAndFinalizationPreCompute"
+               for l in r3.code_scope["locations"])
+
+
 def test_accuracy_gate_passes_on_bench_fixture():
     """Step 4: the CI accuracy gate runs on the vendored bench repo and passes
     strict thresholds (cross-convention pyspec->client resolution, #157)."""

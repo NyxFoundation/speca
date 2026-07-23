@@ -13,7 +13,9 @@ Each seed is looked up in the symbol index. A confidence is attached so the
 02c phase can fall back to the LLM only on low-confidence properties (which
 guarantees system recall >= the LLM baseline — speca#157):
 
-- ``high``   an exact symbol-name match on a strong seed (spec_symbol/covers).
+- ``high``   an exact symbol-name match on a strong seed (spec_symbol/covers),
+  or a *unique long-prefix* match (client added a suffix, e.g. prysm
+  ``ProcessJustificationAndFinalizationPreCompute``).
 - ``medium`` a match only on a mined token, or a partial/substring match.
 - ``low``    no symbol match (file-only or nothing) -> fall back to the LLM.
 """
@@ -78,6 +80,43 @@ def _lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
     return [s for s in index.symbols if _norm(s.name) == n]
 
 
+# a strong seed's normalized form must be at least this long before we allow a
+# prefix match — shorter seeds prefix-match too many unrelated symbols.
+_MIN_PREFIX_LEN = 12
+
+
+def _prefix_lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
+    """Unique long-prefix match for a strong seed.
+
+    A client frequently names a spec function with an extra suffix — prysm's Go
+    ``ProcessJustificationAndFinalizationPreCompute`` implements pyspec
+    ``process_justification_and_finalization``. Accept such a match when either:
+
+    * the normalized seed is a prefix of exactly ONE distinct normalized symbol
+      name, or
+    * several candidates exist but the shortest is itself a prefix of all the
+      others — i.e. they are the same canonical symbol plus further suffixes
+      (prysm's ``…PreCompute`` vs an auto-generated ``…PreComputeWrapper``); the
+      shortest is the canonical implementation.
+
+    Otherwise (short seed, or genuinely divergent candidates) return [] so the
+    property falls back to the LLM tail — keeping the deterministic tier precise.
+    """
+    n = _norm(seed)
+    if len(n) < _MIN_PREFIX_LEN:
+        return []
+    matches = {k: syms for k, syms in index.by_name.items()
+               if k != n and k.startswith(n)}
+    if not matches:
+        return []
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    shortest = min(matches, key=len)
+    if all(k.startswith(shortest) for k in matches):
+        return matches[shortest]
+    return []
+
+
 def _loc(s: Symbol) -> dict[str, Any]:
     # schema.CodeLocation shape: file / symbol / line_range{start,end} / role / note
     return {
@@ -102,7 +141,7 @@ def resolve(prop: dict[str, Any], index: SymbolIndex, max_locations: int = 8) ->
             locs.append(_loc(sym))
 
     for seed in strong:
-        hit = _lookup(seed, index)
+        hit = _lookup(seed, index) or _prefix_lookup(seed, index)
         if hit:
             matched.append(seed)
             for s in hit[:max_locations]:
