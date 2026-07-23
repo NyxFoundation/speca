@@ -1294,7 +1294,72 @@ class Phase02cOrchestrator(BaseOrchestrator):
 
     Loads properties directly from 01e partials, applies scope/severity
     filtering, and sends them for code location resolution.
+
+    ``code_resolution == "graph"`` (speca#157) first resolves every property
+    deterministically with the Tree-sitter graph resolver over
+    ``SPECA_TARGET_WORKSPACE``; high/medium-confidence results are written with
+    no LLM, and only the low-confidence tail runs through the LLM worker below
+    — so system recall >= the pure-LLM baseline by construction, at a fraction
+    of the cost.
     """
+
+    # property_ids the graph pre-pass could not resolve; when set, load_items
+    # restricts the LLM batch to just these (the fallback tail).
+    _graph_tail_ids: set[str] | None = None
+
+    async def run(self) -> None:
+        mode = os.environ.get("SPECA_02C_RESOLUTION", "").strip() or self.config.code_resolution
+        if mode == "graph":
+            await self._run_02c_graph()
+        else:
+            await super().run()
+
+    async def _run_02c_graph(self) -> None:
+        """Deterministic graph resolution + LLM fallback on the low-confidence tail."""
+        import os as _os
+
+        workspace = _os.environ.get("SPECA_TARGET_WORKSPACE", "").strip()
+        if not workspace or not Path(workspace).is_dir():
+            print(
+                "  02c(graph): SPECA_TARGET_WORKSPACE not set/found — "
+                "falling back to the LLM path",
+                file=sys.stderr,
+            )
+            await super().run()
+            return
+
+        # lazy import: tree-sitter deps are only needed for graph mode
+        from experiments.graph_02c.run import run_02c  # type: ignore
+
+        properties = self.load_items()
+        print(f"  02c(graph): resolving {len(properties)} properties over {workspace}")
+        items, report = run_02c(workspace, properties)
+        print(
+            f"  02c(graph): resolved={report.resolved} ({report.resolved_rate}) "
+            f"fallback={report.fallback} ({report.fallback_rate}) "
+            f"by_conf={report.by_confidence}"
+            + (f" skipped_langs={report.skipped_langs}" if report.skipped_langs else "")
+        )
+
+        accepted = [it for it in items if it.get("x_02c_confidence") in ("high", "medium")]
+        tail_ids = {
+            str(it.get("property_id"))
+            for it in items
+            if it.get("x_02c_confidence") not in ("high", "medium")
+        }
+
+        if accepted:
+            self.collector.save_partial(accepted, 0, 0)
+            print(f"  02c(graph): wrote {len(accepted)} deterministic resolutions")
+
+        if tail_ids:
+            print(
+                f"  02c(graph): {len(tail_ids)} low-confidence -> LLM fallback tail"
+            )
+            self._graph_tail_ids = tail_ids
+            await super().run()   # LLM worker runs on just the tail (see load_items)
+        else:
+            print("  02c(graph): no fallback needed — 02c complete without the LLM")
 
     def _build_subgraph_index(self) -> None:
         """Build and save 01b subgraph index for worker context."""
@@ -1398,7 +1463,15 @@ class Phase02cOrchestrator(BaseOrchestrator):
                 file=sys.stderr,
             )
 
-        return list(items.values())
+        result = list(items.values())
+        # graph mode (#157): the second pass runs the LLM worker on only the
+        # low-confidence tail the deterministic resolver could not handle.
+        if self._graph_tail_ids is not None:
+            result = [
+                it for it in result
+                if str(it.get("property_id")) in self._graph_tail_ids
+            ]
+        return result
 
     def apply_early_exit(
         self,

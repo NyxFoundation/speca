@@ -79,8 +79,14 @@ def _lookup(seed: str, index: SymbolIndex) -> list[Symbol]:
 
 
 def _loc(s: Symbol) -> dict[str, Any]:
-    return {"file": s.file, "symbol": s.name, "kind": s.kind,
-            "line_start": s.line_start, "line_end": s.line_end}
+    # schema.CodeLocation shape: file / symbol / line_range{start,end} / role / note
+    return {
+        "file": s.file,
+        "symbol": s.name,
+        "line_range": {"start": s.line_start, "end": s.line_end},
+        "role": "primary",
+        "note": f"graph-resolved ({s.kind})",
+    }
 
 
 def resolve(prop: dict[str, Any], index: SymbolIndex, max_locations: int = 8) -> Resolution:

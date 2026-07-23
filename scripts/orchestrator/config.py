@@ -142,6 +142,14 @@ class PhaseConfig(BaseModel):
     # "kurtosis" = NyxFoundation/kurtosis-harness (external plugin).
     verification_backend: str = "none"
 
+    # Phase 02c code-location resolution mode (speca#157):
+    #   "llm"   — the LLM worker resolves every property (default, MCP path).
+    #   "graph" — deterministic Tree-sitter resolver handles high/medium-
+    #             confidence properties with no LLM; only the low-confidence
+    #             tail falls back to the LLM worker (system recall >= baseline
+    #             by construction). CLI: --code-resolution graph.
+    code_resolution: str = "llm"
+
     # Which external-search backend the Phase 05 critique worker gets.
     # "none" (default for non-05 phases) = no search tools.
     # "websearch" = Claude Code built-in WebSearch/WebFetch tools.

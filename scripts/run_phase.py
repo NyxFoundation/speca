@@ -919,6 +919,16 @@ def main():
              "what is installed and what each runtime needs to be usable.",
     )
     parser.add_argument(
+        "--code-resolution",
+        default=None,
+        choices=["llm", "graph"],
+        help="Phase 02c code-location resolution (speca#157). 'llm' (default) "
+             "resolves every property with the LLM worker + tree_sitter MCP. "
+             "'graph' resolves deterministically with the Tree-sitter graph "
+             "resolver over SPECA_TARGET_WORKSPACE and runs the LLM only on the "
+             "low-confidence tail. Sets SPECA_02C_RESOLUTION.",
+    )
+    parser.add_argument(
         "--list-runtimes",
         action="store_true",
         help="Print a table of registered runtimes with availability + "
@@ -968,6 +978,11 @@ def main():
                 print(f"     - {note}")
             print()
         sys.exit(0)
+
+    # --code-resolution graph flips Phase 02c to the deterministic Tree-sitter
+    # resolver (speca#157) via the env the orchestrator reads.
+    if args.code_resolution:
+        os.environ["SPECA_02C_RESOLUTION"] = args.code_resolution
 
     # --runtime <name> wins over a pre-set ORCHESTRATOR_RUNNER env var
     # so a one-shot CLI invocation is fully reproducible. We refuse to

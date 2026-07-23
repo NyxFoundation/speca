@@ -65,7 +65,9 @@ def score_one(gt: GroundTruth, code_scope: Any) -> Score:
     for loc in locs:
         lf = loc.get("file") or loc.get("path") or ""
         lsym = loc.get("symbol") or loc.get("name")
-        ls, le = loc.get("line_start") or loc.get("start_line"), loc.get("line_end") or loc.get("end_line")
+        lr = loc.get("line_range") or {}
+        ls = lr.get("start") if lr else (loc.get("line_start") or loc.get("start_line"))
+        le = lr.get("end") if lr else (loc.get("line_end") or loc.get("end_line"))
         if _file_match(gt.file, lf):
             file_hit = True
             if _symbol_match(gt.symbol, lsym) or _line_overlap(gt, ls, le):
