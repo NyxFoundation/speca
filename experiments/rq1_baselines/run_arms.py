@@ -71,7 +71,14 @@ def _build_arm_queue(arm_letter: str, out_root: Path, target_workspace: str,
         units = build_arm_a_units(scope or {}, ti)
         arm_id = "A_code_only"
     else:  # B — 01b partials produced by the arm's own 01b phase (runs first)
-        parts = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_root.glob("01b_PARTIAL_*.json"))]
+        parts = []
+        for p in sorted(out_root.glob("01b_PARTIAL_*.json")):
+            try:
+                parts.append(json.loads(p.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as exc:
+                # A corrupt 01b partial must not crash the whole process (it is not
+                # a SystemExit, so run_arm's guard would miss it); skip it loudly.
+                print(f"warning: skipping unreadable {p}: {exc}", file=sys.stderr)
         units = build_arm_b_units(parts)
         arm_id = "B_spec_only"
     if not units:
@@ -154,7 +161,18 @@ def run_arm(arm: dict, run_idx: int, target_workspace: str, model: str, dry_run:
     return True
 
 
-_CONFIRMED_VERDICTS = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "Confirmed"}
+# Verdicts that count as RECOVERED for recall. Per prompts/04_review_worker.md and
+# CLAUDE.md, the review is recall-safe: DISPUTED_FP is the ONLY false-positive
+# verdict. DOWNGRADED passed every gate and is a genuine finding whose severity was
+# merely capped by the scope thresholds (04_review_worker.md §3, "original severity
+# exceeds the cap -> DOWNGRADED"), so for recall (did we find the bug?) it counts —
+# excluding it would understate recall wherever severity-cap firing differs across
+# arms (#156 review). "Confirmed" is a dead legacy enum value (schemas.py
+# ReviewVerdict.CONFIRMED, superseded by the CONFIRMED_* vocabulary) kept only as a
+# harmless fallback for older outputs.
+_CONFIRMED_VERDICTS = {
+    "CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "DOWNGRADED", "Confirmed",
+}
 
 
 def _confirmed_finding_ids(run_root: Path) -> set[str]:

@@ -97,12 +97,14 @@ def test_confirmed_finding_ids_reads_phase04():
         run_root = Path(td)
         (run_root / "04_PARTIAL_x.json").write_text(json.dumps({"reviewed_items": [
             {"property_id": "armA-001", "review_verdict": "CONFIRMED_VULNERABILITY"},
-            {"property_id": "armA-002", "review_verdict": "DISPUTED_FP"},
+            {"property_id": "armA-002", "review_verdict": "DISPUTED_FP"},        # only FP verdict
             {"property_id": "armA-003", "review_verdict": "CONFIRMED_POTENTIAL"},
-            {"property_id": "armA-004", "review_verdict": "Confirmed"},   # legacy accepted
+            {"property_id": "armA-004", "review_verdict": "Confirmed"},          # legacy accepted
+            {"property_id": "armA-005", "review_verdict": "DOWNGRADED"},         # gate-passing TP, counts for recall
         ]}), encoding="utf-8")
         ids = run_arms._confirmed_finding_ids(run_root)
-        assert ids == {"armA-001", "armA-003", "armA-004"}, ids   # DISPUTED excluded
+        # DISPUTED_FP excluded; DOWNGRADED (severity-capped TP) INCLUDED for recall (#156)
+        assert ids == {"armA-001", "armA-003", "armA-004", "armA-005"}, ids
     print("ok: confirmed finding ids from Phase 04")
 
 
