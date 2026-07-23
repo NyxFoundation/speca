@@ -29,6 +29,15 @@ import sys
 POSITIVE = {"vulnerable", "vulnerability", "potential-vulnerability"}
 EXCLUDED = {"not-a-vulnerability", "out-of-scope", "safe", "informational", "inconclusive"}
 
+# Phase 04 review-verdict vocabulary (prompts/04_review_worker.md). See issue #132:
+# a plain "Confirmed"/"Disputed" check dropped every real verdict, so confirmed=0
+# on real data. CONFIRMED = confirmed findings, DISPUTED = disputed. Legacy accepted.
+CONFIRMED_VERDICTS = {"CONFIRMED_VULNERABILITY", "CONFIRMED_POTENTIAL", "Confirmed"}
+DISPUTED_VERDICTS = {"DISPUTED_FP", "Disputed"}
+# DOWNGRADED / NEEDS_MANUAL_REVIEW / PASS_THROUGH / "" are surfaced as other_verdicts
+# rather than silently ignored. Whether DOWNGRADED is a confirmed finding is a
+# deferred #107/#110 definitional decision for the paper authors.
+
 
 def _read(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
@@ -51,15 +60,18 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
     confirmed_ids: list[str] = []
     disputed = 0
     adjudicated = 0
+    other_verdicts: dict[str, int] = {}
     for part in p04:
         for item in part.get("reviewed_items", []):
             adjudicated += 1
             verdict = str(item.get("review_verdict", "")).strip()
             pid = item.get("property_id") or item.get("check_id") or ""
-            if verdict == "Confirmed":
+            if verdict in CONFIRMED_VERDICTS:
                 confirmed_ids.append(pid)
-            elif verdict == "Disputed":
+            elif verdict in DISPUTED_VERDICTS:
                 disputed += 1
+            else:
+                other_verdicts[verdict or "<empty>"] = other_verdicts.get(verdict or "<empty>", 0) + 1
 
     table = {
         "raw_audit_outputs": raw,
@@ -68,6 +80,7 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
         "adjudicated_reviewed": adjudicated,
         "confirmed": len(confirmed_ids),
         "disputed": disputed,
+        "other_verdicts": other_verdicts,
     }
 
     # Clusters and GT-match are NOT in the output schema -- require external maps.
@@ -105,8 +118,10 @@ def _selftest() -> int:
         {"property_id": "P4", "classification": "out-of-scope"},
     ]}]
     p04 = [{"reviewed_items": [
-        {"property_id": "P1", "review_verdict": "Confirmed"},
-        {"property_id": "P2", "review_verdict": "Disputed"},
+        {"property_id": "P1", "review_verdict": "CONFIRMED_VULNERABILITY"},
+        {"property_id": "P2", "review_verdict": "DISPUTED_FP"},
+        {"property_id": "P5", "review_verdict": "Confirmed"},   # legacy alias still counts
+        {"property_id": "P6", "review_verdict": "DOWNGRADED"},  # surfaced as other, not confirmed
     ]}]
     clusters = {"P1": "C1"}
     gt = {"P1": "GT-7"}
@@ -114,7 +129,8 @@ def _selftest() -> int:
     assert t["raw_audit_outputs"] == 4, t
     assert t["excluded_not_vuln_or_oos"] == 2, t
     assert t["positive_findings"] == 2, t
-    assert t["confirmed"] == 1 and t["disputed"] == 1, t
+    assert t["confirmed"] == 2 and t["disputed"] == 1, t   # 2 = new vocab + legacy alias
+    assert t["other_verdicts"] == {"DOWNGRADED": 1}, t
     assert t["clusters"] == 1, t
     assert t["gt_match_findings"] == 1 and t["gt_ids_covered"] == ["GT-7"], t
     # without external maps, those cells report the requirement

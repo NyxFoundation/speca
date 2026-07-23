@@ -116,7 +116,21 @@ class AuditClassification(str, Enum):
 
 
 class ReviewVerdict(str, Enum):
-    """Review verdict from Phase 04."""
+    """Review verdict from Phase 04.
+
+    Values match the actual Phase 04 output vocabulary in
+    prompts/04_review_worker.md (see issue #132). The legacy values below are
+    kept as deprecated aliases for backward compatibility with older outputs;
+    do not emit them from new code.
+    """
+    # Current vocabulary (prompts/04_review_worker.md).
+    CONFIRMED_VULNERABILITY = "CONFIRMED_VULNERABILITY"
+    CONFIRMED_POTENTIAL = "CONFIRMED_POTENTIAL"
+    DISPUTED_FP = "DISPUTED_FP"
+    DOWNGRADED = "DOWNGRADED"
+    NEEDS_MANUAL_REVIEW = "NEEDS_MANUAL_REVIEW"
+    PASS_THROUGH = "PASS_THROUGH"
+    # Deprecated legacy values (pre-#132), retained for backward compatibility.
     CONFIRMED = "Confirmed"
     DISPUTED = "Disputed"
     NEEDS_MORE_INFO = "Needs More Info"
