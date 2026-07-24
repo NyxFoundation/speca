@@ -395,6 +395,32 @@ class APIRunner:
         _tt = _os.environ.get("SPECA_API_TURN_TIMEOUT", "").strip()
         self.turn_timeout = float(_tt) if _tt.replace(".", "", 1).isdigit() and float(_tt) > 0 else 150.0
 
+    def _run_provenance(self) -> dict:
+        """Model/provider/effort provenance for the run — recorded in the stream
+        init event and the RUN_MANIFEST so every 03 output is traceable to exactly
+        which model+version+effort produced it."""
+        import os as _os
+        return {
+            "runtime": _os.environ.get("ORCHESTRATOR_RUNNER", "api"),
+            "provider": getattr(self, "base_url", None),
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort or "default",
+            "max_tokens": self.max_tokens,
+            "max_turns": self.max_turns,
+            "turn_timeout": self.turn_timeout,
+            "phase": self.config.phase_id,
+        }
+
+    def _write_run_manifest(self) -> None:
+        """Write a one-per-run provenance manifest into the output dir (metadata)."""
+        try:
+            prov = self._run_provenance()
+            prov["recorded_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            mf = self.output_dir / f"{self.config.phase_id}_RUN_MANIFEST.json"
+            mf.write_text(json.dumps(prov, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     async def run_batch(
         self,
         batch: list[dict[str, Any]],
@@ -500,6 +526,11 @@ class APIRunner:
         total_output_tokens = 0
         num_turns = 0
         log_entries: list[dict[str, Any]] = []
+        self._write_run_manifest()
+        # Claude stream-json parity: a system/init event carrying provenance.
+        log_entries.append({"type": "system", "subtype": "init",
+                            "session_id": f"{phase_id}-w{worker_id}b{batch_index}-{timestamp}",
+                            **self._run_provenance()})
 
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": prompt_content},
@@ -680,6 +711,12 @@ class APIRunner:
                         f"without producing output"
                     )
 
+        # Claude stream-json parity: terminal result event.
+        log_entries.append({
+            "type": "result", "subtype": "success", "is_error": False,
+            "model": self.model, "num_turns": num_turns,
+            "usage": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens},
+        })
         # Save conversation log
         self._save_log(log_file, log_entries)
 
