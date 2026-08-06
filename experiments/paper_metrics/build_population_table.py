@@ -56,6 +56,7 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
     confirmed_ids: list[str] = []
     disputed = 0
     adjudicated = 0
+    other_verdicts: dict[str, int] = {}
     for part in p04:
         for item in part.get("reviewed_items", []):
             adjudicated += 1
@@ -65,6 +66,15 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
                 confirmed_ids.append(pid)
             elif verdict in _DISPUTED:
                 disputed += 1
+            else:
+                # DOWNGRADED / NEEDS_MANUAL_REVIEW / PASS_THROUGH / empty: neither a
+                # confirmed finding nor a disputed FP. Surface the breakdown so every
+                # adjudicated item is accounted for (confirmed + disputed + other ==
+                # adjudicated); on real data these dominate (e.g. lodestar: 28
+                # PASS_THROUGH + 2 DOWNGRADED of 37), and a silent gap would leave a
+                # reviewer asking where the rest went. DOWNGRADED's denominator role
+                # is a #107/#110 decision — surfaced here, not folded into confirmed.
+                other_verdicts[verdict or "<empty>"] = other_verdicts.get(verdict or "<empty>", 0) + 1
 
     table = {
         "raw_audit_outputs": raw,
@@ -73,6 +83,7 @@ def build(p03: list[dict], p04: list[dict], clusters: dict | None, gt: dict | No
         "adjudicated_reviewed": adjudicated,
         "confirmed": len(confirmed_ids),
         "disputed": disputed,
+        "other_verdicts": other_verdicts,
     }
 
     # Clusters and GT-match are NOT in the output schema -- require external maps.
@@ -112,6 +123,11 @@ def _selftest() -> int:
     p04 = [{"reviewed_items": [
         {"property_id": "P1", "review_verdict": "CONFIRMED_VULNERABILITY"},
         {"property_id": "P2", "review_verdict": "DISPUTED_FP"},
+        # DOWNGRADED / PASS_THROUGH: neither confirmed nor disputed. On real data
+        # (lodestar) these are 30 of 37 items -- must be surfaced, not dropped.
+        {"property_id": "P3", "review_verdict": "DOWNGRADED"},
+        {"property_id": "P4", "review_verdict": "PASS_THROUGH"},
+        {"property_id": "P5", "review_verdict": "PASS_THROUGH"},
     ]}]
     clusters = {"P1": "C1"}
     gt = {"P1": "GT-7"}
@@ -120,6 +136,9 @@ def _selftest() -> int:
     assert t["excluded_not_vuln_or_oos"] == 2, t
     assert t["positive_findings"] == 2, t
     assert t["confirmed"] == 1 and t["disputed"] == 1, t
+    assert t["other_verdicts"] == {"DOWNGRADED": 1, "PASS_THROUGH": 2}, t
+    # every adjudicated item is accounted for: confirmed + disputed + other == adjudicated
+    assert t["confirmed"] + t["disputed"] + sum(t["other_verdicts"].values()) == t["adjudicated_reviewed"], t
     assert t["clusters"] == 1, t
     assert t["gt_match_findings"] == 1 and t["gt_ids_covered"] == ["GT-7"], t
     # without external maps, those cells report the requirement
