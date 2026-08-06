@@ -116,10 +116,13 @@ class AuditClassification(str, Enum):
 
 
 class ReviewVerdict(str, Enum):
-    """Review verdict from Phase 04."""
-    CONFIRMED = "Confirmed"
-    DISPUTED = "Disputed"
-    NEEDS_MORE_INFO = "Needs More Info"
+    """Review verdict from Phase 04 (vocabulary: prompts/04_review_worker.md)."""
+    CONFIRMED_VULNERABILITY = "CONFIRMED_VULNERABILITY"
+    CONFIRMED_POTENTIAL = "CONFIRMED_POTENTIAL"
+    DISPUTED_FP = "DISPUTED_FP"
+    DOWNGRADED = "DOWNGRADED"
+    NEEDS_MANUAL_REVIEW = "NEEDS_MANUAL_REVIEW"
+    PASS_THROUGH = "PASS_THROUGH"
 
 
 class ChecklistMindset(str, Enum):
