@@ -1,0 +1,55 @@
+name: "evidence-check"
+
+# Enforces RULES.md (artifact > testimony) on every PR body: Evidence Blocks must
+# carry a raw log, and each RERUN recipe is RE-EXECUTED here so a pasted (or
+# fabricated) log cannot stand in for a real result. See scripts/evidence_check.py.
+#
+# NOTE ON TRUST: this job executes RERUN commands taken from the PR body. That is
+# code execution, so it runs only for internal branches (not fork PRs), mirroring
+# the actor gating the phase workflows already use. Fork PRs get structural checks
+# only (--no-run); a maintainer re-runs the full gate after review.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  evidence-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr view "${{ github.event.pull_request.number }}" --json body -q .body > pr_body.md
+
+      - name: Count changed files (R6 size gate)
+        run: |
+          base="origin/${{ github.event.pull_request.base.ref }}"
+          echo "CHANGED=$(git diff --name-only "$base"...HEAD | wc -l | tr -d ' ')" >> "$GITHUB_ENV"
+
+      - name: Gate self-test (red-before-green of the gate itself)
+        run: python3 scripts/evidence_check.py --selftest
+
+      - name: Enforce RULES.md on PR body
+        run: |
+          # internal branch → re-run RERUN commands; fork PR → structural only
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}" ]; then
+            python3 scripts/evidence_check.py --body pr_body.md --changed-files "$CHANGED"
+          else
+            echo "::warning::fork PR — structural checks only (RERUN not executed); maintainer must re-run"
+            python3 scripts/evidence_check.py --body pr_body.md --changed-files "$CHANGED" --no-run
+          fi

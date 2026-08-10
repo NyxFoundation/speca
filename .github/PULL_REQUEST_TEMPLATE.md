@@ -4,10 +4,15 @@ Thanks for contributing to SPECA! A few quick notes:
 - Please keep changes focused; pipeline phases are deliberately decoupled.
 - Our bot is allergic to scope creep — split unrelated changes into separate PRs.
 
+EVIDENCE OVER TESTIMONY (see RULES.md). "It works" / "tests pass" is testimony
+and is not admissible. Back every such claim with an Evidence Block — a raw log
+plus a RERUN recipe that CI re-executes for itself. Honest "UNVERIFIED" always
+passes; an unsupported claim never does. `evidence-check` CI runs on this body.
+
 REVIEWER'S ONE CHECK (bug fixes): does the added/updated test FAIL on the pre-fix
 code? If it cannot be shown red before the fix, it verifies nothing (see #134:
-CI green, feature broken). This is the single acceptance gate — fill the
-"red-before-green evidence" box below.
+CI green, feature broken). Red-before-green is one instance of RULES.md rule 4
+(refute, don't confirm) — fill the evidence box below.
 -->
 
 ## Summary
@@ -25,11 +30,28 @@ CI green, feature broken). This is the single acceptance gate — fill the
 - [ ] Pipeline phase change (which phase: ___)
 - [ ] CI / tooling
 
-## Test plan
+## Test plan — Evidence Blocks (RULES.md)
 
-<!-- How was this verified? Concrete commands and expected output, ideally. -->
-- [ ] `uv run python3 -m pytest tests/ -v --tb=short` passes
-- [ ]
+<!--
+Do NOT write "tests pass". Paste an Evidence Block per claim: the raw log, and a
+RERUN line CI re-executes. What you cannot verify, mark UNVERIFIED (that passes).
+Format (the HTML comments are the machine-readable part):
+
+<!-- EVIDENCE claim="pytest suite is green" -->
+​```
+$ uv run python3 -m pytest tests/ -q
+823 passed, 2 skipped
+​```
+<!-- RERUN: uv run python3 -m pytest tests/ -q EXPECT passed -->
+-->
+
+<!-- EVIDENCE claim="..." -->
+```
+# paste the verbatim command + output
+```
+<!-- RERUN: <command> EXPECT <substring> -->
+
+<!-- UNVERIFIED: <anything you did not check — this is allowed and preferred over guessing> -->
 
 ### Red-before-green evidence (required for Bug fix)
 
