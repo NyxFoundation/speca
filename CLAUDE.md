@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working rules (read first)
+
+**[RULES.md](RULES.md) is the contract for every session, human or AI: artifact >
+testimony.** "It works" / "tests pass" is not admissible — back every such claim
+with an Evidence Block (raw log + a `RERUN` recipe CI re-executes), and mark what
+you did not check as `UNVERIFIED` (that is allowed and preferred over guessing).
+The gate is `scripts/evidence_check.py`. If a longer doc conflicts with RULES.md,
+RULES.md wins.
+
 ## Project Overview
 
 SPECA (Specification-to-Property Agentic Auditing) — an automated security audit pipeline that uses Claude Code CLI to analyze codebases for vulnerabilities. The pipeline transforms specifications into formal program graphs, generates security properties, pre-resolves code locations, performs proof-based formal audits against target code, and filters false positives via a recall-safe 3-gate review pipeline (Dead Code, Trust Boundary, Scope Check).
