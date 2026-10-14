@@ -343,6 +343,23 @@ describe("runRunCommand — --runtime selection (#113)", () => {
     expect(seenRuntime).toBe("ollama");
   });
 
+  it("forwards hermes_moa (registered in runtime_registry.py) into the spawn options", async () => {
+    let seenRuntime: string | undefined;
+    const code = await runRunCommand({
+      flags: { phase: ["02c"], noTui: true, runtime: "hermes_moa" },
+      cwd,
+      spawn: ((opts) => {
+        seenRuntime = opts.runtime;
+        return fakeSpawnDependencyFailure()(opts);
+      }) as typeof spawnPipeline,
+      startLogs: async () => async () => {},
+      skipPreflight: true,
+    });
+    expect(code).toBe(1); // fake pipeline's dependency-failure exit
+    expect(seenRuntime).toBe("hermes_moa");
+    expect(stderrCapture.chunks.join("")).not.toContain("unknown runtime");
+  });
+
   it("leaves runtime undefined when the flag is absent (default unchanged)", async () => {
     let seenRuntime: string | undefined = "sentinel";
     await runRunCommand({

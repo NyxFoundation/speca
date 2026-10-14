@@ -25,6 +25,7 @@ export const PROVIDER_IDS = [
   "ollama",
   "copilot",
   "claude_pty",
+  "hermes_moa",
 ] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
@@ -140,6 +141,16 @@ export const PROVIDERS: Record<ProviderId, ProviderDescriptor> = {
     // Same credential story as `claude` — the CLI owns its auth store.
     // Platform support (POSIX pty / pywinpty on Windows) is probed on the
     // Python side at runner construction, where the actionable error lives.
+    validate: () => ok(),
+  },
+  hermes_moa: {
+    id: "hermes_moa",
+    summary:
+      "Mixture-of-Agents: 3 ollama-cloud models via the Hermes proxy, " +
+      "recall-first union+cross-verify (speca#88).",
+    // Hermes owns the provider credential pool and the proxy, so there is no
+    // speca-side key to check. Whether `hermes` is on PATH is probed by
+    // runtime_registry.py::_probe_hermes_moa, where the actionable error lives.
     validate: () => ok(),
   },
 };
