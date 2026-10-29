@@ -137,6 +137,12 @@ class TestGlobTool:
         result = _execute_glob({"pattern": "**/*.go", "path": str(tmp_path)})
         assert "deep.go" in result
 
+    def test_glob_truncation(self, tmp_path):
+        for i in range(505):
+            (tmp_path / f"file_{i:03d}.dat").touch()
+        result = _execute_glob({"pattern": "*.dat", "path": str(tmp_path)})
+        assert "... (505 total, truncated)" in result
+
 
 class TestWriteTool:
     """Tests for the Write tool executor."""
