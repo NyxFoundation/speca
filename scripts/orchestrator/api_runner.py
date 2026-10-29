@@ -219,6 +219,8 @@ def _execute_grep(params: dict[str, Any]) -> str:
     except FileNotFoundError:
         # Fallback to grep if rg not available
         cmd_fallback = ["grep", "-rn"]
+        if glob_filter:
+            cmd_fallback.extend([f"--include={glob_filter}"])
         if context:
             cmd_fallback.extend([f"-C{context}"])
         cmd_fallback.extend([pattern, path])
@@ -259,8 +261,9 @@ def _execute_glob(params: dict[str, Any]) -> str:
 
     # Limit output
     if len(matches) > 500:
+        total = len(matches)
         matches = matches[:500]
-        matches.append(f"... ({len(matches)} total, truncated)")
+        matches.append(f"... ({total} total, truncated)")
 
     return "\n".join(matches)
 
